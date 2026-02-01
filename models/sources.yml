@@ -1,0 +1,19 @@
+version: 2
+
+sources:
+  - name: aemo
+    database: ducklake
+    schema: aemo
+    description: "Raw data layer - tracks archived CSV files"
+    tables:
+      - name: csv_archive_log
+        description: "Tracks which raw files have been archived to OneLake"
+        columns:
+          - name: source_type
+            description: "Type of source: daily, scada_today, price_today, duid_*"
+          - name: source_filename
+            description: "Parsed filename from URL"
+          - name: archive_path
+            description: "Relative path where written"
+          - name: archived_at
+            description: "Timestamp when archived"

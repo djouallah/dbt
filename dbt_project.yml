@@ -1,0 +1,36 @@
+name: 'aemo_electricity'
+version: '1.0.0'
+
+profile: 'aemo_electricity'
+
+model-paths: ["models"]
+analysis-paths: ["analyses"]
+test-paths: ["tests"]
+macro-paths: ["macros"]
+snapshot-paths: ["snapshots"]
+
+clean-targets:
+  - "target"
+  - "dbt_packages"
+
+vars:
+  # Fabric connection (set via env vars: FABRIC_WORKSPACE, FABRIC_LAKEHOUSE)
+  # Defaults in profiles.yml: duckrun, dbt
+
+  # Paths
+  csv_archive_path: "/lakehouse/default/Files/csv"
+  path_root: "/lakehouse/default"
+
+  # Download settings
+  download_limit: 2  # Set low for dev, increase for prod
+  daily_source: aemo  # 'aemo' (default, no rate limits) or 'github' for historical archive
+
+on-run-start:
+  - "{{ download() }}"
+
+models:
+  aemo_electricity:
+    dimensions:
+      +materialized: table
+    marts:
+      +materialized: incremental

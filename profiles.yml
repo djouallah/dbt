@@ -1,0 +1,24 @@
+aemo_electricity:
+  target: dev
+  outputs:
+    dev:
+      type: duckdb
+      path: ':memory:'
+      database: ducklake
+      threads: 1
+      schema: aemo
+      extensions:
+        - parquet
+        - azure
+        - httpfs
+        - json
+        - sqlite
+        - ducklake
+      attach:
+        - path: ducklake:sqlite:/lakehouse/default/Files/dbt/metadata.db
+          alias: ducklake
+          options:
+            data_path: "abfss://{{ env_var('FABRIC_WORKSPACE', 'duckrun') }}@onelake.dfs.fabric.microsoft.com/{{ env_var('FABRIC_LAKEHOUSE', 'dbt') }}.Lakehouse/Tables"
+      settings:
+        memory_limit: '16GB'
+        threads: 8
