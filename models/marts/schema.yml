@@ -1,0 +1,28 @@
+version: 2
+
+models:
+  - name: fct_price
+    description: Price data from daily AEMO dispatch files
+    columns:
+      - name: REGIONID
+        tests:
+          - not_null
+      - name: SETTLEMENTDATE
+        tests:
+          - not_null
+      - name: file
+        tests:
+          - not_null
+
+  - name: fct_scada
+    description: SCADA data from daily AEMO dispatch files
+    columns:
+      - name: DUID
+        tests:
+          - not_null
+      - name: SETTLEMENTDATE
+        tests:
+          - not_null
+      - name: file
+        tests:
+          - not_null
