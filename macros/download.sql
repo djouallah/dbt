@@ -31,9 +31,9 @@ CREATE SCHEMA IF NOT EXISTS ducklake.aemo
 USE ducklake.aemo
 {% endcall %}
 
-{# Create csv_archive_log table if it doesn't exist #}
-{% call statement('create_csv_archive_log', fetch_result=False) %}
-CREATE TABLE IF NOT EXISTS aemo.csv_archive_log (
+{# Create temp staging table for new archive log entries #}
+{% call statement('create_staging', fetch_result=False) %}
+CREATE OR REPLACE TEMP TABLE _csv_archive_staging (
   source_type VARCHAR,
   source_filename VARCHAR,
   archive_path VARCHAR,
@@ -42,6 +42,21 @@ CREATE TABLE IF NOT EXISTS aemo.csv_archive_log (
   source_url VARCHAR,
   etag VARCHAR
 )
+{% endcall %}
+
+{# Create empty temp table to track what's already archived #}
+{% call statement('create_existing_log', fetch_result=False) %}
+CREATE OR REPLACE TEMP TABLE _existing_archive_log (
+  source_type VARCHAR,
+  source_filename VARCHAR
+)
+{% endcall %}
+
+{# Try to populate from existing model table - ignore error if not exists #}
+{% call statement('populate_existing_log', fetch_result=False) %}
+INSERT INTO _existing_archive_log 
+SELECT source_type, source_filename 
+FROM ducklake.aemo.csv_archive_log
 {% endcall %}
 
 {# ============================================================================ #}
@@ -102,7 +117,7 @@ ORDER BY full_url DESC
 CREATE OR REPLACE TEMP TABLE daily_to_archive AS
 SELECT full_url, filename
 FROM daily_files_web
-WHERE filename NOT IN (SELECT source_filename FROM csv_archive_log WHERE source_type = 'daily')
+WHERE filename NOT IN (SELECT source_filename FROM _existing_archive_log WHERE source_type = 'daily')
 LIMIT getvariable('download_limit')
 {% endcall %}
 
@@ -137,7 +152,7 @@ COPY (
 {% endcall %}
 
 {% call statement('log_daily', fetch_result=False) %}
-INSERT INTO csv_archive_log BY NAME
+INSERT INTO ducklake.aemo.csv_archive_log BY NAME
 SELECT
   'daily' AS source_type,
   filename AS source_filename,
@@ -174,7 +189,7 @@ LIMIT 500
 CREATE OR REPLACE TEMP TABLE scada_today_to_archive AS
 SELECT full_url, filename
 FROM intraday_scada_web
-WHERE filename NOT IN (SELECT source_filename FROM csv_archive_log WHERE source_type = 'scada_today')
+WHERE filename NOT IN (SELECT source_filename FROM _existing_archive_log WHERE source_type = 'scada_today')
 LIMIT getvariable('download_limit')
 {% endcall %}
 
@@ -209,7 +224,7 @@ COPY (
 {% endcall %}
 
 {% call statement('log_scada', fetch_result=False) %}
-INSERT INTO csv_archive_log BY NAME
+INSERT INTO ducklake.aemo.csv_archive_log BY NAME
 SELECT
   'scada_today' AS source_type,
   filename AS source_filename,
@@ -246,7 +261,7 @@ LIMIT 500
 CREATE OR REPLACE TEMP TABLE price_today_to_archive AS
 SELECT full_url, filename
 FROM intraday_price_web
-WHERE filename NOT IN (SELECT source_filename FROM csv_archive_log WHERE source_type = 'price_today')
+WHERE filename NOT IN (SELECT source_filename FROM _existing_archive_log WHERE source_type = 'price_today')
 LIMIT getvariable('download_limit')
 {% endcall %}
 
@@ -281,7 +296,7 @@ COPY (
 {% endcall %}
 
 {% call statement('log_price', fetch_result=False) %}
-INSERT INTO csv_archive_log BY NAME
+INSERT INTO ducklake.aemo.csv_archive_log BY NAME
 SELECT
   'price_today' AS source_type,
   filename AS source_filename,
@@ -328,11 +343,11 @@ COPY (
 {% endcall %}
 
 {% call statement('delete_old_duid_logs', fetch_result=False) %}
-DELETE FROM csv_archive_log WHERE source_type LIKE 'duid_%'
+DELETE FROM ducklake.aemo.csv_archive_log WHERE source_type LIKE 'duid_%'
 {% endcall %}
 
 {% call statement('log_duid', fetch_result=False) %}
-INSERT INTO csv_archive_log BY NAME
+INSERT INTO ducklake.aemo.csv_archive_log BY NAME
 SELECT * FROM (VALUES
   ('duid_data', 'duid_data', '/duid/duid_data.csv', now()),
   ('duid_facilities', 'facilities', '/duid/facilities.csv', now()),

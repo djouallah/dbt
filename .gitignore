@@ -1,0 +1,35 @@
+# dbt
+target/
+dbt_packages/
+logs/
+.user.yml
+
+# DuckDB / DuckLake
+*.db
+*.db.wal
+*.duckdb
+*.duckdb.wal
+metadata.db
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
+.env
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Secrets
+*.pem
+*.key
+secrets.yml

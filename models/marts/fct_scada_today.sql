@@ -1,28 +1,15 @@
 {{ config(
     materialized='incremental',
-    unique_key=['file', 'DUID', 'SETTLEMENTDATE']
+    unique_key=['file', 'DUID', 'SETTLEMENTDATE'],
+    pre_hook="SET VARIABLE scada_today_paths = (SELECT COALESCE(NULLIF(list('zip://' || '{{ var('csv_archive_path') }}' || '/scada_today/day=' || substring(source_filename, 22, 8) || '/source_file=' || source_filename || '/data_0.zip/*.CSV'), []), ['']) FROM {{ ref('stg_csv_archive_log') }} WHERE source_type = 'scada_today')"
 ) }}
 
 {% set csv_archive_path = var('csv_archive_path') %}
 
-WITH source_files AS (
-  SELECT source_filename
-  FROM {{ source('aemo', 'csv_archive_log') }}
-  WHERE source_type = 'scada_today'
-  {% if is_incremental() %}
-    AND source_filename NOT IN (SELECT DISTINCT split_part(file, '.', 1) FROM {{ this }})
-  {% endif %}
-),
-
-file_paths AS (
-  SELECT list('zip://' || '{{ csv_archive_path }}' || '/scada_today/day=' || substring(source_filename, 22, 8) || '/source_file=' || source_filename || '/data_0.zip/*.CSV') as paths
-  FROM source_files
-),
-
-scada_staging AS (
+WITH scada_staging AS (
   SELECT *
   FROM read_csv(
-    (SELECT COALESCE(paths, ['']) FROM file_paths),
+    getvariable('scada_today_paths'),
     skip = 1,
     header = 0,
     all_varchar = 1,

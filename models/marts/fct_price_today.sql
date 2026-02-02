@@ -1,28 +1,15 @@
 {{ config(
     materialized='incremental',
-    unique_key=['file', 'REGIONID', 'SETTLEMENTDATE']
+    unique_key=['file', 'REGIONID', 'SETTLEMENTDATE'],
+    pre_hook="SET VARIABLE price_today_paths = (SELECT COALESCE(NULLIF(list('zip://' || '{{ var('csv_archive_path') }}' || '/price_today/day=' || substring(source_filename, 19, 8) || '/source_file=' || source_filename || '/data_0.zip/*.CSV'), []), ['']) FROM {{ ref('stg_csv_archive_log') }} WHERE source_type = 'price_today')"
 ) }}
 
 {% set csv_archive_path = var('csv_archive_path') %}
 
-WITH source_files AS (
-  SELECT source_filename
-  FROM {{ source('aemo', 'csv_archive_log') }}
-  WHERE source_type = 'price_today'
-  {% if is_incremental() %}
-    AND source_filename NOT IN (SELECT DISTINCT split_part(file, '.', 1) FROM {{ this }})
-  {% endif %}
-),
-
-file_paths AS (
-  SELECT list('zip://' || '{{ csv_archive_path }}' || '/price_today/day=' || substring(source_filename, 19, 8) || '/source_file=' || source_filename || '/data_0.zip/*.CSV') as paths
-  FROM source_files
-),
-
-price_staging AS (
+WITH price_staging AS (
   SELECT *
   FROM read_csv(
-    (SELECT COALESCE(paths, ['']) FROM file_paths),
+    getvariable('price_today_paths'),
     skip = 1,
     header = 0,
     all_varchar = 1,

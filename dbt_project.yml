@@ -17,7 +17,7 @@ vars:
   # Fabric connection (set via env vars: FABRIC_WORKSPACE, FABRIC_LAKEHOUSE)
   # Defaults in profiles.yml: duckrun, dbt
 
-  # Paths
+  # Paths - use forward slashes for cross-platform compatibility
   csv_archive_path: "/lakehouse/default/Files/csv"
   path_root: "/lakehouse/default"
 
@@ -25,8 +25,10 @@ vars:
   download_limit: 2  # Set low for dev, increase for prod
   daily_source: aemo  # 'aemo' (default, no rate limits) or 'github' for historical archive
 
-on-run-start:
-  - "{{ download() }}"
+# Download must run AFTER csv_archive_log model exists
+# Run manually: dbt run-operation download
+# on-run-start:
+#   - "{{ download() }}"
 
 models:
   aemo_electricity:
@@ -34,3 +36,15 @@ models:
       +materialized: table
     marts:
       +materialized: incremental
+
+seeds:
+  aemo_electricity:
+    csv_archive_log:
+      +column_types:
+        source_type: varchar
+        source_filename: varchar
+        archive_path: varchar
+        archived_at: timestamp
+        row_count: bigint
+        source_url: varchar
+        etag: varchar

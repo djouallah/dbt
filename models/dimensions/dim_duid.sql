@@ -1,5 +1,8 @@
 {{ config(materialized='table') }}
 
+-- Ensure download runs first by depending on stg_csv_archive_log
+-- {{ ref('stg_csv_archive_log') }}
+
 WITH
   states AS (
     SELECT 'WA1' AS RegionID, 'Western Australia' AS State

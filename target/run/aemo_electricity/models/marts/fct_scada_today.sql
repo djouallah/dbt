@@ -11,22 +11,10 @@
 
 
 
-WITH source_files AS (
-  SELECT source_filename
-  FROM "ducklake"."aemo"."csv_archive_log"
-  WHERE source_type = 'scada_today'
-  
-),
-
-file_paths AS (
-  SELECT list('zip://' || '/lakehouse/default/Files/csv' || '/scada_today/day=' || substring(source_filename, 22, 8) || '/source_file=' || source_filename || '/data_0.zip/*.CSV') as paths
-  FROM source_files
-),
-
-scada_staging AS (
+WITH scada_staging AS (
   SELECT *
   FROM read_csv(
-    (SELECT COALESCE(paths, ['']) FROM file_paths),
+    getvariable('scada_today_paths'),
     skip = 1,
     header = 0,
     all_varchar = 1,

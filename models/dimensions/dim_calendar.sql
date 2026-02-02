@@ -1,4 +1,8 @@
-{{ config(materialized='table') }}
+{{ config(
+    materialized='incremental',
+    unique_key='date',
+    on_schema_change='sync_all_columns'
+) }}
 
 SELECT
   CAST(date AS DATE) as date,

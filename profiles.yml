@@ -14,11 +14,9 @@ aemo_electricity:
         - json
         - sqlite
         - ducklake
+        - zipfs
       attach:
         - path: ducklake:sqlite:/lakehouse/default/Files/dbt/metadata.db
           alias: ducklake
           options:
             data_path: "abfss://{{ env_var('FABRIC_WORKSPACE', 'duckrun') }}@onelake.dfs.fabric.microsoft.com/{{ env_var('FABRIC_LAKEHOUSE', 'dbt') }}.Lakehouse/Tables"
-      settings:
-        memory_limit: '16GB'
-        threads: 8
