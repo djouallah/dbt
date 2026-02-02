@@ -1,4 +1,7 @@
-{{ config(materialized='table') }}
+{{ config(
+    materialized='incremental',
+    incremental_strategy='truncate+insert'
+) }}
 
 -- Ensure download runs first by depending on stg_csv_archive_log
 -- {{ ref('stg_csv_archive_log') }}

@@ -1,7 +1,6 @@
 {{ config(
     materialized='incremental',
-    unique_key='date',
-    on_schema_change='sync_all_columns'
+    full_refresh=false
 ) }}
 
 SELECT
@@ -15,3 +14,6 @@ FROM (
     INTERVAL 1 DAY
   )) as date
 )
+{% if is_incremental() %}
+WHERE 1=0  -- Table exists, skip insert
+{% endif %}
