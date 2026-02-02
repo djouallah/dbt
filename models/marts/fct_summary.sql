@@ -1,3 +1,6 @@
+-- depends_on: {{ ref('fct_scada_today') }}
+-- depends_on: {{ ref('fct_price_today') }}
+
 {{ config(
     materialized='incremental',
     incremental_strategy='append'
