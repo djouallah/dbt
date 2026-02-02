@@ -13,7 +13,8 @@ models:
         tests:
           - not_null
           - accepted_values:
-              values: ['daily', 'scada_today', 'price_today']
+              arguments:
+                values: ['daily', 'scada_today', 'price_today', 'duid_data', 'duid_facilities', 'duid_wa_energy', 'duid_geo_data']
       - name: archived_at
         description: Timestamp when file was archived
         tests:

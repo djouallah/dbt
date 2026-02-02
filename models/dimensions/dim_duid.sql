@@ -1,12 +1,32 @@
+{% set csv_archive_path = get_csv_archive_path() %}
+
+{# Check if there are new DUIDs not in the existing table #}
+{%- set check_new_duids_query -%}
+  SELECT count(*) as cnt FROM (
+    SELECT DUID FROM read_csv('{{ csv_archive_path }}/duid/duid_data.csv') WHERE length(DUID) > 2
+    UNION
+    SELECT "Facility Code" AS DUID FROM read_csv_auto('{{ csv_archive_path }}/duid/facilities.csv')
+  ) source_duids
+  WHERE DUID NOT IN (SELECT DUID FROM {{ this }})
+{%- endset -%}
+
+{%- if execute and is_incremental() -%}
+  {%- set result = run_query(check_new_duids_query) -%}
+  {%- set has_new_duids = result and result.rows[0][0] > 0 -%}
+{%- else -%}
+  {%- set has_new_duids = true -%}
+{%- endif -%}
+
 {{ config(
     materialized='incremental',
     on_schema_change='sync_all_columns',
-    pre_hook="{% if is_incremental() %}DELETE FROM {{ this }} WHERE 1=1{% endif %}"
+    pre_hook=["DELETE FROM " ~ this ~ " WHERE 1=1"] if (has_new_duids and is_incremental()) else []
 ) }}
 
 -- Ensure download runs first by depending on stg_csv_archive_log
 -- {{ ref('stg_csv_archive_log') }}
 
+{% if has_new_duids %}
 WITH
   states AS (
     SELECT 'WA1' AS RegionID, 'Western Australia' AS State
@@ -24,7 +44,7 @@ WITH
       first("Fuel Source - Descriptor") AS FuelSourceDescriptor,
       first(Participant) AS Participant
     FROM
-      read_csv('{{ get_csv_archive_path() }}/duid/duid_data.csv')
+      read_csv('{{ csv_archive_path }}/duid/duid_data.csv')
     WHERE
       length(DUID) > 2
     GROUP BY
@@ -37,12 +57,12 @@ WITH
       "Facility Code" AS DUID,
       "Participant Name" AS Participant
     FROM
-      read_csv_auto('{{ get_csv_archive_path() }}/duid/facilities.csv')
+      read_csv_auto('{{ csv_archive_path }}/duid/facilities.csv')
   ),
 
   wa_energy AS (
     SELECT *
-    FROM read_csv_auto('{{ get_csv_archive_path() }}/duid/WA_ENERGY.csv', header = 1)
+    FROM read_csv_auto('{{ csv_archive_path }}/duid/WA_ENERGY.csv', header = 1)
   ),
 
   duid_wa AS (
@@ -66,7 +86,7 @@ WITH
       duid,
       max(latitude) as latitude,
       max(longitude) as longitude
-    FROM read_csv('{{ get_csv_archive_path() }}/duid/geo_data.csv')
+    FROM read_csv('{{ csv_archive_path }}/duid/geo_data.csv')
     WHERE latitude IS NOT NULL
     GROUP BY duid
   )
@@ -83,3 +103,7 @@ FROM duid_all a
 JOIN states ON a.Region = states.RegionID
 LEFT JOIN geo ON a.duid = geo.duid
 GROUP BY a.DUID
+{% else %}
+-- No new DUIDs found, return empty result to keep existing data
+SELECT * FROM {{ this }} WHERE FALSE
+{% endif %}
