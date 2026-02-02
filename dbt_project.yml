@@ -14,15 +14,13 @@ clean-targets:
   - "dbt_packages"
 
 vars:
-  # Fabric connection (set via env vars: FABRIC_WORKSPACE, FABRIC_LAKEHOUSE, DBT_SCHEMA)
-  # Defaults: duckrun, dbt, aemo
-
-  # Paths - set via env vars: csv_archive_path, path_root
-  # Defaults work for local Windows dev with /lakehouse mount
-  # For Fabric, set to abfss:// paths
-
+  # Env vars used:
+  # - DBT_SCHEMA: schema name (default: aemo)
+  # - FABRIC_WORKSPACE, FABRIC_LAKEHOUSE: for DuckLake data_path
+  # - csv_archive_path, path_root: for abfss:// paths in Fabric
+  # - download_limit: number of files to download per source (default: 2)
+  
   # Download settings
-  download_limit: 2  # Set low for dev, increase for prod
   daily_source: aemo  # 'aemo' (default, no rate limits) or 'github' for historical archive
 
 # Download must run AFTER csv_archive_log model exists

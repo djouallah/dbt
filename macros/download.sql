@@ -5,7 +5,7 @@
 
 {% set path_root = env_var('path_root', '/lakehouse/default') %}
 {% set csv_archive_path = env_var('csv_archive_path', '/lakehouse/default/Files/csv') %}
-{% set download_limit = var('download_limit') %}
+{% set download_limit = env_var('download_limit', '2') | int %}
 
 {% do log("[DOWNLOAD] Starting download with PATH_ROOT=" ~ path_root ~ ", csv_archive_path=" ~ csv_archive_path ~ ", download_limit=" ~ download_limit, info=True) %}
 
