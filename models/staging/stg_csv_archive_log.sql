@@ -1,12 +1,17 @@
 {{ config(
     materialized='table',
-    pre_hook="{{ download() }}"
+    pre_hook=[
+        "CREATE SCHEMA IF NOT EXISTS ducklake.{{ env_var('DBT_SCHEMA', 'aemo') }}",
+        "CREATE TABLE IF NOT EXISTS ducklake.{{ env_var('DBT_SCHEMA', 'aemo') }}.csv_archive_log (source_type VARCHAR, source_filename VARCHAR, archive_path VARCHAR, archived_at TIMESTAMP, row_count BIGINT, source_url VARCHAR, etag VARCHAR)",
+        "{{ download() }}"
+    ]
 ) }}
 
 {# 
-  Pre-hook runs download() on this model's connection (which has DuckLake attached).
-  The download macro inserts into the seed table (csv_archive_log).
-  This model then reads from it and becomes the source for other models.
+  Pre-hooks:
+  1. Create schema if not exists
+  2. Create csv_archive_log table if not exists (no seed needed)
+  3. Run download() on this model's connection (which has DuckLake attached)
 #}
 
 SELECT 
@@ -17,4 +22,4 @@ SELECT
   row_count,
   source_url,
   etag
-FROM {{ ref('csv_archive_log') }}
+FROM ducklake.{{ env_var('DBT_SCHEMA', 'aemo') }}.csv_archive_log

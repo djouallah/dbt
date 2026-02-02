@@ -6,7 +6,7 @@ aemo_electricity:
       path: ':memory:'
       database: ducklake
       threads: 1
-      schema: aemo
+      schema: "{{ env_var('DBT_SCHEMA', 'aemo') }}"
       extensions:
         - parquet
         - azure

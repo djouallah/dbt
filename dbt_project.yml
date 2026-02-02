@@ -14,8 +14,8 @@ clean-targets:
   - "dbt_packages"
 
 vars:
-  # Fabric connection (set via env vars: FABRIC_WORKSPACE, FABRIC_LAKEHOUSE)
-  # Defaults in profiles.yml: duckrun, dbt
+  # Fabric connection (set via env vars: FABRIC_WORKSPACE, FABRIC_LAKEHOUSE, DBT_SCHEMA)
+  # Defaults: duckrun, dbt, aemo
 
   # Paths - use forward slashes for cross-platform compatibility
   csv_archive_path: "/lakehouse/default/Files/csv"
@@ -37,14 +37,3 @@ models:
     marts:
       +materialized: incremental
 
-seeds:
-  aemo_electricity:
-    csv_archive_log:
-      +column_types:
-        source_type: varchar
-        source_filename: varchar
-        archive_path: varchar
-        archived_at: timestamp
-        row_count: bigint
-        source_url: varchar
-        etag: varchar

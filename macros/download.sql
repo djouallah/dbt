@@ -23,12 +23,12 @@ SET VARIABLE csv_archive_path = getvariable('PATH_ROOT') || '/Files/csv'
 
 {# Create schema if not exists #}
 {% call statement('create_schema', fetch_result=False) %}
-CREATE SCHEMA IF NOT EXISTS ducklake.aemo
+CREATE SCHEMA IF NOT EXISTS ducklake.{{ env_var('DBT_SCHEMA', 'aemo') }}
 {% endcall %}
 
-{# Ensure we're using the ducklake database and aemo schema #}
+{# Ensure we're using the ducklake database and schema #}
 {% call statement('use_ducklake', fetch_result=False) %}
-USE ducklake.aemo
+USE ducklake.{{ env_var('DBT_SCHEMA', 'aemo') }}
 {% endcall %}
 
 {# Create temp staging table for new archive log entries #}
@@ -56,7 +56,7 @@ CREATE OR REPLACE TEMP TABLE _existing_archive_log (
 {% call statement('populate_existing_log', fetch_result=False) %}
 INSERT INTO _existing_archive_log 
 SELECT source_type, source_filename 
-FROM ducklake.aemo.csv_archive_log
+FROM ducklake.{{ env_var('DBT_SCHEMA', 'aemo') }}.csv_archive_log
 {% endcall %}
 
 {# ============================================================================ #}
@@ -152,7 +152,7 @@ COPY (
 {% endcall %}
 
 {% call statement('log_daily', fetch_result=False) %}
-INSERT INTO ducklake.aemo.csv_archive_log BY NAME
+INSERT INTO ducklake.{{ env_var('DBT_SCHEMA', 'aemo') }}.csv_archive_log BY NAME
 SELECT
   'daily' AS source_type,
   filename AS source_filename,
@@ -224,7 +224,7 @@ COPY (
 {% endcall %}
 
 {% call statement('log_scada', fetch_result=False) %}
-INSERT INTO ducklake.aemo.csv_archive_log BY NAME
+INSERT INTO ducklake.{{ env_var('DBT_SCHEMA', 'aemo') }}.csv_archive_log BY NAME
 SELECT
   'scada_today' AS source_type,
   filename AS source_filename,
@@ -296,7 +296,7 @@ COPY (
 {% endcall %}
 
 {% call statement('log_price', fetch_result=False) %}
-INSERT INTO ducklake.aemo.csv_archive_log BY NAME
+INSERT INTO ducklake.{{ env_var('DBT_SCHEMA', 'aemo') }}.csv_archive_log BY NAME
 SELECT
   'price_today' AS source_type,
   filename AS source_filename,
@@ -343,11 +343,11 @@ COPY (
 {% endcall %}
 
 {% call statement('delete_old_duid_logs', fetch_result=False) %}
-DELETE FROM ducklake.aemo.csv_archive_log WHERE source_type LIKE 'duid_%'
+DELETE FROM ducklake.{{ env_var('DBT_SCHEMA', 'aemo') }}.csv_archive_log WHERE source_type LIKE 'duid_%'
 {% endcall %}
 
 {% call statement('log_duid', fetch_result=False) %}
-INSERT INTO ducklake.aemo.csv_archive_log BY NAME
+INSERT INTO ducklake.{{ env_var('DBT_SCHEMA', 'aemo') }}.csv_archive_log BY NAME
 SELECT * FROM (VALUES
   ('duid_data', 'duid_data', '/duid/duid_data.csv', now()),
   ('duid_facilities', 'facilities', '/duid/facilities.csv', now()),
