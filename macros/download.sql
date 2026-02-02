@@ -4,8 +4,8 @@
 {% if execute %}
 
 {# Build paths from FABRIC_WORKSPACE and FABRIC_LAKEHOUSE, or use direct overrides #}
-{% set fabric_workspace = env_var('FABRIC_WORKSPACE', 'duckrun') %}
-{% set fabric_lakehouse = env_var('FABRIC_LAKEHOUSE', 'dbt') %}
+{% set fabric_workspace = env_var('FABRIC_WORKSPACE', 'duckrun') | trim %}
+{% set fabric_lakehouse = env_var('FABRIC_LAKEHOUSE', 'dbt') | trim %}
 {% set default_path_root = 'abfss://' ~ fabric_workspace ~ '@onelake.dfs.fabric.microsoft.com/' ~ fabric_lakehouse ~ '.Lakehouse' %}
 {% set default_csv_path = default_path_root ~ '/Files/csv' %}
 

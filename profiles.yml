@@ -20,4 +20,4 @@ aemo_electricity:
         - path: ducklake:sqlite:/lakehouse/default/Files/metadata.db
           alias: ducklake
           options:
-            data_path: "abfss://{{ env_var('FABRIC_WORKSPACE', 'duckrun') }}@onelake.dfs.fabric.microsoft.com/{{ env_var('FABRIC_LAKEHOUSE', 'dbt') }}.Lakehouse/Tables"
+            data_path: "abfss://{{ env_var('FABRIC_WORKSPACE', 'duckrun') | trim }}@onelake.dfs.fabric.microsoft.com/{{ env_var('FABRIC_LAKEHOUSE', 'dbt') | trim }}.Lakehouse/Tables"

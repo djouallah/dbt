@@ -1,5 +1,5 @@
 {{ config(
-    materialized='table',
+    materialized='view',
     pre_hook=[
         "CREATE SCHEMA IF NOT EXISTS ducklake.{{ env_var('DBT_SCHEMA', 'aemo') }}",
         "CREATE TABLE IF NOT EXISTS ducklake.{{ env_var('DBT_SCHEMA', 'aemo') }}.csv_archive_log (source_type VARCHAR, source_filename VARCHAR, archive_path VARCHAR, archived_at TIMESTAMP, row_count BIGINT, source_url VARCHAR, etag VARCHAR)",
