@@ -17,7 +17,7 @@ aemo_electricity:
         - name: zipfs
           repo: community
       attach:
-        - path: ducklake:sqlite:/lakehouse/default/Files/dbt/metadata.db
+        - path: ducklake:sqlite:/lakehouse/default/Files/metadata.db
           alias: ducklake
           options:
             data_path: "abfss://{{ env_var('FABRIC_WORKSPACE', 'duckrun') }}@onelake.dfs.fabric.microsoft.com/{{ env_var('FABRIC_LAKEHOUSE', 'dbt') }}.Lakehouse/Tables"
