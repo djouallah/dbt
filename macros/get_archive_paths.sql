@@ -4,7 +4,7 @@
       SELECT source_filename FROM {{ ref('stg_csv_archive_log') }} WHERE source_type = '{{ source_type }}'
     {% endset %}
     {% set results = run_query(query) %}
-    {% set csv_archive_path = var('csv_archive_path') %}
+    {% set csv_archive_path = env_var('csv_archive_path', '/lakehouse/default/Files/csv') %}
     {% set paths = [] %}
     {% for row in results %}
       {% if source_type == 'daily' %}

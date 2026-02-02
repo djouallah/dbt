@@ -20,7 +20,7 @@ WITH
       first("Fuel Source - Descriptor") AS FuelSourceDescriptor,
       first(Participant) AS Participant
     FROM
-      read_csv('{{ var("csv_archive_path") }}/duid/duid_data.csv')
+      read_csv('{{ env_var('csv_archive_path', '/lakehouse/default/Files/csv') }}/duid/duid_data.csv')
     WHERE
       length(DUID) > 2
     GROUP BY
@@ -33,12 +33,12 @@ WITH
       "Facility Code" AS DUID,
       "Participant Name" AS Participant
     FROM
-      read_csv_auto('{{ var("csv_archive_path") }}/duid/facilities.csv')
+      read_csv_auto('{{ env_var('csv_archive_path', '/lakehouse/default/Files/csv') }}/duid/facilities.csv')
   ),
 
   wa_energy AS (
     SELECT *
-    FROM read_csv_auto('{{ var("csv_archive_path") }}/duid/WA_ENERGY.csv', header = 1)
+    FROM read_csv_auto('{{ env_var('csv_archive_path', '/lakehouse/default/Files/csv') }}/duid/WA_ENERGY.csv', header = 1)
   ),
 
   duid_wa AS (
@@ -62,7 +62,7 @@ WITH
       duid,
       max(latitude) as latitude,
       max(longitude) as longitude
-    FROM read_csv('{{ var("csv_archive_path") }}/duid/geo_data.csv')
+    FROM read_csv('{{ env_var('csv_archive_path', '/lakehouse/default/Files/csv') }}/duid/geo_data.csv')
     WHERE latitude IS NOT NULL
     GROUP BY duid
   )

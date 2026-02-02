@@ -17,9 +17,9 @@ vars:
   # Fabric connection (set via env vars: FABRIC_WORKSPACE, FABRIC_LAKEHOUSE, DBT_SCHEMA)
   # Defaults: duckrun, dbt, aemo
 
-  # Paths - use forward slashes for cross-platform compatibility
-  csv_archive_path: "/lakehouse/default/Files/csv"
-  path_root: "/lakehouse/default"
+  # Paths - set via env vars: csv_archive_path, path_root
+  # Defaults work for local Windows dev with /lakehouse mount
+  # For Fabric, set to abfss:// paths
 
   # Download settings
   download_limit: 2  # Set low for dev, increase for prod

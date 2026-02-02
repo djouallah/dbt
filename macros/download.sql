@@ -3,10 +3,11 @@
 {# Only run during execution, not during parsing #}
 {% if execute %}
 
-{% set path_root = var('path_root') %}
+{% set path_root = env_var('path_root', '/lakehouse/default') %}
+{% set csv_archive_path = env_var('csv_archive_path', '/lakehouse/default/Files/csv') %}
 {% set download_limit = var('download_limit') %}
 
-{% do log("[DOWNLOAD] Starting download with PATH_ROOT=" ~ path_root ~ ", download_limit=" ~ download_limit, info=True) %}
+{% do log("[DOWNLOAD] Starting download with PATH_ROOT=" ~ path_root ~ ", csv_archive_path=" ~ csv_archive_path ~ ", download_limit=" ~ download_limit, info=True) %}
 
 {# Set up variables for the download script - each statement separately #}
 {% call statement('set_path_root', fetch_result=False) %}
@@ -18,7 +19,7 @@ SET VARIABLE download_limit = {{ download_limit }}
 {% endcall %}
 
 {% call statement('set_csv_archive_path', fetch_result=False) %}
-SET VARIABLE csv_archive_path = getvariable('PATH_ROOT') || '/Files/csv'
+SET VARIABLE csv_archive_path = '{{ csv_archive_path }}'
 {% endcall %}
 
 {# Create schema if not exists #}
