@@ -14,7 +14,8 @@ aemo_electricity:
         - json
         - sqlite
         - ducklake
-        - zipfs
+        - name: zipfs
+          repo: community
       attach:
         - path: ducklake:sqlite:/lakehouse/default/Files/dbt/metadata.db
           alias: ducklake
