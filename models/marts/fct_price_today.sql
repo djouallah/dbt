@@ -1,10 +1,10 @@
 {{ config(
     materialized='incremental',
     unique_key=['file', 'REGIONID', 'SETTLEMENTDATE'],
-    pre_hook="SET VARIABLE price_today_paths = (SELECT COALESCE(NULLIF(list('zip://' || '{{ env_var('csv_archive_path', '/lakehouse/default/Files/csv') }}' || '/price_today/day=' || substring(source_filename, 19, 8) || '/source_file=' || source_filename || '/data_0.zip/*.CSV'), []), ['']) FROM {{ ref('stg_csv_archive_log') }} WHERE source_type = 'price_today')"
+    pre_hook="SET VARIABLE price_today_paths = (SELECT COALESCE(NULLIF(list('zip://' || '{{ get_csv_archive_path() }}' || '/price_today/day=' || substring(source_filename, 19, 8) || '/source_file=' || source_filename || '/data_0.zip/*.CSV'), []), ['']) FROM {{ ref('stg_csv_archive_log') }} WHERE source_type = 'price_today')"
 ) }}
 
-{% set csv_archive_path = env_var('csv_archive_path', '/lakehouse/default/Files/csv') %}
+{% set csv_archive_path = get_csv_archive_path() %}
 
 WITH price_staging AS (
   SELECT *

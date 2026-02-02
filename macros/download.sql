@@ -3,8 +3,14 @@
 {# Only run during execution, not during parsing #}
 {% if execute %}
 
-{% set path_root = env_var('path_root', '/lakehouse/default') %}
-{% set csv_archive_path = env_var('csv_archive_path', '/lakehouse/default/Files/csv') %}
+{# Build paths from FABRIC_WORKSPACE and FABRIC_LAKEHOUSE, or use direct overrides #}
+{% set fabric_workspace = env_var('FABRIC_WORKSPACE', 'duckrun') %}
+{% set fabric_lakehouse = env_var('FABRIC_LAKEHOUSE', 'dbt') %}
+{% set default_path_root = 'abfss://' ~ fabric_workspace ~ '@onelake.dfs.fabric.microsoft.com/' ~ fabric_lakehouse ~ '.Lakehouse' %}
+{% set default_csv_path = default_path_root ~ '/Files/csv' %}
+
+{% set path_root = env_var('path_root', default_path_root) %}
+{% set csv_archive_path = env_var('csv_archive_path', default_csv_path) %}
 {% set download_limit = env_var('download_limit', '2') | int %}
 
 {% do log("[DOWNLOAD] Starting download with PATH_ROOT=" ~ path_root ~ ", csv_archive_path=" ~ csv_archive_path ~ ", download_limit=" ~ download_limit, info=True) %}

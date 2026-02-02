@@ -1,10 +1,10 @@
 {{ config(
     materialized='incremental',
     unique_key=['file', 'DUID', 'SETTLEMENTDATE'],
-    pre_hook="SET VARIABLE scada_today_paths = (SELECT COALESCE(NULLIF(list('zip://' || '{{ env_var('csv_archive_path', '/lakehouse/default/Files/csv') }}' || '/scada_today/day=' || substring(source_filename, 22, 8) || '/source_file=' || source_filename || '/data_0.zip/*.CSV'), []), ['']) FROM {{ ref('stg_csv_archive_log') }} WHERE source_type = 'scada_today')"
+    pre_hook="SET VARIABLE scada_today_paths = (SELECT COALESCE(NULLIF(list('zip://' || '{{ get_csv_archive_path() }}' || '/scada_today/day=' || substring(source_filename, 22, 8) || '/source_file=' || source_filename || '/data_0.zip/*.CSV'), []), ['']) FROM {{ ref('stg_csv_archive_log') }} WHERE source_type = 'scada_today')"
 ) }}
 
-{% set csv_archive_path = env_var('csv_archive_path', '/lakehouse/default/Files/csv') %}
+{% set csv_archive_path = get_csv_archive_path() %}
 
 WITH scada_staging AS (
   SELECT *
