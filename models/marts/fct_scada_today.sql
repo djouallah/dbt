@@ -1,6 +1,6 @@
 {{ config(
     materialized='incremental',
-    unique_key=['file', 'DUID', 'SETTLEMENTDATE','INTERVENTION'],
+    unique_key=['file', 'DUID', 'SETTLEMENTDATE'],
     pre_hook="SET VARIABLE scada_today_paths = (SELECT COALESCE(NULLIF(list('zip://' || '{{ get_csv_archive_path() }}' || '/scada_today/day=' || substring(source_filename, 22, 8) || '/source_file=' || source_filename || '/data_0.zip/*.CSV'), []), ['']) FROM {{ ref('stg_csv_archive_log') }} WHERE source_type = 'scada_today'{% if is_incremental() %} AND source_filename NOT IN (SELECT DISTINCT split_part(file, '.', 1) FROM {{ this }}){% endif %})"
 ) }}
 
