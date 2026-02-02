@@ -73,12 +73,13 @@ WITH
 
 SELECT
   a.DUID,
-  a.Region,
-  UPPER(LEFT(TRIM(FuelSourceDescriptor), 1)) || LOWER(SUBSTR(TRIM(FuelSourceDescriptor), 2)) AS FuelSourceDescriptor,
-  a.Participant,
-  states.State,
-  geo.latitude,
-  geo.longitude
+  first(a.Region) AS Region,
+  first(UPPER(LEFT(TRIM(FuelSourceDescriptor), 1)) || LOWER(SUBSTR(TRIM(FuelSourceDescriptor), 2))) AS FuelSourceDescriptor,
+  first(a.Participant) AS Participant,
+  first(states.State) AS State,
+  first(geo.latitude) AS latitude,
+  first(geo.longitude) AS longitude
 FROM duid_all a
 JOIN states ON a.Region = states.RegionID
 LEFT JOIN geo ON a.duid = geo.duid
+GROUP BY a.DUID
