@@ -59,3 +59,7 @@ generate_latest_delta_log('/lakehouse/default/Files/metadata.db')
 Data is downloaded from AEMO's public APIs. Configure `daily_source` in `dbt_project.yml`:
 - `aemo` (default) - Direct from AEMO, no rate limits
 - `github` - Historical archive for backfilling
+
+# Limitation
+
+you need a filesystem to store sqlite metadata, fuse works fine too
