@@ -1,8 +1,4 @@
 version: 2
 
-sources:
-  - name: aemo
-    database: ducklake
-    schema: aemo
-    tables:
-      - name: csv_archive_log
+# csv_archive_log is now a standalone parquet file on abfss://
+# (no longer a DuckLake table, so no source definition needed)

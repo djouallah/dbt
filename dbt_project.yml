@@ -16,17 +16,18 @@ clean-targets:
 vars:
   # Env vars used:
   # - DBT_SCHEMA: schema name (default: aemo)
-  # - FABRIC_WORKSPACE, FABRIC_LAKEHOUSE: for DuckLake data_path
   # - csv_archive_path, path_root: for abfss:// paths in Fabric
   # - download_limit: number of files to download per source (default: 2)
   
   # Download settings
   daily_source: aemo  # 'aemo' (default, no rate limits) or 'github' for historical archive
 
-# Download must run AFTER csv_archive_log model exists
-# Run manually: dbt run-operation download
-# on-run-start:
-#   - "{{ download() }}"
+on-run-start:
+  - "{{ download() }}"
+  - "{{ import_metadata() }}"
+
+on-run-end:
+  - "{{ export_metadata() }}"
 
 models:
   aemo_electricity:

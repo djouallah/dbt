@@ -1,65 +1,26 @@
-# AEMO Electricity dbt Project
+# AEMO Electricity — dbt + DuckLake
 
-A dbt project that downloads and transforms Australian electricity market data from AEMO (Australian Energy Market Operator) using DuckDB and exports to Delta Lake for Microsoft Fabric.
+Downloads Australian electricity market data (AEMO NEM), transforms with dbt-duckdb + DuckLake, and exports to Delta Lake on Microsoft Fabric.
 
-## Prerequisites
+**Single writer only.** No concurrent runs — metadata sync and archive log use read-modify-overwrite on parquet with no locking.
 
-- Python 3.x
-- dbt-duckdb
-- DuckDB
-- ducklake-delta-exporter
+## Quick Start
 
-Install dependencies:
 ```bash
 pip install duckdb dbt-duckdb ducklake-delta-exporter
-```
-
-## Environment Variables
-
-| Variable | Description |
-|----------|-------------|
-| `DBT_SCHEMA` | Target schema name (e.g., `power`) |
-| `FABRIC_WORKSPACE` | Microsoft Fabric workspace name |
-| `FABRIC_LAKEHOUSE` | Microsoft Fabric lakehouse name |
-| `DUCKLAKE_METADATA_PATH` | Path to DuckLake metadata SQLite database |
-| `download_limit` | Number of files to download per source |
-
-## Usage
-
-Run the dbt project:
-```bash
 dbt run
 dbt test
 ```
 
-Export to Delta Lake:
-```python
-from ducklake_delta_exporter import generate_latest_delta_log
-generate_latest_delta_log('/lakehouse/default/Files/metadata.db')
-```
+## Environment Variables
 
-## Models
+| Variable | Default | Purpose |
+|----------|---------|---------|
+| `ROOT_PATH` | `abfss://duckrun@...dbt.Lakehouse` | Storage root — `abfss://...` or `s3://bucket/prefix` |
+| `DBT_SCHEMA` | `aemo` | Target schema |
+| `download_limit` | `2` | Max files per source per run |
+| `daily_source` | `aemo` | `aemo` (live) or `github` (historical backfill) |
 
-### Staging
-- `stg_csv_archive_log` - Tracks downloaded CSV files and triggers data downloads
+Layout under `ROOT_PATH`: `/Tables` (DuckLake data), `/Files/csv` (archives), `/Files/csv_archive_log.parquet`, `/Files/metadata/` (metadata sync).
 
-### Dimensions
-- `dim_calendar` - Date dimension
-- `dim_duid` - Dispatch Unit Identifier (generator) reference data
-
-### Facts
-- `fct_scada` - Historical SCADA generation data
-- `fct_scada_today` - Intraday SCADA data
-- `fct_price` - Historical electricity prices
-- `fct_price_today` - Intraday prices
-- `fct_summary` - Aggregated summary metrics
-
-## Data Sources
-
-Data is downloaded from AEMO's public APIs. Configure `daily_source` in `dbt_project.yml`:
-- `aemo` (default) - Direct from AEMO, no rate limits
-- `github` - Historical archive for backfilling
-
-# Limitation
-
-you need a filesystem to store sqlite metadata, fuse works fine too
+See [CLAUDE.md](CLAUDE.md) for full architecture, model details, and implementation notes.

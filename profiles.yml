@@ -12,12 +12,11 @@ aemo_electricity:
         - azure
         - httpfs
         - json
-        - sqlite
         - ducklake
         - name: zipfs
           repo: community
       attach:
-        - path: "ducklake:{{ env_var('DUCKLAKE_METADATA_PATH', 'sqlite:/lakehouse/default/Files/metadata.db') }}"
+        - path: "ducklake:{{ env_var('DUCKLAKE_METADATA_PATH', '/tmp/metadata.db') }}"
           alias: ducklake
           options:
-            data_path: "abfss://{{ env_var('FABRIC_WORKSPACE', 'duckrun') | trim }}@onelake.dfs.fabric.microsoft.com/{{ env_var('FABRIC_LAKEHOUSE', 'dbt') | trim }}.Lakehouse/Tables"
+            data_path: "{{ env_var('ROOT_PATH', 'abfss://duckrun@onelake.dfs.fabric.microsoft.com/dbt.Lakehouse') }}/Tables"

@@ -3,21 +3,16 @@
 {# Only run during execution, not during parsing #}
 {% if execute %}
 
-{# Build paths from FABRIC_WORKSPACE and FABRIC_LAKEHOUSE, or use direct overrides #}
-{% set fabric_workspace = env_var('FABRIC_WORKSPACE', 'duckrun') | trim %}
-{% set fabric_lakehouse = env_var('FABRIC_LAKEHOUSE', 'dbt') | trim %}
-{% set default_path_root = 'abfss://' ~ fabric_workspace ~ '@onelake.dfs.fabric.microsoft.com/' ~ fabric_lakehouse ~ '.Lakehouse' %}
-{% set default_csv_path = default_path_root ~ '/Files/csv' %}
-
-{% set path_root = env_var('path_root', default_path_root) %}
-{% set csv_archive_path = env_var('csv_archive_path', default_csv_path) %}
+{% set root_path = get_root_path() %}
+{% set csv_archive_path = root_path ~ '/Files/csv' %}
+{% set csv_log_path = root_path ~ '/Files/csv_archive_log.parquet' %}
 {% set download_limit = env_var('download_limit', '2') | int %}
 
-{% do log("[DOWNLOAD] Starting download with PATH_ROOT=" ~ path_root ~ ", csv_archive_path=" ~ csv_archive_path ~ ", download_limit=" ~ download_limit, info=True) %}
+{% do log("[DOWNLOAD] Starting download with PATH_ROOT=" ~ root_path ~ ", csv_archive_path=" ~ csv_archive_path ~ ", download_limit=" ~ download_limit, info=True) %}
 
 {# Set up variables for the download script - each statement separately #}
 {% call statement('set_path_root', fetch_result=False) %}
-SET VARIABLE PATH_ROOT = '{{ path_root }}'
+SET VARIABLE PATH_ROOT = '{{ root_path }}'
 {% endcall %}
 
 {% call statement('set_download_limit', fetch_result=False) %}
@@ -28,19 +23,10 @@ SET VARIABLE download_limit = {{ download_limit }}
 SET VARIABLE csv_archive_path = '{{ csv_archive_path }}'
 {% endcall %}
 
-{# Create schema if not exists #}
-{% call statement('create_schema', fetch_result=False) %}
-CREATE SCHEMA IF NOT EXISTS ducklake.{{ env_var('DBT_SCHEMA', 'aemo') }}
-{% endcall %}
 
-{# Ensure we're using the ducklake database and schema #}
-{% call statement('use_ducklake', fetch_result=False) %}
-USE ducklake.{{ env_var('DBT_SCHEMA', 'aemo') }}
-{% endcall %}
-
-{# Create temp staging table for new archive log entries #}
-{% call statement('create_staging', fetch_result=False) %}
-CREATE OR REPLACE TEMP TABLE _csv_archive_staging (
+{# Create temp table for the combined archive log (existing + new entries) #}
+{% call statement('create_log', fetch_result=False) %}
+CREATE OR REPLACE TEMP TABLE _csv_archive_log (
   source_type VARCHAR,
   source_filename VARCHAR,
   archive_path VARCHAR,
@@ -51,19 +37,30 @@ CREATE OR REPLACE TEMP TABLE _csv_archive_staging (
 )
 {% endcall %}
 
-{# Create empty temp table to track what's already archived #}
-{% call statement('create_existing_log', fetch_result=False) %}
-CREATE OR REPLACE TEMP TABLE _existing_archive_log (
-  source_type VARCHAR,
-  source_filename VARCHAR
-)
+{# Set log path variable for SQL use #}
+{% call statement('set_csv_log_path', fetch_result=False) %}
+SET VARIABLE csv_log_path = '{{ csv_log_path }}'
 {% endcall %}
 
-{# Try to populate from existing model table - ignore error if not exists #}
-{% call statement('populate_existing_log', fetch_result=False) %}
-INSERT INTO _existing_archive_log 
-SELECT source_type, source_filename 
-FROM ducklake.{{ env_var('DBT_SCHEMA', 'aemo') }}.csv_archive_log
+{# Load existing log from parquet if it exists #}
+{% set log_check %}
+  SELECT count(*) FROM glob('{{ csv_log_path }}')
+{% endset %}
+{% set log_exists = run_query(log_check).columns[0].values()[0] %}
+
+{% if log_exists > 0 %}
+  {% call statement('load_existing_log', fetch_result=False) %}
+  INSERT INTO _csv_archive_log SELECT * FROM read_parquet('{{ csv_log_path }}')
+  {% endcall %}
+  {% do log("[DOWNLOAD] Loaded existing log from parquet (" ~ log_exists ~ " file)", info=True) %}
+{% else %}
+  {% do log("[DOWNLOAD] No existing log file, starting fresh", info=True) %}
+{% endif %}
+
+{# Create dedup table from existing log #}
+{% call statement('create_existing_log', fetch_result=False) %}
+CREATE OR REPLACE TEMP TABLE _existing_archive_log AS
+SELECT source_type, source_filename FROM _csv_archive_log
 {% endcall %}
 
 {# ============================================================================ #}
@@ -159,7 +156,7 @@ COPY (
 {% endcall %}
 
 {% call statement('log_daily', fetch_result=False) %}
-INSERT INTO ducklake.{{ env_var('DBT_SCHEMA', 'aemo') }}.csv_archive_log BY NAME
+INSERT INTO _csv_archive_log BY NAME
 SELECT
   'daily' AS source_type,
   filename AS source_filename,
@@ -231,7 +228,7 @@ COPY (
 {% endcall %}
 
 {% call statement('log_scada', fetch_result=False) %}
-INSERT INTO ducklake.{{ env_var('DBT_SCHEMA', 'aemo') }}.csv_archive_log BY NAME
+INSERT INTO _csv_archive_log BY NAME
 SELECT
   'scada_today' AS source_type,
   filename AS source_filename,
@@ -303,7 +300,7 @@ COPY (
 {% endcall %}
 
 {% call statement('log_price', fetch_result=False) %}
-INSERT INTO ducklake.{{ env_var('DBT_SCHEMA', 'aemo') }}.csv_archive_log BY NAME
+INSERT INTO _csv_archive_log BY NAME
 SELECT
   'price_today' AS source_type,
   filename AS source_filename,
@@ -350,11 +347,11 @@ COPY (
 {% endcall %}
 
 {% call statement('delete_old_duid_logs', fetch_result=False) %}
-DELETE FROM ducklake.{{ env_var('DBT_SCHEMA', 'aemo') }}.csv_archive_log WHERE source_type LIKE 'duid_%'
+DELETE FROM _csv_archive_log WHERE source_type LIKE 'duid_%'
 {% endcall %}
 
 {% call statement('log_duid', fetch_result=False) %}
-INSERT INTO ducklake.{{ env_var('DBT_SCHEMA', 'aemo') }}.csv_archive_log BY NAME
+INSERT INTO _csv_archive_log BY NAME
 SELECT * FROM (VALUES
   ('duid_data', 'duid_data', '/duid/duid_data.csv', now()),
   ('duid_facilities', 'facilities', '/duid/facilities.csv', now()),
@@ -364,6 +361,13 @@ SELECT * FROM (VALUES
 {% endcall %}
 
 {% do log("[DOWNLOAD] DUID files written: 4", info=True) %}
+
+{# Write the combined log to parquet on abfss:// #}
+{% call statement('save_log', fetch_result=False) %}
+COPY _csv_archive_log TO '{{ csv_log_path }}' (FORMAT PARQUET)
+{% endcall %}
+{% do log("[DOWNLOAD] Log saved to " ~ csv_log_path, info=True) %}
+
 {% do log("[DOWNLOAD COMPLETE]", info=True) %}
 
 {% endif %}
