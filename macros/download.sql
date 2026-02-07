@@ -1,7 +1,7 @@
 {% macro download() %}
 
-{# Only run during execution, not during parsing #}
-{% if execute %}
+{# Only run during execution, not during parsing. Skip during 'dbt test' since models won't process files #}
+{% if execute and flags.WHICH != 'test' %}
 
 {% set root_path = get_root_path() %}
 {% set csv_archive_path = root_path ~ '/Files/csv' %}
