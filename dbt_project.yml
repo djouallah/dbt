@@ -24,7 +24,6 @@ vars:
 
 on-run-start:
   - "{{ download() }}"
-  - "{{ import_metadata() }}"
 
 on-run-end:
   - "{{ export_metadata() }}"

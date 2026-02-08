@@ -43,8 +43,8 @@ dbt/
 │   ├── get_csv_archive_path.sql      # Construct Azure Fabric archive path
 │   ├── get_archive_paths.sql         # Build dynamic file paths per source type
 │   ├── get_metadata_path.sql         # Construct metadata sync path on abfss://
-│   ├── import_metadata.sql           # on-run-start: restore metadata from parquet
-│   └── export_metadata.sql           # on-run-end: save metadata as parquet
+│   ├── import_metadata.sql           # on-run-start: restore metadata DB blob from abfss://
+│   └── export_metadata.sql           # on-run-end: upload metadata DB blob to abfss://
 ├── tests/
 │   ├── assert_all_daily_files_processed_price.sql
 │   └── assert_all_daily_files_processed_scada.sql
@@ -69,9 +69,9 @@ dbt/
 - **parse_filename()** (`macros/parse_filename.sql`) — Extracts filename without extension from a full path. Used in all fact models.
 - **get_csv_archive_path()** (`macros/get_csv_archive_path.sql`) — Builds the abfss:// path to the CSV archive using env vars.
 - **get_archive_paths()** (`macros/get_archive_paths.sql`) — Queries stg_csv_archive_log and constructs ZIP file paths for each source_type.
-- **get_metadata_path()** (`macros/get_metadata_path.sql`) — Builds the abfss:// path to the metadata parquet folder. Override via `METADATA_PATH` env var.
-- **import_metadata()** (`macros/import_metadata.sql`) — on-run-start hook. Imports DuckLake metadata from parquet files on abfss:// into the local SQLite metadata DB. Skips if no parquet files exist (first run).
-- **export_metadata()** (`macros/export_metadata.sql`) — on-run-end hook. Exports all DuckLake metadata tables to parquet files on abfss://.
+- **get_metadata_path()** (`macros/get_metadata_path.sql`) — Builds the abfss:// path to the metadata blob folder.
+- **import_metadata()** (`macros/import_metadata.sql`) — on-run-start hook. Downloads the DuckLake SQLite metadata DB blob from abfss://, DETACHes the empty DuckLake, and REATTACHes with the restored file. Skips if no blob exists (first run).
+- **export_metadata()** (`macros/export_metadata.sql`) — on-run-end hook. DETACHes DuckLake (WAL checkpoint), then uploads the SQLite file as a blob to abfss:// using `FORMAT BLOB`.
 
 ## Incremental Strategies
 - **dim_calendar:** One-time load. After first run, uses `WHERE 1=0` to skip inserts. `full_refresh: false`.
@@ -91,8 +91,7 @@ dbt/
 | DBT_SCHEMA | aemo | Target schema name |
 | FABRIC_WORKSPACE | duckrun | Microsoft Fabric workspace |
 | FABRIC_LAKEHOUSE | dbt | Microsoft Fabric lakehouse |
-| DUCKLAKE_METADATA_PATH | sqlite:metadata_<random>.db | DuckLake metadata DB (ephemeral, random name per run) |
-| METADATA_PATH | abfss://...Lakehouse/Files/metadata | Metadata parquet sync folder on abfss:// |
+
 | download_limit | 2 | Max files to download per source per run |
 | daily_source | aemo | Data source: 'aemo' (live) or 'github' (historical) |
 
@@ -123,11 +122,11 @@ parquet, azure, httpfs, json, sqlite, ducklake, zipfs (community)
 | duid_geo_data | GitHub | /duid/ | geo_data.csv |
 
 ## DuckLake Metadata Sync
-DuckLake needs a local filesystem for its SQLite metadata DB — it can't run directly on object storage (abfss://). To make metadata portable across ephemeral environments (e.g., Fabric notebook sessions):
-- **on-run-start:** `import_metadata()` reads parquet files from `abfss://.../Files/metadata/` and populates the local DuckLake metadata tables via `__ducklake_metadata_ducklake` internal catalog
-- **on-run-end:** `export_metadata()` exports all ~22 DuckLake metadata tables back to parquet on abfss://
-- **First run:** No parquet files exist, import is skipped, DuckLake starts fresh. After the run, metadata is exported for future sessions.
-- **Subsequent runs:** Metadata is restored from parquet, dbt runs normally, updated metadata is exported back.
+DuckLake needs a local filesystem for its SQLite metadata DB — it can't run directly on object storage (abfss://). To make metadata portable across ephemeral environments (e.g., Fabric notebook sessions), the entire SQLite file is synced as a binary blob using `FORMAT BLOB`:
+- **on-run-start:** `import_metadata()` checks for a blob at `abfss://.../Files/metadata/data_0.db`. If found, DETACHes the empty DuckLake, downloads the blob via `COPY (read_blob(...)) TO ... (FORMAT BLOB)`, then REATTACHes DuckLake to the restored file.
+- **on-run-end:** `export_metadata()` DETACHes DuckLake (checkpoints WAL), then uploads the SQLite file as a blob to abfss:// via `COPY (read_blob(...)) TO ... (FORMAT BLOB)`.
+- **First run:** No blob exists, import is skipped, DuckLake starts fresh. After the run, the SQLite file is exported for future sessions.
+- **Subsequent runs:** The full SQLite file (with complete DuckLake history) is restored from blob, dbt runs normally, updated file is exported back.
 
 ## Key Patterns & Conventions
 - Pre-hooks on models create schemas/tables and set DuckDB VARIABLEs with file paths

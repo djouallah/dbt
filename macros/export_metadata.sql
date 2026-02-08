@@ -3,39 +3,29 @@
 {# Only run during execution, not during parsing #}
 {% if execute %}
 
-{% set metadata_path = get_metadata_path() %}
-{% do log("[METADATA] Export path: " ~ metadata_path, info=True) %}
+{% set local_path = '/tmp/ducklake_metadata.db' %}
+{% set remote_path = get_metadata_path() ~ '/data_0.db' %}
 
-{# Discover DuckLake internal metadata tables #}
-{% set tables_query %}
-  SELECT database_name, schema_name, table_name
-  FROM duckdb_tables()
-  WHERE database_name LIKE '__ducklake_metadata_%'
-  ORDER BY table_name
-{% endset %}
-{% set tables = run_query(tables_query) %}
+{% do log("[METADATA] Exporting metadata DB...", info=True) %}
+{% do log("[METADATA] Local DB path: " ~ local_path, info=True) %}
+{% do log("[METADATA] Remote blob path: " ~ remote_path, info=True) %}
 
-{% if tables | length == 0 %}
-  {% do log("[METADATA] No DuckLake metadata catalog found, skipping export", info=True) %}
-{% else %}
+{# Switch away from ducklake — can't detach the active database #}
+{% call statement('use_memory', fetch_result=False) %}
+  USE memory
+{% endcall %}
 
-  {% for row in tables.rows %}
-    {% set db_name = row[0] %}
-    {% set schema_name = row[1] %}
-    {% set table_name = row[2] %}
-    {% set fqn = db_name ~ '."' ~ schema_name ~ '".' ~ table_name %}
-    {% set parquet_file = metadata_path ~ '/' ~ table_name ~ '.parquet' %}
+{# Detach DuckLake to force WAL checkpoint and flush all writes to SQLite file #}
+{% call statement('detach_ducklake', fetch_result=False) %}
+  DETACH ducklake
+{% endcall %}
 
-    {% call statement('export_' ~ table_name, fetch_result=False) %}
-      COPY {{ fqn }} TO '{{ parquet_file }}' (FORMAT PARQUET)
-    {% endcall %}
+{# Upload the SQLite metadata DB as a blob to remote storage #}
+{% call statement('upload_metadata_blob', fetch_result=False) %}
+  COPY (SELECT content FROM read_blob('{{ local_path }}')) TO '{{ remote_path }}' (FORMAT BLOB)
+{% endcall %}
 
-    {% do log("[METADATA] Exported " ~ table_name, info=True) %}
-  {% endfor %}
-
-  {% do log("[METADATA] Export complete", info=True) %}
-
-{% endif %}
+{% do log("[METADATA] Export complete — metadata DB uploaded to remote storage", info=True) %}
 
 {% endif %}
 
