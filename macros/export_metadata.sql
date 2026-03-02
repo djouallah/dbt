@@ -7,6 +7,14 @@
 {% set remote_path = env_var('METADATA_REMOTE_BLOB', get_metadata_path() ~ '/data_0.db') %}
 
 {# Run delta export while ducklake is still attached #}
+{% call statement('install_delta_export', fetch_result=False) %}
+  INSTALL delta_export FROM 'https://djouallah.github.io/delta_export'
+{% endcall %}
+
+{% call statement('load_delta_export', fetch_result=False) %}
+  LOAD delta_export
+{% endcall %}
+
 {% call statement('run_delta_export', fetch_result=False) %}
   CALL delta_export()
 {% endcall %}
