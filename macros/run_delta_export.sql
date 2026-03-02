@@ -8,6 +8,10 @@
   LOAD delta_export
 {% endcall %}
 
+{% call statement('use_ducklake', fetch_result=False) %}
+  USE ducklake
+{% endcall %}
+
 {% call statement('run_delta_export', fetch_result=False) %}
   CALL delta_export()
 {% endcall %}
