@@ -3,8 +3,8 @@
 {# Only run during execution, not during parsing #}
 {% if execute %}
 
-{% set local_path = '/tmp/ducklake_metadata.db' %}
-{% set remote_path = get_metadata_path() ~ '/data_0.db' %}
+{% set local_path = env_var('METADATA_LOCAL_PATH', '/tmp/ducklake_metadata.db') %}
+{% set remote_path = env_var('METADATA_REMOTE_BLOB', get_metadata_path() ~ '/data_0.db') %}
 
 {% do log("[METADATA] Exporting metadata DB...", info=True) %}
 {% do log("[METADATA] Local DB path: " ~ local_path, info=True) %}
