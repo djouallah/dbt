@@ -17,7 +17,14 @@
   DETACH ducklake
 {% endcall %}
 
-{# Reattach fresh (no dbt transaction) and run delta export #}
+{# Upload the SQLite metadata DB as a blob to remote storage #}
+{% call statement('upload_metadata_blob', fetch_result=False) %}
+  COPY (SELECT content FROM read_blob('{{ local_path }}')) TO '{{ remote_path }}' (FORMAT BLOB)
+{% endcall %}
+
+{% do log("[METADATA] Metadata DB uploaded to remote storage", info=True) %}
+
+{# Reattach fresh and run delta export #}
 {% call statement('attach_ducklake', fetch_result=False) %}
   ATTACH 'ducklake:sqlite:{{ local_path }}' AS ducklake (DATA_PATH '{{ data_path }}')
 {% endcall %}
@@ -39,21 +46,6 @@
 {% endcall %}
 
 {% do log("[METADATA] Delta export complete", info=True) %}
-
-{# Detach again and upload metadata blob #}
-{% call statement('use_memory_2', fetch_result=False) %}
-  USE memory
-{% endcall %}
-
-{% call statement('detach_ducklake_2', fetch_result=False) %}
-  DETACH ducklake
-{% endcall %}
-
-{% call statement('upload_metadata_blob', fetch_result=False) %}
-  COPY (SELECT content FROM read_blob('{{ local_path }}')) TO '{{ remote_path }}' (FORMAT BLOB)
-{% endcall %}
-
-{% do log("[METADATA] Metadata DB uploaded to remote storage", info=True) %}
 
 {% endif %}
 
