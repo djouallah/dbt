@@ -25,12 +25,13 @@ on-run-start:
   - "INSTALL delta_export FROM 'https://djouallah.github.io/delta_export'"
   - "LOAD delta_export"
   - "CALL ducklake.set_option('rewrite_delete_threshold', 0)"
+  - "CALL ducklake.set_option('target_file_size', '128MB')"
   - "{{ download() }}"
 
 
 on-run-end:
   - "CALL ducklake_rewrite_data_files('ducklake')"
-  - "CALL ducklake_merge_adjacent_files('ducklake')"
+  - "CALL ducklake_merge_adjacent_files('ducklake', max_compacted_files => 100)"
   - "CALL delta_export()"
 
 models:
