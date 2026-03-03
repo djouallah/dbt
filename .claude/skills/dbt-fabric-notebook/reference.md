@@ -12,6 +12,10 @@ aemo_electricity:
       database: ducklake
       threads: 1
       schema: "{{ env_var('DBT_SCHEMA', 'aemo') }}"
+      config_options:
+        allow_unsigned_extensions: true
+      settings:
+        preserve_insertion_order: false
       extensions:
         - parquet
         - sqlite
@@ -42,10 +46,16 @@ macro-paths: ["macros"]
 
 vars:
   # download_limit: max files per source per run (default: 2)
+  # process_limit: max files per model per run (default: 500)
 
 on-run-start:
+  - "INSTALL delta_export FROM 'https://djouallah.github.io/delta_export'"
+  - "LOAD delta_export"
   - "CALL ducklake.set_option('rewrite_delete_threshold', 0)"
   - "{{ download() }}"
+
+on-run-end:
+  - "CALL delta_export()"
 
 models:
   aemo_electricity:
@@ -55,9 +65,9 @@ models:
       +materialized: incremental
 ```
 
-## Incremental Fact Model with Pre-Hook
+## Incremental Fact Model with Pre-Hook and process_limit
 
-Example from fct_scada — reads only unprocessed files:
+Example from fct_scada — reads only unprocessed files, capped by process_limit:
 
 ```sql
 {{ config(
@@ -70,13 +80,17 @@ Example from fct_scada — reads only unprocessed files:
         || '/source_file=' || source_filename
         || '/data_0.zip/*.CSV'
       )
-      FROM {{ ref('stg_csv_archive_log') }}
-      WHERE source_type = 'daily'
-      {% if is_incremental() %}
-        AND source_filename NOT IN (
-          SELECT DISTINCT split_part(file, '.', 1) FROM {{ this }}
-        )
-      {% endif %}
+      FROM (
+        SELECT source_filename
+        FROM {{ ref('stg_csv_archive_log') }}
+        WHERE source_type = 'daily'
+        {% if is_incremental() %}
+          AND source_filename NOT IN (
+            SELECT DISTINCT split_part(file, '.', 1) FROM {{ this }}
+          )
+        {% endif %}
+        LIMIT {{ env_var('process_limit', '500') }}
+      )
     )"
 ) }}
 
@@ -133,14 +147,17 @@ Example from dim_duid — only rebuilds when new DUIDs appear:
 | `DBT_SCHEMA` | `aemo` | Yes |
 | `ROOT_PATH` | `abfss://workspace@onelake.dfs.fabric.microsoft.com/lakehouse.Lakehouse` | Yes |
 | `download_limit` | `10` | No (default: 2) |
+| `process_limit` | `500` | No (default: 500) |
 | `METADATA_LOCAL_PATH` | `/synfs/nb_resource/builtin/metadata.db` | Yes (for Fabric) |
 
-## DuckLake Options Reference
+## DuckDB / DuckLake Options Reference
 
 | Option | Default | Set Via | Description |
 |--------|---------|---------|-------------|
-| `data_inlining_row_limit` | 0 | ATTACH parameter or `set_option` | Rows below this limit are inlined in metadata instead of Parquet |
-| `rewrite_delete_threshold` | 0.95 | `set_option` only (not ATTACH) | Fraction of deleted rows before file rewrite (0 = disabled) |
+| `allow_unsigned_extensions` | false | `config_options` in profiles.yml (connection creation time) | Allow loading unsigned extensions like delta_export |
+| `preserve_insertion_order` | true | `settings` in profiles.yml (runtime SET) | Set false to reduce memory usage |
+| `data_inlining_row_limit` | 0 | ATTACH parameter in profiles.yml | Rows below this limit are inlined in metadata instead of Parquet |
+| `rewrite_delete_threshold` | 0.95 | `set_option` only (not ATTACH param) | Fraction of deleted rows before file rewrite (0 = disabled) |
 | `parquet_compression` | snappy | `set_option` | Compression: snappy, zstd, gzip, lz4 |
 | `target_file_size` | 512MB | `set_option` | Target Parquet file size |
 
@@ -150,16 +167,17 @@ Example from dim_duid — only rebuilds when new DUIDs appear:
 Fabric Notebook
   |
   v
-pip install duckdb dbt-duckdb ducklake-delta-exporter
+pip install duckdb dbt-duckdb
   |
   v
-Set env vars (ROOT_PATH, METADATA_LOCAL_PATH, etc.)
+Set env vars (ROOT_PATH, METADATA_LOCAL_PATH, process_limit, etc.)
   |
   v
 git clone <dbt-project> /tmp/dbt
   |
   v
 dbt run
+  |-- on-run-start: INSTALL + LOAD delta_export (unsigned extension)
   |-- on-run-start: set_option(rewrite_delete_threshold, 0)
   |-- on-run-start: download() macro
   |     |-- Load csv_archive_log.parquet from abfss://
@@ -170,17 +188,16 @@ dbt run
   |-- Models (dependency order):
   |     |-- stg_csv_archive_log (VIEW)
   |     |-- dim_calendar, dim_duid (TABLE)
-  |     |-- fct_scada, fct_price (incremental by file)
-  |     |-- fct_scada_today, fct_price_today (incremental by file)
+  |     |-- fct_scada, fct_price (incremental by file, LIMIT process_limit)
+  |     |-- fct_scada_today, fct_price_today (incremental by file, LIMIT process_limit)
   |     |-- fct_summary (append)
+  |
+  |-- on-run-end: CALL delta_export()
+  |     |-- Reads DuckLake SQLite metadata
+  |     |-- Writes _delta_log/ JSON files to abfss://ROOT_PATH/Tables/
   |
   v
 dbt test
-  |
-  v
-generate_latest_delta_log(METADATA_LOCAL_PATH)
-  |-- Reads DuckLake SQLite metadata
-  |-- Writes _delta_log/ JSON files to abfss://ROOT_PATH/Tables/
   |
   v
 Fabric / Power BI reads Delta tables from OneLake
