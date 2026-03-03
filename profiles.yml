@@ -9,6 +9,7 @@ aemo_electricity:
       schema: "{{ env_var('DBT_SCHEMA', 'aemo') }}"
       settings:
         preserve_insertion_order: false
+        allow_unsigned_extensions: true
       extensions:
         - parquet
         - sqlite
@@ -18,6 +19,8 @@ aemo_electricity:
         - ducklake
         - name: zipfs
           repo: community
+        - name: delta_export
+          repo: "https://djouallah.github.io/delta_export"
       attach:
         - path: "ducklake:sqlite:{{ env_var('METADATA_LOCAL_PATH', '/tmp/ducklake_metadata.db') }}"
           alias: ducklake

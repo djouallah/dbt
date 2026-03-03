@@ -25,6 +25,9 @@ on-run-start:
   - "{{ download() }}"
 
 
+on-run-end:
+  - "CALL delta_export()"
+
 models:
   aemo_electricity:
     dimensions:
