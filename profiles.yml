@@ -16,8 +16,6 @@ aemo_electricity:
         - ducklake
         - name: zipfs
           repo: community
-      config_options:
-        allow_unsigned_extensions: true
       attach:
         - path: "ducklake:sqlite:{{ env_var('METADATA_LOCAL_PATH', '/tmp/ducklake_metadata.db') }}"
           alias: ducklake
