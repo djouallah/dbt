@@ -31,7 +31,7 @@ on-run-start:
 
 on-run-end:
   - "CALL ducklake_rewrite_data_files('ducklake')"
-  - "CALL ducklake_merge_adjacent_files('ducklake', max_compacted_files => 100)"
+  - "CALL ducklake_merge_adjacent_files('ducklake')"
   - "CALL delta_export()"
 
 models:
