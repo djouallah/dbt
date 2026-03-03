@@ -9,8 +9,6 @@ aemo_electricity:
       schema: "{{ env_var('DBT_SCHEMA', 'aemo') }}"
       config_options:
         allow_unsigned_extensions: true
-      settings:
-        preserve_insertion_order: false
       extensions:
         - parquet
         - sqlite
