@@ -67,13 +67,25 @@ SELECT source_type, source_filename FROM _csv_archive_log
 {# DAILY REPORTS (SCADA + PRICE) #}
 {# ============================================================================ #}
 
-{# daily_source: 'github' (historical archive) or 'aemo' (current, no rate limits) #}
-{% set daily_source = var('daily_source', 'github') %}
-{% do log("[DOWNLOAD] Daily source: " ~ daily_source, info=True) %}
-
-{% if daily_source == 'github' %}
-{% call statement('daily_files_web', fetch_result=False) %}
+{# Download daily files from AEMO website first, then backfill from GitHub archive #}
+{% call statement('daily_files_aemo', fetch_result=False) %}
 CREATE OR REPLACE TEMP TABLE daily_files_web AS
+WITH
+  html_data AS (
+    SELECT content AS html FROM read_text('https://nemweb.com.au/Reports/Current/Daily_Reports/')
+  ),
+  lines AS (
+    SELECT unnest(string_split(html, '<br>')) AS line FROM html_data
+  )
+SELECT
+  'https://nemweb.com.au' || regexp_extract(line, 'HREF="([^"]+)"', 1) AS full_url,
+  split_part(regexp_extract(line, 'HREF="[^"]+/([^"]+\.zip)"', 1), '.', 1) AS filename
+FROM lines
+WHERE line LIKE '%PUBLIC_DAILY%.zip%'
+{% endcall %}
+
+{% call statement('daily_files_github', fetch_result=False) %}
+INSERT INTO daily_files_web
 WITH
   api_responses AS (
     SELECT 2018 AS year, content AS json_content FROM read_text('https://api.github.com/repos/djouallah/fabric_demo/contents/data/archive/2018')
@@ -95,27 +107,10 @@ SELECT
   split_part(json_extract_string(file_info, '$.name'), '.', 1) AS filename
 FROM parsed_files
 WHERE json_extract_string(file_info, '$.name') LIKE 'PUBLIC_DAILY%.zip'
-ORDER BY full_url DESC
+  AND split_part(json_extract_string(file_info, '$.name'), '.', 1) NOT IN (SELECT filename FROM daily_files_web)
 {% endcall %}
-{% else %}
-{# AEMO fallback - current files only, no rate limits #}
-{% call statement('daily_files_web', fetch_result=False) %}
-CREATE OR REPLACE TEMP TABLE daily_files_web AS
-WITH
-  html_data AS (
-    SELECT content AS html FROM read_text('https://nemweb.com.au/Reports/Current/Daily_Reports/')
-  ),
-  lines AS (
-    SELECT unnest(string_split(html, '<br>')) AS line FROM html_data
-  )
-SELECT
-  'https://nemweb.com.au' || regexp_extract(line, 'HREF="([^"]+)"', 1) AS full_url,
-  split_part(regexp_extract(line, 'HREF="[^"]+/([^"]+\.zip)"', 1), '.', 1) AS filename
-FROM lines
-WHERE line LIKE '%PUBLIC_DAILY%.zip%'
-ORDER BY full_url DESC
-{% endcall %}
-{% endif %}
+
+{% do log("[DOWNLOAD] Daily source: AEMO + GitHub backfill", info=True) %}
 
 {% call statement('daily_to_archive', fetch_result=False) %}
 CREATE OR REPLACE TEMP TABLE daily_to_archive AS

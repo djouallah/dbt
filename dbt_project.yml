@@ -19,8 +19,6 @@ vars:
   # - csv_archive_path, path_root: for abfss:// paths in Fabric
   # - download_limit: number of files to download per source (default: 2)
   
-  # Download settings
-  daily_source: aemo  # 'aemo' (default, no rate limits) or 'github' for historical archive
 
 on-run-start:
   - "{{ download() }}"
