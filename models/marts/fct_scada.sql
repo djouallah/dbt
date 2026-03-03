@@ -1,7 +1,7 @@
 {{ config(
     materialized='incremental',
     unique_key=['file', 'DUID', 'SETTLEMENTDATE','INTERVENTION'],
-    pre_hook="SET VARIABLE scada_daily_paths = (SELECT list('zip://' || '{{ get_csv_archive_path() }}' || '/daily/year=' || substring(source_filename, 14, 4) || '/source_file=' || source_filename || '/data_0.zip/*.CSV') FROM (SELECT source_filename FROM {{ ref('stg_csv_archive_log') }} WHERE source_type = 'daily'{% if is_incremental() %} AND source_filename NOT IN (SELECT DISTINCT split_part(file, '.', 1) FROM {{ this }}){% endif %} LIMIT {{ env_var('process_limit', '500') }}))"
+    pre_hook="SET VARIABLE scada_daily_paths = (SELECT list('zip://' || '{{ get_csv_archive_path() }}' || '/daily/year=' || substring(source_filename, 14, 4) || '/source_file=' || source_filename || '/data_0.zip/*.CSV') FROM (SELECT source_filename FROM {{ ref('stg_csv_archive_log') }} WHERE source_type = 'daily'{% if is_incremental() %} AND source_filename NOT IN (SELECT DISTINCT split_part(file, '.', 1) FROM {{ this }}){% endif %} LIMIT {{ env_var('process_limit', '100') }}))"
 ) }}
 
 {%- set check_files_query -%}

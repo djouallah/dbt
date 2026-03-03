@@ -1,7 +1,7 @@
 {{ config(
     materialized='incremental',
     unique_key=['file', 'REGIONID', 'SETTLEMENTDATE','INTERVENTION'],
-    pre_hook="SET VARIABLE price_today_paths = (SELECT COALESCE(NULLIF(list('zip://' || '{{ get_csv_archive_path() }}' || '/price_today/day=' || substring(source_filename, 19, 8) || '/source_file=' || source_filename || '/data_0.zip/*.CSV'), []), ['']) FROM (SELECT source_filename FROM {{ ref('stg_csv_archive_log') }} WHERE source_type = 'price_today'{% if is_incremental() %} AND source_filename NOT IN (SELECT DISTINCT split_part(file, '.', 1) FROM {{ this }}){% endif %} LIMIT {{ env_var('process_limit', '500') }}))"
+    pre_hook="SET VARIABLE price_today_paths = (SELECT COALESCE(NULLIF(list('zip://' || '{{ get_csv_archive_path() }}' || '/price_today/day=' || substring(source_filename, 19, 8) || '/source_file=' || source_filename || '/data_0.zip/*.CSV'), []), ['']) FROM (SELECT source_filename FROM {{ ref('stg_csv_archive_log') }} WHERE source_type = 'price_today'{% if is_incremental() %} AND source_filename NOT IN (SELECT DISTINCT split_part(file, '.', 1) FROM {{ this }}){% endif %} LIMIT {{ env_var('process_limit', '100') }}))"
 ) }}
 
 {% set csv_archive_path = get_csv_archive_path() %}
