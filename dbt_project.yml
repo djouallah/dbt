@@ -21,6 +21,8 @@ vars:
   
 
 on-run-start:
+  - "INSTALL delta_export FROM 'https://djouallah.github.io/delta_export'"
+  - "LOAD delta_export"
   - "CALL ducklake.set_option('rewrite_delete_threshold', 0)"
   - "{{ download() }}"
 

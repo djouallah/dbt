@@ -19,8 +19,6 @@ aemo_electricity:
         - ducklake
         - name: zipfs
           repo: community
-        - name: delta_export
-          repo: "https://djouallah.github.io/delta_export"
       attach:
         - path: "ducklake:sqlite:{{ env_var('METADATA_LOCAL_PATH', '/tmp/ducklake_metadata.db') }}"
           alias: ducklake
