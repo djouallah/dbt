@@ -7,9 +7,10 @@ aemo_electricity:
       database: ducklake
       threads: 1
       schema: "{{ env_var('DBT_SCHEMA', 'aemo') }}"
+      config_options:
+        allow_unsigned_extensions: true
       settings:
         preserve_insertion_order: false
-        allow_unsigned_extensions: true
       extensions:
         - parquet
         - sqlite
