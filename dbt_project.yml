@@ -22,8 +22,6 @@ vars:
 
 on-run-start:
   - "SET preserve_insertion_order = false"
-  - "INSTALL delta_export FROM 'https://djouallah.github.io/delta_export'"
-  - "LOAD delta_export"
   - "CALL ducklake.set_option('rewrite_delete_threshold', 0)"
   - "CALL ducklake.set_option('target_file_size', '128MB')"
   - "{{ download() }}"
