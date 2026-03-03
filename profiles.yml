@@ -21,3 +21,4 @@ aemo_electricity:
           alias: ducklake
           options:
             data_path: "{{ env_var('ROOT_PATH') }}/Tables"
+            data_inlining_row_limit: 0

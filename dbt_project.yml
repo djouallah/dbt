@@ -21,6 +21,7 @@ vars:
   
 
 on-run-start:
+  - "CALL ducklake.set_option('rewrite_delete_threshold', 0)"
   - "{{ download() }}"
 
 
