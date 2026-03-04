@@ -4,20 +4,19 @@
 {{ config(
     materialized='incremental',
     incremental_strategy='append',
-    pre_hook="{% if is_incremental() %}DELETE FROM {{ this }} WHERE EXISTS (SELECT 1 FROM {{ ref('fct_scada') }} s WHERE s.SETTLEMENTDATE > (SELECT MAX(cutoff) FROM {{ this }}) AND s.INTERVENTION = 0 LIMIT 1){% endif %}"
+    pre_hook="{% if is_incremental() %}DELETE FROM {{ this }} WHERE (SELECT COUNT(DISTINCT DATE) FROM {{ ref('fct_scada') }} WHERE INTERVENTION = 0) > (SELECT COUNT(DISTINCT date) FROM {{ this }}){% endif %}"
 ) }}
 
 {% if is_incremental() %}
 
 {%- set has_new_daily_query -%}
-SELECT COUNT(*) as cnt FROM {{ ref('fct_scada') }}
-WHERE SETTLEMENTDATE > (SELECT MAX(cutoff) FROM {{ this }})
-  AND INTERVENTION = 0
-LIMIT 1
+SELECT
+  (SELECT COUNT(DISTINCT DATE) FROM {{ ref('fct_scada') }} WHERE INTERVENTION = 0) as scada_days,
+  (SELECT COUNT(DISTINCT date) FROM {{ this }}) as summary_days
 {%- endset -%}
 
 {%- set result = run_query(has_new_daily_query) -%}
-{%- set has_new_daily = result and result.rows[0][0] > 0 -%}
+{%- set has_new_daily = result and result.rows[0][0] > result.rows[0][1] -%}
 
 {% if has_new_daily %}
 
