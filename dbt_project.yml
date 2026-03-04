@@ -21,7 +21,6 @@ vars:
   
 
 on-run-start:
-  - "SET preserve_insertion_order = false"
   - "CALL ducklake.set_option('rewrite_delete_threshold', 0)"
   - "CALL ducklake.set_option('target_file_size', '128MB')"
   - "{{ download() }}"

@@ -9,6 +9,33 @@ aemo_electricity:
       schema: "{{ env_var('DBT_SCHEMA', 'aemo') }}"
       config_options:
         allow_unsigned_extensions: true
+      settings:
+        preserve_insertion_order: false
+      extensions:
+        - parquet
+        - sqlite
+        - json
+        - ducklake
+        - name: zipfs
+          repo: community
+        - name: delta_export
+          repo: community
+      attach:
+        - path: "ducklake:sqlite:{{ env_var('METADATA_LOCAL_PATH', '/tmp/metadata.db') }}"
+          alias: ducklake
+          options:
+            data_path: "{{ env_var('ROOT_PATH', '/tmp') }}/Tables"
+            data_inlining_row_limit: 0
+    prod:
+      type: duckdb
+      path: ':memory:'
+      database: ducklake
+      threads: 1
+      schema: "{{ env_var('DBT_SCHEMA', 'aemo') }}"
+      config_options:
+        allow_unsigned_extensions: true
+      settings:
+        preserve_insertion_order: false
       extensions:
         - parquet
         - sqlite

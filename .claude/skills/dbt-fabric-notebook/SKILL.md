@@ -37,8 +37,8 @@ sys.exit(0)  # Restart kernel to pick up new packages
 import os
 os.environ['DBT_SCHEMA']          = 'my_schema'
 os.environ['ROOT_PATH']           = 'abfss://<workspace>@onelake.dfs.fabric.microsoft.com/<lakehouse>.Lakehouse'
-os.environ['download_limit']      = '10'
-os.environ['process_limit']       = '500'
+os.environ['download_limit']      = '100'
+os.environ['process_limit']       = '100'
 os.environ['METADATA_LOCAL_PATH'] = '/synfs/nb_resource/builtin/metadata.db'
 ```
 
@@ -47,7 +47,7 @@ os.environ['METADATA_LOCAL_PATH'] = '/synfs/nb_resource/builtin/metadata.db'
 | `DBT_SCHEMA` | Target schema name in DuckLake |
 | `ROOT_PATH` | abfss:// path to the Fabric lakehouse root |
 | `download_limit` | Max files to download per source per run |
-| `process_limit` | Max files to process per model per run (default: 500) |
+| `process_limit` | Max files to process per model per run (default: 100) |
 | `METADATA_LOCAL_PATH` | Local path for DuckLake SQLite metadata DB. Use `/synfs/nb_resource/builtin/` in Fabric — this persists across notebook sessions |
 
 ### Cell 3 — Clone dbt project
@@ -87,6 +87,8 @@ my_project:
         - ducklake
         - name: zipfs
           repo: community
+        - name: delta_export
+          repo: community
       attach:
         - path: "ducklake:sqlite:{{ env_var('METADATA_LOCAL_PATH', '/tmp/ducklake_metadata.db') }}"
           alias: ducklake
@@ -98,31 +100,47 @@ my_project:
 Key points:
 - `path: ':memory:'` — DuckDB runs fully in-memory, no local database file
 - `database: ducklake` — tells dbt to target the attached DuckLake catalog
-- `config_options.allow_unsigned_extensions: true` — must be set at connection creation time (not `settings`) to allow unsigned extensions like `delta_export`
+- `config_options.allow_unsigned_extensions: true` — must be set at connection creation time (not `settings`) to allow community extensions
 - `settings.preserve_insertion_order: false` — reduces memory usage by allowing DuckDB to reorder results
 - `data_path` points to `abfss://.../<lakehouse>/Tables` where Parquet data lives
 - `data_inlining_row_limit: 0` — disables data inlining (small writes go to Parquet, not metadata)
 - Extensions: `azure` for abfss://, `httpfs` for HTTP downloads, `zipfs` for reading CSVs from ZIPs
 
-## dbt_project.yml — Delta Export & DuckLake Config
+## dbt_project.yml — Delta Export & DuckLake Maintenance
 
 ```yaml
 on-run-start:
-  - "INSTALL delta_export FROM 'https://djouallah.github.io/delta_export'"
-  - "LOAD delta_export"
   - "CALL ducklake.set_option('rewrite_delete_threshold', 0)"
+  - "CALL ducklake.set_option('target_file_size', '128MB')"
   - "{{ download() }}"   # your data ingestion macro
 
 on-run-end:
+  - "CALL ducklake_rewrite_data_files('ducklake')"
+  - "CALL ducklake_merge_adjacent_files('ducklake')"
   - "CALL delta_export()"
 ```
 
-The `delta_export` extension is installed and loaded at run start (requires `allow_unsigned_extensions` in `config_options`). At run end, `CALL delta_export()` writes Delta Lake transaction logs alongside the Parquet files so Fabric/Power BI reads them as native Delta tables.
+`delta_export` is now a **community extension** — installed via `profiles.yml` extensions list (no manual INSTALL/LOAD needed). At run end, DuckLake maintenance compacts data files before `delta_export()` writes Delta Lake transaction logs.
 
-| DuckLake Option | Value | How to Set | Why |
-|-----------------|-------|------------|-----|
+**Why delta_export is mandatory:** DuckLake is not natively supported by Spark, Power BI, or any other engine in Microsoft Fabric. Without `delta_export`, the Parquet files written by DuckLake are invisible to the rest of the platform. The Delta Lake transaction logs (`_delta_log/`) make the tables readable as standard Delta tables by Power BI, Spark, SQL Analytics, and any Delta-compatible tool.
+
+### DuckLake Maintenance (on-run-end)
+
+| Call | Purpose |
+|------|---------|
+| `ducklake_rewrite_data_files('ducklake')` | Rewrites files with deletes (threshold controlled by `rewrite_delete_threshold`) |
+| `ducklake_merge_adjacent_files('ducklake')` | Merges small Parquet files into larger ones (target size from `target_file_size`) |
+| `delta_export()` | Writes Delta Lake `_delta_log/` so Fabric/Power BI reads tables natively |
+
+### DuckLake Options
+
+| Option | Value | How to Set | Why |
+|--------|-------|------------|-----|
 | `data_inlining_row_limit` | 0 | ATTACH option in profiles.yml | Disable storing small inserts in metadata DB |
-| `rewrite_delete_threshold` | 0 | `set_option` in on-run-start hook (not an ATTACH param) | Disable automatic file rewriting on deletes |
+| `rewrite_delete_threshold` | 0 | `set_option` in on-run-start (not an ATTACH param) | Rewrite all files with any deletes |
+| `target_file_size` | 128MB | `set_option` in on-run-start (not an ATTACH param) | Target Parquet file size for insert and compaction (default 512MB, reduced to prevent OOM) |
+
+Note: `target_file_size` controls both `merge_adjacent_files` merge target and auto-splitting of large inserts. It cannot be set via ATTACH options — must use `set_option`.
 
 ## Key Patterns
 
@@ -145,7 +163,7 @@ Track which source files have been processed using a `file` column in each fact 
         {% if is_incremental() %}
           AND source_filename NOT IN (SELECT DISTINCT file FROM {{ this }})
         {% endif %}
-        LIMIT {{ env_var('process_limit', '500') }}
+        LIMIT {{ env_var('process_limit', '100') }}
       )
     )"
 ) }}

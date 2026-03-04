@@ -25,6 +25,8 @@ aemo_electricity:
         - ducklake
         - name: zipfs
           repo: community
+        - name: delta_export
+          repo: community
       attach:
         - path: "ducklake:sqlite:{{ env_var('METADATA_LOCAL_PATH', '/tmp/ducklake_metadata.db') }}"
           alias: ducklake
@@ -45,16 +47,17 @@ test-paths: ["tests"]
 macro-paths: ["macros"]
 
 vars:
-  # download_limit: max files per source per run (default: 2)
-  # process_limit: max files per model per run (default: 500)
+  # download_limit: max files per source per run (default: 100)
+  # process_limit: max files per model per run (default: 100)
 
 on-run-start:
-  - "INSTALL delta_export FROM 'https://djouallah.github.io/delta_export'"
-  - "LOAD delta_export"
   - "CALL ducklake.set_option('rewrite_delete_threshold', 0)"
+  - "CALL ducklake.set_option('target_file_size', '128MB')"
   - "{{ download() }}"
 
 on-run-end:
+  - "CALL ducklake_rewrite_data_files('ducklake')"
+  - "CALL ducklake_merge_adjacent_files('ducklake')"
   - "CALL delta_export()"
 
 models:
@@ -89,7 +92,7 @@ Example from fct_scada — reads only unprocessed files, capped by process_limit
             SELECT DISTINCT split_part(file, '.', 1) FROM {{ this }}
           )
         {% endif %}
-        LIMIT {{ env_var('process_limit', '500') }}
+        LIMIT {{ env_var('process_limit', '100') }}
       )
     )"
 ) }}
@@ -146,20 +149,20 @@ Example from dim_duid — only rebuilds when new DUIDs appear:
 |----------|---------------|----------|
 | `DBT_SCHEMA` | `aemo` | Yes |
 | `ROOT_PATH` | `abfss://workspace@onelake.dfs.fabric.microsoft.com/lakehouse.Lakehouse` | Yes |
-| `download_limit` | `10` | No (default: 2) |
-| `process_limit` | `500` | No (default: 500) |
+| `download_limit` | `100` | No (default: 100) |
+| `process_limit` | `100` | No (default: 100) |
 | `METADATA_LOCAL_PATH` | `/synfs/nb_resource/builtin/metadata.db` | Yes (for Fabric) |
 
 ## DuckDB / DuckLake Options Reference
 
 | Option | Default | Set Via | Description |
 |--------|---------|---------|-------------|
-| `allow_unsigned_extensions` | false | `config_options` in profiles.yml (connection creation time) | Allow loading unsigned extensions like delta_export |
+| `allow_unsigned_extensions` | false | `config_options` in profiles.yml (connection creation time) | Allow loading community extensions |
 | `preserve_insertion_order` | true | `settings` in profiles.yml (runtime SET) | Set false to reduce memory usage |
 | `data_inlining_row_limit` | 0 | ATTACH parameter in profiles.yml | Rows below this limit are inlined in metadata instead of Parquet |
-| `rewrite_delete_threshold` | 0.95 | `set_option` only (not ATTACH param) | Fraction of deleted rows before file rewrite (0 = disabled) |
+| `rewrite_delete_threshold` | 0.95 | `set_option` only (not ATTACH param) | Fraction of deleted rows before file rewrite (0 = rewrite all) |
+| `target_file_size` | 512MB | `set_option` only (not ATTACH param) | Target Parquet file size for insert and compaction. `merge_adjacent_files` reads this automatically. Reduce to prevent OOM (e.g., 128MB) |
 | `parquet_compression` | snappy | `set_option` | Compression: snappy, zstd, gzip, lz4 |
-| `target_file_size` | 512MB | `set_option` | Target Parquet file size |
 
 ## Execution Flow Diagram
 
@@ -177,8 +180,8 @@ git clone <dbt-project> /tmp/dbt
   |
   v
 dbt run
-  |-- on-run-start: INSTALL + LOAD delta_export (unsigned extension)
   |-- on-run-start: set_option(rewrite_delete_threshold, 0)
+  |-- on-run-start: set_option(target_file_size, '128MB')
   |-- on-run-start: download() macro
   |     |-- Load csv_archive_log.parquet from abfss://
   |     |-- Download new files from AEMO / GitHub
@@ -190,8 +193,10 @@ dbt run
   |     |-- dim_calendar, dim_duid (TABLE)
   |     |-- fct_scada, fct_price (incremental by file, LIMIT process_limit)
   |     |-- fct_scada_today, fct_price_today (incremental by file, LIMIT process_limit)
-  |     |-- fct_summary (append)
+  |     |-- fct_summary (delete+insert with daily priority, append intraday)
   |
+  |-- on-run-end: ducklake_rewrite_data_files (compact deleted data)
+  |-- on-run-end: ducklake_merge_adjacent_files (merge small files, target 128MB)
   |-- on-run-end: CALL delta_export()
   |     |-- Reads DuckLake SQLite metadata
   |     |-- Writes _delta_log/ JSON files to abfss://ROOT_PATH/Tables/
