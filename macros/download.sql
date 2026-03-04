@@ -84,6 +84,17 @@ FROM lines
 WHERE line LIKE '%PUBLIC_DAILY%.zip%'
 {% endcall %}
 
+{# Check if AEMO already has enough new files before hitting GitHub API #}
+{% call statement('check_aemo_new', fetch_result=True) %}
+SELECT count(*) AS cnt FROM daily_files_web
+WHERE filename NOT IN (SELECT source_filename FROM _existing_archive_log WHERE source_type = 'daily')
+{% endcall %}
+{% set aemo_new = load_result('check_aemo_new')['data'][0][0] %}
+
+{% if aemo_new >= download_limit %}
+{% do log("[DOWNLOAD] AEMO has " ~ aemo_new ~ " new files, skipping GitHub", info=True) %}
+{% else %}
+{% do log("[DOWNLOAD] AEMO has " ~ aemo_new ~ " new files (need " ~ download_limit ~ "), fetching GitHub backfill", info=True) %}
 {% call statement('daily_files_github', fetch_result=False) %}
 INSERT INTO daily_files_web
 WITH
@@ -109,8 +120,7 @@ FROM parsed_files
 WHERE json_extract_string(file_info, '$.name') LIKE 'PUBLIC_DAILY%.zip'
   AND split_part(json_extract_string(file_info, '$.name'), '.', 1) NOT IN (SELECT filename FROM daily_files_web)
 {% endcall %}
-
-{% do log("[DOWNLOAD] Daily source: AEMO + GitHub backfill", info=True) %}
+{% endif %}
 
 {% call statement('daily_to_archive', fetch_result=False) %}
 CREATE OR REPLACE TEMP TABLE daily_to_archive AS
