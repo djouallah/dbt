@@ -6,7 +6,7 @@
 {% set root_path = get_root_path() %}
 {% set csv_archive_path = root_path ~ '/Files/csv' %}
 {% set csv_log_path = root_path ~ '/Files/csv_archive_log.parquet' %}
-{% set download_limit = env_var('download_limit', '100') | int %}
+{% set download_limit = env_var('download_limit', '2') | int %}
 
 {% do log("[DOWNLOAD] Starting download with PATH_ROOT=" ~ root_path ~ ", csv_archive_path=" ~ csv_archive_path ~ ", download_limit=" ~ download_limit, info=True) %}
 
