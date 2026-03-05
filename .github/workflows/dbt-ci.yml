@@ -6,6 +6,11 @@ on:
   pull_request:
     branches: [main]
 
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
 jobs:
   test:
     runs-on: ubuntu-latest
@@ -21,13 +26,11 @@ jobs:
       - name: Install dependencies
         run: pip install dbt-duckdb azure-storage-blob
 
-      - name: Start Azurite
+      - name: Start Azurite and create container
         run: |
-          npx azurite-blob --silent --blobPort 10000 &
-          sleep 2
-
-      - name: Create blob container
-        run: |
+          npm install -g azurite
+          azurite-blob --silent --blobPort 10000 &
+          for i in $(seq 1 10); do nc -z 127.0.0.1 10000 && break || sleep 1; done
           python -c "
           from azure.storage.blob import BlobServiceClient
           c = BlobServiceClient.from_connection_string('DefaultEndpointsProtocol=http;AccountName=devstoreaccount1;AccountKey=Eby8vdM02xNOcqFlqUwJPLlmEtlCDXJ1OUzFT50uSRZ6IFsuFq2UVErCz4I6tq/K1SZFPTOtr/KBHBeksoGMGw==;BlobEndpoint=http://127.0.0.1:10000/devstoreaccount1;')
@@ -39,3 +42,25 @@ jobs:
 
       - name: dbt test
         run: dbt test --target ci
+
+      - name: Generate dbt docs
+        if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+        run: dbt docs generate --target ci
+
+      - name: Upload docs artifact
+        if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: target
+
+  deploy-docs:
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    needs: test
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
