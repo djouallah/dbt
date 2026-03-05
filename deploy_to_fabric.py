@@ -289,6 +289,7 @@ def deploy_pipeline(notebook_id):
 
     pipeline_json = {
         "properties": {
+            "concurrency": 1,
             "activities": [
                 {
                     "name": "Run Notebook",
