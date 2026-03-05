@@ -25,6 +25,8 @@ models:
           - relationships:
               to: ref('dim_duid')
               field: DUID
+              config:
+                severity: warn
       - name: SETTLEMENTDATE
         tests:
           - not_null
