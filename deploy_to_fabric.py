@@ -11,7 +11,9 @@ Usage:
 import base64
 import json
 import os
+import subprocess
 import sys
+import tempfile
 import time
 from pathlib import Path
 
@@ -31,20 +33,28 @@ SCHEDULE_INTERVAL_MINUTES = 60
 METADATA_LOCAL_PATH       = '/lakehouse/default/Files/metadata.db'
 
 EXCLUDE_DIRS = {".git", "target", "logs", "dbt_packages", "__pycache__", ".github", ".claude"}
-EXCLUDE_FILES = {"metadata.db", "deploy_to_fabric.py", ".user.yml", "nul", "README.md"}
+EXCLUDE_FILES = {"metadata.db", ".user.yml", "nul", "README.md"}
 EXCLUDE_PATTERNS = {"%SystemDrive%"}
 
 DEPLOY_BRANCH = "production"
 
 BASE_URL = "https://api.fabric.microsoft.com/v1"
 
-# --- Checkout production branch ---
-import subprocess
-project_root = Path(__file__).resolve().parent
-print(f"Checking out '{DEPLOY_BRANCH}' branch...")
-subprocess.run(["git", "checkout", DEPLOY_BRANCH], check=True, cwd=project_root)
-subprocess.run(["git", "pull", "origin", DEPLOY_BRANCH], check=True, cwd=project_root)
-print(f"Branch: {DEPLOY_BRANCH} (up to date)")
+# --- Clone production branch into temp dir ---
+REPO_URL = subprocess.run(
+    ["git", "remote", "get-url", "origin"],
+    capture_output=True, text=True, check=True,
+    cwd=Path(__file__).resolve().parent,
+).stdout.strip()
+
+tmp_dir = tempfile.mkdtemp(prefix="dbt_deploy_")
+project_root = Path(tmp_dir)
+print(f"Cloning '{DEPLOY_BRANCH}' branch into {tmp_dir}...")
+subprocess.run(
+    ["git", "clone", "--branch", DEPLOY_BRANCH, "--depth", "1", REPO_URL, tmp_dir],
+    check=True,
+)
+print(f"Branch: {DEPLOY_BRANCH} (cloned)")
 
 # --- Auth: az login with tenant enforcement ---
 print("Authenticating with Azure CLI credential...")
