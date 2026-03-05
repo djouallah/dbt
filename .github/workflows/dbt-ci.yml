@@ -29,7 +29,7 @@ jobs:
       - name: Start Azurite and create container
         run: |
           npm install -g azurite
-          azurite-blob --silent --blobPort 10000 &
+          azurite-blob --silent --skipApiVersionCheck --blobPort 10000 &
           for i in $(seq 1 10); do nc -z 127.0.0.1 10000 && break || sleep 1; done
           python -c "
           from azure.storage.blob import BlobServiceClient
