@@ -393,12 +393,21 @@ def deploy_schedule(pipeline_id):
 def deploy_semantic_model():
     print(f"Deploying semantic model '{SEMANTIC_MODEL_NAME}'...")
 
-    bim_path = project_root / "model.bim"
-    bim_text = bim_path.read_text().replace("{{ONELAKE_URL}}", ONELAKE_URL)
-    bim_content = json.loads(bim_text)
+    sm_root = project_root / "semantic_model"
 
-    print(f"  loaded {bim_path} ({len(bim_content['model']['tables'])} tables, "
-          f"{len(bim_content['model']['relationships'])} relationships)")
+    # Build parts from TMDL files, substituting OneLake URL placeholder
+    parts = []
+    for tmdl_file in sorted(sm_root.rglob("*")):
+        if tmdl_file.is_dir():
+            continue
+        relative = str(tmdl_file.relative_to(sm_root)).replace("\\", "/")
+        content = tmdl_file.read_text(encoding="utf-8")
+        content = content.replace("{{ONELAKE_URL}}", ONELAKE_URL)
+        encoded = base64.b64encode(content.encode("utf-8")).decode("utf-8")
+        parts.append({"path": relative, "payload": encoded, "payloadType": "InlineBase64"})
+
+    tmdl_tables = [p["path"] for p in parts if p["path"].startswith("definition/tables/")]
+    print(f"  loaded {sm_root} ({len(tmdl_tables)} tables, {len(parts)} files)")
 
     resp = requests.get(f"{BASE_URL}/workspaces/{WORKSPACE_ID}/semanticModels", headers=headers)
     resp.raise_for_status()
@@ -407,17 +416,7 @@ def deploy_semantic_model():
         None,
     )
 
-    bim_base64 = base64.b64encode(json.dumps(bim_content, indent=2).encode("utf-8")).decode("utf-8")
-    pbism_base64 = base64.b64encode(json.dumps({"version": "1.0"}).encode("utf-8")).decode("utf-8")
-
-    sm_definition = {
-        "definition": {
-            "parts": [
-                {"path": "model.bim", "payload": bim_base64, "payloadType": "InlineBase64"},
-                {"path": "definition.pbism", "payload": pbism_base64, "payloadType": "InlineBase64"},
-            ]
-        }
-    }
+    sm_definition = {"definition": {"parts": parts}}
 
     if existing:
         semantic_model_id = existing["id"]

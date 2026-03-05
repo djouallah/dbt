@@ -1,0 +1,62 @@
+/// Generator unit reference dimension for the Australian National Electricity Market (NEM).
+/// Each row represents a unique Dispatchable Unit Identifier (DUID) — a power station or generation unit.
+/// Includes fuel type, region, participant, and geographic coordinates.
+table dim_duid
+	sourceLineageTag: [aemo].[dim_duid]
+
+	/// Dispatchable Unit Identifier — unique code for each generator unit (primary key)
+	column DUID
+		dataType: string
+		isKey
+		sourceColumn: DUID
+		sourceLineageTag: DUID
+		summarizeBy: none
+
+	/// NEM region code (e.g. NSW1, QLD1, VIC1, SA1, TAS1, WA1)
+	column Region
+		dataType: string
+		sourceColumn: Region
+		sourceLineageTag: Region
+		summarizeBy: none
+
+	/// Australian state name (e.g. New South Wales, Queensland)
+	column State
+		dataType: string
+		sourceColumn: State
+		sourceLineageTag: State
+		summarizeBy: none
+
+	/// Fuel source type (e.g. Black coal, Natural gas, Solar, Wind)
+	column FuelSourceDescriptor
+		dataType: string
+		sourceColumn: FuelSourceDescriptor
+		sourceLineageTag: FuelSourceDescriptor
+		summarizeBy: none
+
+	/// Market participant company name
+	column Participant
+		dataType: string
+		sourceColumn: Participant
+		sourceLineageTag: Participant
+		summarizeBy: none
+
+	/// Geographic latitude of the generator unit
+	column latitude
+		dataType: double
+		sourceColumn: latitude
+		sourceLineageTag: latitude
+		summarizeBy: none
+
+	/// Geographic longitude of the generator unit
+	column longitude
+		dataType: double
+		sourceColumn: longitude
+		sourceLineageTag: longitude
+		summarizeBy: none
+
+	partition dim_duid = entity
+		mode: directLake
+		source
+			entityName: dim_duid
+			expressionSource: DirectLake
+			schemaName: aemo
