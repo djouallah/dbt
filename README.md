@@ -16,7 +16,7 @@ dbt test
 
 | Variable | Default | Purpose |
 |----------|---------|---------|
-| `ROOT_PATH` | `abfss://duckrun@...dbt.Lakehouse` | Storage root — `abfss://...` or `s3://bucket/prefix` |
+| `ROOT_PATH` | `abfss://{WORKSPACE_ID}@onelake.dfs.fabric.microsoft.com/{LAKEHOUSE_ID}` | Storage root (uses IDs, not names) |
 | `DBT_SCHEMA` | `aemo` | Target schema |
 | `download_limit` | `2` | Max files to download per source per run |
 | `process_limit` | `500` | Max files to process per model per run |
