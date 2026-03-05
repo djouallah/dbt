@@ -1,6 +1,6 @@
 {{ config(
     materialized='view',
-    schema='staging'
+    schema='raw'
 ) }}
 
 {%- set log_path = get_root_path() ~ '/Files/csv_archive_log.parquet' -%}

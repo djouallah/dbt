@@ -4,6 +4,7 @@
 {{ config(
     materialized='incremental',
     incremental_strategy='append',
+    schema='aemo',
     pre_hook="{% if is_incremental() %}DELETE FROM {{ this }} WHERE (SELECT COUNT(DISTINCT DATE) FROM {{ ref('fct_scada') }} WHERE INTERVENTION = 0) > (SELECT COUNT(DISTINCT date) FROM {{ this }}){% endif %}"
 ) }}
 

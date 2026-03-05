@@ -5,4 +5,4 @@ expression DirectLake =
 		in
 			Source
 
-	annotation PBI_RemovedChildren = [{"sourceLineageTag":"[aemo].[fct_scada]"},{"sourceLineageTag":"[aemo].[fct_scada_today]"},{"sourceLineageTag":"[aemo].[fct_price]"},{"sourceLineageTag":"[aemo].[fct_price_today]"},{"sourceLineageTag":"[aemo].[stg_csv_archive_log]"}]
+	annotation PBI_RemovedChildren = [{"sourceLineageTag":"[raw].[fct_scada]"},{"sourceLineageTag":"[raw].[fct_scada_today]"},{"sourceLineageTag":"[raw].[fct_price]"},{"sourceLineageTag":"[raw].[fct_price_today]"},{"sourceLineageTag":"[raw].[stg_csv_archive_log]"}]
