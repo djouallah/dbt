@@ -29,10 +29,10 @@ from azure.storage.filedatalake import DataLakeServiceClient
 
 ALL_STEPS = ["lakehouse", "files", "notebook", "pipeline", "schedule", "semantic_model"]
 parser = argparse.ArgumentParser(description="Deploy dbt project to Microsoft Fabric")
-parser.add_argument("steps", nargs="*", default=ALL_STEPS, choices=ALL_STEPS,
+parser.add_argument("steps", nargs="*", choices=ALL_STEPS,
                     help="Steps to deploy (default: all)")
 args = parser.parse_args()
-STEPS = set(args.steps)
+STEPS = set(args.steps if args.steps else ALL_STEPS)
 
 # --- Config ---
 TENANT_ID                 = "4a86d5bb-4173-45ee-bfd5-a3b56ee2d3d5"
