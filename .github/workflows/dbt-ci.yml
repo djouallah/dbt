@@ -9,6 +9,8 @@ on:
 jobs:
   test:
     runs-on: ubuntu-latest
+    env:
+      ROOT_PATH: az://dbt
     steps:
       - uses: actions/checkout@v4
 
@@ -16,11 +18,24 @@ jobs:
         with:
           python-version: "3.11"
 
-      - name: Install dbt-duckdb
-        run: pip install dbt-duckdb
+      - name: Install dependencies
+        run: pip install dbt-duckdb azure-storage-blob
+
+      - name: Start Azurite
+        run: |
+          npx azurite-blob --silent --blobPort 10000 &
+          sleep 2
+
+      - name: Create blob container
+        run: |
+          python -c "
+          from azure.storage.blob import BlobServiceClient
+          c = BlobServiceClient.from_connection_string('DefaultEndpointsProtocol=http;AccountName=devstoreaccount1;AccountKey=Eby8vdM02xNOcqFlqUwJPLlmEtlCDXJ1OUzFT50uSRZ6IFsuFq2UVErCz4I6tq/K1SZFPTOtr/KBHBeksoGMGw==;BlobEndpoint=http://127.0.0.1:10000/devstoreaccount1;')
+          c.create_container('dbt')
+          "
 
       - name: dbt run
-        run: dbt run
+        run: dbt run --target ci
 
       - name: dbt test
-        run: dbt test
+        run: dbt test --target ci

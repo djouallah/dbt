@@ -26,6 +26,33 @@ aemo_electricity:
           options:
             data_path: "{{ env_var('ROOT_PATH', '/tmp') }}/Tables"
             data_inlining_row_limit: 0
+    ci:
+      type: duckdb
+      path: ':memory:'
+      database: ducklake
+      threads: 1
+      schema: "{{ env_var('DBT_SCHEMA', 'aemo') }}"
+      config_options:
+        allow_unsigned_extensions: true
+      settings:
+        preserve_insertion_order: false
+        azure_storage_connection_string: "DefaultEndpointsProtocol=http;AccountName=devstoreaccount1;AccountKey=Eby8vdM02xNOcqFlqUwJPLlmEtlCDXJ1OUzFT50uSRZ6IFsuFq2UVErCz4I6tq/K1SZFPTOtr/KBHBeksoGMGw==;BlobEndpoint=http://127.0.0.1:10000/devstoreaccount1;"
+      extensions:
+        - parquet
+        - sqlite
+        - azure
+        - json
+        - ducklake
+        - name: zipfs
+          repo: community
+        - name: delta_export
+          repo: community
+      attach:
+        - path: "ducklake:sqlite:{{ env_var('METADATA_LOCAL_PATH', '/tmp/metadata.db') }}"
+          alias: ducklake
+          options:
+            data_path: "{{ env_var('ROOT_PATH', 'az://dbt') }}/Tables"
+            data_inlining_row_limit: 0
     prod:
       type: duckdb
       path: ':memory:'
