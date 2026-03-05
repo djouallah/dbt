@@ -27,7 +27,9 @@ Layout under `ROOT_PATH`: `/Tables` (DuckLake data), `/Files/csv` (archives), `/
 
 ## Deployment to Microsoft Fabric
 
-`deploy_to_fabric.py` deploys everything (lakehouse, notebook, pipeline, schedule, semantic model) via the Fabric REST API. It is a one-off operation — once deployed, the pipeline runs on its own.
+**Option 1: Manual.** Upload `dbt.ipynb` to a Fabric workspace, create and attach a lakehouse, and run it. This is the simplest way to get started.
+
+**Option 2: Script.** `deploy_to_fabric.py` automates everything (lakehouse, notebook, pipeline, schedule, semantic model) via the Fabric REST API. It is a one-off operation — once deployed, the pipeline runs on its own.
 
 **Note:** Update `WORKSPACE_ID` and `TENANT_ID` in `deploy_to_fabric.py` with your own values before running. Using IDs rather than names is more rigorous and avoids ambiguity.
 
