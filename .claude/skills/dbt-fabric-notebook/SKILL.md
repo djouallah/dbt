@@ -51,9 +51,19 @@ os.environ['METADATA_LOCAL_PATH'] = '/synfs/nb_resource/builtin/metadata.db'
 | `METADATA_LOCAL_PATH` | Local path for DuckLake SQLite metadata DB. Use `/synfs/nb_resource/builtin/` in Fabric — this persists across notebook sessions |
 
 ### Cell 3 — Clone dbt project
+
+**Public repo:**
 ```python
-!git clone https://github.com/<your-repo>.git /tmp/dbt
+!git clone --branch production --single-branch https://github.com/<your-repo>.git /tmp/dbt
 ```
+
+**Private repo (production):**
+```python
+pat = mssparkutils.credentials.getSecret('https://<vault-name>.vault.azure.net/', 'github-pat')
+!git clone --branch production --single-branch https://{pat}@github.com/<your-repo>.git /tmp/dbt
+```
+
+For private repos, store a GitHub fine-grained PAT (with `Contents: Read` permission) in Azure Key Vault. Grant the Fabric workspace identity `Key Vault Secrets User` access.
 
 ### Cell 4 — Run dbt
 ```python
