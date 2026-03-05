@@ -34,3 +34,6 @@ Thumbs.db
 *.pem
 *.key
 secrets.yml
+
+# Blog assets
+blog/
