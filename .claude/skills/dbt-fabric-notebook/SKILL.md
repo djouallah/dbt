@@ -152,6 +152,52 @@ on-run-end:
 
 Note: `target_file_size` controls both `merge_adjacent_files` merge target and auto-splitting of large inserts. It cannot be set via ATTACH options — must use `set_option`.
 
+## Schema Separation (raw + aemo)
+
+Separate intermediate tables from Power BI-facing tables using dbt schema config:
+
+- **`aemo`** schema (default from `DBT_SCHEMA`): dim_calendar, dim_duid, fct_summary — exposed to Power BI
+- **`raw`** schema: fct_scada, fct_scada_today, fct_price, fct_price_today, stg_csv_archive_log — intermediate
+
+**dbt_project.yml:**
+```yaml
+models:
+  aemo_electricity:
+    staging:
+      +materialized: view
+      +schema: raw
+    dimensions:
+      +materialized: table
+    marts:
+      +materialized: incremental
+      +schema: raw
+```
+
+Override specific models back to `aemo`: `{{ config(schema='aemo') }}` in `fct_summary.sql`.
+
+**Custom schema macro required** (`macros/generate_schema_name.sql`):
+```sql
+{% macro generate_schema_name(custom_schema_name, node) -%}
+    {%- if custom_schema_name is none -%}
+        {{ target.schema }}
+    {%- else -%}
+        {{ custom_schema_name | trim }}
+    {%- endif -%}
+{%- endmacro %}
+```
+Without this, dbt prefixes the target schema (e.g., `aemo_raw` instead of `raw`).
+
+## Semantic Model (model.bim)
+
+Deploy via Fabric REST API using **TMSL format (model.bim)** — TMDL create is NOT supported by the API.
+
+Key requirements for Direct Lake on OneLake (no SQL endpoint):
+- `PBI_ProTooling` annotation with `DirectLakeOnOneLakeCreatedInDesktop`
+- `sourceLineageTag` on all tables (`[schema].[table]`) and columns
+- `relyOnReferentialIntegrity` on all relationships
+- `PBI_RemovedChildren` on expression listing excluded tables with correct schema prefix
+- Partition `schemaName` must match the lakehouse schema folder name
+
 ## Key Patterns
 
 ### Metadata persistence in Fabric
