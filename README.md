@@ -25,4 +25,15 @@ dbt test
 
 Layout under `ROOT_PATH`: `/Tables` (DuckLake data), `/Files/csv` (archives), `/Files/csv_archive_log.parquet`, `/Files/metadata/` (metadata sync).
 
-See [CLAUDE.md](CLAUDE.md) for full architecture, model details, and implementation notes.
+## Deployment to Microsoft Fabric
+
+`deploy_to_fabric.py` deploys everything (lakehouse, notebook, pipeline, schedule, semantic model) via the Fabric REST API. It is a one-off operation — once deployed, the pipeline runs on its own.
+
+**Note:** Update `WORKSPACE_ID` and `TENANT_ID` in `deploy_to_fabric.py` with your own values before running. Using IDs rather than names is more rigorous and avoids ambiguity.
+
+```bash
+python deploy_to_fabric.py              # deploy everything
+python deploy_to_fabric.py semantic_model   # just the semantic model
+```
+
+See the [blog post](https://datamonkeysite.com/2026/03/05/building-a-data-pipeline-using-vscode-and-claude-out-of-thin-air/) for a full walkthrough, and [CLAUDE.md](CLAUDE.md) for architecture, model details, and implementation notes.
