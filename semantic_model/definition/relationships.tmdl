@@ -1,9 +1,0 @@
-relationship fct_summary_to_dim_duid
-	fromColumn: fct_summary.DUID
-	toColumn: dim_duid.DUID
-	relyOnReferentialIntegrity
-
-relationship fct_summary_to_dim_calendar
-	fromColumn: fct_summary.date
-	toColumn: dim_calendar.date
-	relyOnReferentialIntegrity
