@@ -5,9 +5,14 @@ Prerequisites:
   - pip install azure-identity azure-storage-file-datalake requests
 
 Usage:
-  python deploy_to_fabric.py
+  python deploy_to_fabric.py                  # deploy everything
+  python deploy_to_fabric.py semantic_model   # deploy semantic model only
+  python deploy_to_fabric.py files notebook   # deploy files + notebook only
+
+Steps: lakehouse, files, notebook, pipeline, schedule, semantic_model
 """
 
+import argparse
 import base64
 import json
 import os
@@ -21,6 +26,13 @@ import jwt
 import requests
 from azure.identity import AzureCliCredential
 from azure.storage.filedatalake import DataLakeServiceClient
+
+ALL_STEPS = ["lakehouse", "files", "notebook", "pipeline", "schedule", "semantic_model"]
+parser = argparse.ArgumentParser(description="Deploy dbt project to Microsoft Fabric")
+parser.add_argument("steps", nargs="*", default=ALL_STEPS, choices=ALL_STEPS,
+                    help="Steps to deploy (default: all)")
+args = parser.parse_args()
+STEPS = set(args.steps)
 
 # --- Config ---
 TENANT_ID                 = "4a86d5bb-4173-45ee-bfd5-a3b56ee2d3d5"
@@ -97,10 +109,8 @@ def wait_for_operation(operation_id):
     return False
 
 
-# --- Step 1: Workspace ---
+# --- Resolve lakehouse (always needed for LAKEHOUSE_ID) ---
 print(f"Using workspace {WORKSPACE_ID}")
-
-# --- Step 2: Create lakehouse if not exists ---
 print(f"Checking if lakehouse '{LAKEHOUSE_NAME}' exists...")
 resp = requests.get(
     f"{BASE_URL}/workspaces/{WORKSPACE_ID}/lakehouses",
@@ -112,7 +122,7 @@ lakehouse = next(
     None,
 )
 
-if lakehouse is None:
+if lakehouse is None and "lakehouse" in STEPS:
     resp = requests.post(
         f"{BASE_URL}/workspaces/{WORKSPACE_ID}/lakehouses",
         headers=headers,
@@ -123,359 +133,380 @@ if lakehouse is None:
     )
     resp.raise_for_status()
     lakehouse = resp.json()
-    time.sleep(2)  # wait for provisioning
+    time.sleep(2)
     print(f"  created lakehouse '{LAKEHOUSE_NAME}'")
+elif lakehouse is None:
+    print(f"  ERROR: lakehouse '{LAKEHOUSE_NAME}' does not exist. Run with 'lakehouse' step first.")
+    sys.exit(1)
 else:
     print(f"  lakehouse '{LAKEHOUSE_NAME}' already exists")
 
 LAKEHOUSE_ID = lakehouse["id"]
-
-# --- Step 3: Upload dbt files to OneLake ---
-print("Uploading dbt project files to OneLake...")
-datalake_client = DataLakeServiceClient(
-    account_url="https://onelake.dfs.fabric.microsoft.com",
-    credential=credential,
-)
-fs = datalake_client.get_file_system_client(WORKSPACE_ID)
-
-uploaded = 0
-
-for local_path in sorted(project_root.rglob("*")):
-    if local_path.is_dir():
-        continue
-    if any(part in EXCLUDE_DIRS for part in local_path.relative_to(project_root).parts):
-        continue
-    if local_path.name in EXCLUDE_FILES:
-        continue
-
-    relative = str(local_path.relative_to(project_root)).replace("\\", "/")
-    if any(p in relative for p in EXCLUDE_PATTERNS):
-        continue
-    onelake_path = f"{LAKEHOUSE_ID}/Files/dbt/{relative}"
-
-    file_client = fs.get_file_client(onelake_path)
-    with open(local_path, "rb") as f:
-        file_client.upload_data(f, overwrite=True)
-    print(f"  {relative}")
-    uploaded += 1
-
-print(f"  {uploaded} files uploaded to Files/dbt/")
-
-# --- Step 4: Deploy notebook as Fabric item with lakehouse attached ---
-print(f"Deploying notebook '{NOTEBOOK_NAME}' to workspace...")
-
-# Derive ROOT_PATH from workspace and lakehouse names
+ONELAKE_URL = f"https://onelake.dfs.fabric.microsoft.com/{WORKSPACE_ID}/{LAKEHOUSE_ID}"
 ROOT_PATH = f"abfss://{WORKSPACE_ID}@onelake.dfs.fabric.microsoft.com/{LAKEHOUSE_ID}"
 
-# Build notebook content with values from this script
-notebook_json = {
-    "nbformat": 4,
-    "nbformat_minor": 5,
-    "cells": [
-        {
-            "cell_type": "code",
-            "metadata": {},
-            "outputs": [],
-            "execution_count": None,
-            "source": [
-                "!pip install -q duckdb==1.4.4\n",
-                "!pip install -q dbt-duckdb\n",
-                "import sys\n",
-                "sys.exit(0)",
-            ],
-        },
-        {
-            "cell_type": "code",
-            "metadata": {},
-            "outputs": [],
-            "execution_count": None,
-            "source": [
-                "import os\n",
-                f"os.environ['ROOT_PATH']           = '{ROOT_PATH}'\n",
-                f"os.environ['METADATA_LOCAL_PATH'] = '{METADATA_LOCAL_PATH}'\n",
-                "os.environ['download_limit']      = '100'\n",
-                "os.environ['process_limit']       = '100'\n",
-                "\n",
-                "!cd /lakehouse/default/Files/dbt && dbt run --target prod && dbt test --target prod",
-            ],
-        },
-    ],
-    "metadata": {},
-}
 
-# Set notebook metadata for Python runtime with lakehouse attached
-notebook_json["metadata"] = {
-    "kernelspec": {"name": "python3", "display_name": "python3", "language": "python"},
-    "kernel_info": {"name": "jupyter"},
-    "microsoft": {"language": "python", "language_group": "jupyter_python"},
-    "language_info": {"name": "python"},
-    "trident": {
-        "lakehouse": {
-            "default_lakehouse": LAKEHOUSE_ID,
-            "default_lakehouse_name": LAKEHOUSE_NAME,
-            "default_lakehouse_workspace_id": WORKSPACE_ID,
-        }
-    },
-}
+# --- Step: files ---
+def deploy_files():
+    print("Uploading dbt project files to OneLake...")
+    datalake_client = DataLakeServiceClient(
+        account_url="https://onelake.dfs.fabric.microsoft.com",
+        credential=credential,
+    )
+    fs = datalake_client.get_file_system_client(WORKSPACE_ID)
 
-notebook_base64 = base64.b64encode(json.dumps(notebook_json, indent=2).encode("utf-8")).decode("utf-8")
+    uploaded = 0
+    for local_path in sorted(project_root.rglob("*")):
+        if local_path.is_dir():
+            continue
+        if any(part in EXCLUDE_DIRS for part in local_path.relative_to(project_root).parts):
+            continue
+        if local_path.name in EXCLUDE_FILES:
+            continue
 
-# Check if notebook already exists
-resp = requests.get(f"{BASE_URL}/workspaces/{WORKSPACE_ID}/notebooks", headers=headers)
-resp.raise_for_status()
-existing_notebook = next(
-    (nb for nb in resp.json().get("value", []) if nb["displayName"] == NOTEBOOK_NAME),
-    None,
-)
+        relative = str(local_path.relative_to(project_root)).replace("\\", "/")
+        if any(p in relative for p in EXCLUDE_PATTERNS):
+            continue
+        onelake_path = f"{LAKEHOUSE_ID}/Files/dbt/{relative}"
 
-definition_payload = {
-    "definition": {
-        "format": "ipynb",
-        "parts": [
+        file_client = fs.get_file_client(onelake_path)
+        with open(local_path, "rb") as f:
+            file_client.upload_data(f, overwrite=True)
+        print(f"  {relative}")
+        uploaded += 1
+
+    print(f"  {uploaded} files uploaded to Files/dbt/")
+
+
+# --- Step: notebook ---
+def deploy_notebook():
+    print(f"Deploying notebook '{NOTEBOOK_NAME}' to workspace...")
+
+    notebook_json = {
+        "nbformat": 4,
+        "nbformat_minor": 5,
+        "cells": [
             {
-                "path": "notebook-content.ipynb",
-                "payload": notebook_base64,
-                "payloadType": "InlineBase64",
-            }
+                "cell_type": "code",
+                "metadata": {},
+                "outputs": [],
+                "execution_count": None,
+                "source": [
+                    "!pip install -q duckdb==1.4.4\n",
+                    "!pip install -q dbt-duckdb\n",
+                    "import sys\n",
+                    "sys.exit(0)",
+                ],
+            },
+            {
+                "cell_type": "code",
+                "metadata": {},
+                "outputs": [],
+                "execution_count": None,
+                "source": [
+                    "import os\n",
+                    f"os.environ['ROOT_PATH']           = '{ROOT_PATH}'\n",
+                    f"os.environ['METADATA_LOCAL_PATH'] = '{METADATA_LOCAL_PATH}'\n",
+                    "os.environ['download_limit']      = '100'\n",
+                    "os.environ['process_limit']       = '100'\n",
+                    "\n",
+                    "!cd /lakehouse/default/Files/dbt && dbt run --target prod && dbt test --target prod",
+                ],
+            },
         ],
+        "metadata": {
+            "kernelspec": {"name": "python3", "display_name": "python3", "language": "python"},
+            "kernel_info": {"name": "jupyter"},
+            "microsoft": {"language": "python", "language_group": "jupyter_python"},
+            "language_info": {"name": "python"},
+            "trident": {
+                "lakehouse": {
+                    "default_lakehouse": LAKEHOUSE_ID,
+                    "default_lakehouse_name": LAKEHOUSE_NAME,
+                    "default_lakehouse_workspace_id": WORKSPACE_ID,
+                }
+            },
+        },
     }
-}
 
-if existing_notebook:
-    notebook_id = existing_notebook["id"]
-    resp = requests.post(
-        f"{BASE_URL}/workspaces/{WORKSPACE_ID}/notebooks/{notebook_id}/updateDefinition",
-        headers=headers,
-        json=definition_payload,
-    )
-    resp.raise_for_status()
-    if resp.status_code == 202:
-        op_id = resp.headers.get("x-ms-operation-id")
-        if op_id:
-            wait_for_operation(op_id)
-    print(f"  updated notebook '{NOTEBOOK_NAME}' (id: {notebook_id})")
-else:
-    definition_payload["displayName"] = NOTEBOOK_NAME
-    resp = requests.post(
-        f"{BASE_URL}/workspaces/{WORKSPACE_ID}/notebooks",
-        headers=headers,
-        json=definition_payload,
-    )
-    resp.raise_for_status()
-    if resp.status_code == 202:
-        op_id = resp.headers.get("x-ms-operation-id")
-        if op_id:
-            wait_for_operation(op_id)
-    # Re-fetch to get the notebook ID
+    notebook_base64 = base64.b64encode(json.dumps(notebook_json, indent=2).encode("utf-8")).decode("utf-8")
+
     resp = requests.get(f"{BASE_URL}/workspaces/{WORKSPACE_ID}/notebooks", headers=headers)
     resp.raise_for_status()
-    nb = next(nb for nb in resp.json().get("value", []) if nb["displayName"] == NOTEBOOK_NAME)
-    notebook_id = nb["id"]
-    print(f"  created notebook '{NOTEBOOK_NAME}' (id: {notebook_id})")
+    existing = next(
+        (nb for nb in resp.json().get("value", []) if nb["displayName"] == NOTEBOOK_NAME),
+        None,
+    )
 
-# --- Step 5: Deploy pipeline with notebook activity + timeout ---
-print(f"Deploying pipeline '{PIPELINE_NAME}' to workspace...")
-
-pipeline_json = {
-    "properties": {
-        "activities": [
-            {
-                "name": "Run Notebook",
-                "type": "TridentNotebook",
-                "dependsOn": [],
-                "policy": {
-                    "timeout": PIPELINE_TIMEOUT,
-                    "retry": 0,
-                    "retryIntervalInSeconds": 30,
-                    "secureOutput": False,
-                    "secureInput": False,
-                },
-                "typeProperties": {
-                    "notebookId": notebook_id,
-                    "workspaceId": WORKSPACE_ID,
-                },
-            }
-        ]
+    definition_payload = {
+        "definition": {
+            "format": "ipynb",
+            "parts": [{"path": "notebook-content.ipynb", "payload": notebook_base64, "payloadType": "InlineBase64"}],
+        }
     }
-}
 
-pipeline_base64 = base64.b64encode(json.dumps(pipeline_json).encode("utf-8")).decode("utf-8")
+    if existing:
+        notebook_id = existing["id"]
+        resp = requests.post(
+            f"{BASE_URL}/workspaces/{WORKSPACE_ID}/notebooks/{notebook_id}/updateDefinition",
+            headers=headers, json=definition_payload,
+        )
+        resp.raise_for_status()
+        if resp.status_code == 202:
+            op_id = resp.headers.get("x-ms-operation-id")
+            if op_id:
+                wait_for_operation(op_id)
+        print(f"  updated notebook '{NOTEBOOK_NAME}' (id: {notebook_id})")
+    else:
+        definition_payload["displayName"] = NOTEBOOK_NAME
+        resp = requests.post(
+            f"{BASE_URL}/workspaces/{WORKSPACE_ID}/notebooks",
+            headers=headers, json=definition_payload,
+        )
+        resp.raise_for_status()
+        if resp.status_code == 202:
+            op_id = resp.headers.get("x-ms-operation-id")
+            if op_id:
+                wait_for_operation(op_id)
+        resp = requests.get(f"{BASE_URL}/workspaces/{WORKSPACE_ID}/notebooks", headers=headers)
+        resp.raise_for_status()
+        nb = next(nb for nb in resp.json().get("value", []) if nb["displayName"] == NOTEBOOK_NAME)
+        notebook_id = nb["id"]
+        print(f"  created notebook '{NOTEBOOK_NAME}' (id: {notebook_id})")
 
-# Check if pipeline already exists
-resp = requests.get(f"{BASE_URL}/workspaces/{WORKSPACE_ID}/items?type=DataPipeline", headers=headers)
-resp.raise_for_status()
-existing_pipeline = next(
-    (p for p in resp.json().get("value", []) if p["displayName"] == PIPELINE_NAME),
-    None,
-)
+    return notebook_id
 
-pipeline_def = {
-    "definition": {
-        "parts": [
-            {
-                "path": "pipeline-content.json",
-                "payload": pipeline_base64,
-                "payloadType": "InlineBase64",
-            }
-        ]
+
+# --- Step: pipeline ---
+def deploy_pipeline(notebook_id):
+    print(f"Deploying pipeline '{PIPELINE_NAME}' to workspace...")
+
+    pipeline_json = {
+        "properties": {
+            "activities": [
+                {
+                    "name": "Run Notebook",
+                    "type": "TridentNotebook",
+                    "dependsOn": [],
+                    "policy": {
+                        "timeout": PIPELINE_TIMEOUT,
+                        "retry": 0,
+                        "retryIntervalInSeconds": 30,
+                        "secureOutput": False,
+                        "secureInput": False,
+                    },
+                    "typeProperties": {
+                        "notebookId": notebook_id,
+                        "workspaceId": WORKSPACE_ID,
+                    },
+                }
+            ]
+        }
     }
-}
 
-if existing_pipeline:
-    pipeline_id = existing_pipeline["id"]
-    resp = requests.post(
-        f"{BASE_URL}/workspaces/{WORKSPACE_ID}/items/{pipeline_id}/updateDefinition",
-        headers=headers,
-        json=pipeline_def,
-    )
+    pipeline_base64 = base64.b64encode(json.dumps(pipeline_json).encode("utf-8")).decode("utf-8")
+
+    resp = requests.get(f"{BASE_URL}/workspaces/{WORKSPACE_ID}/items?type=DataPipeline", headers=headers)
     resp.raise_for_status()
-    if resp.status_code == 202:
-        op_id = resp.headers.get("x-ms-operation-id")
-        if op_id:
-            wait_for_operation(op_id)
-    print(f"  updated pipeline '{PIPELINE_NAME}'")
-else:
-    pipeline_def["displayName"] = PIPELINE_NAME
-    pipeline_def["type"] = "DataPipeline"
-    resp = requests.post(
-        f"{BASE_URL}/workspaces/{WORKSPACE_ID}/items",
-        headers=headers,
-        json=pipeline_def,
+    existing = next(
+        (p for p in resp.json().get("value", []) if p["displayName"] == PIPELINE_NAME),
+        None,
     )
-    resp.raise_for_status()
-    if resp.status_code == 202:
-        op_id = resp.headers.get("x-ms-operation-id")
-        if op_id:
-            wait_for_operation(op_id)
-    pipeline_id = resp.json().get("id")
-    print(f"  created pipeline '{PIPELINE_NAME}'")
 
-# --- Step 6: Schedule the pipeline ---
-print(f"Setting schedule (every {SCHEDULE_INTERVAL_MINUTES} min)...")
+    pipeline_def = {
+        "definition": {
+            "parts": [{"path": "pipeline-content.json", "payload": pipeline_base64, "payloadType": "InlineBase64"}]
+        }
+    }
 
-resp = requests.get(
-    f"{BASE_URL}/workspaces/{WORKSPACE_ID}/items/{pipeline_id}/jobs/Pipeline/schedules",
-    headers=headers,
-)
-resp.raise_for_status()
-existing_schedules = resp.json().get("value", [])
+    if existing:
+        pipeline_id = existing["id"]
+        resp = requests.post(
+            f"{BASE_URL}/workspaces/{WORKSPACE_ID}/items/{pipeline_id}/updateDefinition",
+            headers=headers, json=pipeline_def,
+        )
+        resp.raise_for_status()
+        if resp.status_code == 202:
+            op_id = resp.headers.get("x-ms-operation-id")
+            if op_id:
+                wait_for_operation(op_id)
+        print(f"  updated pipeline '{PIPELINE_NAME}'")
+    else:
+        pipeline_def["displayName"] = PIPELINE_NAME
+        pipeline_def["type"] = "DataPipeline"
+        resp = requests.post(
+            f"{BASE_URL}/workspaces/{WORKSPACE_ID}/items",
+            headers=headers, json=pipeline_def,
+        )
+        resp.raise_for_status()
+        if resp.status_code == 202:
+            op_id = resp.headers.get("x-ms-operation-id")
+            if op_id:
+                wait_for_operation(op_id)
+        pipeline_id = resp.json().get("id")
+        print(f"  created pipeline '{PIPELINE_NAME}'")
 
-schedule_config = {
-    "enabled": True,
-    "configuration": {
-        "startDateTime": "2025-01-01T00:00:00",
-        "endDateTime": "2030-12-31T23:59:00",
-        "localTimeZoneId": "AUS Eastern Standard Time",
-        "type": "Cron",
-        "interval": SCHEDULE_INTERVAL_MINUTES,
-    },
-}
+    return pipeline_id
 
-if existing_schedules:
-    schedule_id = existing_schedules[0]["id"]
-    resp = requests.patch(
-        f"{BASE_URL}/workspaces/{WORKSPACE_ID}/items/{pipeline_id}/jobs/Pipeline/schedules/{schedule_id}",
-        headers=headers,
-        json=schedule_config,
-    )
-    resp.raise_for_status()
-    print(f"  updated schedule (id: {schedule_id})")
-else:
-    resp = requests.post(
+
+# --- Step: schedule ---
+def deploy_schedule(pipeline_id):
+    print(f"Setting schedule (every {SCHEDULE_INTERVAL_MINUTES} min)...")
+
+    resp = requests.get(
         f"{BASE_URL}/workspaces/{WORKSPACE_ID}/items/{pipeline_id}/jobs/Pipeline/schedules",
         headers=headers,
-        json=schedule_config,
     )
     resp.raise_for_status()
-    schedule_id = resp.json().get("id", "unknown")
-    print(f"  created schedule (id: {schedule_id})")
+    existing_schedules = resp.json().get("value", [])
 
-# --- Step 7: Deploy semantic model (Direct Lake) ---
-print(f"Deploying semantic model '{SEMANTIC_MODEL_NAME}'...")
-
-ONELAKE_URL = f"https://onelake.dfs.fabric.microsoft.com/{WORKSPACE_ID}/{LAKEHOUSE_ID}"
-
-# Read model.bim and substitute the OneLake URL placeholder
-bim_path = project_root / "model.bim"
-bim_text = bim_path.read_text().replace("{{ONELAKE_URL}}", ONELAKE_URL)
-bim_content = json.loads(bim_text)
-
-print(f"  loaded {bim_path} ({len(bim_content['model']['tables'])} tables, "
-      f"{len(bim_content['model']['relationships'])} relationships)")
-
-# Check if semantic model already exists
-resp = requests.get(f"{BASE_URL}/workspaces/{WORKSPACE_ID}/semanticModels", headers=headers)
-resp.raise_for_status()
-existing_model = next(
-    (m for m in resp.json().get("value", []) if m["displayName"] == SEMANTIC_MODEL_NAME),
-    None,
-)
-
-bim_base64 = base64.b64encode(json.dumps(bim_content, indent=2).encode("utf-8")).decode("utf-8")
-pbism_base64 = base64.b64encode(json.dumps({"version": "1.0"}).encode("utf-8")).decode("utf-8")
-
-sm_definition = {
-    "definition": {
-        "parts": [
-            {"path": "model.bim", "payload": bim_base64, "payloadType": "InlineBase64"},
-            {"path": "definition.pbism", "payload": pbism_base64, "payloadType": "InlineBase64"},
-        ]
+    schedule_config = {
+        "enabled": True,
+        "configuration": {
+            "startDateTime": "2025-01-01T00:00:00",
+            "endDateTime": "2030-12-31T23:59:00",
+            "localTimeZoneId": "AUS Eastern Standard Time",
+            "type": "Cron",
+            "interval": SCHEDULE_INTERVAL_MINUTES,
+        },
     }
-}
 
-if existing_model:
-    semantic_model_id = existing_model["id"]
-    resp = requests.post(
-        f"{BASE_URL}/workspaces/{WORKSPACE_ID}/semanticModels/{semantic_model_id}/updateDefinition",
-        headers=headers,
-        json=sm_definition,
-    )
-    resp.raise_for_status()
-    if resp.status_code == 202:
-        op_id = resp.headers.get("x-ms-operation-id")
-        if op_id:
-            wait_for_operation(op_id)
-    print(f"  updated semantic model '{SEMANTIC_MODEL_NAME}' (id: {semantic_model_id})")
-else:
-    sm_definition["displayName"] = SEMANTIC_MODEL_NAME
-    resp = requests.post(
-        f"{BASE_URL}/workspaces/{WORKSPACE_ID}/semanticModels",
-        headers=headers,
-        json=sm_definition,
-    )
-    resp.raise_for_status()
-    if resp.status_code == 202:
-        op_id = resp.headers.get("x-ms-operation-id")
-        if op_id:
-            wait_for_operation(op_id)
-    # Re-fetch to get the semantic model ID
+    if existing_schedules:
+        schedule_id = existing_schedules[0]["id"]
+        resp = requests.patch(
+            f"{BASE_URL}/workspaces/{WORKSPACE_ID}/items/{pipeline_id}/jobs/Pipeline/schedules/{schedule_id}",
+            headers=headers, json=schedule_config,
+        )
+        resp.raise_for_status()
+        print(f"  updated schedule (id: {schedule_id})")
+    else:
+        resp = requests.post(
+            f"{BASE_URL}/workspaces/{WORKSPACE_ID}/items/{pipeline_id}/jobs/Pipeline/schedules",
+            headers=headers, json=schedule_config,
+        )
+        resp.raise_for_status()
+        schedule_id = resp.json().get("id", "unknown")
+        print(f"  created schedule (id: {schedule_id})")
+
+
+# --- Step: semantic_model ---
+def deploy_semantic_model():
+    print(f"Deploying semantic model '{SEMANTIC_MODEL_NAME}'...")
+
+    bim_path = project_root / "model.bim"
+    bim_text = bim_path.read_text().replace("{{ONELAKE_URL}}", ONELAKE_URL)
+    bim_content = json.loads(bim_text)
+
+    print(f"  loaded {bim_path} ({len(bim_content['model']['tables'])} tables, "
+          f"{len(bim_content['model']['relationships'])} relationships)")
+
     resp = requests.get(f"{BASE_URL}/workspaces/{WORKSPACE_ID}/semanticModels", headers=headers)
     resp.raise_for_status()
-    sm = next(m for m in resp.json().get("value", []) if m["displayName"] == SEMANTIC_MODEL_NAME)
-    semantic_model_id = sm["id"]
-    print(f"  created semantic model '{SEMANTIC_MODEL_NAME}' (id: {semantic_model_id})")
+    existing = next(
+        (m for m in resp.json().get("value", []) if m["displayName"] == SEMANTIC_MODEL_NAME),
+        None,
+    )
 
-# Refresh the semantic model (clearValues + full)
-print("  refreshing semantic model...")
-powerbi_headers = {**headers}
-powerbi_refresh_url = f"https://api.powerbi.com/v1.0/myorg/datasets/{semantic_model_id}/refreshes"
+    bim_base64 = base64.b64encode(json.dumps(bim_content, indent=2).encode("utf-8")).decode("utf-8")
+    pbism_base64 = base64.b64encode(json.dumps({"version": "1.0"}).encode("utf-8")).decode("utf-8")
 
-# Step 1: clearValues
-resp = requests.post(powerbi_refresh_url, headers=powerbi_headers, json={
-    "type": "clearValues", "commitMode": "transactional", "maxParallelism": 10, "retryCount": 2, "objects": []
-})
-if resp.status_code in (200, 202):
-    if resp.status_code == 202:
-        time.sleep(15)
-    print("  clearValues done")
+    sm_definition = {
+        "definition": {
+            "parts": [
+                {"path": "model.bim", "payload": bim_base64, "payloadType": "InlineBase64"},
+                {"path": "definition.pbism", "payload": pbism_base64, "payloadType": "InlineBase64"},
+            ]
+        }
+    }
 
-# Step 2: full refresh
-resp = requests.post(powerbi_refresh_url, headers=powerbi_headers, json={
-    "type": "full", "commitMode": "transactional", "maxParallelism": 10, "retryCount": 2, "objects": []
-})
-if resp.status_code in (200, 202):
-    print("  full refresh initiated")
+    if existing:
+        semantic_model_id = existing["id"]
+        resp = requests.post(
+            f"{BASE_URL}/workspaces/{WORKSPACE_ID}/semanticModels/{semantic_model_id}/updateDefinition",
+            headers=headers, json=sm_definition,
+        )
+        resp.raise_for_status()
+        if resp.status_code == 202:
+            op_id = resp.headers.get("x-ms-operation-id")
+            if op_id:
+                wait_for_operation(op_id)
+        print(f"  updated semantic model '{SEMANTIC_MODEL_NAME}' (id: {semantic_model_id})")
+    else:
+        sm_definition["displayName"] = SEMANTIC_MODEL_NAME
+        resp = requests.post(
+            f"{BASE_URL}/workspaces/{WORKSPACE_ID}/semanticModels",
+            headers=headers, json=sm_definition,
+        )
+        resp.raise_for_status()
+        if resp.status_code == 202:
+            op_id = resp.headers.get("x-ms-operation-id")
+            if op_id:
+                wait_for_operation(op_id)
+        resp = requests.get(f"{BASE_URL}/workspaces/{WORKSPACE_ID}/semanticModels", headers=headers)
+        resp.raise_for_status()
+        sm = next(m for m in resp.json().get("value", []) if m["displayName"] == SEMANTIC_MODEL_NAME)
+        semantic_model_id = sm["id"]
+        print(f"  created semantic model '{SEMANTIC_MODEL_NAME}' (id: {semantic_model_id})")
+
+    # Refresh (clearValues + full)
+    print("  refreshing semantic model...")
+    refresh_url = f"https://api.powerbi.com/v1.0/myorg/datasets/{semantic_model_id}/refreshes"
+
+    resp = requests.post(refresh_url, headers=headers, json={
+        "type": "clearValues", "commitMode": "transactional", "maxParallelism": 10, "retryCount": 2, "objects": []
+    })
+    if resp.status_code in (200, 202):
+        if resp.status_code == 202:
+            time.sleep(15)
+        print("  clearValues done")
+
+    resp = requests.post(refresh_url, headers=headers, json={
+        "type": "full", "commitMode": "transactional", "maxParallelism": 10, "retryCount": 2, "objects": []
+    })
+    if resp.status_code in (200, 202):
+        print("  full refresh initiated")
+    else:
+        print(f"  refresh returned {resp.status_code}: {resp.text[:200]}")
+
+
+# --- Run selected steps ---
+print(f"\nSteps: {', '.join(s for s in ALL_STEPS if s in STEPS)}\n")
+
+if "files" in STEPS:
+    deploy_files()
+
+notebook_id = None
+if "notebook" in STEPS:
+    notebook_id = deploy_notebook()
+
+if "pipeline" in STEPS:
+    if notebook_id is None:
+        # Look up existing notebook ID
+        resp = requests.get(f"{BASE_URL}/workspaces/{WORKSPACE_ID}/notebooks", headers=headers)
+        resp.raise_for_status()
+        nb = next((nb for nb in resp.json().get("value", []) if nb["displayName"] == NOTEBOOK_NAME), None)
+        if nb:
+            notebook_id = nb["id"]
+        else:
+            print(f"  ERROR: notebook '{NOTEBOOK_NAME}' not found. Deploy notebook first.")
+            sys.exit(1)
+    pipeline_id = deploy_pipeline(notebook_id)
 else:
-    print(f"  refresh returned {resp.status_code}: {resp.text[:200]}")
+    pipeline_id = None
+
+if "schedule" in STEPS:
+    if pipeline_id is None:
+        resp = requests.get(f"{BASE_URL}/workspaces/{WORKSPACE_ID}/items?type=DataPipeline", headers=headers)
+        resp.raise_for_status()
+        pl = next((p for p in resp.json().get("value", []) if p["displayName"] == PIPELINE_NAME), None)
+        if pl:
+            pipeline_id = pl["id"]
+        else:
+            print(f"  ERROR: pipeline '{PIPELINE_NAME}' not found. Deploy pipeline first.")
+            sys.exit(1)
+    deploy_schedule(pipeline_id)
+
+if "semantic_model" in STEPS:
+    deploy_semantic_model()
 
 print("\nDeploy complete.")
