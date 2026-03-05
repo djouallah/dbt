@@ -38,6 +38,8 @@ EXCLUDE_PATTERNS = {"%SystemDrive%"}
 
 DEPLOY_BRANCH = "production"
 
+SEMANTIC_MODEL_NAME = "aemo_electricity"
+
 BASE_URL = "https://api.fabric.microsoft.com/v1"
 
 # --- Clone production branch into temp dir ---
@@ -112,9 +114,12 @@ lakehouse = next(
 
 if lakehouse is None:
     resp = requests.post(
-        f"{BASE_URL}/workspaces/{WORKSPACE_ID}/items",
+        f"{BASE_URL}/workspaces/{WORKSPACE_ID}/lakehouses",
         headers=headers,
-        json={"displayName": LAKEHOUSE_NAME, "type": "Lakehouse"},
+        json={
+            "displayName": LAKEHOUSE_NAME,
+            "creationPayload": {"enableSchemas": True},
+        },
     )
     resp.raise_for_status()
     lakehouse = resp.json()
@@ -146,7 +151,7 @@ for local_path in sorted(project_root.rglob("*")):
     relative = str(local_path.relative_to(project_root)).replace("\\", "/")
     if any(p in relative for p in EXCLUDE_PATTERNS):
         continue
-    onelake_path = f"{LAKEHOUSE_NAME}.Lakehouse/Files/dbt/{relative}"
+    onelake_path = f"{LAKEHOUSE_ID}/Files/dbt/{relative}"
 
     file_client = fs.get_file_client(onelake_path)
     with open(local_path, "rb") as f:
@@ -160,7 +165,7 @@ print(f"  {uploaded} files uploaded to Files/dbt/")
 print(f"Deploying notebook '{NOTEBOOK_NAME}' to workspace...")
 
 # Derive ROOT_PATH from workspace and lakehouse names
-ROOT_PATH = f"abfss://{WORKSPACE_ID}@onelake.dfs.fabric.microsoft.com/{LAKEHOUSE_NAME}.Lakehouse"
+ROOT_PATH = f"abfss://{WORKSPACE_ID}@onelake.dfs.fabric.microsoft.com/{LAKEHOUSE_ID}"
 
 # Build notebook content with values from this script
 notebook_json = {
@@ -384,5 +389,93 @@ else:
     resp.raise_for_status()
     schedule_id = resp.json().get("id", "unknown")
     print(f"  created schedule (id: {schedule_id})")
+
+# --- Step 7: Deploy semantic model (Direct Lake) ---
+print(f"Deploying semantic model '{SEMANTIC_MODEL_NAME}'...")
+
+ONELAKE_URL = f"https://onelake.dfs.fabric.microsoft.com/{WORKSPACE_ID}/{LAKEHOUSE_ID}"
+
+# Read model.bim and substitute the OneLake URL placeholder
+bim_path = project_root / "model.bim"
+bim_text = bim_path.read_text().replace("{{ONELAKE_URL}}", ONELAKE_URL)
+bim_content = json.loads(bim_text)
+
+print(f"  loaded {bim_path} ({len(bim_content['model']['tables'])} tables, "
+      f"{len(bim_content['model']['relationships'])} relationships)")
+
+# Check if semantic model already exists
+resp = requests.get(f"{BASE_URL}/workspaces/{WORKSPACE_ID}/semanticModels", headers=headers)
+resp.raise_for_status()
+existing_model = next(
+    (m for m in resp.json().get("value", []) if m["displayName"] == SEMANTIC_MODEL_NAME),
+    None,
+)
+
+bim_base64 = base64.b64encode(json.dumps(bim_content, indent=2).encode("utf-8")).decode("utf-8")
+pbism_base64 = base64.b64encode(json.dumps({"version": "1.0"}).encode("utf-8")).decode("utf-8")
+
+sm_definition = {
+    "definition": {
+        "parts": [
+            {"path": "model.bim", "payload": bim_base64, "payloadType": "InlineBase64"},
+            {"path": "definition.pbism", "payload": pbism_base64, "payloadType": "InlineBase64"},
+        ]
+    }
+}
+
+if existing_model:
+    semantic_model_id = existing_model["id"]
+    resp = requests.post(
+        f"{BASE_URL}/workspaces/{WORKSPACE_ID}/semanticModels/{semantic_model_id}/updateDefinition",
+        headers=headers,
+        json=sm_definition,
+    )
+    resp.raise_for_status()
+    if resp.status_code == 202:
+        op_id = resp.headers.get("x-ms-operation-id")
+        if op_id:
+            wait_for_operation(op_id)
+    print(f"  updated semantic model '{SEMANTIC_MODEL_NAME}' (id: {semantic_model_id})")
+else:
+    sm_definition["displayName"] = SEMANTIC_MODEL_NAME
+    resp = requests.post(
+        f"{BASE_URL}/workspaces/{WORKSPACE_ID}/semanticModels",
+        headers=headers,
+        json=sm_definition,
+    )
+    resp.raise_for_status()
+    if resp.status_code == 202:
+        op_id = resp.headers.get("x-ms-operation-id")
+        if op_id:
+            wait_for_operation(op_id)
+    # Re-fetch to get the semantic model ID
+    resp = requests.get(f"{BASE_URL}/workspaces/{WORKSPACE_ID}/semanticModels", headers=headers)
+    resp.raise_for_status()
+    sm = next(m for m in resp.json().get("value", []) if m["displayName"] == SEMANTIC_MODEL_NAME)
+    semantic_model_id = sm["id"]
+    print(f"  created semantic model '{SEMANTIC_MODEL_NAME}' (id: {semantic_model_id})")
+
+# Refresh the semantic model (clearValues + full)
+print("  refreshing semantic model...")
+powerbi_headers = {**headers}
+powerbi_refresh_url = f"https://api.powerbi.com/v1.0/myorg/datasets/{semantic_model_id}/refreshes"
+
+# Step 1: clearValues
+resp = requests.post(powerbi_refresh_url, headers=powerbi_headers, json={
+    "type": "clearValues", "commitMode": "transactional", "maxParallelism": 10, "retryCount": 2, "objects": []
+})
+if resp.status_code in (200, 202):
+    if resp.status_code == 202:
+        time.sleep(15)
+    print("  clearValues done")
+
+# Step 2: full refresh
+resp = requests.post(powerbi_refresh_url, headers=powerbi_headers, json={
+    "type": "full", "commitMode": "transactional", "maxParallelism": 10, "retryCount": 2, "objects": []
+})
+if resp.status_code in (200, 202):
+    print("  full refresh initiated")
+else:
+    print(f"  refresh returned {resp.status_code}: {resp.text[:200]}")
 
 print("\nDeploy complete.")
