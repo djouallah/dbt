@@ -1,8 +1,0 @@
-/// Direct Lake connection to OneLake — reads Delta tables directly, no SQL endpoint
-expression DirectLake =
-		let
-			Source = AzureStorage.DataLake("{{ONELAKE_URL}}", [HierarchicalNavigation=true])
-		in
-			Source
-
-	annotation PBI_RemovedChildren = [{"sourceLineageTag":"[raw].[fct_scada]"},{"sourceLineageTag":"[raw].[fct_scada_today]"},{"sourceLineageTag":"[raw].[fct_price]"},{"sourceLineageTag":"[raw].[fct_price_today]"},{"sourceLineageTag":"[raw].[stg_csv_archive_log]"}]

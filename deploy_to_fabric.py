@@ -29,10 +29,16 @@ from azure.storage.filedatalake import DataLakeServiceClient
 
 ALL_STEPS = ["lakehouse", "files", "notebook", "pipeline", "schedule", "semantic_model"]
 parser = argparse.ArgumentParser(description="Deploy dbt project to Microsoft Fabric")
-parser.add_argument("steps", nargs="*", choices=ALL_STEPS,
-                    help="Steps to deploy (default: all)")
+parser.add_argument("steps", nargs="*", default=None,
+                    help=f"Steps to deploy (default: all). Choices: {', '.join(ALL_STEPS)}")
 args = parser.parse_args()
-STEPS = set(args.steps if args.steps else ALL_STEPS)
+if not args.steps:
+    STEPS = set(ALL_STEPS)
+else:
+    invalid = set(args.steps) - set(ALL_STEPS)
+    if invalid:
+        parser.error(f"invalid step(s): {', '.join(invalid)}. Choose from: {', '.join(ALL_STEPS)}")
+    STEPS = set(args.steps)
 
 # --- Config ---
 TENANT_ID                 = "4a86d5bb-4173-45ee-bfd5-a3b56ee2d3d5"
@@ -393,21 +399,17 @@ def deploy_schedule(pipeline_id):
 def deploy_semantic_model():
     print(f"Deploying semantic model '{SEMANTIC_MODEL_NAME}'...")
 
-    sm_root = project_root / "semantic_model"
+    # Read model.bim and substitute OneLake URL placeholder
+    bim_path = project_root / "model.bim"
+    bim_content = bim_path.read_text(encoding="utf-8")
+    bim_content = bim_content.replace("{{ONELAKE_URL}}", ONELAKE_URL)
+    print(f"  loaded {bim_path}")
 
-    # Build parts from TMDL files, substituting OneLake URL placeholder
-    parts = []
-    for tmdl_file in sorted(sm_root.rglob("*")):
-        if tmdl_file.is_dir():
-            continue
-        relative = str(tmdl_file.relative_to(sm_root)).replace("\\", "/")
-        content = tmdl_file.read_text(encoding="utf-8")
-        content = content.replace("{{ONELAKE_URL}}", ONELAKE_URL)
-        encoded = base64.b64encode(content.encode("utf-8")).decode("utf-8")
-        parts.append({"path": relative, "payload": encoded, "payloadType": "InlineBase64"})
-
-    tmdl_tables = [p["path"] for p in parts if p["path"].startswith("definition/tables/")]
-    print(f"  loaded {sm_root} ({len(tmdl_tables)} tables, {len(parts)} files)")
+    pbism = json.dumps({"version": "1.0"})
+    parts = [
+        {"path": "model.bim", "payload": base64.b64encode(bim_content.encode()).decode(), "payloadType": "InlineBase64"},
+        {"path": "definition.pbism", "payload": base64.b64encode(pbism.encode()).decode(), "payloadType": "InlineBase64"},
+    ]
 
     resp = requests.get(f"{BASE_URL}/workspaces/{WORKSPACE_ID}/semanticModels", headers=headers)
     resp.raise_for_status()
@@ -443,7 +445,10 @@ def deploy_semantic_model():
                 wait_for_operation(op_id)
         resp = requests.get(f"{BASE_URL}/workspaces/{WORKSPACE_ID}/semanticModels", headers=headers)
         resp.raise_for_status()
-        sm = next(m for m in resp.json().get("value", []) if m["displayName"] == SEMANTIC_MODEL_NAME)
+        sm = next((m for m in resp.json().get("value", []) if m["displayName"] == SEMANTIC_MODEL_NAME), None)
+        if not sm:
+            print("  ERROR: semantic model was not created. Check the Fabric workspace for details.")
+            return
         semantic_model_id = sm["id"]
         print(f"  created semantic model '{SEMANTIC_MODEL_NAME}' (id: {semantic_model_id})")
 
