@@ -40,6 +40,8 @@ jobs:
   lakehouse:
     needs: test
     runs-on: ubuntu-latest
+    outputs:
+      first_deploy: ${{ steps.deploy.outputs.first_deploy }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -51,7 +53,8 @@ jobs:
           client-id: ${{ secrets.AZURE_CLIENT_ID }}
           tenant-id: ${{ secrets.AZURE_TENANT_ID }}
           allow-no-subscriptions: true
-      - run: python deploy_to_fabric.py lakehouse
+      - id: deploy
+        run: python deploy_to_fabric.py lakehouse
 
   files:
     needs: lakehouse
@@ -70,7 +73,8 @@ jobs:
       - run: python deploy_to_fabric.py files
 
   initial-load:
-    needs: files
+    needs: [lakehouse, files]
+    if: needs.lakehouse.outputs.first_deploy == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -87,7 +91,8 @@ jobs:
       - run: python deploy_to_fabric.py initial_load
 
   notebook:
-    needs: initial-load
+    needs: [files, initial-load]
+    if: ${{ !failure() && !cancelled() }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
