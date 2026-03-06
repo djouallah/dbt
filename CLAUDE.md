@@ -148,12 +148,21 @@ on-run-end:
 Upload `dbt.ipynb` to a Fabric workspace, create and attach a lakehouse, run it.
 
 ### Option 2: Script (`deploy_to_fabric.py`)
-6 steps: lakehouse, files, notebook, pipeline, schedule, semantic_model. Uses `az login` (AzureCliCredential) -- no service principal needed. Clones `production` branch for deployment.
+7 steps: lakehouse, files, initial_load, notebook, semantic_model, pipeline, schedule. Uses `az login` (AzureCliCredential) -- no service principal needed. Clones `production` branch for deployment.
 
-### CI/CD (`.github/workflows/dbt-ci.yml`)
-- On push/PR to `main`: Azurite + `dbt run --target ci` + `dbt test --target ci`
-- On merge to `main`: generates dbt docs, deploys DAG + documentation to GitHub Pages
-- Fabric deployment is separate (local script) to avoid service principal overhead
+### Deploy Idempotency Rules
+- **If only dbt code changes** (models, macros, tests, profiles, etc.), only `files` should re-upload. All other steps (notebook, semantic_model, pipeline, schedule) must detect no change and skip if the asset already exists and is unchanged.
+- `notebook` compares base64 payload via `getDefinition` — skips if identical.
+- `semantic_model` compares `model.bim` base64 via `getDefinition` — skips if identical. No refresh when skipped.
+- `pipeline` compares notebook_id in definition — skips if identical.
+- `schedule` compares interval + enabled flag — skips if identical.
+- `initial_load` only runs on first deploy (new lakehouse). Gated by `first_deploy` output.
+- `getDefinition` returns 202 for async ops — must fetch result from `/operations/{op_id}/result`.
+
+### CI/CD
+- **Main branch** (`.github/workflows/dbt-ci.yml`): Azurite + `dbt run --target ci` + `dbt test --target ci`. No docs.
+- **Production branch** (`.github/workflows/deploy.yml`): Full deploy DAG + dbt docs to GitHub Pages.
+- GitHub Pages source must be set to "GitHub Actions" (not "Deploy from a branch").
 
 ## Semantic Model (`model.bim`)
 - AI-generated TMSL (Tabular Model Scripting Language) format
