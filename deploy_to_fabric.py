@@ -123,6 +123,14 @@ def wait_for_operation(operation_id):
     return False
 
 
+def get_definition_result(operation_id):
+    """Fetch the result of a completed getDefinition operation."""
+    resp = requests.get(f"{BASE_URL}/operations/{operation_id}/result", headers=headers)
+    if resp.status_code == 200:
+        return resp.json()
+    return None
+
+
 # --- Resolve lakehouse (always needed for LAKEHOUSE_ID) ---
 print(f"Using workspace {WORKSPACE_ID}")
 print(f"Checking if lakehouse '{LAKEHOUSE_NAME}' exists...")
@@ -276,12 +284,16 @@ def deploy_notebook(download_limit=100, process_limit=100):
             headers=headers,
         )
         resp.raise_for_status()
+        definition_data = None
         if resp.status_code == 202:
             op_id = resp.headers.get("x-ms-operation-id")
             if op_id:
                 wait_for_operation(op_id)
+                definition_data = get_definition_result(op_id)
+        else:
+            definition_data = resp.json()
         try:
-            parts = resp.json().get("definition", {}).get("parts", [])
+            parts = definition_data.get("definition", {}).get("parts", [])
             for part in parts:
                 if part.get("path") == "notebook-content.ipynb":
                     if part["payload"] == notebook_base64:
@@ -371,12 +383,16 @@ def deploy_pipeline(notebook_id):
             headers=headers,
         )
         resp.raise_for_status()
+        definition_data = None
         if resp.status_code == 202:
             op_id = resp.headers.get("x-ms-operation-id")
             if op_id:
                 wait_for_operation(op_id)
+                definition_data = get_definition_result(op_id)
+        else:
+            definition_data = resp.json()
         try:
-            parts = resp.json().get("definition", {}).get("parts", [])
+            parts = definition_data.get("definition", {}).get("parts", [])
             for part in parts:
                 if part.get("path") == "pipeline-content.json":
                     existing_json = json.loads(base64.b64decode(part["payload"]).decode("utf-8"))
@@ -524,12 +540,16 @@ def deploy_semantic_model():
             headers=headers,
         )
         resp.raise_for_status()
+        definition_data = None
         if resp.status_code == 202:
             op_id = resp.headers.get("x-ms-operation-id")
             if op_id:
                 wait_for_operation(op_id)
+                definition_data = get_definition_result(op_id)
+        else:
+            definition_data = resp.json()
         try:
-            existing_parts = resp.json().get("definition", {}).get("parts", [])
+            existing_parts = definition_data.get("definition", {}).get("parts", [])
             for part in existing_parts:
                 if part.get("path") == "model.bim":
                     if part["payload"] == bim_base64:

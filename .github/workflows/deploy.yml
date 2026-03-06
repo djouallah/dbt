@@ -109,6 +109,7 @@ jobs:
 
   semantic-model:
     needs: notebook
+    if: ${{ !failure() && !cancelled() }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -125,6 +126,7 @@ jobs:
 
   pipeline:
     needs: semantic-model
+    if: ${{ !failure() && !cancelled() }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -141,6 +143,7 @@ jobs:
 
   schedule:
     needs: pipeline
+    if: ${{ !failure() && !cancelled() }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -157,6 +160,7 @@ jobs:
 
   deploy-docs:
     needs: schedule
+    if: ${{ !failure() && !cancelled() }}
     runs-on: ubuntu-latest
     environment:
       name: github-pages
