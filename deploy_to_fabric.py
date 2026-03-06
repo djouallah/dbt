@@ -60,26 +60,30 @@ SEMANTIC_MODEL_NAME = "aemo_electricity"
 
 BASE_URL = "https://api.fabric.microsoft.com/v1"
 
-# --- Clone production branch into temp dir ---
-REPO_URL = subprocess.run(
-    ["git", "remote", "get-url", "origin"],
-    capture_output=True, text=True, check=True,
-    cwd=Path(__file__).resolve().parent,
-).stdout.strip()
+IS_CI = os.environ.get("CI") == "true"
 
-tmp_dir = tempfile.mkdtemp(prefix="dbt_deploy_")
-project_root = Path(tmp_dir)
-print(f"Cloning '{DEPLOY_BRANCH}' branch into {tmp_dir}...")
-subprocess.run(
-    ["git", "clone", "--branch", DEPLOY_BRANCH, "--depth", "1", REPO_URL, tmp_dir],
-    check=True,
-)
-print(f"Branch: {DEPLOY_BRANCH} (cloned)")
+# --- Resolve project root ---
+if IS_CI:
+    project_root = Path(__file__).resolve().parent
+    print(f"CI mode: using {project_root}")
+else:
+    REPO_URL = subprocess.run(
+        ["git", "remote", "get-url", "origin"],
+        capture_output=True, text=True, check=True,
+        cwd=Path(__file__).resolve().parent,
+    ).stdout.strip()
+    tmp_dir = tempfile.mkdtemp(prefix="dbt_deploy_")
+    project_root = Path(tmp_dir)
+    print(f"Cloning '{DEPLOY_BRANCH}' branch into {tmp_dir}...")
+    subprocess.run(
+        ["git", "clone", "--branch", DEPLOY_BRANCH, "--depth", "1", REPO_URL, tmp_dir],
+        check=True,
+    )
+    print(f"Branch: {DEPLOY_BRANCH} (cloned)")
 
 # --- Auth: az login with tenant enforcement ---
 print("Authenticating with Azure CLI credential...")
 credential = AzureCliCredential()
-IS_CI = os.environ.get("CI") == "true"
 
 try:
     fabric_token = credential.get_token("https://api.fabric.microsoft.com/.default").token

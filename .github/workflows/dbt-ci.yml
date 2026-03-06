@@ -8,8 +8,6 @@ on:
 
 permissions:
   contents: read
-  pages: write
-  id-token: write
 
 jobs:
   test:
@@ -42,25 +40,3 @@ jobs:
 
       - name: dbt test
         run: dbt test --target ci
-
-      - name: Generate dbt docs
-        if: github.ref == 'refs/heads/main' && github.event_name == 'push'
-        run: dbt docs generate --target ci
-
-      - name: Upload docs artifact
-        if: github.ref == 'refs/heads/main' && github.event_name == 'push'
-        uses: actions/upload-pages-artifact@v3
-        with:
-          path: target
-
-  deploy-docs:
-    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
-    needs: test
-    runs-on: ubuntu-latest
-    environment:
-      name: github-pages
-      url: ${{ steps.deployment.outputs.page_url }}
-    steps:
-      - name: Deploy to GitHub Pages
-        id: deployment
-        uses: actions/deploy-pages@v4
