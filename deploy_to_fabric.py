@@ -9,7 +9,7 @@ Usage:
   python deploy_to_fabric.py semantic_model   # deploy semantic model only
   python deploy_to_fabric.py files notebook   # deploy files + notebook only
 
-Steps: lakehouse, files, notebook, pipeline, schedule, semantic_model
+Steps: lakehouse, files, initial_load, notebook, semantic_model, pipeline, schedule
 """
 
 import argparse
@@ -157,6 +157,13 @@ elif lakehouse is None:
 else:
     print(f"  lakehouse '{LAKEHOUSE_NAME}' already exists")
 
+# Output for GitHub Actions
+if IS_CI:
+    gh_output = os.environ.get("GITHUB_OUTPUT")
+    if gh_output:
+        with open(gh_output, "a") as f:
+            f.write(f"first_deploy={'true' if FIRST_DEPLOY else 'false'}\n")
+
 LAKEHOUSE_ID = lakehouse["id"]
 ONELAKE_URL = f"https://onelake.dfs.fabric.microsoft.com/{WORKSPACE_ID}/{LAKEHOUSE_ID}"
 ROOT_PATH = f"abfss://{WORKSPACE_ID}@onelake.dfs.fabric.microsoft.com/{LAKEHOUSE_ID}"
@@ -263,6 +270,26 @@ def deploy_notebook(download_limit=100, process_limit=100):
 
     if existing:
         notebook_id = existing["id"]
+        # Check if content already matches
+        resp = requests.post(
+            f"{BASE_URL}/workspaces/{WORKSPACE_ID}/notebooks/{notebook_id}/getDefinition",
+            headers=headers,
+        )
+        resp.raise_for_status()
+        if resp.status_code == 202:
+            op_id = resp.headers.get("x-ms-operation-id")
+            if op_id:
+                wait_for_operation(op_id)
+        try:
+            parts = resp.json().get("definition", {}).get("parts", [])
+            for part in parts:
+                if part.get("path") == "notebook-content.ipynb":
+                    if part["payload"] == notebook_base64:
+                        print(f"  notebook unchanged (id: {notebook_id})")
+                        return notebook_id
+        except (KeyError, IndexError, AttributeError, TypeError):
+            pass
+
         resp = requests.post(
             f"{BASE_URL}/workspaces/{WORKSPACE_ID}/notebooks/{notebook_id}/updateDefinition",
             headers=headers, json=definition_payload,
@@ -338,6 +365,28 @@ def deploy_pipeline(notebook_id):
 
     if existing:
         pipeline_id = existing["id"]
+        # Check if notebook ID already matches
+        resp = requests.post(
+            f"{BASE_URL}/workspaces/{WORKSPACE_ID}/items/{pipeline_id}/getDefinition",
+            headers=headers,
+        )
+        resp.raise_for_status()
+        if resp.status_code == 202:
+            op_id = resp.headers.get("x-ms-operation-id")
+            if op_id:
+                wait_for_operation(op_id)
+        try:
+            parts = resp.json().get("definition", {}).get("parts", [])
+            for part in parts:
+                if part.get("path") == "pipeline-content.json":
+                    existing_json = json.loads(base64.b64decode(part["payload"]).decode("utf-8"))
+                    existing_nb_id = existing_json["properties"]["activities"][0]["typeProperties"]["notebookId"]
+                    if existing_nb_id == notebook_id:
+                        print(f"  pipeline unchanged (notebook_id matches)")
+                        return pipeline_id
+        except (KeyError, IndexError, AttributeError, TypeError, json.JSONDecodeError):
+            pass  # can't compare, update anyway
+
         resp = requests.post(
             f"{BASE_URL}/workspaces/{WORKSPACE_ID}/items/{pipeline_id}/updateDefinition",
             headers=headers, json=pipeline_def,
@@ -390,6 +439,10 @@ def deploy_schedule(pipeline_id):
 
     if existing_schedules:
         schedule_id = existing_schedules[0]["id"]
+        existing_config = existing_schedules[0].get("configuration", {})
+        if existing_config.get("interval") == SCHEDULE_INTERVAL_MINUTES and existing_schedules[0].get("enabled"):
+            print(f"  schedule unchanged (id: {schedule_id}, every {SCHEDULE_INTERVAL_MINUTES} min)")
+            return
         resp = requests.patch(
             f"{BASE_URL}/workspaces/{WORKSPACE_ID}/items/{pipeline_id}/jobs/Pipeline/schedules/{schedule_id}",
             headers=headers, json=schedule_config,
@@ -447,9 +500,10 @@ def deploy_semantic_model():
     bim_content = bim_content.replace("{{ONELAKE_URL}}", ONELAKE_URL)
     print(f"  loaded {bim_path}")
 
+    bim_base64 = base64.b64encode(bim_content.encode()).decode()
     pbism = json.dumps({"version": "1.0"})
     parts = [
-        {"path": "model.bim", "payload": base64.b64encode(bim_content.encode()).decode(), "payloadType": "InlineBase64"},
+        {"path": "model.bim", "payload": bim_base64, "payloadType": "InlineBase64"},
         {"path": "definition.pbism", "payload": base64.b64encode(pbism.encode()).decode(), "payloadType": "InlineBase64"},
     ]
 
@@ -464,6 +518,26 @@ def deploy_semantic_model():
 
     if existing:
         semantic_model_id = existing["id"]
+        # Check if BIM content already matches
+        resp = requests.post(
+            f"{BASE_URL}/workspaces/{WORKSPACE_ID}/semanticModels/{semantic_model_id}/getDefinition",
+            headers=headers,
+        )
+        resp.raise_for_status()
+        if resp.status_code == 202:
+            op_id = resp.headers.get("x-ms-operation-id")
+            if op_id:
+                wait_for_operation(op_id)
+        try:
+            existing_parts = resp.json().get("definition", {}).get("parts", [])
+            for part in existing_parts:
+                if part.get("path") == "model.bim":
+                    if part["payload"] == bim_base64:
+                        print(f"  semantic model unchanged (id: {semantic_model_id})")
+                        return
+        except (KeyError, IndexError, AttributeError, TypeError):
+            pass
+
         resp = requests.post(
             f"{BASE_URL}/workspaces/{WORKSPACE_ID}/semanticModels/{semantic_model_id}/updateDefinition",
             headers=headers, json=sm_definition,
