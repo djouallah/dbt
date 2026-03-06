@@ -79,6 +79,7 @@ print(f"Branch: {DEPLOY_BRANCH} (cloned)")
 # --- Auth: az login with tenant enforcement ---
 print("Authenticating with Azure CLI credential...")
 credential = AzureCliCredential()
+IS_CI = os.environ.get("CI") == "true"
 
 try:
     fabric_token = credential.get_token("https://api.fabric.microsoft.com/.default").token
@@ -88,6 +89,9 @@ try:
         print(f"  wrong tenant '{actual_tenant}', logging into '{TENANT_ID}'...")
         raise Exception("wrong tenant")
 except Exception:
+    if IS_CI:
+        print("ERROR: Azure CLI authentication failed in CI. Check azure/login step.")
+        sys.exit(1)
     print(f"Logging in to tenant {TENANT_ID}...")
     subprocess.run(["az", "login", "--tenant", TENANT_ID], check=True)
     credential = AzureCliCredential()
