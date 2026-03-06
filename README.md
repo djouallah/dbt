@@ -32,11 +32,11 @@ See the [blog post](https://datamonkeysite.com/2026/03/05/building-a-data-pipeli
 
 ## Environment Variables
 
-| Variable | Default | Purpose |
-|----------|---------|---------|
-| `ROOT_PATH` | `abfss://{WORKSPACE_ID}@onelake.dfs.fabric.microsoft.com/{LAKEHOUSE_ID}` | Storage root |
-| `DBT_SCHEMA` | `aemo` | Target schema |
-| `download_limit` | `2` | Max files to download per source per run |
-| `process_limit` | `500` | Max files to process per model per run |
-| `daily_source` | `aemo` | `aemo` (live) or `github` (historical backfill) |
-| `METADATA_LOCAL_PATH` | `/tmp/ducklake_metadata.db` | DuckLake SQLite metadata DB path |
+| Variable               | Default                                  | Purpose                          |
+|------------------------|------------------------------------------|----------------------------------|
+| `ROOT_PATH`            | `abfss://{WORKSPACE}@onelake.../{LAKEHOUSE}` | OneLake storage root        |
+| `METADATA_LOCAL_PATH`  | `/lakehouse/default/Files/metadata.db`   | DuckLake SQLite metadata DB      |
+| `DBT_SCHEMA`           | `aemo`                                   | Target schema                    |
+| `download_limit`       | `2`                                      | Max files to download per source |
+| `process_limit`        | `500`                                    | Max files to process per model   |
+| `daily_source`         | `aemo`                                   | `aemo` (live) or `github` (backfill) |
