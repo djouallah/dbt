@@ -287,7 +287,7 @@ def deploy_notebook(download_limit=100, process_limit=100):
                     if part["payload"] == notebook_base64:
                         print(f"  notebook unchanged (id: {notebook_id})")
                         return notebook_id
-        except (KeyError, IndexError):
+        except (KeyError, IndexError, AttributeError, TypeError):
             pass
 
         resp = requests.post(
@@ -384,7 +384,7 @@ def deploy_pipeline(notebook_id):
                     if existing_nb_id == notebook_id:
                         print(f"  pipeline unchanged (notebook_id matches)")
                         return pipeline_id
-        except (KeyError, IndexError, json.JSONDecodeError):
+        except (KeyError, IndexError, AttributeError, TypeError, json.JSONDecodeError):
             pass  # can't compare, update anyway
 
         resp = requests.post(
@@ -535,7 +535,7 @@ def deploy_semantic_model():
                     if part["payload"] == bim_base64:
                         print(f"  semantic model unchanged (id: {semantic_model_id})")
                         return
-        except (KeyError, IndexError):
+        except (KeyError, IndexError, AttributeError, TypeError):
             pass
 
         resp = requests.post(
