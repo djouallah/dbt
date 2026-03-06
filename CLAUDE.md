@@ -110,7 +110,6 @@ dbt/
 | METADATA_LOCAL_PATH | /tmp/ducklake_metadata.db | Local path for DuckLake SQLite metadata DB |
 | download_limit | 2 | Max files to download per source per run |
 | process_limit | 500 | Max files to process per model per run |
-| daily_source | aemo | Data source: 'aemo' (live) or 'github' (historical) |
 
 ### DuckDB Extensions
 parquet, azure, httpfs, json, sqlite, ducklake, zipfs (community), delta_export (community)

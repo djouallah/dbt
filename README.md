@@ -39,4 +39,3 @@ See the [blog post](https://datamonkeysite.com/2026/03/05/building-a-data-pipeli
 | `DBT_SCHEMA`           | `aemo`                                   | Target schema                    |
 | `download_limit`       | `2`                                      | Max files to download per source |
 | `process_limit`        | `500`                                    | Max files to process per model   |
-| `daily_source`         | `aemo`                                   | `aemo` (live) or `github` (backfill) |
