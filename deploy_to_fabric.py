@@ -270,26 +270,6 @@ def deploy_notebook(download_limit=100, process_limit=100):
 
     if existing:
         notebook_id = existing["id"]
-        # Check if content already matches
-        resp = requests.post(
-            f"{BASE_URL}/workspaces/{WORKSPACE_ID}/notebooks/{notebook_id}/getDefinition",
-            headers=headers,
-        )
-        resp.raise_for_status()
-        if resp.status_code == 202:
-            op_id = resp.headers.get("x-ms-operation-id")
-            if op_id:
-                wait_for_operation(op_id)
-        try:
-            parts = resp.json().get("definition", {}).get("parts", [])
-            for part in parts:
-                if part.get("path") == "notebook-content.ipynb":
-                    if part["payload"] == notebook_base64:
-                        print(f"  notebook unchanged (id: {notebook_id})")
-                        return notebook_id
-        except (KeyError, IndexError, AttributeError, TypeError):
-            pass
-
         resp = requests.post(
             f"{BASE_URL}/workspaces/{WORKSPACE_ID}/notebooks/{notebook_id}/updateDefinition",
             headers=headers, json=definition_payload,
@@ -365,28 +345,6 @@ def deploy_pipeline(notebook_id):
 
     if existing:
         pipeline_id = existing["id"]
-        # Check if notebook ID already matches
-        resp = requests.post(
-            f"{BASE_URL}/workspaces/{WORKSPACE_ID}/items/{pipeline_id}/getDefinition",
-            headers=headers,
-        )
-        resp.raise_for_status()
-        if resp.status_code == 202:
-            op_id = resp.headers.get("x-ms-operation-id")
-            if op_id:
-                wait_for_operation(op_id)
-        try:
-            parts = resp.json().get("definition", {}).get("parts", [])
-            for part in parts:
-                if part.get("path") == "pipeline-content.json":
-                    existing_json = json.loads(base64.b64decode(part["payload"]).decode("utf-8"))
-                    existing_nb_id = existing_json["properties"]["activities"][0]["typeProperties"]["notebookId"]
-                    if existing_nb_id == notebook_id:
-                        print(f"  pipeline unchanged (notebook_id matches)")
-                        return pipeline_id
-        except (KeyError, IndexError, AttributeError, TypeError, json.JSONDecodeError):
-            pass  # can't compare, update anyway
-
         resp = requests.post(
             f"{BASE_URL}/workspaces/{WORKSPACE_ID}/items/{pipeline_id}/updateDefinition",
             headers=headers, json=pipeline_def,
@@ -518,26 +476,6 @@ def deploy_semantic_model():
 
     if existing:
         semantic_model_id = existing["id"]
-        # Check if BIM content already matches
-        resp = requests.post(
-            f"{BASE_URL}/workspaces/{WORKSPACE_ID}/semanticModels/{semantic_model_id}/getDefinition",
-            headers=headers,
-        )
-        resp.raise_for_status()
-        if resp.status_code == 202:
-            op_id = resp.headers.get("x-ms-operation-id")
-            if op_id:
-                wait_for_operation(op_id)
-        try:
-            existing_parts = resp.json().get("definition", {}).get("parts", [])
-            for part in existing_parts:
-                if part.get("path") == "model.bim":
-                    if part["payload"] == bim_base64:
-                        print(f"  semantic model unchanged (id: {semantic_model_id})")
-                        return
-        except (KeyError, IndexError, AttributeError, TypeError):
-            pass
-
         resp = requests.post(
             f"{BASE_URL}/workspaces/{WORKSPACE_ID}/semanticModels/{semantic_model_id}/updateDefinition",
             headers=headers, json=sm_definition,
