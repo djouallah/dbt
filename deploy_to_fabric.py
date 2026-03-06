@@ -27,7 +27,7 @@ import requests
 from azure.identity import AzureCliCredential
 from azure.storage.filedatalake import DataLakeServiceClient
 
-ALL_STEPS = ["lakehouse", "files", "notebook", "pipeline", "schedule", "semantic_model"]
+ALL_STEPS = ["lakehouse", "files", "initial_load", "notebook", "semantic_model", "pipeline", "schedule"]
 parser = argparse.ArgumentParser(description="Deploy dbt project to Microsoft Fabric")
 parser.add_argument("steps", nargs="*", default=None,
                     help=f"Steps to deploy (default: all). Choices: {', '.join(ALL_STEPS)}")
@@ -136,6 +136,7 @@ lakehouse = next(
     None,
 )
 
+FIRST_DEPLOY = False
 if lakehouse is None and "lakehouse" in STEPS:
     resp = requests.post(
         f"{BASE_URL}/workspaces/{WORKSPACE_ID}/lakehouses",
@@ -148,6 +149,7 @@ if lakehouse is None and "lakehouse" in STEPS:
     resp.raise_for_status()
     lakehouse = resp.json()
     time.sleep(2)
+    FIRST_DEPLOY = True
     print(f"  created lakehouse '{LAKEHOUSE_NAME}'")
 elif lakehouse is None:
     print(f"  ERROR: lakehouse '{LAKEHOUSE_NAME}' does not exist. Run with 'lakehouse' step first.")
@@ -193,8 +195,8 @@ def deploy_files():
 
 
 # --- Step: notebook ---
-def deploy_notebook():
-    print(f"Deploying notebook '{NOTEBOOK_NAME}' to workspace...")
+def deploy_notebook(download_limit=100, process_limit=100):
+    print(f"Deploying notebook '{NOTEBOOK_NAME}' (download_limit={download_limit})...")
 
     notebook_json = {
         "nbformat": 4,
@@ -221,8 +223,8 @@ def deploy_notebook():
                     "import os\n",
                     f"os.environ['ROOT_PATH']           = '{ROOT_PATH}'\n",
                     f"os.environ['METADATA_LOCAL_PATH'] = '{METADATA_LOCAL_PATH}'\n",
-                    "os.environ['download_limit']      = '100'\n",
-                    "os.environ['process_limit']       = '100'\n",
+                    f"os.environ['download_limit']      = '{download_limit}'\n",
+                    f"os.environ['process_limit']       = '{process_limit}'\n",
                     "\n",
                     "!cd /lakehouse/default/Files/dbt && dbt run --target prod && dbt test --target prod",
                 ],
@@ -404,6 +406,37 @@ def deploy_schedule(pipeline_id):
         print(f"  created schedule (id: {schedule_id})")
 
 
+# --- Step: run notebook one-off and wait ---
+def run_notebook_and_wait(notebook_id):
+    print("Triggering notebook run...")
+    resp = requests.post(
+        f"{BASE_URL}/workspaces/{WORKSPACE_ID}/items/{notebook_id}/jobs/instances?jobType=RunNotebook",
+        headers=headers,
+    )
+    resp.raise_for_status()
+    location = resp.headers.get("Location")
+    if not location:
+        print("  WARNING: no job location returned, cannot wait for completion")
+        return False
+
+    print("  waiting for notebook to complete (this may take several minutes)...")
+    for i in range(120):  # up to 20 minutes
+        time.sleep(10)
+        resp = requests.get(location, headers=headers)
+        resp.raise_for_status()
+        status = resp.json().get("status")
+        if status == "Completed":
+            print("  notebook run completed successfully")
+            return True
+        if status in ("Failed", "Cancelled", "Deduped"):
+            print(f"  notebook run {status.lower()}")
+            return False
+        if i % 6 == 0:
+            print(f"  still running... ({i * 10}s)")
+    print("  notebook run timed out")
+    return False
+
+
 # --- Step: semantic_model ---
 def deploy_semantic_model():
     print(f"Deploying semantic model '{SEMANTIC_MODEL_NAME}'...")
@@ -488,13 +521,23 @@ print(f"\nSteps: {', '.join(s for s in ALL_STEPS if s in STEPS)}\n")
 if "files" in STEPS:
     deploy_files()
 
+if "initial_load" in STEPS:
+    print("\nInitial load: deploying notebook with download_limit=1 to seed data...")
+    notebook_id = deploy_notebook(download_limit=1, process_limit=1)
+    run_notebook_and_wait(notebook_id)
+    # Update notebook back to normal limits
+    deploy_notebook(download_limit=100, process_limit=100)
+    print("  notebook updated back to download_limit=100")
+
 notebook_id = None
 if "notebook" in STEPS:
     notebook_id = deploy_notebook()
 
+if "semantic_model" in STEPS:
+    deploy_semantic_model()
+
 if "pipeline" in STEPS:
     if notebook_id is None:
-        # Look up existing notebook ID
         resp = requests.get(f"{BASE_URL}/workspaces/{WORKSPACE_ID}/notebooks", headers=headers)
         resp.raise_for_status()
         nb = next((nb for nb in resp.json().get("value", []) if nb["displayName"] == NOTEBOOK_NAME), None)
@@ -518,8 +561,5 @@ if "schedule" in STEPS:
             print(f"  ERROR: pipeline '{PIPELINE_NAME}' not found. Deploy pipeline first.")
             sys.exit(1)
     deploy_schedule(pipeline_id)
-
-if "semantic_model" in STEPS:
-    deploy_semantic_model()
 
 print("\nDeploy complete.")
