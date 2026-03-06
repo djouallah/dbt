@@ -47,7 +47,7 @@ LAKEHOUSE_NAME            = "raw"
 NOTEBOOK_NAME             = "run"
 PIPELINE_NAME             = "run_pipeline"
 PIPELINE_TIMEOUT          = "0.01:00:00"  # 1 hour
-SCHEDULE_INTERVAL_MINUTES = 60
+SCHEDULE_INTERVAL_MINUTES = 30
 METADATA_LOCAL_PATH       = '/lakehouse/default/Files/metadata.db'
 
 EXCLUDE_DIRS = {".git", "target", "logs", "dbt_packages", "__pycache__", ".github", ".claude"}
