@@ -565,11 +565,13 @@ if "test_semantic_model" in STEPS:
         print(f"  ERROR: semantic model '{SEMANTIC_MODEL_NAME}' not found")
         sys.exit(1)
     sm_id = sm["id"]
-    # Run DAX query to verify data (uses datasets endpoint, not semanticModels)
+    # Run DAX query to verify data (Power BI API needs its own token scope)
+    pbi_token = credential.get_token("https://analysis.windows.net/powerbi/api/.default").token
+    pbi_headers = {"Authorization": f"Bearer {pbi_token}", "Content-Type": "application/json"}
     dax_query = "EVALUATE ROW(\"rows\", COUNTROWS(fct_summary), \"duids\", COUNTROWS(dim_duid), \"dates\", COUNTROWS(dim_calendar))"
     resp = requests.post(
         f"https://api.powerbi.com/v1.0/myorg/groups/{WORKSPACE_ID}/datasets/{sm_id}/executeQueries",
-        headers=headers,
+        headers=pbi_headers,
         json={"queries": [{"query": dax_query}], "serializerSettings": {"includeNulls": True}},
     )
     resp.raise_for_status()
