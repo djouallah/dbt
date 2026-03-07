@@ -44,16 +44,16 @@ URL format: `https://onelake.dfs.fabric.microsoft.com/{WORKSPACE_ID}/{LAKEHOUSE_
     "type": "entity",
     "entityName": "table_name",
     "expressionSource": "DirectLake",
-    "schemaName": "aemo"
+    "schemaName": "mart"
   }
 }
 ```
-- `schemaName` maps to folder under `Tables/` (e.g., `Tables/aemo/dim_calendar/`)
+- `schemaName` maps to folder under `Tables/` (e.g., `Tables/mart/dim_calendar/`)
 - `entityName` is the Delta table folder name
 - `expressionSource` references the M expression name
 
 ## Required on Tables
-- `sourceLineageTag`: `[schema].[table_name]` (e.g., `[aemo].[fct_summary]`)
+- `sourceLineageTag`: `[schema].[table_name]` (e.g., `[mart].[fct_summary]`)
 
 ## Required on Columns
 - `sourceLineageTag`: column name (e.g., `"date"`, `"DUID"`)
@@ -68,7 +68,7 @@ Schema prefix must match actual schema where tables live:
 ```json
 {
   "name": "PBI_RemovedChildren",
-  "value": "[{\"sourceLineageTag\":\"[raw].[fct_scada]\"},{\"sourceLineageTag\":\"[raw].[fct_scada_today]\"},{\"sourceLineageTag\":\"[raw].[fct_price]\"},{\"sourceLineageTag\":\"[raw].[fct_price_today]\"},{\"sourceLineageTag\":\"[raw].[stg_csv_archive_log]\"}]"
+  "value": "[{\"sourceLineageTag\":\"[landing].[fct_scada]\"},{\"sourceLineageTag\":\"[landing].[fct_scada_today]\"},{\"sourceLineageTag\":\"[landing].[fct_price]\"},{\"sourceLineageTag\":\"[landing].[fct_price_today]\"},{\"sourceLineageTag\":\"[landing].[stg_csv_archive_log]\"}]"
 }
 ```
 

@@ -1,6 +1,6 @@
 # Reference: dbt in Fabric Notebook — Full Code Examples
 
-## Complete profiles.yml
+## Complete profiles.yml (3 targets)
 
 ```yaml
 aemo_electricity:
@@ -11,7 +11,60 @@ aemo_electricity:
       path: ':memory:'
       database: ducklake
       threads: 1
-      schema: "{{ env_var('DBT_SCHEMA', 'aemo') }}"
+      schema: "{{ env_var('DBT_SCHEMA', 'mart') }}"
+      config_options:
+        allow_unsigned_extensions: true
+      settings:
+        preserve_insertion_order: false
+      extensions:
+        - parquet
+        - sqlite
+        - httpfs
+        - json
+        - ducklake
+        - name: delta_export
+          repo: community
+      attach:
+        - path: "ducklake:sqlite:{{ env_var('METADATA_LOCAL_PATH', '/tmp/metadata.db') }}"
+          alias: ducklake
+          options:
+            data_path: "{{ env_var('ROOT_PATH', '/tmp') }}/Tables"
+            data_inlining_row_limit: 0
+    ci:
+      type: duckdb
+      path: ':memory:'
+      database: ducklake
+      threads: 1
+      schema: "{{ env_var('DBT_SCHEMA', 'mart') }}"
+      config_options:
+        allow_unsigned_extensions: true
+      settings:
+        preserve_insertion_order: false
+        azure_storage_connection_string: "DefaultEndpointsProtocol=http;AccountName=devstoreaccount1;AccountKey=Eby8vdM02xNOcqFlqUwJPLlmEtlCDXJ1OUzFT50uSRZ6IFsuFq2UVErCz4I6tq/K1SZFPTOtr/KBHBeksoGMGw==;BlobEndpoint=http://127.0.0.1:10000/devstoreaccount1;"
+      secrets:
+        - type: azure
+          provider: config
+          connection_string: "DefaultEndpointsProtocol=http;AccountName=devstoreaccount1;AccountKey=Eby8vdM02xNOcqFlqUwJPLlmEtlCDXJ1OUzFT50uSRZ6IFsuFq2UVErCz4I6tq/K1SZFPTOtr/KBHBeksoGMGw==;BlobEndpoint=http://127.0.0.1:10000/devstoreaccount1;"
+      extensions:
+        - parquet
+        - sqlite
+        - azure
+        - json
+        - ducklake
+        - name: delta_export
+          repo: community
+      attach:
+        - path: "ducklake:sqlite:{{ env_var('METADATA_LOCAL_PATH', '/tmp/metadata.db') }}"
+          alias: ducklake
+          options:
+            data_path: "{{ env_var('ROOT_PATH', 'az://dbt') }}/Tables"
+            data_inlining_row_limit: 0
+    prod:
+      type: duckdb
+      path: ':memory:'
+      database: ducklake
+      threads: 1
+      schema: "{{ env_var('DBT_SCHEMA', 'mart') }}"
       config_options:
         allow_unsigned_extensions: true
       settings:
@@ -23,8 +76,6 @@ aemo_electricity:
         - httpfs
         - json
         - ducklake
-        - name: zipfs
-          repo: community
         - name: delta_export
           repo: community
       attach:
@@ -34,6 +85,11 @@ aemo_electricity:
             data_path: "{{ env_var('ROOT_PATH') }}/Tables"
             data_inlining_row_limit: 0
 ```
+
+Key differences between targets:
+- **dev**: Local filesystem, `httpfs` for downloads, no `azure` extension needed
+- **ci**: Azurite emulator (`az://`), `azure` extension + connection string in both `settings` and `secrets`
+- **prod**: OneLake (`abfss://`), `azure` + `httpfs` extensions
 
 ## Complete dbt_project.yml
 
@@ -47,13 +103,12 @@ test-paths: ["tests"]
 macro-paths: ["macros"]
 
 vars:
-  # download_limit: max files per source per run (default: 100)
-  # process_limit: max files per model per run (default: 100)
+  # download_limit: max files per source per run (default: 2)
+  # process_limit: max files per model per run (default: 1000)
 
 on-run-start:
   - "CALL ducklake.set_option('rewrite_delete_threshold', 0)"
   - "CALL ducklake.set_option('target_file_size', '128MB')"
-  - "{{ download() }}"
 
 on-run-end:
   - "CALL ducklake_rewrite_data_files('ducklake')"
@@ -62,11 +117,17 @@ on-run-end:
 
 models:
   aemo_electricity:
+    staging:
+      +materialized: view
+      +schema: landing
     dimensions:
       +materialized: table
     marts:
       +materialized: incremental
+      +schema: landing
 ```
+
+Note: `stg_csv_archive_log.py` overrides to `materialized: table` in its `dbt.config()`. `fct_summary.sql` overrides back to `schema='mart'`.
 
 ## Incremental Fact Model with Pre-Hook and process_limit
 
@@ -92,7 +153,7 @@ Example from fct_scada — reads only unprocessed files, capped by process_limit
             SELECT DISTINCT split_part(file, '.', 1) FROM {{ this }}
           )
         {% endif %}
-        LIMIT {{ env_var('process_limit', '100') }}
+        LIMIT {{ env_var('process_limit', '1000') }}
       )
     )"
 ) }}
@@ -143,15 +204,33 @@ Example from dim_duid — only rebuilds when new DUIDs appear:
 {% endif %}
 ```
 
+## Python Model for Data Ingestion
+
+`stg_csv_archive_log.py` handles all data downloads as a dbt Python model:
+
+```python
+def model(dbt, session):
+    dbt.config(materialized="table", schema="landing")
+
+    # Downloads ZIPs from AEMO/GitHub, extracts CSVs, archives to OneLake
+    # Tracks downloads in csv_archive_log.parquet on abfss://
+    # Uses ThreadPoolExecutor for parallel downloads
+    # Returns DuckDB relation (no pandas/numpy)
+
+    return session.sql("SELECT * FROM _csv_archive_log")
+```
+
+Key pattern: the Python model uses `session.sql()` for all DuckDB operations and returns a DuckDB relation directly — no pandas or numpy dependencies needed. File uploads to OneLake use `COPY ... TO ... (FORMAT BLOB)` through DuckDB.
+
 ## Environment Variables Summary
 
-| Variable | Example Value | Required |
-|----------|---------------|----------|
-| `DBT_SCHEMA` | `aemo` | Yes |
-| `ROOT_PATH` | `abfss://workspace@onelake.dfs.fabric.microsoft.com/lakehouse.Lakehouse` | Yes |
-| `download_limit` | `100` | No (default: 100) |
-| `process_limit` | `100` | No (default: 100) |
-| `METADATA_LOCAL_PATH` | `/synfs/nb_resource/builtin/metadata.db` | Yes (for Fabric) |
+| Variable | Example Value | Default | Required |
+|----------|---------------|---------|----------|
+| `DBT_SCHEMA` | `mart` | `mart` | No |
+| `ROOT_PATH` | `abfss://workspace@onelake.dfs.fabric.microsoft.com/lakehouse.Lakehouse` | `/tmp` | Yes (for Fabric) |
+| `download_limit` | `100` | `2` | No |
+| `process_limit` | `1000` | `1000` | No |
+| `METADATA_LOCAL_PATH` | `/lakehouse/default/Files/metadata.db` | `/tmp/metadata.db` | Yes (for Fabric) |
 
 ## DuckDB / DuckLake Options Reference
 
@@ -176,20 +255,15 @@ pip install duckdb dbt-duckdb
 Set env vars (ROOT_PATH, METADATA_LOCAL_PATH, process_limit, etc.)
   |
   v
-git clone <dbt-project> /tmp/dbt
-  |
-  v
-dbt run
+dbt run --target prod --profiles-dir .
   |-- on-run-start: set_option(rewrite_delete_threshold, 0)
   |-- on-run-start: set_option(target_file_size, '128MB')
-  |-- on-run-start: download() macro
-  |     |-- Load csv_archive_log.parquet from abfss://
-  |     |-- Download new files from AEMO / GitHub
-  |     |-- Archive ZIPs to abfss://ROOT_PATH/Files/csv/
-  |     |-- Update csv_archive_log.parquet
   |
   |-- Models (dependency order):
-  |     |-- stg_csv_archive_log (VIEW)
+  |     |-- stg_csv_archive_log (Python model, TABLE)
+  |     |     |-- Downloads new files from AEMO / GitHub
+  |     |     |-- Archives gzipped CSVs to abfss://ROOT_PATH/Files/csv/
+  |     |     |-- Updates csv_archive_log.parquet
   |     |-- dim_calendar, dim_duid (TABLE)
   |     |-- fct_scada, fct_price (incremental by file, LIMIT process_limit)
   |     |-- fct_scada_today, fct_price_today (incremental by file, LIMIT process_limit)
@@ -202,7 +276,7 @@ dbt run
   |     |-- Writes _delta_log/ JSON files to abfss://ROOT_PATH/Tables/
   |
   v
-dbt test
+dbt test --target prod --profiles-dir .
   |
   v
 Fabric / Power BI reads Delta tables from OneLake

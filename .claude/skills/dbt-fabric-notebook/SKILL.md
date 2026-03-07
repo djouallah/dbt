@@ -13,16 +13,20 @@ This skill explains how to run a full dbt pipeline inside a Microsoft Fabric Pyt
 Fabric Notebook (ephemeral Python session)
   -> pip install duckdb, dbt-duckdb
   -> dbt run (DuckDB in-memory + DuckLake extension)
-       -> on-run-start: installs delta_export extension, downloads data
+       -> on-run-start: set DuckLake options
+       -> stg_csv_archive_log.py (Python model): downloads + archives data
        -> Transforms with dbt models (incremental by file)
        -> DuckLake writes Parquet to abfss://.../<lakehouse>/Tables/
-       -> on-run-end: CALL delta_export() writes Delta Lake _delta_log
+       -> on-run-end: DuckLake maintenance + CALL delta_export()
+  -> dbt test
   -> Fabric / Power BI reads Delta tables natively
 ```
 
 Key insight: DuckDB runs **in-memory** inside the notebook. DuckLake stores data as Parquet on OneLake (abfss://) and keeps metadata in a local SQLite file. The `delta_export` DuckDB extension converts DuckLake metadata into Delta Lake transaction logs — no separate Python package needed. Everything runs inside `dbt run`.
 
-## Notebook Template (4 cells)
+## Notebook Template (2 cells)
+
+The deploy script generates the notebook with env vars baked into the run command. The notebook only needs two cells:
 
 ### Cell 1 — Install dependencies
 ```python
@@ -32,45 +36,36 @@ import sys
 sys.exit(0)  # Restart kernel to pick up new packages
 ```
 
-### Cell 2 — Environment variables
+### Cell 2 — Run dbt
 ```python
 import os
-os.environ['DBT_SCHEMA']          = 'my_schema'
 os.environ['ROOT_PATH']           = 'abfss://<workspace>@onelake.dfs.fabric.microsoft.com/<lakehouse>.Lakehouse'
+os.environ['METADATA_LOCAL_PATH'] = '/lakehouse/default/Files/metadata.db'
 os.environ['download_limit']      = '100'
-os.environ['process_limit']       = '100'
-os.environ['METADATA_LOCAL_PATH'] = '/synfs/nb_resource/builtin/metadata.db'
+os.environ['process_limit']       = '1000'
+!cd /lakehouse/default/Files/dbt && dbt run --target prod --profiles-dir . && dbt test --target prod --profiles-dir .
 ```
 
 | Variable | Purpose |
 |----------|---------|
-| `DBT_SCHEMA` | Target schema name in DuckLake |
 | `ROOT_PATH` | abfss:// path to the Fabric lakehouse root |
-| `download_limit` | Max files to download per source per run |
-| `process_limit` | Max files to process per model per run (default: 100) |
-| `METADATA_LOCAL_PATH` | Local path for DuckLake SQLite metadata DB. Use `/synfs/nb_resource/builtin/` in Fabric — this persists across notebook sessions |
+| `METADATA_LOCAL_PATH` | Local path for DuckLake SQLite metadata DB. `/lakehouse/default/` is a FUSE mount of OneLake — the SQLite file persists across notebook runs |
+| `download_limit` | Max files to download per source per run (default: 2) |
+| `process_limit` | Max files to process per model per run (default: 1000) |
 
-### Cell 3 — Clone dbt project
+Note: `DBT_SCHEMA` defaults to `mart` in profiles.yml. Override only if you need a different schema name.
 
-**Public repo:**
-```python
-!git clone --branch production --single-branch https://github.com/<your-repo>.git /tmp/dbt
-```
+## Data Ingestion via Python Model
 
-**Private repo (production):**
-```python
-pat = mssparkutils.credentials.getSecret('https://<vault-name>.vault.azure.net/', 'github-pat')
-!git clone --branch production --single-branch https://{pat}@github.com/<your-repo>.git /tmp/dbt
-```
+Data download is handled by `stg_csv_archive_log.py` — a **dbt Python model** (materialized as table). This replaces the old `download()` macro approach. The Python model:
 
-For private repos, store a GitHub fine-grained PAT (with `Contents: Read` permission) in Azure Key Vault. Grant the Fabric workspace identity `Key Vault Secrets User` access.
+- Downloads ZIPs from AEMO/GitHub using `urllib.request`
+- Extracts CSVs, gzip-compresses them, uploads to OneLake via DuckDB `COPY ... TO ... (FORMAT BLOB)`
+- Tracks all downloads in `csv_archive_log.parquet` on abfss://
+- Uses `ThreadPoolExecutor` for parallel downloads (batch_size=7, max_workers=8)
+- Returns the full log as a DuckDB relation (no pandas/numpy dependency)
 
-### Cell 4 — Run dbt
-```python
-!cd /tmp/dbt && dbt run && dbt test
-```
-
-Delta export happens automatically via the `on-run-end` hook — no separate step needed.
+This runs as a regular dbt model in dependency order — no on-run-start hook needed.
 
 ## profiles.yml Configuration
 
@@ -83,7 +78,7 @@ my_project:
       path: ':memory:'
       database: ducklake
       threads: 1
-      schema: "{{ env_var('DBT_SCHEMA', 'default') }}"
+      schema: "{{ env_var('DBT_SCHEMA', 'mart') }}"
       config_options:
         allow_unsigned_extensions: true
       settings:
@@ -91,19 +86,16 @@ my_project:
       extensions:
         - parquet
         - sqlite
-        - azure
         - httpfs
         - json
         - ducklake
-        - name: zipfs
-          repo: community
         - name: delta_export
           repo: community
       attach:
-        - path: "ducklake:sqlite:{{ env_var('METADATA_LOCAL_PATH', '/tmp/ducklake_metadata.db') }}"
+        - path: "ducklake:sqlite:{{ env_var('METADATA_LOCAL_PATH', '/tmp/metadata.db') }}"
           alias: ducklake
           options:
-            data_path: "{{ env_var('ROOT_PATH') }}/Tables"
+            data_path: "{{ env_var('ROOT_PATH', '/tmp') }}/Tables"
             data_inlining_row_limit: 0
 ```
 
@@ -114,7 +106,42 @@ Key points:
 - `settings.preserve_insertion_order: false` — reduces memory usage by allowing DuckDB to reorder results
 - `data_path` points to `abfss://.../<lakehouse>/Tables` where Parquet data lives
 - `data_inlining_row_limit: 0` — disables data inlining (small writes go to Parquet, not metadata)
-- Extensions: `azure` for abfss://, `httpfs` for HTTP downloads, `zipfs` for reading CSVs from ZIPs
+
+### CI target with Azurite
+For CI testing, add a separate target with Azure extension and Azurite connection string:
+```yaml
+    ci:
+      type: duckdb
+      path: ':memory:'
+      database: ducklake
+      threads: 1
+      schema: "{{ env_var('DBT_SCHEMA', 'mart') }}"
+      config_options:
+        allow_unsigned_extensions: true
+      settings:
+        preserve_insertion_order: false
+        azure_storage_connection_string: "DefaultEndpointsProtocol=http;AccountName=devstoreaccount1;AccountKey=Eby8vdM02xNOcqFlqUwJPLlmEtlCDXJ1OUzFT50uSRZ6IFsuFq2UVErCz4I6tq/K1SZFPTOtr/KBHBeksoGMGw==;BlobEndpoint=http://127.0.0.1:10000/devstoreaccount1;"
+      secrets:
+        - type: azure
+          provider: config
+          connection_string: "DefaultEndpointsProtocol=http;AccountName=devstoreaccount1;AccountKey=Eby8vdM02xNOcqFlqUwJPLlmEtlCDXJ1OUzFT50uSRZ6IFsuFq2UVErCz4I6tq/K1SZFPTOtr/KBHBeksoGMGw==;BlobEndpoint=http://127.0.0.1:10000/devstoreaccount1;"
+      extensions:
+        - parquet
+        - sqlite
+        - azure
+        - json
+        - ducklake
+        - name: delta_export
+          repo: community
+      attach:
+        - path: "ducklake:sqlite:{{ env_var('METADATA_LOCAL_PATH', '/tmp/metadata.db') }}"
+          alias: ducklake
+          options:
+            data_path: "{{ env_var('ROOT_PATH', 'az://dbt') }}/Tables"
+            data_inlining_row_limit: 0
+```
+
+The CI target uses `az://` (Azurite) instead of `abfss://` (OneLake), and requires both `settings.azure_storage_connection_string` and a `secrets` block for DuckDB's Azure extension to authenticate with the emulator.
 
 ## dbt_project.yml — Delta Export & DuckLake Maintenance
 
@@ -122,7 +149,6 @@ Key points:
 on-run-start:
   - "CALL ducklake.set_option('rewrite_delete_threshold', 0)"
   - "CALL ducklake.set_option('target_file_size', '128MB')"
-  - "{{ download() }}"   # your data ingestion macro
 
 on-run-end:
   - "CALL ducklake_rewrite_data_files('ducklake')"
@@ -130,7 +156,7 @@ on-run-end:
   - "CALL delta_export()"
 ```
 
-`delta_export` is now a **community extension** — installed via `profiles.yml` extensions list (no manual INSTALL/LOAD needed). At run end, DuckLake maintenance compacts data files before `delta_export()` writes Delta Lake transaction logs.
+`delta_export` is a **community extension** — installed via `profiles.yml` extensions list (no manual INSTALL/LOAD needed). At run end, DuckLake maintenance compacts data files before `delta_export()` writes Delta Lake transaction logs.
 
 **Why delta_export is mandatory:** DuckLake is not natively supported by Spark, Power BI, or any other engine in Microsoft Fabric. Without `delta_export`, the Parquet files written by DuckLake are invisible to the rest of the platform. The Delta Lake transaction logs (`_delta_log/`) make the tables readable as standard Delta tables by Power BI, Spark, SQL Analytics, and any Delta-compatible tool.
 
@@ -152,12 +178,12 @@ on-run-end:
 
 Note: `target_file_size` controls both `merge_adjacent_files` merge target and auto-splitting of large inserts. It cannot be set via ATTACH options — must use `set_option`.
 
-## Schema Separation (raw + aemo)
+## Schema Separation (mart + landing)
 
 Separate intermediate tables from Power BI-facing tables using dbt schema config:
 
-- **`aemo`** schema (default from `DBT_SCHEMA`): dim_calendar, dim_duid, fct_summary — exposed to Power BI
-- **`raw`** schema: fct_scada, fct_scada_today, fct_price, fct_price_today, stg_csv_archive_log — intermediate
+- **`mart`** schema (default from `DBT_SCHEMA`): dim_calendar, dim_duid, fct_summary — exposed to Power BI
+- **`landing`** schema: fct_scada, fct_scada_today, fct_price, fct_price_today, stg_csv_archive_log — intermediate
 
 **dbt_project.yml:**
 ```yaml
@@ -165,15 +191,15 @@ models:
   aemo_electricity:
     staging:
       +materialized: view
-      +schema: raw
+      +schema: landing
     dimensions:
       +materialized: table
     marts:
       +materialized: incremental
-      +schema: raw
+      +schema: landing
 ```
 
-Override specific models back to `aemo`: `{{ config(schema='aemo') }}` in `fct_summary.sql`.
+Override specific models back to `mart`: `{{ config(schema='mart') }}` in `fct_summary.sql`.
 
 **Custom schema macro required** (`macros/generate_schema_name.sql`):
 ```sql
@@ -185,7 +211,7 @@ Override specific models back to `aemo`: `{{ config(schema='aemo') }}` in `fct_s
     {%- endif -%}
 {%- endmacro %}
 ```
-Without this, dbt prefixes the target schema (e.g., `aemo_raw` instead of `raw`).
+Without this, dbt prefixes the target schema (e.g., `mart_landing` instead of `landing`).
 
 ## Semantic Model (model.bim)
 
@@ -201,7 +227,7 @@ Key requirements for Direct Lake on OneLake (no SQL endpoint):
 ## Key Patterns
 
 ### Metadata persistence in Fabric
-DuckLake's SQLite metadata DB needs a local filesystem. In Fabric notebooks, use `/synfs/nb_resource/builtin/` — this is the notebook resource folder that persists across sessions. Set `METADATA_LOCAL_PATH` to a file in that folder.
+DuckLake's SQLite metadata DB needs a local filesystem. In Fabric notebooks, use `/lakehouse/default/Files/` — this is a FUSE mount of OneLake that persists across notebook runs without any special sync logic. Set `METADATA_LOCAL_PATH` to a file in that folder (e.g., `/lakehouse/default/Files/metadata.db`).
 
 ### Incremental by file with process_limit
 Track which source files have been processed using a `file` column in each fact table. Pre-hooks use DuckDB `SET VARIABLE` to pass only unprocessed file paths, capped by `process_limit`:
@@ -214,12 +240,12 @@ Track which source files have been processed using a `file` column in each fact 
       SELECT list(...)
       FROM (
         SELECT source_filename
-        FROM {{ ref('stg_archive_log') }}
+        FROM {{ ref('stg_csv_archive_log') }}
         WHERE source_type = 'daily'
         {% if is_incremental() %}
           AND source_filename NOT IN (SELECT DISTINCT file FROM {{ this }})
         {% endif %}
-        LIMIT {{ env_var('process_limit', '100') }}
+        LIMIT {{ env_var('process_limit', '1000') }}
       )
     )"
 ) }}
