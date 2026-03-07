@@ -91,7 +91,7 @@ def model(dbt, session):
             os.makedirs(dest_dir, exist_ok=True)
         session.sql(
             f"COPY (SELECT content FROM read_blob('{escaped_temp}')) "
-            f"TO '{dest_path}' (FORMAT BLOB)"
+            f"TO '{dest_path}' (FORMAT BLOB, COMPRESSION 'none')"
         )
 
     # =========================================================================
