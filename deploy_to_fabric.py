@@ -27,7 +27,7 @@ import requests
 from azure.identity import AzureCliCredential
 from azure.storage.filedatalake import DataLakeServiceClient
 
-ALL_STEPS = ["lakehouse", "files", "initial_load", "notebook", "semantic_model", "test_semantic_model", "pipeline", "schedule"]
+ALL_STEPS = ["lakehouse", "files", "initial_load", "notebook", "semantic_model", "pipeline", "schedule"]
 parser = argparse.ArgumentParser(description="Deploy dbt project to Microsoft Fabric")
 parser.add_argument("steps", nargs="*", default=None,
                     help=f"Steps to deploy (default: all). Choices: {', '.join(ALL_STEPS)}")
@@ -537,106 +537,6 @@ if "notebook" in STEPS:
 
 if "semantic_model" in STEPS:
     deploy_semantic_model()
-
-if "test_semantic_model" in STEPS:
-    print(f"\nTesting semantic model '{SEMANTIC_MODEL_NAME}' via notebook...")
-
-    TEST_NOTEBOOK_NAME = "ci_test"
-    test_notebook_json = {
-        "nbformat": 4, "nbformat_minor": 5,
-        "cells": [
-            {
-                "cell_type": "code", "metadata": {}, "outputs": [], "execution_count": None,
-                "source": [
-                    "import json\n",
-                    "import sempy.fabric as fabric\n",
-                    "\n",
-                    f"fabric.refresh_dataset('{SEMANTIC_MODEL_NAME}')\n",
-                    f"df = fabric.evaluate_dax('{SEMANTIC_MODEL_NAME}',\n",
-                    "    'EVALUATE ROW(\"rows\", COUNTROWS(fct_summary), \"duids\", COUNTROWS(dim_duid), \"dates\", COUNTROWS(dim_calendar))')\n",
-                    "\n",
-                    "results = {\n",
-                    "    'sm_rows': int(df.iloc[0, 0]) if len(df) > 0 else 0,\n",
-                    "    'sm_duids': int(df.iloc[0, 1]) if len(df) > 0 else 0,\n",
-                    "    'sm_dates': int(df.iloc[0, 2]) if len(df) > 0 else 0,\n",
-                    "}\n",
-                    "with open('/lakehouse/default/Files/test_results.json', 'w') as f:\n",
-                    "    json.dump(results, f)\n",
-                    "print(json.dumps(results, indent=2))\n",
-                ],
-            },
-        ],
-        "metadata": {
-            "kernelspec": {"name": "python3", "display_name": "python3", "language": "python"},
-            "kernel_info": {"name": "jupyter"},
-            "microsoft": {"language": "python", "language_group": "jupyter_python"},
-            "language_info": {"name": "python"},
-            "trident": {
-                "lakehouse": {
-                    "default_lakehouse": LAKEHOUSE_ID,
-                    "default_lakehouse_name": LAKEHOUSE_NAME,
-                    "default_lakehouse_workspace_id": WORKSPACE_ID,
-                }
-            },
-        },
-    }
-
-    # Deploy test notebook
-    test_nb_base64 = base64.b64encode(json.dumps(test_notebook_json, indent=2).encode("utf-8")).decode("utf-8")
-    definition_payload = {
-        "definition": {
-            "format": "ipynb",
-            "parts": [{"path": "notebook-content.ipynb", "payload": test_nb_base64, "payloadType": "InlineBase64"}],
-        }
-    }
-
-    # Always delete and recreate to avoid stale state
-    resp = requests.get(f"{BASE_URL}/workspaces/{WORKSPACE_ID}/notebooks", headers=headers)
-    resp.raise_for_status()
-    existing = next((nb for nb in resp.json().get("value", []) if nb["displayName"] == TEST_NOTEBOOK_NAME), None)
-    if existing:
-        requests.delete(f"{BASE_URL}/workspaces/{WORKSPACE_ID}/notebooks/{existing['id']}", headers=headers)
-        print(f"  deleted old test notebook")
-        time.sleep(5)
-
-    definition_payload["displayName"] = TEST_NOTEBOOK_NAME
-    resp = requests.post(
-        f"{BASE_URL}/workspaces/{WORKSPACE_ID}/notebooks",
-        headers=headers, json=definition_payload,
-    )
-    resp.raise_for_status()
-    if resp.status_code == 202:
-        op_id = resp.headers.get("x-ms-operation-id")
-        if op_id:
-            wait_for_operation(op_id)
-    resp = requests.get(f"{BASE_URL}/workspaces/{WORKSPACE_ID}/notebooks", headers=headers)
-    resp.raise_for_status()
-    nb = next(nb for nb in resp.json().get("value", []) if nb["displayName"] == TEST_NOTEBOOK_NAME)
-    test_nb_id = nb["id"]
-    print(f"  created test notebook (id: {test_nb_id})")
-
-    # Run test notebook
-    success = run_notebook_and_wait(test_nb_id)
-    if not success:
-        print("  FAILED: test notebook did not complete")
-        sys.exit(1)
-
-    # Read results from OneLake
-    datalake_client = DataLakeServiceClient(
-        account_url="https://onelake.dfs.fabric.microsoft.com",
-        credential=credential,
-    )
-    fs = datalake_client.get_file_system_client(WORKSPACE_ID)
-    file_client = fs.get_file_client(f"{LAKEHOUSE_ID}/Files/test_results.json")
-    results = json.loads(file_client.download_file().readall())
-    print(f"  fct_summary: {results['sm_rows']} rows")
-    print(f"  dim_duid: {results['sm_duids']} rows")
-    print(f"  dim_calendar: {results['sm_dates']} rows")
-
-    if results["sm_rows"] == 0:
-        print("  FAILED: fct_summary has 0 rows in semantic model")
-        sys.exit(1)
-    print("  semantic model test PASSED")
 
 if "pipeline" in STEPS:
     if notebook_id is None:

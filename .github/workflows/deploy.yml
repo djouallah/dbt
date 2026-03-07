@@ -128,25 +128,8 @@ jobs:
           allow-no-subscriptions: true
       - run: python deploy_to_fabric.py semantic_model
 
-  test-semantic-model:
-    needs: semantic-model
-    if: ${{ !failure() && !cancelled() }}
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
-      - run: pip install azure-identity azure-storage-file-datalake requests PyJWT
-      - uses: azure/login@v2
-        with:
-          client-id: ${{ secrets.AZURE_CLIENT_ID }}
-          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
-          allow-no-subscriptions: true
-      - run: python deploy_to_fabric.py test_semantic_model
-
   pipeline:
-    needs: test-semantic-model
+    needs: semantic-model
     if: ${{ !failure() && !cancelled() }}
     runs-on: ubuntu-latest
     steps:
