@@ -281,7 +281,7 @@ def model(dbt, session):
         process_downloads(price_to_download, 'price_today', 'price_today')
 
     # =========================================================================
-    # DUID REFERENCE DATA (always refresh)
+    # DUID REFERENCE DATA (skip if downloaded less than 24 hours ago)
     # =========================================================================
 
     duid_sources = [
@@ -311,31 +311,45 @@ def model(dbt, session):
         ),
     ]
 
-    duid_dir = f"{csv_archive_path}/duid"
-    if not duid_dir.startswith(("az://", "abfss://")):
-        os.makedirs(duid_dir, exist_ok=True)
+    # Check if DUID data was downloaded recently (< 24 hours ago)
+    last_duid_download = session.sql("""
+        SELECT max(archived_at) FROM _csv_archive_log
+        WHERE source_type LIKE 'duid_%'
+    """).fetchone()[0]
 
-    for source_type, source_filename, url, csv_filename in duid_sources:
-        session.sql(f"""
-            COPY (
-                SELECT * FROM read_csv_auto('{url}',
-                    null_padding=true, ignore_errors=true
-                    {", header=true" if source_filename == "WA_ENERGY" else ""})
-            ) TO ('{csv_archive_path}/duid/{csv_filename}') (FORMAT CSV, HEADER)
-        """)
+    skip_duid = (
+        last_duid_download is not None
+        and (datetime.now() - last_duid_download).total_seconds() < 86400
+    )
 
-    # Delete old DUID log entries and re-insert
-    session.sql("DELETE FROM _csv_archive_log WHERE source_type LIKE 'duid_%'")
-    now = datetime.now().isoformat()
-    for source_type, source_filename, url, csv_filename in duid_sources:
-        csv_base = csv_filename.rsplit(".", 1)[0]
-        session.sql(f"""
-            INSERT INTO _csv_archive_log VALUES (
-                '{source_type}', '{source_filename}',
-                '/duid/{csv_filename}', '{now}'::TIMESTAMP,
-                NULL, '{url}', NULL, '{csv_base}'
-            )
-        """)
+    if skip_duid:
+        print(f"  DUID data is fresh (last download: {last_duid_download}), skipping")
+    else:
+        duid_dir = f"{csv_archive_path}/duid"
+        if not duid_dir.startswith(("az://", "abfss://")):
+            os.makedirs(duid_dir, exist_ok=True)
+
+        for source_type, source_filename, url, csv_filename in duid_sources:
+            session.sql(f"""
+                COPY (
+                    SELECT * FROM read_csv_auto('{url}',
+                        null_padding=true, ignore_errors=true
+                        {", header=true" if source_filename == "WA_ENERGY" else ""})
+                ) TO ('{csv_archive_path}/duid/{csv_filename}') (FORMAT CSV, HEADER)
+            """)
+
+        # Delete old DUID log entries and re-insert
+        session.sql("DELETE FROM _csv_archive_log WHERE source_type LIKE 'duid_%'")
+        now = datetime.now().isoformat()
+        for source_type, source_filename, url, csv_filename in duid_sources:
+            csv_base = csv_filename.rsplit(".", 1)[0]
+            session.sql(f"""
+                INSERT INTO _csv_archive_log VALUES (
+                    '{source_type}', '{source_filename}',
+                    '/duid/{csv_filename}', '{now}'::TIMESTAMP,
+                    NULL, '{url}', NULL, '{csv_base}'
+                )
+            """)
 
     # =========================================================================
     # Save log to parquet and return

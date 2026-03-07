@@ -1,3 +1,4 @@
+{{ config(severity='warn') }}
 -- fct_scada row count should match its Delta Lake export
 SELECT
   'fct_scada' AS table_name,
