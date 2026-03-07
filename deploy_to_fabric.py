@@ -463,41 +463,6 @@ def run_notebook_and_wait(notebook_id):
     return False
 
 
-# --- Step: refresh semantic model ---
-def refresh_semantic_model(semantic_model_id):
-    """Refresh semantic model using Fabric Job Scheduler API (works with service principals)."""
-    print("  refreshing semantic model...")
-    resp = requests.post(
-        f"{BASE_URL}/workspaces/{WORKSPACE_ID}/items/{semantic_model_id}/jobs/DefaultJob/instances",
-        headers=headers,
-    )
-    if resp.status_code != 202:
-        print(f"  refresh failed ({resp.status_code}): {resp.text}")
-        return
-
-    location = resp.headers.get("Location")
-    if not location:
-        print("  refresh triggered (no location to poll)")
-        return
-
-    print("  refresh triggered, waiting for completion...")
-    for attempt in range(60):
-        time.sleep(5)
-        sr = requests.get(location, headers=headers)
-        sr.raise_for_status()
-        status = sr.json().get("status")
-        if status == "Completed":
-            print("  refresh completed")
-            return
-        if status in ("Failed", "Cancelled"):
-            error = sr.json().get("failureReason", sr.json())
-            print(f"  refresh {status.lower()}: {error}")
-            return
-        if attempt % 6 == 0 and attempt > 0:
-            print(f"  refresh still running...")
-    print("  refresh timed out")
-
-
 # --- Step: semantic_model ---
 def deploy_semantic_model():
     print(f"Deploying semantic model '{SEMANTIC_MODEL_NAME}'...")
@@ -556,7 +521,9 @@ def deploy_semantic_model():
         semantic_model_id = sm["id"]
         print(f"  created semantic model '{SEMANTIC_MODEL_NAME}' (id: {semantic_model_id})")
 
-    refresh_semantic_model(semantic_model_id)
+    # No explicit refresh needed — Direct Lake reads from Delta tables on query.
+    # Power BI refresh API returns 403 for service principals, and Fabric Job
+    # Scheduler doesn't support semantic models. Data is picked up automatically.
 
 
 # --- Run selected steps ---
