@@ -71,7 +71,16 @@ def model(dbt, session):
     # =========================================================================
     def download_and_extract(url, temp_dir):
         """Download ZIP from url, extract CSV files to temp_dir. Thread-safe."""
-        zip_bytes = urllib.request.urlopen(url, timeout=60).read()
+        req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0 (dbt-aemo)"})
+        for attempt in range(3):
+            try:
+                zip_bytes = urllib.request.urlopen(req, timeout=60).read()
+                break
+            except urllib.error.HTTPError as e:
+                if attempt < 2:
+                    import time; time.sleep(2 ** attempt)
+                    continue
+                raise
         z = zipfile.ZipFile(io.BytesIO(zip_bytes))
         results = []
         for name in z.namelist():
@@ -113,8 +122,11 @@ def model(dbt, session):
                     }
                     for future in as_completed(future_to_meta):
                         url, src_fn = future_to_meta[future]
-                        for csv_name, safe_name, temp_path in future.result():
-                            extracted.append((src_fn, safe_name, temp_path, url))
+                        try:
+                            for csv_name, safe_name, temp_path in future.result():
+                                extracted.append((src_fn, safe_name, temp_path, url))
+                        except Exception as e:
+                            print(f"  WARN: skipping {src_fn}: {e}")
 
                 now = datetime.now().isoformat()
                 for src_fn, csv_name, temp_path, url in extracted:
