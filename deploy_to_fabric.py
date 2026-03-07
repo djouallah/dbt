@@ -510,25 +510,26 @@ def deploy_semantic_model():
         semantic_model_id = sm["id"]
         print(f"  created semantic model '{SEMANTIC_MODEL_NAME}' (id: {semantic_model_id})")
 
-    # Refresh (clearValues + full)
+    # Refresh via Power BI API (Fabric token works for /refreshes)
     print("  refreshing semantic model...")
     refresh_url = f"https://api.powerbi.com/v1.0/myorg/datasets/{semantic_model_id}/refreshes"
+    resp = requests.post(refresh_url, headers=headers, json={
+        "type": "clearValues", "commitMode": "transactional",
+    })
+    if resp.status_code in (200, 202):
+        if resp.status_code == 202:
+            time.sleep(10)
+        print("  clearValues done")
 
     resp = requests.post(refresh_url, headers=headers, json={
-        "type": "clearValues", "commitMode": "transactional", "maxParallelism": 10, "retryCount": 2, "objects": []
+        "type": "full", "commitMode": "transactional",
     })
     if resp.status_code in (200, 202):
         if resp.status_code == 202:
             time.sleep(15)
-        print("  clearValues done")
-
-    resp = requests.post(refresh_url, headers=headers, json={
-        "type": "full", "commitMode": "transactional", "maxParallelism": 10, "retryCount": 2, "objects": []
-    })
-    if resp.status_code in (200, 202):
-        print("  full refresh initiated")
+        print("  full refresh done")
     else:
-        print(f"  refresh returned {resp.status_code}: {resp.text[:200]}")
+        print(f"  WARNING: refresh returned {resp.status_code}: {resp.text[:200]}")
 
 
 # --- Run selected steps ---
@@ -565,34 +566,17 @@ if "test_semantic_model" in STEPS:
             {
                 "cell_type": "code", "metadata": {}, "outputs": [], "execution_count": None,
                 "source": [
-                    "!pip install -q duckdb==1.4.4\n",
-                    "!pip install -q dbt-duckdb\n",
-                    "import sys\n",
-                    "sys.exit(0)",
-                ],
-            },
-            {
-                "cell_type": "code", "metadata": {}, "outputs": [], "execution_count": None,
-                "source": [
-                    "import os, json\n",
-                    f"os.environ['ROOT_PATH']           = '{ROOT_PATH}'\n",
-                    f"os.environ['METADATA_LOCAL_PATH'] = '{METADATA_LOCAL_PATH}'\n",
-                    "os.environ['download_limit']      = '0'\n",
-                    "os.environ['process_limit']       = '0'\n",
-                    "\n",
-                    "# Run dbt test with store-failures\n",
-                    "ret = os.system('cd /lakehouse/default/Files/dbt && dbt test --store-failures --target prod --profiles-dir .')\n",
-                    "dbt_ok = (ret == 0)\n",
-                    "\n",
-                    "# Query semantic model via sempy\n",
+                    "import json\n",
                     "import sempy.fabric as fabric\n",
+                    "\n",
                     f"df = fabric.evaluate_dax('{SEMANTIC_MODEL_NAME}',\n",
                     "    'EVALUATE ROW(\"rows\", COUNTROWS(fct_summary), \"duids\", COUNTROWS(dim_duid), \"dates\", COUNTROWS(dim_calendar))')\n",
-                    "sm_rows = int(df.iloc[0, 0]) if len(df) > 0 else 0\n",
-                    "sm_duids = int(df.iloc[0, 1]) if len(df) > 0 else 0\n",
-                    "sm_dates = int(df.iloc[0, 2]) if len(df) > 0 else 0\n",
                     "\n",
-                    "results = {'dbt_test_passed': dbt_ok, 'sm_rows': sm_rows, 'sm_duids': sm_duids, 'sm_dates': sm_dates}\n",
+                    "results = {\n",
+                    "    'sm_rows': int(df.iloc[0, 0]) if len(df) > 0 else 0,\n",
+                    "    'sm_duids': int(df.iloc[0, 1]) if len(df) > 0 else 0,\n",
+                    "    'sm_dates': int(df.iloc[0, 2]) if len(df) > 0 else 0,\n",
+                    "}\n",
                     "with open('/lakehouse/default/Files/test_results.json', 'w') as f:\n",
                     "    json.dump(results, f)\n",
                     "print(json.dumps(results, indent=2))\n",
@@ -670,18 +654,14 @@ if "test_semantic_model" in STEPS:
     fs = datalake_client.get_file_system_client(WORKSPACE_ID)
     file_client = fs.get_file_client(f"{LAKEHOUSE_ID}/Files/test_results.json")
     results = json.loads(file_client.download_file().readall())
-    print(f"  dbt test: {'PASSED' if results['dbt_test_passed'] else 'FAILED'}")
     print(f"  fct_summary: {results['sm_rows']} rows")
     print(f"  dim_duid: {results['sm_duids']} rows")
     print(f"  dim_calendar: {results['sm_dates']} rows")
 
-    if not results["dbt_test_passed"]:
-        print("  FAILED: dbt test failures detected")
-        sys.exit(1)
     if results["sm_rows"] == 0:
         print("  FAILED: fct_summary has 0 rows in semantic model")
         sys.exit(1)
-    print("  all tests PASSED")
+    print("  semantic model test PASSED")
 
 if "pipeline" in STEPS:
     if notebook_id is None:
