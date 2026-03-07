@@ -40,23 +40,27 @@ else:
         parser.error(f"invalid step(s): {', '.join(invalid)}. Choose from: {', '.join(ALL_STEPS)}")
     STEPS = set(args.steps)
 
-# --- Config ---
-TENANT_ID                 = "4a86d5bb-4173-45ee-bfd5-a3b56ee2d3d5"
-WORKSPACE_ID              = "be079b0f-3416-4de2-9184-9c546bad223c"
-LAKEHOUSE_NAME            = "data"
-NOTEBOOK_NAME             = "run"
-PIPELINE_NAME             = "run_pipeline"
-PIPELINE_TIMEOUT          = "0.01:00:00"  # 1 hour
-SCHEDULE_INTERVAL_MINUTES = 30
-METADATA_LOCAL_PATH       = '/lakehouse/default/Files/metadata.db'
+# --- Config (from deploy_config.json) ---
+_config_path = Path(__file__).resolve().parent / "deploy_config.json"
+with open(_config_path) as _f:
+    _cfg = json.load(_f)
+
+TENANT_ID                 = _cfg["tenant_id"]
+WORKSPACE_ID              = _cfg["workspace_id"]
+LAKEHOUSE_NAME            = _cfg["lakehouse_name"]
+NOTEBOOK_NAME             = _cfg["notebook_name"]
+PIPELINE_NAME             = _cfg["pipeline_name"]
+PIPELINE_TIMEOUT          = _cfg.get("pipeline_timeout", "0.01:00:00")
+SCHEDULE_INTERVAL_MINUTES = _cfg.get("schedule_interval_minutes", 30)
+METADATA_LOCAL_PATH       = _cfg.get("metadata_local_path", "/lakehouse/default/Files/metadata.db")
+DEPLOY_BRANCH             = _cfg.get("deploy_branch", "production")
+SEMANTIC_MODEL_NAME       = _cfg.get("semantic_model_name", "aemo_electricity")
+DOWNLOAD_LIMIT            = _cfg.get("download_limit", 100)
+PROCESS_LIMIT             = _cfg.get("process_limit", 100)
 
 EXCLUDE_DIRS = {".git", "target", "logs", "dbt_packages", "__pycache__", ".github", ".claude"}
-EXCLUDE_FILES = {"metadata.db", ".user.yml", "nul", "README.md"}
+EXCLUDE_FILES = {"metadata.db", ".user.yml", "nul", "README.md", "deploy_config.json"}
 EXCLUDE_PATTERNS = {"%SystemDrive%"}
-
-DEPLOY_BRANCH = "production"
-
-SEMANTIC_MODEL_NAME = "aemo_electricity"
 
 BASE_URL = "https://api.fabric.microsoft.com/v1"
 
@@ -538,12 +542,12 @@ if "initial_load" in STEPS:
     notebook_id = deploy_notebook(download_limit=1, process_limit=1)
     run_notebook_and_wait(notebook_id)
     # Update notebook back to normal limits
-    deploy_notebook(download_limit=100, process_limit=100)
-    print("  notebook updated back to download_limit=100")
+    deploy_notebook(download_limit=DOWNLOAD_LIMIT, process_limit=PROCESS_LIMIT)
+    print(f"  notebook updated back to download_limit={DOWNLOAD_LIMIT}")
 
 notebook_id = None
 if "notebook" in STEPS:
-    notebook_id = deploy_notebook()
+    notebook_id = deploy_notebook(download_limit=DOWNLOAD_LIMIT, process_limit=PROCESS_LIMIT)
 
 if "semantic_model" in STEPS:
     deploy_semantic_model()

@@ -75,10 +75,11 @@ def model(dbt, session):
         for name in z.namelist():
             if name.upper().endswith(".CSV"):
                 safe_name = name.replace("/", "_")
+                gz_name = safe_name + ".gz"
                 path = os.path.join(temp_dir, safe_name)
                 with open(path, "wb") as f:
                     f.write(z.read(name))
-                results.append((name, safe_name, path))
+                results.append((name, gz_name, path))
         return results
 
     def copy_to_onelake(temp_path, dest_path):
@@ -174,17 +175,18 @@ def model(dbt, session):
                 for future in as_completed(future_to_meta):
                     url, src_fn = future_to_meta[future]
                     for csv_name, safe_name, temp_path in future.result():
-                        extracted.append((src_fn, csv_name, temp_path, url))
+                        extracted.append((src_fn, safe_name, temp_path, url))
 
             # Sequential write to OneLake + log
             now = datetime.now().isoformat()
             for src_fn, csv_name, temp_path, url in extracted:
-                csv_base = csv_name.rsplit(".", 1)[0] if "." in csv_name else csv_name
-                dest = f"{csv_archive_path}/daily/{csv_name}.gz"
+                # csv_name is e.g. "FILE.CSV.gz", strip .gz then .CSV for base
+                csv_base = csv_name.removesuffix(".gz").removesuffix(".CSV").removesuffix(".csv")
+                dest = f"{csv_archive_path}/daily/{csv_name}"
                 copy_to_onelake(temp_path, dest)
                 session.sql(f"""
                     INSERT INTO _csv_archive_log VALUES (
-                        'daily', '{src_fn}', '/daily/{csv_name}.gz',
+                        'daily', '{src_fn}', '/daily/{csv_name}',
                         '{now}'::TIMESTAMP, NULL, '{url}', NULL, '{csv_base}'
                     )
                 """)
@@ -233,16 +235,16 @@ def model(dbt, session):
                 for future in as_completed(future_to_meta):
                     url, src_fn = future_to_meta[future]
                     for csv_name, safe_name, temp_path in future.result():
-                        extracted.append((src_fn, csv_name, temp_path, url))
+                        extracted.append((src_fn, safe_name, temp_path, url))
 
             now = datetime.now().isoformat()
             for src_fn, csv_name, temp_path, url in extracted:
-                csv_base = csv_name.rsplit(".", 1)[0] if "." in csv_name else csv_name
-                dest = f"{csv_archive_path}/scada_today/{csv_name}.gz"
+                csv_base = csv_name.removesuffix(".gz").removesuffix(".CSV").removesuffix(".csv")
+                dest = f"{csv_archive_path}/scada_today/{csv_name}"
                 copy_to_onelake(temp_path, dest)
                 session.sql(f"""
                     INSERT INTO _csv_archive_log VALUES (
-                        'scada_today', '{src_fn}', '/scada_today/{csv_name}.gz',
+                        'scada_today', '{src_fn}', '/scada_today/{csv_name}',
                         '{now}'::TIMESTAMP, NULL, '{url}', NULL, '{csv_base}'
                     )
                 """)
@@ -291,16 +293,16 @@ def model(dbt, session):
                 for future in as_completed(future_to_meta):
                     url, src_fn = future_to_meta[future]
                     for csv_name, safe_name, temp_path in future.result():
-                        extracted.append((src_fn, csv_name, temp_path, url))
+                        extracted.append((src_fn, safe_name, temp_path, url))
 
             now = datetime.now().isoformat()
             for src_fn, csv_name, temp_path, url in extracted:
-                csv_base = csv_name.rsplit(".", 1)[0] if "." in csv_name else csv_name
-                dest = f"{csv_archive_path}/price_today/{csv_name}.gz"
+                csv_base = csv_name.removesuffix(".gz").removesuffix(".CSV").removesuffix(".csv")
+                dest = f"{csv_archive_path}/price_today/{csv_name}"
                 copy_to_onelake(temp_path, dest)
                 session.sql(f"""
                     INSERT INTO _csv_archive_log VALUES (
-                        'price_today', '{src_fn}', '/price_today/{csv_name}.gz',
+                        'price_today', '{src_fn}', '/price_today/{csv_name}',
                         '{now}'::TIMESTAMP, NULL, '{url}', NULL, '{csv_base}'
                     )
                 """)
