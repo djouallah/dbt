@@ -212,6 +212,33 @@ def deploy_files():
 
     print(f"  {uploaded} files uploaded to Files/dbt/")
 
+    # Delete remote files that no longer exist locally
+    local_relatives = set()
+    for local_path in sorted(project_root.rglob("*")):
+        if local_path.is_dir():
+            continue
+        if any(part in EXCLUDE_DIRS for part in local_path.relative_to(project_root).parts):
+            continue
+        if local_path.name in EXCLUDE_FILES:
+            continue
+        relative = str(local_path.relative_to(project_root)).replace("\\", "/")
+        if any(p in relative for p in EXCLUDE_PATTERNS):
+            continue
+        local_relatives.add(relative)
+
+    dbt_prefix = f"{LAKEHOUSE_ID}/Files/dbt"
+    deleted = 0
+    for path in fs.get_paths(path=dbt_prefix, recursive=True):
+        if path.is_directory:
+            continue
+        remote_relative = path.name[len(dbt_prefix) + 1:]
+        if remote_relative not in local_relatives:
+            fs.get_file_client(path.name).delete_file()
+            print(f"  deleted: {remote_relative}")
+            deleted += 1
+    if deleted:
+        print(f"  {deleted} stale files removed from OneLake")
+
 
 # --- Step: notebook ---
 def deploy_notebook(download_limit=100, process_limit=100):
