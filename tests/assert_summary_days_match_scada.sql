@@ -1,4 +1,4 @@
--- Distinct days in fct_summary should equal distinct days from fct_scada + fct_scada_today combined
+-- Distinct days in fct_scada + fct_scada_today should equal distinct days in fct_summary
 SELECT
   scada_days,
   summary_days

@@ -7,6 +7,6 @@ SELECT
 FROM (
   SELECT
     (SELECT COUNT(*) FROM {{ ref('fct_scada_today') }}) AS ducklake_count,
-    (SELECT COUNT(*) FROM delta_scan('{{ env_var("ROOT_PATH", "/tmp") }}/Tables/raw/fct_scada_today')) AS delta_count
+    (SELECT COUNT(*) FROM delta_scan('{{ env_var("ROOT_PATH", "/tmp") }}/Tables/landing/fct_scada_today')) AS delta_count
 )
 WHERE ducklake_count != delta_count
