@@ -367,4 +367,4 @@ def model(dbt, session):
     # =========================================================================
     session.sql(f"COPY _csv_archive_log TO '{csv_log_path}' (FORMAT PARQUET)")
 
-    return session.sql("SELECT * FROM _csv_archive_log").df()
+    return session.sql("SELECT * FROM _csv_archive_log")
