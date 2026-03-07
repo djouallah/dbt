@@ -14,6 +14,7 @@ def model(dbt, session):
     csv_archive_path = root_path + "/Files/csv"
     csv_log_path = root_path + "/Files/csv_archive_log.parquet"
     download_limit = int(os.environ.get("download_limit", "2"))
+    batch_size = 7
     max_workers = 8
 
     # =========================================================================
@@ -94,6 +95,40 @@ def model(dbt, session):
             f"TO '{dest_path}' (FORMAT BLOB, COMPRESSION 'none')"
         )
 
+    def save_log():
+        """Save current log state to parquet."""
+        session.sql(f"COPY _csv_archive_log TO '{csv_log_path}' (FORMAT PARQUET)")
+
+    def process_downloads(rows, source_type, subfolder):
+        """Download, extract, copy to OneLake in batches. Saves log after each batch."""
+        files_to_process = [(row[0], row[1]) for row in rows]
+        for i in range(0, len(files_to_process), batch_size):
+            batch = files_to_process[i:i + batch_size]
+            with tempfile.TemporaryDirectory() as tmpdir:
+                extracted = []
+                with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                    future_to_meta = {
+                        executor.submit(download_and_extract, url, tmpdir): (url, src_fn)
+                        for url, src_fn in batch
+                    }
+                    for future in as_completed(future_to_meta):
+                        url, src_fn = future_to_meta[future]
+                        for csv_name, safe_name, temp_path in future.result():
+                            extracted.append((src_fn, safe_name, temp_path, url))
+
+                now = datetime.now().isoformat()
+                for src_fn, csv_name, temp_path, url in extracted:
+                    csv_base = csv_name.removesuffix(".gz").removesuffix(".CSV").removesuffix(".csv")
+                    dest = f"{csv_archive_path}/{subfolder}/{csv_name}"
+                    copy_to_onelake(temp_path, dest)
+                    session.sql(f"""
+                        INSERT INTO _csv_archive_log VALUES (
+                            '{source_type}', '{src_fn}', '/{subfolder}/{csv_name}',
+                            '{now}'::TIMESTAMP, NULL, '{url}', NULL, '{csv_base}'
+                        )
+                    """)
+            save_log()
+
     # =========================================================================
     # DAILY REPORTS (SCADA + PRICE)
     # =========================================================================
@@ -163,34 +198,7 @@ def model(dbt, session):
     """).fetchall()
 
     if daily_to_download:
-        with tempfile.TemporaryDirectory() as tmpdir:
-            files_to_process = [(row[0], row[1]) for row in daily_to_download]
-
-            # Parallel download + extract
-            extracted = []  # (source_filename, csv_name, temp_path, url)
-            with ThreadPoolExecutor(max_workers=max_workers) as executor:
-                future_to_meta = {
-                    executor.submit(download_and_extract, url, tmpdir): (url, src_fn)
-                    for url, src_fn in files_to_process
-                }
-                for future in as_completed(future_to_meta):
-                    url, src_fn = future_to_meta[future]
-                    for csv_name, safe_name, temp_path in future.result():
-                        extracted.append((src_fn, safe_name, temp_path, url))
-
-            # Sequential write to OneLake + log
-            now = datetime.now().isoformat()
-            for src_fn, csv_name, temp_path, url in extracted:
-                # csv_name is e.g. "FILE.CSV.gz", strip .gz then .CSV for base
-                csv_base = csv_name.removesuffix(".gz").removesuffix(".CSV").removesuffix(".csv")
-                dest = f"{csv_archive_path}/daily/{csv_name}"
-                copy_to_onelake(temp_path, dest)
-                session.sql(f"""
-                    INSERT INTO _csv_archive_log VALUES (
-                        'daily', '{src_fn}', '/daily/{csv_name}',
-                        '{now}'::TIMESTAMP, NULL, '{url}', NULL, '{csv_base}'
-                    )
-                """)
+        process_downloads(daily_to_download, 'daily', 'daily')
 
     # =========================================================================
     # INTRADAY SCADA
@@ -224,31 +232,7 @@ def model(dbt, session):
     """).fetchall()
 
     if scada_to_download:
-        with tempfile.TemporaryDirectory() as tmpdir:
-            files_to_process = [(row[0], row[1]) for row in scada_to_download]
-
-            extracted = []
-            with ThreadPoolExecutor(max_workers=max_workers) as executor:
-                future_to_meta = {
-                    executor.submit(download_and_extract, url, tmpdir): (url, src_fn)
-                    for url, src_fn in files_to_process
-                }
-                for future in as_completed(future_to_meta):
-                    url, src_fn = future_to_meta[future]
-                    for csv_name, safe_name, temp_path in future.result():
-                        extracted.append((src_fn, safe_name, temp_path, url))
-
-            now = datetime.now().isoformat()
-            for src_fn, csv_name, temp_path, url in extracted:
-                csv_base = csv_name.removesuffix(".gz").removesuffix(".CSV").removesuffix(".csv")
-                dest = f"{csv_archive_path}/scada_today/{csv_name}"
-                copy_to_onelake(temp_path, dest)
-                session.sql(f"""
-                    INSERT INTO _csv_archive_log VALUES (
-                        'scada_today', '{src_fn}', '/scada_today/{csv_name}',
-                        '{now}'::TIMESTAMP, NULL, '{url}', NULL, '{csv_base}'
-                    )
-                """)
+        process_downloads(scada_to_download, 'scada_today', 'scada_today')
 
     # =========================================================================
     # INTRADAY PRICE
@@ -282,31 +266,7 @@ def model(dbt, session):
     """).fetchall()
 
     if price_to_download:
-        with tempfile.TemporaryDirectory() as tmpdir:
-            files_to_process = [(row[0], row[1]) for row in price_to_download]
-
-            extracted = []
-            with ThreadPoolExecutor(max_workers=max_workers) as executor:
-                future_to_meta = {
-                    executor.submit(download_and_extract, url, tmpdir): (url, src_fn)
-                    for url, src_fn in files_to_process
-                }
-                for future in as_completed(future_to_meta):
-                    url, src_fn = future_to_meta[future]
-                    for csv_name, safe_name, temp_path in future.result():
-                        extracted.append((src_fn, safe_name, temp_path, url))
-
-            now = datetime.now().isoformat()
-            for src_fn, csv_name, temp_path, url in extracted:
-                csv_base = csv_name.removesuffix(".gz").removesuffix(".CSV").removesuffix(".csv")
-                dest = f"{csv_archive_path}/price_today/{csv_name}"
-                copy_to_onelake(temp_path, dest)
-                session.sql(f"""
-                    INSERT INTO _csv_archive_log VALUES (
-                        'price_today', '{src_fn}', '/price_today/{csv_name}',
-                        '{now}'::TIMESTAMP, NULL, '{url}', NULL, '{csv_base}'
-                    )
-                """)
+        process_downloads(price_to_download, 'price_today', 'price_today')
 
     # =========================================================================
     # DUID REFERENCE DATA (always refresh)
@@ -368,6 +328,6 @@ def model(dbt, session):
     # =========================================================================
     # Save log to parquet and return
     # =========================================================================
-    session.sql(f"COPY _csv_archive_log TO '{csv_log_path}' (FORMAT PARQUET)")
+    save_log()
 
     return session.sql("SELECT * FROM _csv_archive_log")
