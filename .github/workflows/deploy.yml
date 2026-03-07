@@ -133,8 +133,23 @@ jobs:
           allow-no-subscriptions: true
       - run: python deploy_to_fabric.py schedule
 
-  deploy-docs:
+  docs:
     needs: schedule
+    if: ${{ !failure() && !cancelled() }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: pip install dbt-duckdb
+      - run: dbt docs generate --target dev --profiles-dir .
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: target
+
+  deploy-docs:
+    needs: docs
     if: ${{ !failure() && !cancelled() }}
     runs-on: ubuntu-latest
     environment:
