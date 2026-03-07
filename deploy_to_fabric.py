@@ -556,38 +556,132 @@ if "semantic_model" in STEPS:
     deploy_semantic_model()
 
 if "test_semantic_model" in STEPS:
-    print(f"\nTesting semantic model '{SEMANTIC_MODEL_NAME}'...")
-    # Find the semantic model
-    resp = requests.get(f"{BASE_URL}/workspaces/{WORKSPACE_ID}/semanticModels", headers=headers)
+    print(f"\nTesting semantic model '{SEMANTIC_MODEL_NAME}' via notebook...")
+
+    TEST_NOTEBOOK_NAME = "ci_test"
+    test_notebook_json = {
+        "nbformat": 4, "nbformat_minor": 5,
+        "cells": [
+            {
+                "cell_type": "code", "metadata": {}, "outputs": [], "execution_count": None,
+                "source": [
+                    "!pip install -q duckdb==1.4.4\n",
+                    "!pip install -q dbt-duckdb\n",
+                    "import sys\n",
+                    "sys.exit(0)",
+                ],
+            },
+            {
+                "cell_type": "code", "metadata": {}, "outputs": [], "execution_count": None,
+                "source": [
+                    "import os, json\n",
+                    f"os.environ['ROOT_PATH']           = '{ROOT_PATH}'\n",
+                    f"os.environ['METADATA_LOCAL_PATH'] = '{METADATA_LOCAL_PATH}'\n",
+                    "os.environ['download_limit']      = '0'\n",
+                    "os.environ['process_limit']       = '0'\n",
+                    "\n",
+                    "# Run dbt test with store-failures\n",
+                    "ret = os.system('cd /lakehouse/default/Files/dbt && dbt test --store-failures --target prod --profiles-dir .')\n",
+                    "dbt_ok = (ret == 0)\n",
+                    "\n",
+                    "# Query semantic model via sempy\n",
+                    "import sempy.fabric as fabric\n",
+                    f"df = fabric.evaluate_dax('{SEMANTIC_MODEL_NAME}',\n",
+                    "    'EVALUATE ROW(\"rows\", COUNTROWS(fct_summary), \"duids\", COUNTROWS(dim_duid), \"dates\", COUNTROWS(dim_calendar))')\n",
+                    "sm_rows = int(df.iloc[0, 0]) if len(df) > 0 else 0\n",
+                    "sm_duids = int(df.iloc[0, 1]) if len(df) > 0 else 0\n",
+                    "sm_dates = int(df.iloc[0, 2]) if len(df) > 0 else 0\n",
+                    "\n",
+                    "results = {'dbt_test_passed': dbt_ok, 'sm_rows': sm_rows, 'sm_duids': sm_duids, 'sm_dates': sm_dates}\n",
+                    "with open('/lakehouse/default/Files/test_results.json', 'w') as f:\n",
+                    "    json.dump(results, f)\n",
+                    "print(json.dumps(results, indent=2))\n",
+                ],
+            },
+        ],
+        "metadata": {
+            "kernelspec": {"name": "python3", "display_name": "python3", "language": "python"},
+            "kernel_info": {"name": "jupyter"},
+            "microsoft": {"language": "python", "language_group": "jupyter_python"},
+            "language_info": {"name": "python"},
+            "trident": {
+                "lakehouse": {
+                    "default_lakehouse": LAKEHOUSE_ID,
+                    "default_lakehouse_name": LAKEHOUSE_NAME,
+                    "default_lakehouse_workspace_id": WORKSPACE_ID,
+                }
+            },
+        },
+    }
+
+    # Deploy test notebook
+    test_nb_base64 = base64.b64encode(json.dumps(test_notebook_json, indent=2).encode("utf-8")).decode("utf-8")
+    definition_payload = {
+        "definition": {
+            "format": "ipynb",
+            "parts": [{"path": "notebook-content.ipynb", "payload": test_nb_base64, "payloadType": "InlineBase64"}],
+        }
+    }
+
+    resp = requests.get(f"{BASE_URL}/workspaces/{WORKSPACE_ID}/notebooks", headers=headers)
     resp.raise_for_status()
-    sm = next((s for s in resp.json().get("value", []) if s["displayName"] == SEMANTIC_MODEL_NAME), None)
-    if not sm:
-        print(f"  ERROR: semantic model '{SEMANTIC_MODEL_NAME}' not found")
+    existing = next((nb for nb in resp.json().get("value", []) if nb["displayName"] == TEST_NOTEBOOK_NAME), None)
+
+    if existing:
+        test_nb_id = existing["id"]
+        resp = requests.post(
+            f"{BASE_URL}/workspaces/{WORKSPACE_ID}/notebooks/{test_nb_id}/updateDefinition",
+            headers=headers, json=definition_payload,
+        )
+        resp.raise_for_status()
+        if resp.status_code == 202:
+            op_id = resp.headers.get("x-ms-operation-id")
+            if op_id:
+                wait_for_operation(op_id)
+        print(f"  updated test notebook (id: {test_nb_id})")
+    else:
+        definition_payload["displayName"] = TEST_NOTEBOOK_NAME
+        resp = requests.post(
+            f"{BASE_URL}/workspaces/{WORKSPACE_ID}/notebooks",
+            headers=headers, json=definition_payload,
+        )
+        resp.raise_for_status()
+        if resp.status_code == 202:
+            op_id = resp.headers.get("x-ms-operation-id")
+            if op_id:
+                wait_for_operation(op_id)
+        resp = requests.get(f"{BASE_URL}/workspaces/{WORKSPACE_ID}/notebooks", headers=headers)
+        resp.raise_for_status()
+        nb = next(nb for nb in resp.json().get("value", []) if nb["displayName"] == TEST_NOTEBOOK_NAME)
+        test_nb_id = nb["id"]
+        print(f"  created test notebook (id: {test_nb_id})")
+
+    # Run test notebook
+    success = run_notebook_and_wait(test_nb_id)
+    if not success:
+        print("  FAILED: test notebook did not complete")
         sys.exit(1)
-    sm_id = sm["id"]
-    # Run DAX query to verify data (Power BI API needs its own token scope)
-    pbi_token = credential.get_token("https://analysis.windows.net/powerbi/api/.default").token
-    pbi_headers = {"Authorization": f"Bearer {pbi_token}", "Content-Type": "application/json"}
-    dax_query = "EVALUATE ROW(\"rows\", COUNTROWS(fct_summary), \"duids\", COUNTROWS(dim_duid), \"dates\", COUNTROWS(dim_calendar))"
-    resp = requests.post(
-        f"https://api.powerbi.com/v1.0/myorg/groups/{WORKSPACE_ID}/datasets/{sm_id}/executeQueries",
-        headers=pbi_headers,
-        json={"queries": [{"query": dax_query}], "serializerSettings": {"includeNulls": True}},
+
+    # Read results from OneLake
+    datalake_client = DataLakeServiceClient(
+        account_url="https://onelake.dfs.fabric.microsoft.com",
+        credential=credential,
     )
-    resp.raise_for_status()
-    results = resp.json()
-    rows = results.get("results", [{}])[0].get("tables", [{}])[0].get("rows", [])
-    if not rows:
-        print("  FAILED: DAX query returned no results")
+    fs = datalake_client.get_file_system_client(WORKSPACE_ID)
+    file_client = fs.get_file_client(f"{LAKEHOUSE_ID}/Files/test_results.json")
+    results = json.loads(file_client.download_file().readall())
+    print(f"  dbt test: {'PASSED' if results['dbt_test_passed'] else 'FAILED'}")
+    print(f"  fct_summary: {results['sm_rows']} rows")
+    print(f"  dim_duid: {results['sm_duids']} rows")
+    print(f"  dim_calendar: {results['sm_dates']} rows")
+
+    if not results["dbt_test_passed"]:
+        print("  FAILED: dbt test failures detected")
         sys.exit(1)
-    row = rows[0]
-    print(f"  fct_summary: {row.get('[rows]', 0)} rows")
-    print(f"  dim_duid: {row.get('[duids]', 0)} rows")
-    print(f"  dim_calendar: {row.get('[dates]', 0)} rows")
-    if int(row.get("[rows]", 0)) == 0:
-        print("  FAILED: fct_summary has 0 rows")
+    if results["sm_rows"] == 0:
+        print("  FAILED: fct_summary has 0 rows in semantic model")
         sys.exit(1)
-    print("  semantic model test PASSED")
+    print("  all tests PASSED")
 
 if "pipeline" in STEPS:
     if notebook_id is None:
