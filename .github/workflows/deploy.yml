@@ -95,7 +95,7 @@ jobs:
       - run: python deploy_to_fabric.py initial_load
 
   notebook:
-    needs: [files, initial-load]
+    needs: initial-load
     if: ${{ !failure() && !cancelled() }}
     runs-on: ubuntu-latest
     steps:
@@ -111,26 +111,8 @@ jobs:
           allow-no-subscriptions: true
       - run: python deploy_to_fabric.py notebook
 
-  run-notebook:
-    needs: notebook
-    if: ${{ !failure() && !cancelled() }}
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
-      - run: pip install azure-identity azure-storage-file-datalake requests PyJWT
-      - uses: azure/login@v2
-        with:
-          client-id: ${{ secrets.AZURE_CLIENT_ID }}
-          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
-          allow-no-subscriptions: true
-      - run: python deploy_to_fabric.py run_notebook
-
   semantic-model:
-    needs: run-notebook
+    needs: notebook
     if: ${{ !failure() && !cancelled() }}
     runs-on: ubuntu-latest
     steps:

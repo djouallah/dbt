@@ -27,7 +27,7 @@ import requests
 from azure.identity import AzureCliCredential
 from azure.storage.filedatalake import DataLakeServiceClient
 
-ALL_STEPS = ["lakehouse", "files", "initial_load", "notebook", "run_notebook", "semantic_model", "test_semantic_model", "pipeline", "schedule"]
+ALL_STEPS = ["lakehouse", "files", "initial_load", "notebook", "semantic_model", "test_semantic_model", "pipeline", "schedule"]
 parser = argparse.ArgumentParser(description="Deploy dbt project to Microsoft Fabric")
 parser.add_argument("steps", nargs="*", default=None,
                     help=f"Steps to deploy (default: all). Choices: {', '.join(ALL_STEPS)}")
@@ -538,9 +538,12 @@ if "files" in STEPS:
     deploy_files()
 
 if "initial_load" in STEPS:
-    print("\nInitial load: deploying notebook with download_limit=1 to seed data...")
-    notebook_id = deploy_notebook(download_limit=1, process_limit=1)
-    run_notebook_and_wait(notebook_id)
+    print("\nInitial load: deploying notebook with download_limit=2 and running...")
+    notebook_id = deploy_notebook(download_limit=2, process_limit=2)
+    success = run_notebook_and_wait(notebook_id)
+    if not success:
+        print("  FAILED: initial load notebook run did not complete successfully")
+        sys.exit(1)
     # Update notebook back to normal limits
     deploy_notebook(download_limit=DOWNLOAD_LIMIT, process_limit=PROCESS_LIMIT)
     print(f"  notebook updated back to download_limit={DOWNLOAD_LIMIT}")
@@ -548,21 +551,6 @@ if "initial_load" in STEPS:
 notebook_id = None
 if "notebook" in STEPS:
     notebook_id = deploy_notebook(download_limit=DOWNLOAD_LIMIT, process_limit=PROCESS_LIMIT)
-
-if "run_notebook" in STEPS:
-    if notebook_id is None:
-        resp = requests.get(f"{BASE_URL}/workspaces/{WORKSPACE_ID}/notebooks", headers=headers)
-        resp.raise_for_status()
-        nb = next((nb for nb in resp.json().get("value", []) if nb["displayName"] == NOTEBOOK_NAME), None)
-        if nb:
-            notebook_id = nb["id"]
-        else:
-            print(f"  ERROR: notebook '{NOTEBOOK_NAME}' not found. Deploy notebook first.")
-            sys.exit(1)
-    success = run_notebook_and_wait(notebook_id)
-    if not success:
-        print("  FAILED: notebook run did not complete successfully")
-        sys.exit(1)
 
 if "semantic_model" in STEPS:
     deploy_semantic_model()
@@ -577,12 +565,12 @@ if "test_semantic_model" in STEPS:
         print(f"  ERROR: semantic model '{SEMANTIC_MODEL_NAME}' not found")
         sys.exit(1)
     sm_id = sm["id"]
-    # Run DAX query to verify data
+    # Run DAX query to verify data (uses datasets endpoint, not semanticModels)
     dax_query = "EVALUATE ROW(\"rows\", COUNTROWS(fct_summary), \"duids\", COUNTROWS(dim_duid), \"dates\", COUNTROWS(dim_calendar))"
     resp = requests.post(
-        f"{BASE_URL}/workspaces/{WORKSPACE_ID}/semanticModels/{sm_id}/executeQueries",
+        f"https://api.powerbi.com/v1.0/myorg/groups/{WORKSPACE_ID}/datasets/{sm_id}/executeQueries",
         headers=headers,
-        json={"queries": [{"query": dax_query}]},
+        json={"queries": [{"query": dax_query}], "serializerSettings": {"includeNulls": True}},
     )
     resp.raise_for_status()
     results = resp.json()
