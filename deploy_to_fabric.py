@@ -237,7 +237,7 @@ def deploy_notebook(download_limit=100, process_limit=100):
                     f"os.environ['download_limit']      = '{download_limit}'\n",
                     f"os.environ['process_limit']       = '{process_limit}'\n",
                     "\n",
-                    "!cd /lakehouse/default/Files/dbt && dbt run --target prod && dbt test --target prod",
+                    "!cd /lakehouse/default/Files/dbt && dbt run --target prod --profiles-dir . && dbt test --target prod --profiles-dir .",
                 ],
             },
         ],
