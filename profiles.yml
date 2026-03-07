@@ -6,7 +6,7 @@ aemo_electricity:
       path: ':memory:'
       database: ducklake
       threads: 1
-      schema: "{{ env_var('DBT_SCHEMA', 'aemo') }}"
+      schema: "{{ env_var('DBT_SCHEMA', 'mart') }}"
       config_options:
         allow_unsigned_extensions: true
       settings:
@@ -14,10 +14,9 @@ aemo_electricity:
       extensions:
         - parquet
         - sqlite
+        - httpfs
         - json
         - ducklake
-        - name: zipfs
-          repo: community
         - name: delta_export
           repo: community
       attach:
@@ -31,7 +30,7 @@ aemo_electricity:
       path: ':memory:'
       database: ducklake
       threads: 1
-      schema: "{{ env_var('DBT_SCHEMA', 'aemo') }}"
+      schema: "{{ env_var('DBT_SCHEMA', 'mart') }}"
       config_options:
         allow_unsigned_extensions: true
       settings:
@@ -47,8 +46,6 @@ aemo_electricity:
         - azure
         - json
         - ducklake
-        - name: zipfs
-          repo: community
         - name: delta_export
           repo: community
       attach:
@@ -62,7 +59,7 @@ aemo_electricity:
       path: ':memory:'
       database: ducklake
       threads: 1
-      schema: "{{ env_var('DBT_SCHEMA', 'aemo') }}"
+      schema: "{{ env_var('DBT_SCHEMA', 'mart') }}"
       config_options:
         allow_unsigned_extensions: true
       settings:
@@ -74,8 +71,6 @@ aemo_electricity:
         - httpfs
         - json
         - ducklake
-        - name: zipfs
-          repo: community
         - name: delta_export
           repo: community
       attach:

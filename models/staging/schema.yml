@@ -15,6 +15,10 @@ models:
           - accepted_values:
               arguments:
                 values: ['daily', 'scada_today', 'price_today', 'duid_data', 'duid_facilities', 'duid_wa_energy', 'duid_geo_data']
+      - name: csv_filename
+        description: Actual CSV filename (without extension) extracted from ZIP
+        tests:
+          - not_null
       - name: archived_at
         description: Timestamp when file was archived
         tests:
