@@ -3,6 +3,7 @@ def model(dbt, session):
 
     import os
     import io
+    import gzip
     import zipfile
     import tempfile
     import urllib.request
@@ -76,10 +77,10 @@ def model(dbt, session):
             if name.upper().endswith(".CSV"):
                 safe_name = name.replace("/", "_")
                 gz_name = safe_name + ".gz"
-                path = os.path.join(temp_dir, safe_name)
-                with open(path, "wb") as f:
+                gz_path = os.path.join(temp_dir, gz_name)
+                with gzip.open(gz_path, "wb") as f:
                     f.write(z.read(name))
-                results.append((name, gz_name, path))
+                results.append((name, gz_name, gz_path))
         return results
 
     def copy_to_onelake(temp_path, dest_path):
