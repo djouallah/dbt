@@ -444,7 +444,8 @@ def run_notebook_and_wait(notebook_id):
             print("  notebook run completed successfully")
             return True
         if status in ("Failed", "Cancelled", "Deduped"):
-            print(f"  notebook run {status.lower()}")
+            error = resp.json().get("failureReason", resp.json())
+            print(f"  notebook run {status.lower()}: {error}")
             return False
         if i % 6 == 0:
             print(f"  still running... ({i * 10}s)")
