@@ -89,12 +89,11 @@ FROM incremental_data
 
 {% else %}
 
--- Full refresh from daily data
+-- Full refresh from daily + today data
 WITH daily_summary AS (
   SELECT
     s.DATE as date,
     CAST(strftime(s.SETTLEMENTDATE, '%H%M') AS INT) as time,
-    (SELECT MAX(CAST(SETTLEMENTDATE AS TIMESTAMP)) FROM {{ ref('fct_scada') }}) as cutoff,
     s.DUID,
     MAX(s.INITIALMW) as mw,
     MAX(p.RRP) as price
@@ -107,6 +106,24 @@ WITH daily_summary AS (
     AND s.INITIALMW <> 0
     AND p.INTERVENTION = 0
   GROUP BY ALL
+
+  UNION ALL
+
+  SELECT
+    s.DATE as date,
+    CAST(strftime(s.SETTLEMENTDATE, '%H%M') AS INT) as time,
+    s.DUID,
+    MAX(s.INITIALMW) as mw,
+    MAX(p.RRP) as price
+  FROM {{ ref('fct_scada_today') }} s
+  JOIN {{ ref('dim_duid') }} d ON s.DUID = d.DUID
+  JOIN {{ ref('fct_price_today') }} p
+    ON s.SETTLEMENTDATE = p.SETTLEMENTDATE AND d.Region = p.REGIONID
+  WHERE
+    s.INITIALMW <> 0
+    AND p.INTERVENTION = 0
+    AND s.SETTLEMENTDATE > (SELECT MAX(CAST(SETTLEMENTDATE AS TIMESTAMP)) FROM {{ ref('fct_scada') }})
+  GROUP BY ALL
 )
 
 SELECT
@@ -115,7 +132,10 @@ SELECT
   DUID,
   CAST(mw AS DECIMAL(18, 4)) AS mw,
   CAST(price AS DECIMAL(18, 4)) AS price,
-  cutoff
+  (SELECT GREATEST(
+    (SELECT MAX(CAST(SETTLEMENTDATE AS TIMESTAMP)) FROM {{ ref('fct_scada') }}),
+    COALESCE((SELECT MAX(SETTLEMENTDATE) FROM {{ ref('fct_scada_today') }}), '1900-01-01')
+  )) AS cutoff
 FROM daily_summary
 ORDER BY date
 

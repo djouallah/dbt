@@ -1,7 +1,4 @@
--- Test: fct_summary row count should match its Delta Lake export
--- Validates that delta_export() from the previous dbt run kept Delta in sync with DuckLake
--- Returns a row if counts differ, with details to help diagnose the mismatch
-
+-- fct_summary row count should match its Delta Lake export
 SELECT
   'fct_summary' AS table_name,
   ducklake_count,

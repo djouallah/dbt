@@ -51,7 +51,7 @@ LAKEHOUSE_NAME            = _cfg["lakehouse_name"]
 NOTEBOOK_NAME             = _cfg["notebook_name"]
 PIPELINE_NAME             = _cfg["pipeline_name"]
 PIPELINE_TIMEOUT          = _cfg.get("pipeline_timeout", "0.01:00:00")
-SCHEDULE_INTERVAL_MINUTES = _cfg.get("schedule_interval_minutes", 30)
+SCHEDULE_INTERVAL_MINUTES = int(os.environ.get("SCHEDULE_INTERVAL_MINUTES", _cfg.get("schedule_interval_minutes", 30)))
 METADATA_LOCAL_PATH       = _cfg.get("metadata_local_path", "/lakehouse/default/Files/metadata.db")
 DEPLOY_BRANCH             = _cfg.get("deploy_branch", "production")
 SEMANTIC_MODEL_NAME       = _cfg.get("semantic_model_name", "aemo_electricity")
@@ -379,7 +379,8 @@ def deploy_pipeline(notebook_id):
 
 # --- Step: schedule ---
 def deploy_schedule(pipeline_id):
-    print(f"Setting schedule (every {SCHEDULE_INTERVAL_MINUTES} min)...")
+    enabled = SCHEDULE_INTERVAL_MINUTES > 0
+    print(f"Setting schedule ({'every ' + str(SCHEDULE_INTERVAL_MINUTES) + ' min' if enabled else 'disabled'})...")
 
     resp = requests.get(
         f"{BASE_URL}/workspaces/{WORKSPACE_ID}/items/{pipeline_id}/jobs/Pipeline/schedules",
@@ -388,22 +389,23 @@ def deploy_schedule(pipeline_id):
     resp.raise_for_status()
     existing_schedules = resp.json().get("value", [])
 
+    interval = SCHEDULE_INTERVAL_MINUTES if enabled else 720  # 12h placeholder when disabled
     schedule_config = {
-        "enabled": True,
+        "enabled": enabled,
         "configuration": {
             "startDateTime": "2025-01-01T00:00:00",
             "endDateTime": "2030-12-31T23:59:00",
             "localTimeZoneId": "AUS Eastern Standard Time",
             "type": "Cron",
-            "interval": SCHEDULE_INTERVAL_MINUTES,
+            "interval": interval,
         },
     }
 
     if existing_schedules:
         schedule_id = existing_schedules[0]["id"]
         existing_config = existing_schedules[0].get("configuration", {})
-        if existing_config.get("interval") == SCHEDULE_INTERVAL_MINUTES and existing_schedules[0].get("enabled"):
-            print(f"  schedule unchanged (id: {schedule_id}, every {SCHEDULE_INTERVAL_MINUTES} min)")
+        if existing_config.get("interval") == interval and existing_schedules[0].get("enabled") == enabled:
+            print(f"  schedule unchanged (id: {schedule_id})")
             return
         resp = requests.patch(
             f"{BASE_URL}/workspaces/{WORKSPACE_ID}/items/{pipeline_id}/jobs/Pipeline/schedules/{schedule_id}",
@@ -444,7 +446,8 @@ def run_notebook_and_wait(notebook_id):
             print("  notebook run completed successfully")
             return True
         if status in ("Failed", "Cancelled", "Deduped"):
-            print(f"  notebook run {status.lower()}")
+            error = resp.json().get("failureReason", resp.json())
+            print(f"  notebook run {status.lower()}: {error}")
             return False
         if i % 6 == 0:
             print(f"  still running... ({i * 10}s)")
@@ -510,25 +513,7 @@ def deploy_semantic_model():
         semantic_model_id = sm["id"]
         print(f"  created semantic model '{SEMANTIC_MODEL_NAME}' (id: {semantic_model_id})")
 
-    # Refresh (clearValues + full)
-    print("  refreshing semantic model...")
-    refresh_url = f"https://api.powerbi.com/v1.0/myorg/datasets/{semantic_model_id}/refreshes"
-
-    resp = requests.post(refresh_url, headers=headers, json={
-        "type": "clearValues", "commitMode": "transactional", "maxParallelism": 10, "retryCount": 2, "objects": []
-    })
-    if resp.status_code in (200, 202):
-        if resp.status_code == 202:
-            time.sleep(15)
-        print("  clearValues done")
-
-    resp = requests.post(refresh_url, headers=headers, json={
-        "type": "full", "commitMode": "transactional", "maxParallelism": 10, "retryCount": 2, "objects": []
-    })
-    if resp.status_code in (200, 202):
-        print("  full refresh initiated")
-    else:
-        print(f"  refresh returned {resp.status_code}: {resp.text[:200]}")
+    # Refresh happens in test_semantic_model via sempy (Power BI API returns 403 for service principals)
 
 
 # --- Run selected steps ---
@@ -538,9 +523,12 @@ if "files" in STEPS:
     deploy_files()
 
 if "initial_load" in STEPS:
-    print("\nInitial load: deploying notebook with download_limit=1 to seed data...")
-    notebook_id = deploy_notebook(download_limit=1, process_limit=1)
-    run_notebook_and_wait(notebook_id)
+    print("\nInitial load: deploying notebook with download_limit=2 and running...")
+    notebook_id = deploy_notebook(download_limit=2, process_limit=2)
+    success = run_notebook_and_wait(notebook_id)
+    if not success:
+        print("  FAILED: initial load notebook run did not complete successfully")
+        sys.exit(1)
     # Update notebook back to normal limits
     deploy_notebook(download_limit=DOWNLOAD_LIMIT, process_limit=PROCESS_LIMIT)
     print(f"  notebook updated back to download_limit={DOWNLOAD_LIMIT}")
