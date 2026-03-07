@@ -590,38 +590,30 @@ if "test_semantic_model" in STEPS:
         }
     }
 
+    # Always delete and recreate to avoid stale state
     resp = requests.get(f"{BASE_URL}/workspaces/{WORKSPACE_ID}/notebooks", headers=headers)
     resp.raise_for_status()
     existing = next((nb for nb in resp.json().get("value", []) if nb["displayName"] == TEST_NOTEBOOK_NAME), None)
-
     if existing:
-        test_nb_id = existing["id"]
-        resp = requests.post(
-            f"{BASE_URL}/workspaces/{WORKSPACE_ID}/notebooks/{test_nb_id}/updateDefinition",
-            headers=headers, json=definition_payload,
-        )
-        resp.raise_for_status()
-        if resp.status_code == 202:
-            op_id = resp.headers.get("x-ms-operation-id")
-            if op_id:
-                wait_for_operation(op_id)
-        print(f"  updated test notebook (id: {test_nb_id})")
-    else:
-        definition_payload["displayName"] = TEST_NOTEBOOK_NAME
-        resp = requests.post(
-            f"{BASE_URL}/workspaces/{WORKSPACE_ID}/notebooks",
-            headers=headers, json=definition_payload,
-        )
-        resp.raise_for_status()
-        if resp.status_code == 202:
-            op_id = resp.headers.get("x-ms-operation-id")
-            if op_id:
-                wait_for_operation(op_id)
-        resp = requests.get(f"{BASE_URL}/workspaces/{WORKSPACE_ID}/notebooks", headers=headers)
-        resp.raise_for_status()
-        nb = next(nb for nb in resp.json().get("value", []) if nb["displayName"] == TEST_NOTEBOOK_NAME)
-        test_nb_id = nb["id"]
-        print(f"  created test notebook (id: {test_nb_id})")
+        requests.delete(f"{BASE_URL}/workspaces/{WORKSPACE_ID}/notebooks/{existing['id']}", headers=headers)
+        print(f"  deleted old test notebook")
+        time.sleep(5)
+
+    definition_payload["displayName"] = TEST_NOTEBOOK_NAME
+    resp = requests.post(
+        f"{BASE_URL}/workspaces/{WORKSPACE_ID}/notebooks",
+        headers=headers, json=definition_payload,
+    )
+    resp.raise_for_status()
+    if resp.status_code == 202:
+        op_id = resp.headers.get("x-ms-operation-id")
+        if op_id:
+            wait_for_operation(op_id)
+    resp = requests.get(f"{BASE_URL}/workspaces/{WORKSPACE_ID}/notebooks", headers=headers)
+    resp.raise_for_status()
+    nb = next(nb for nb in resp.json().get("value", []) if nb["displayName"] == TEST_NOTEBOOK_NAME)
+    test_nb_id = nb["id"]
+    print(f"  created test notebook (id: {test_nb_id})")
 
     # Run test notebook
     success = run_notebook_and_wait(test_nb_id)
