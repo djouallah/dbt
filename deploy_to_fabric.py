@@ -465,41 +465,37 @@ def run_notebook_and_wait(notebook_id):
 
 # --- Step: refresh semantic model ---
 def refresh_semantic_model(semantic_model_id):
-    """Two-step DirectLake refresh: clearValues then full reframe."""
-    powerbi_url = f"https://api.powerbi.com/v1.0/myorg/datasets/{semantic_model_id}/refreshes"
+    """Refresh semantic model using Fabric Job Scheduler API (works with service principals)."""
+    print("  refreshing semantic model...")
+    resp = requests.post(
+        f"{BASE_URL}/workspaces/{WORKSPACE_ID}/items/{semantic_model_id}/jobs/DefaultJob/instances",
+        headers=headers,
+    )
+    if resp.status_code != 202:
+        print(f"  refresh failed ({resp.status_code}): {resp.text}")
+        return
 
-    for step_name, payload in [
-        ("clearValues", {"type": "clearValues", "commitMode": "transactional", "maxParallelism": 10, "retryCount": 2, "objects": []}),
-        ("full", {"type": "full", "commitMode": "transactional", "maxParallelism": 10, "retryCount": 2, "objects": []}),
-    ]:
-        print(f"  refresh: {step_name}...")
-        resp = requests.post(powerbi_url, headers=headers, json=payload)
-        if resp.status_code not in (200, 202):
-            print(f"  refresh {step_name} failed ({resp.status_code}): {resp.text}")
+    location = resp.headers.get("Location")
+    if not location:
+        print("  refresh triggered (no location to poll)")
+        return
+
+    print("  refresh triggered, waiting for completion...")
+    for attempt in range(60):
+        time.sleep(5)
+        sr = requests.get(location, headers=headers)
+        sr.raise_for_status()
+        status = sr.json().get("status")
+        if status == "Completed":
+            print("  refresh completed")
             return
-        if resp.status_code == 202:
-            location = resp.headers.get("Location")
-            if location:
-                refresh_id = location.split("/")[-1]
-                for attempt in range(60):
-                    time.sleep(5)
-                    sr = requests.get(f"{powerbi_url}/{refresh_id}", headers=headers)
-                    sr.raise_for_status()
-                    status = sr.json().get("status")
-                    if status == "Completed":
-                        print(f"  refresh {step_name} completed")
-                        break
-                    if status in ("Failed", "Cancelled"):
-                        error = sr.json().get("serviceExceptionJson", "")
-                        print(f"  refresh {step_name} {status.lower()}: {error}")
-                        return
-                    if attempt % 6 == 0 and attempt > 0:
-                        print(f"  refresh {step_name} still running...")
-                else:
-                    print(f"  refresh {step_name} timed out")
-                    return
-        else:
-            print(f"  refresh {step_name} completed")
+        if status in ("Failed", "Cancelled"):
+            error = sr.json().get("failureReason", sr.json())
+            print(f"  refresh {status.lower()}: {error}")
+            return
+        if attempt % 6 == 0 and attempt > 0:
+            print(f"  refresh still running...")
+    print("  refresh timed out")
 
 
 # --- Step: semantic_model ---
