@@ -24,7 +24,7 @@ python deploy_to_fabric.py semantic_model    # just one step
 
 ### Option 3: Upload notebook
 
-Upload `dbt.ipynb` to a Fabric workspace, attach a lakehouse named `raw`, and run it.
+Upload `dbt.ipynb` to a Fabric workspace, attach a lakehouse named `data`, and run it.
 
 ---
 
@@ -36,6 +36,6 @@ See the [blog post](https://datamonkeysite.com/2026/03/05/building-a-data-pipeli
 |------------------------|------------------------------------------|----------------------------------|
 | `ROOT_PATH`            | `abfss://{WORKSPACE}@onelake.../{LAKEHOUSE}` | OneLake storage root        |
 | `METADATA_LOCAL_PATH`  | `/lakehouse/default/Files/metadata.db`   | DuckLake SQLite metadata DB      |
-| `DBT_SCHEMA`           | `aemo`                                   | Target schema                    |
+| `DBT_SCHEMA`           | `mart`                                   | Target schema                    |
 | `download_limit`       | `2`                                      | Max files to download per source |
 | `process_limit`        | `500`                                    | Max files to process per model   |

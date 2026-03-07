@@ -14,6 +14,6 @@ SELECT
 FROM (
   SELECT
     (SELECT COUNT(*) FROM {{ ref('fct_summary') }}) AS ducklake_count,
-    (SELECT COUNT(*) FROM delta_scan('{{ env_var("ROOT_PATH", "/tmp") }}/Tables/{{ env_var("DBT_SCHEMA", "aemo") }}/fct_summary')) AS delta_count
+    (SELECT COUNT(*) FROM delta_scan('{{ env_var("ROOT_PATH", "/tmp") }}/Tables/{{ env_var("DBT_SCHEMA", "mart") }}/fct_summary')) AS delta_count
 )
 WHERE ducklake_count != delta_count

@@ -1,14 +1,14 @@
 {{ config(
     materialized='incremental',
     unique_key=['file', 'DUID', 'SETTLEMENTDATE','INTERVENTION'],
-    pre_hook="SET VARIABLE scada_daily_paths = (SELECT list('zip://' || '{{ get_csv_archive_path() }}' || '/daily/year=' || substring(source_filename, 14, 4) || '/source_file=' || source_filename || '/data_0.zip/*.CSV') FROM (SELECT source_filename FROM {{ ref('stg_csv_archive_log') }} WHERE source_type = 'daily'{% if is_incremental() %} AND source_filename NOT IN (SELECT DISTINCT split_part(file, '.', 1) FROM {{ this }}){% endif %} LIMIT {{ env_var('process_limit', '2') }}))"
+    pre_hook="SET VARIABLE scada_daily_paths = (SELECT COALESCE(NULLIF(list('{{ get_csv_archive_path() }}' || archive_path), []), ['']) FROM (SELECT archive_path FROM {{ ref('stg_csv_archive_log') }} WHERE source_type = 'daily'{% if is_incremental() %} AND csv_filename NOT IN (SELECT DISTINCT file FROM {{ this }}){% endif %} LIMIT {{ env_var('process_limit', '2') }}))"
 ) }}
 
 {%- set check_files_query -%}
 SELECT COUNT(*) as cnt FROM {{ ref('stg_csv_archive_log') }}
 WHERE source_type = 'daily'
 {%- if is_incremental() %}
-AND source_filename NOT IN (SELECT DISTINCT split_part(file, '.', 1) FROM {{ this }})
+AND csv_filename NOT IN (SELECT DISTINCT file FROM {{ this }})
 {%- endif -%}
 {%- endset -%}
 

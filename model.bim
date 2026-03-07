@@ -23,7 +23,7 @@
         "annotations": [
           {
             "name": "PBI_RemovedChildren",
-            "value": "[{\"sourceLineageTag\":\"[raw].[fct_scada]\"},{\"sourceLineageTag\":\"[raw].[fct_scada_today]\"},{\"sourceLineageTag\":\"[raw].[fct_price]\"},{\"sourceLineageTag\":\"[raw].[fct_price_today]\"},{\"sourceLineageTag\":\"[raw].[stg_csv_archive_log]\"}]"
+            "value": "[{\"sourceLineageTag\":\"[landing].[fct_scada]\"},{\"sourceLineageTag\":\"[landing].[fct_scada_today]\"},{\"sourceLineageTag\":\"[landing].[fct_price]\"},{\"sourceLineageTag\":\"[landing].[fct_price_today]\"},{\"sourceLineageTag\":\"[landing].[stg_csv_archive_log]\"}]"
           }
         ]
       }
@@ -69,7 +69,7 @@
               "type": "entity",
               "entityName": "dim_calendar",
               "expressionSource": "DirectLake",
-              "schemaName": "aemo"
+              "schemaName": "mart"
             }
           }
         ]
@@ -145,7 +145,7 @@
               "type": "entity",
               "entityName": "dim_duid",
               "expressionSource": "DirectLake",
-              "schemaName": "aemo"
+              "schemaName": "mart"
             }
           }
         ]
@@ -248,7 +248,7 @@
               "type": "entity",
               "entityName": "fct_summary",
               "expressionSource": "DirectLake",
-              "schemaName": "aemo"
+              "schemaName": "mart"
             }
           }
         ]

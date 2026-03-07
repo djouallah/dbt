@@ -43,7 +43,7 @@ else:
 # --- Config ---
 TENANT_ID                 = "4a86d5bb-4173-45ee-bfd5-a3b56ee2d3d5"
 WORKSPACE_ID              = "be079b0f-3416-4de2-9184-9c546bad223c"
-LAKEHOUSE_NAME            = "raw"
+LAKEHOUSE_NAME            = "data"
 NOTEBOOK_NAME             = "run"
 PIPELINE_NAME             = "run_pipeline"
 PIPELINE_TIMEOUT          = "0.01:00:00"  # 1 hour

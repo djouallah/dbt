@@ -15,7 +15,7 @@ clean-targets:
 
 vars:
   # Env vars used:
-  # - DBT_SCHEMA: schema name (default: aemo)
+  # - DBT_SCHEMA: schema name (default: mart)
   # - csv_archive_path, path_root: for abfss:// paths in Fabric
   # - download_limit: number of files to download per source (default: 2)
   
@@ -23,7 +23,6 @@ vars:
 on-run-start:
   - "CALL ducklake.set_option('rewrite_delete_threshold', 0)"
   - "CALL ducklake.set_option('target_file_size', '128MB')"
-  - "{{ download() }}"
 
 
 on-run-end:
@@ -35,10 +34,10 @@ models:
   aemo_electricity:
     staging:
       +materialized: view
-      +schema: raw
+      +schema: landing
     dimensions:
       +materialized: table
     marts:
       +materialized: incremental
-      +schema: raw
+      +schema: landing
 
