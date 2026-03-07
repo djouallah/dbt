@@ -46,7 +46,7 @@ with open(_config_path) as _f:
     _cfg = json.load(_f)
 
 TENANT_ID                 = _cfg["tenant_id"]
-WORKSPACE_ID              = _cfg["workspace_id"]
+WORKSPACE_ID              = os.environ.get("WORKSPACE_ID", _cfg["workspace_id"])
 LAKEHOUSE_NAME            = _cfg["lakehouse_name"]
 NOTEBOOK_NAME             = _cfg["notebook_name"]
 PIPELINE_NAME             = _cfg["pipeline_name"]

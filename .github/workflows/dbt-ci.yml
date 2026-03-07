@@ -7,36 +7,95 @@ on:
     branches: [main]
 
 permissions:
+  id-token: write
   contents: read
 
+env:
+  WORKSPACE_ID: e446a5e7-6666-42ad-a331-0bfef3187fbf
+
 jobs:
-  test:
+  lakehouse:
     runs-on: ubuntu-latest
-    env:
-      ROOT_PATH: az://dbt
+    outputs:
+      first_deploy: ${{ steps.deploy.outputs.first_deploy }}
     steps:
       - uses: actions/checkout@v4
-
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
+      - run: pip install azure-identity azure-storage-file-datalake requests PyJWT
+      - uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          allow-no-subscriptions: true
+      - id: deploy
+        run: python deploy_to_fabric.py lakehouse
 
-      - name: Install dependencies
-        run: pip install dbt-duckdb azure-storage-blob
+  files:
+    needs: lakehouse
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: pip install azure-identity azure-storage-file-datalake requests PyJWT
+      - uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          allow-no-subscriptions: true
+      - run: python deploy_to_fabric.py files
 
-      - name: Start Azurite and create container
-        run: |
-          npm install -g azurite
-          azurite-blob --silent --skipApiVersionCheck --blobPort 10000 &
-          for i in $(seq 1 10); do nc -z 127.0.0.1 10000 && break || sleep 1; done
-          python -c "
-          from azure.storage.blob import BlobServiceClient
-          c = BlobServiceClient.from_connection_string('DefaultEndpointsProtocol=http;AccountName=devstoreaccount1;AccountKey=Eby8vdM02xNOcqFlqUwJPLlmEtlCDXJ1OUzFT50uSRZ6IFsuFq2UVErCz4I6tq/K1SZFPTOtr/KBHBeksoGMGw==;BlobEndpoint=http://127.0.0.1:10000/devstoreaccount1;')
-          c.create_container('dbt')
-          "
+  initial-load:
+    needs: [lakehouse, files]
+    if: needs.lakehouse.outputs.first_deploy == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: pip install azure-identity azure-storage-file-datalake requests PyJWT
+      - uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          allow-no-subscriptions: true
+      - run: python deploy_to_fabric.py initial_load
 
-      - name: dbt run
-        run: dbt run --target ci
+  notebook:
+    needs: [files, initial-load]
+    if: ${{ !failure() && !cancelled() }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: pip install azure-identity azure-storage-file-datalake requests PyJWT
+      - uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          allow-no-subscriptions: true
+      - run: python deploy_to_fabric.py notebook
 
-      - name: dbt test
-        run: dbt test --target ci
+  semantic-model:
+    needs: notebook
+    if: ${{ !failure() && !cancelled() }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: pip install azure-identity azure-storage-file-datalake requests PyJWT
+      - uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          allow-no-subscriptions: true
+      - run: python deploy_to_fabric.py semantic_model
