@@ -521,9 +521,18 @@ def deploy_semantic_model():
         semantic_model_id = sm["id"]
         print(f"  created semantic model '{SEMANTIC_MODEL_NAME}' (id: {semantic_model_id})")
 
-    # No explicit refresh needed — Direct Lake reads from Delta tables on query.
-    # Power BI refresh API returns 403 for service principals, and Fabric Job
-    # Scheduler doesn't support semantic models. Data is picked up automatically.
+    # Refresh via Power BI Enhanced Refresh API (must use /groups/{workspace} path for service principals)
+    print("  refreshing semantic model...")
+    pbi_token = credential.get_token("https://analysis.windows.net/powerbi/api/.default").token
+    pbi_headers = {"Authorization": f"Bearer {pbi_token}", "Content-Type": "application/json"}
+    refresh_url = f"https://api.powerbi.com/v1.0/myorg/groups/{WORKSPACE_ID}/datasets/{semantic_model_id}/refreshes"
+    resp = requests.post(refresh_url, headers=pbi_headers, json={
+        "type": "full", "commitMode": "transactional", "maxParallelism": 10, "retryCount": 2,
+    })
+    if resp.status_code in (200, 202):
+        print("  refresh triggered successfully")
+    else:
+        print(f"  refresh failed ({resp.status_code}): {resp.text}")
 
 
 # --- Run selected steps ---
