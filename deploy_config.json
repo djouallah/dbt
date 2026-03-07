@@ -1,0 +1,14 @@
+{
+  "tenant_id": "4a86d5bb-4173-45ee-bfd5-a3b56ee2d3d5",
+  "workspace_id": "be079b0f-3416-4de2-9184-9c546bad223c",
+  "lakehouse_name": "data",
+  "notebook_name": "run",
+  "pipeline_name": "run_pipeline",
+  "pipeline_timeout": "0.01:00:00",
+  "schedule_interval_minutes": 30,
+  "metadata_local_path": "/lakehouse/default/Files/metadata.db",
+  "semantic_model_name": "aemo_electricity",
+  "deploy_branch": "production",
+  "download_limit": 100,
+  "process_limit": 100
+}
