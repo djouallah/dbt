@@ -379,7 +379,8 @@ def deploy_pipeline(notebook_id):
 
 # --- Step: schedule ---
 def deploy_schedule(pipeline_id):
-    print(f"Setting schedule (every {SCHEDULE_INTERVAL_MINUTES} min)...")
+    enabled = SCHEDULE_INTERVAL_MINUTES > 0
+    print(f"Setting schedule ({'every ' + str(SCHEDULE_INTERVAL_MINUTES) + ' min' if enabled else 'disabled'})...")
 
     resp = requests.get(
         f"{BASE_URL}/workspaces/{WORKSPACE_ID}/items/{pipeline_id}/jobs/Pipeline/schedules",
@@ -388,22 +389,23 @@ def deploy_schedule(pipeline_id):
     resp.raise_for_status()
     existing_schedules = resp.json().get("value", [])
 
+    interval = SCHEDULE_INTERVAL_MINUTES if enabled else 720  # 12h placeholder when disabled
     schedule_config = {
-        "enabled": True,
+        "enabled": enabled,
         "configuration": {
             "startDateTime": "2025-01-01T00:00:00",
             "endDateTime": "2030-12-31T23:59:00",
             "localTimeZoneId": "AUS Eastern Standard Time",
             "type": "Cron",
-            "interval": SCHEDULE_INTERVAL_MINUTES,
+            "interval": interval,
         },
     }
 
     if existing_schedules:
         schedule_id = existing_schedules[0]["id"]
         existing_config = existing_schedules[0].get("configuration", {})
-        if existing_config.get("interval") == SCHEDULE_INTERVAL_MINUTES and existing_schedules[0].get("enabled"):
-            print(f"  schedule unchanged (id: {schedule_id}, every {SCHEDULE_INTERVAL_MINUTES} min)")
+        if existing_config.get("interval") == interval and existing_schedules[0].get("enabled") == enabled:
+            print(f"  schedule unchanged (id: {schedule_id})")
             return
         resp = requests.patch(
             f"{BASE_URL}/workspaces/{WORKSPACE_ID}/items/{pipeline_id}/jobs/Pipeline/schedules/{schedule_id}",

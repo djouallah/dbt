@@ -11,7 +11,7 @@ permissions:
 
 env:
   WORKSPACE_ID: ${{ github.ref_name == 'main' && 'e446a5e7-6666-42ad-a331-0bfef3187fbf' || 'be079b0f-3416-4de2-9184-9c546bad223c' }}
-  SCHEDULE_INTERVAL_MINUTES: ${{ github.ref_name == 'main' && '43200' || '30' }}
+  SCHEDULE_INTERVAL_MINUTES: ${{ github.ref_name == 'main' && '0' || '30' }}
 
 jobs:
   test:
