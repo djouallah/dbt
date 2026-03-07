@@ -10,5 +10,5 @@
   "semantic_model_name": "aemo_electricity",
   "deploy_branch": "production",
   "download_limit": 100,
-  "process_limit": 100
+  "process_limit": 1000
 }
