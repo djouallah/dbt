@@ -3,6 +3,13 @@ name: Deploy to Fabric
 on:
   push:
     branches: [main, production]
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: Target environment
+        type: choice
+        options: [test, production]
+        default: production
 
 permissions:
   id-token: write
@@ -10,8 +17,7 @@ permissions:
   pages: write
 
 env:
-  WORKSPACE_ID: ${{ github.ref_name == 'main' && 'e446a5e7-6666-42ad-a331-0bfef3187fbf' || 'be079b0f-3416-4de2-9184-9c546bad223c' }}
-  SCHEDULE_INTERVAL_MINUTES: ${{ github.ref_name == 'main' && '0' || '30' }}
+  DEPLOY_ENV: ${{ github.event_name == 'workflow_dispatch' && inputs.environment || (github.ref_name == 'main' && 'test' || 'production') }}
 
 jobs:
   test:
@@ -48,6 +54,8 @@ jobs:
       first_deploy: ${{ steps.deploy.outputs.first_deploy }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: main
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
@@ -58,13 +66,15 @@ jobs:
           tenant-id: ${{ secrets.AZURE_TENANT_ID }}
           allow-no-subscriptions: true
       - id: deploy
-        run: python deploy_to_fabric.py lakehouse
+        run: python deploy_to_fabric.py --env $DEPLOY_ENV lakehouse
 
   files:
     needs: lakehouse
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: main
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
@@ -74,7 +84,7 @@ jobs:
           client-id: ${{ secrets.AZURE_CLIENT_ID }}
           tenant-id: ${{ secrets.AZURE_TENANT_ID }}
           allow-no-subscriptions: true
-      - run: python deploy_to_fabric.py files
+      - run: python deploy_to_fabric.py --env $DEPLOY_ENV files
 
   initial-load:
     needs: [lakehouse, files]
@@ -83,6 +93,8 @@ jobs:
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: main
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
@@ -92,7 +104,7 @@ jobs:
           client-id: ${{ secrets.AZURE_CLIENT_ID }}
           tenant-id: ${{ secrets.AZURE_TENANT_ID }}
           allow-no-subscriptions: true
-      - run: python deploy_to_fabric.py initial_load
+      - run: python deploy_to_fabric.py --env $DEPLOY_ENV initial_load
 
   notebook:
     needs: initial-load
@@ -100,6 +112,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: main
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
@@ -109,7 +123,7 @@ jobs:
           client-id: ${{ secrets.AZURE_CLIENT_ID }}
           tenant-id: ${{ secrets.AZURE_TENANT_ID }}
           allow-no-subscriptions: true
-      - run: python deploy_to_fabric.py notebook
+      - run: python deploy_to_fabric.py --env $DEPLOY_ENV notebook
 
   semantic-model:
     needs: notebook
@@ -117,6 +131,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: main
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
@@ -126,7 +142,7 @@ jobs:
           client-id: ${{ secrets.AZURE_CLIENT_ID }}
           tenant-id: ${{ secrets.AZURE_TENANT_ID }}
           allow-no-subscriptions: true
-      - run: python deploy_to_fabric.py semantic_model
+      - run: python deploy_to_fabric.py --env $DEPLOY_ENV semantic_model
 
   pipeline:
     needs: semantic-model
@@ -134,6 +150,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: main
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
@@ -143,7 +161,7 @@ jobs:
           client-id: ${{ secrets.AZURE_CLIENT_ID }}
           tenant-id: ${{ secrets.AZURE_TENANT_ID }}
           allow-no-subscriptions: true
-      - run: python deploy_to_fabric.py pipeline
+      - run: python deploy_to_fabric.py --env $DEPLOY_ENV pipeline
 
   schedule:
     needs: pipeline
@@ -151,6 +169,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: main
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
@@ -160,7 +180,7 @@ jobs:
           client-id: ${{ secrets.AZURE_CLIENT_ID }}
           tenant-id: ${{ secrets.AZURE_TENANT_ID }}
           allow-no-subscriptions: true
-      - run: python deploy_to_fabric.py schedule
+      - run: python deploy_to_fabric.py --env $DEPLOY_ENV schedule
 
   deploy-docs:
     needs: schedule
