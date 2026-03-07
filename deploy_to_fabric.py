@@ -510,26 +510,7 @@ def deploy_semantic_model():
         semantic_model_id = sm["id"]
         print(f"  created semantic model '{SEMANTIC_MODEL_NAME}' (id: {semantic_model_id})")
 
-    # Refresh via Power BI API (Fabric token works for /refreshes)
-    print("  refreshing semantic model...")
-    refresh_url = f"https://api.powerbi.com/v1.0/myorg/datasets/{semantic_model_id}/refreshes"
-    resp = requests.post(refresh_url, headers=headers, json={
-        "type": "clearValues", "commitMode": "transactional",
-    })
-    if resp.status_code in (200, 202):
-        if resp.status_code == 202:
-            time.sleep(10)
-        print("  clearValues done")
-
-    resp = requests.post(refresh_url, headers=headers, json={
-        "type": "full", "commitMode": "transactional",
-    })
-    if resp.status_code in (200, 202):
-        if resp.status_code == 202:
-            time.sleep(15)
-        print("  full refresh done")
-    else:
-        print(f"  WARNING: refresh returned {resp.status_code}: {resp.text[:200]}")
+    # Refresh happens in test_semantic_model via sempy (Power BI API returns 403 for service principals)
 
 
 # --- Run selected steps ---
@@ -569,6 +550,7 @@ if "test_semantic_model" in STEPS:
                     "import json\n",
                     "import sempy.fabric as fabric\n",
                     "\n",
+                    f"fabric.refresh_dataset('{SEMANTIC_MODEL_NAME}')\n",
                     f"df = fabric.evaluate_dax('{SEMANTIC_MODEL_NAME}',\n",
                     "    'EVALUATE ROW(\"rows\", COUNTROWS(fct_summary), \"duids\", COUNTROWS(dim_duid), \"dates\", COUNTROWS(dim_calendar))')\n",
                     "\n",
