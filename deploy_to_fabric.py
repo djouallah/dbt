@@ -5,11 +5,13 @@ Prerequisites:
   - pip install azure-identity azure-storage-file-datalake requests
 
 Usage:
-  python deploy_to_fabric.py                  # deploy everything
-  python deploy_to_fabric.py semantic_model   # deploy semantic model only
-  python deploy_to_fabric.py files notebook   # deploy files + notebook only
+  python deploy_to_fabric.py                           # deploy everything (production)
+  python deploy_to_fabric.py --env test                # deploy everything (test)
+  python deploy_to_fabric.py --env test notebook       # deploy notebook to test
+  python deploy_to_fabric.py semantic_model            # deploy semantic model (production)
 
 Steps: lakehouse, files, initial_load, notebook, semantic_model, pipeline, schedule
+Environments: test, production (default: production)
 """
 
 import argparse
@@ -28,7 +30,10 @@ from azure.identity import AzureCliCredential
 from azure.storage.filedatalake import DataLakeServiceClient
 
 ALL_STEPS = ["lakehouse", "files", "initial_load", "notebook", "semantic_model", "pipeline", "schedule"]
+ENV_CHOICES = ["test", "production"]
 parser = argparse.ArgumentParser(description="Deploy dbt project to Microsoft Fabric")
+parser.add_argument("--env", choices=ENV_CHOICES, default="production",
+                    help="Target environment (default: production)")
 parser.add_argument("steps", nargs="*", default=None,
                     help=f"Steps to deploy (default: all). Choices: {', '.join(ALL_STEPS)}")
 args = parser.parse_args()
@@ -45,18 +50,21 @@ _config_path = Path(__file__).resolve().parent / "deploy_config.json"
 with open(_config_path) as _f:
     _cfg = json.load(_f)
 
+_env_cfg = _cfg["environments"][args.env]
+print(f"Environment: {args.env}")
+
 TENANT_ID                 = _cfg["tenant_id"]
-WORKSPACE_ID              = os.environ.get("WORKSPACE_ID", _cfg["workspace_id"])
-LAKEHOUSE_NAME            = _cfg["lakehouse_name"]
-NOTEBOOK_NAME             = _cfg["notebook_name"]
-PIPELINE_NAME             = _cfg["pipeline_name"]
-PIPELINE_TIMEOUT          = _cfg.get("pipeline_timeout", "0.01:00:00")
-SCHEDULE_INTERVAL_MINUTES = int(os.environ.get("SCHEDULE_INTERVAL_MINUTES", _cfg.get("schedule_interval_minutes", 30)))
-METADATA_LOCAL_PATH       = _cfg.get("metadata_local_path", "/lakehouse/default/Files/metadata.db")
-DEPLOY_BRANCH             = _cfg.get("deploy_branch", "production")
-SEMANTIC_MODEL_NAME       = _cfg.get("semantic_model_name", "aemo_electricity")
-DOWNLOAD_LIMIT            = _cfg.get("download_limit", 100)
-PROCESS_LIMIT             = _cfg.get("process_limit", 100)
+WORKSPACE_ID              = _env_cfg["workspace_id"]
+LAKEHOUSE_NAME            = _env_cfg.get("lakehouse_name", _cfg["lakehouse_name"])
+NOTEBOOK_NAME             = _env_cfg.get("notebook_name", _cfg["notebook_name"])
+PIPELINE_NAME             = _env_cfg.get("pipeline_name", _cfg["pipeline_name"])
+PIPELINE_TIMEOUT          = _env_cfg.get("pipeline_timeout", _cfg.get("pipeline_timeout", "0.01:00:00"))
+SCHEDULE_INTERVAL_MINUTES = int(_env_cfg.get("schedule_interval_minutes", _cfg.get("schedule_interval_minutes", 30)))
+METADATA_LOCAL_PATH       = _env_cfg.get("metadata_local_path", _cfg.get("metadata_local_path", "/lakehouse/default/Files/metadata.db"))
+DEPLOY_BRANCH             = _env_cfg.get("deploy_branch", _cfg.get("deploy_branch", "production"))
+SEMANTIC_MODEL_NAME       = _env_cfg.get("semantic_model_name", _cfg.get("semantic_model_name", "aemo_electricity"))
+DOWNLOAD_LIMIT            = _env_cfg.get("download_limit", _cfg.get("download_limit", 100))
+PROCESS_LIMIT             = _env_cfg.get("process_limit", _cfg.get("process_limit", 100))
 
 EXCLUDE_DIRS = {".git", "target", "logs", "dbt_packages", "__pycache__", ".github", ".claude"}
 EXCLUDE_FILES = {"metadata.db", ".user.yml", "nul", "README.md", "deploy_config.json"}
