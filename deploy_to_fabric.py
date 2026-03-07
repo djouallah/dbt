@@ -463,6 +463,45 @@ def run_notebook_and_wait(notebook_id):
     return False
 
 
+# --- Step: refresh semantic model ---
+def refresh_semantic_model(semantic_model_id):
+    """Two-step DirectLake refresh: clearValues then full reframe."""
+    powerbi_url = f"https://api.powerbi.com/v1.0/myorg/datasets/{semantic_model_id}/refreshes"
+
+    for step_name, payload in [
+        ("clearValues", {"type": "clearValues", "commitMode": "transactional", "maxParallelism": 10, "retryCount": 2, "objects": []}),
+        ("full", {"type": "full", "commitMode": "transactional", "maxParallelism": 10, "retryCount": 2, "objects": []}),
+    ]:
+        print(f"  refresh: {step_name}...")
+        resp = requests.post(powerbi_url, headers=headers, json=payload)
+        if resp.status_code not in (200, 202):
+            print(f"  refresh {step_name} failed ({resp.status_code}): {resp.text}")
+            return
+        if resp.status_code == 202:
+            location = resp.headers.get("Location")
+            if location:
+                refresh_id = location.split("/")[-1]
+                for attempt in range(60):
+                    time.sleep(5)
+                    sr = requests.get(f"{powerbi_url}/{refresh_id}", headers=headers)
+                    sr.raise_for_status()
+                    status = sr.json().get("status")
+                    if status == "Completed":
+                        print(f"  refresh {step_name} completed")
+                        break
+                    if status in ("Failed", "Cancelled"):
+                        error = sr.json().get("serviceExceptionJson", "")
+                        print(f"  refresh {step_name} {status.lower()}: {error}")
+                        return
+                    if attempt % 6 == 0 and attempt > 0:
+                        print(f"  refresh {step_name} still running...")
+                else:
+                    print(f"  refresh {step_name} timed out")
+                    return
+        else:
+            print(f"  refresh {step_name} completed")
+
+
 # --- Step: semantic_model ---
 def deploy_semantic_model():
     print(f"Deploying semantic model '{SEMANTIC_MODEL_NAME}'...")
@@ -521,7 +560,7 @@ def deploy_semantic_model():
         semantic_model_id = sm["id"]
         print(f"  created semantic model '{SEMANTIC_MODEL_NAME}' (id: {semantic_model_id})")
 
-    # Refresh happens in test_semantic_model via sempy (Power BI API returns 403 for service principals)
+    refresh_semantic_model(semantic_model_id)
 
 
 # --- Run selected steps ---
