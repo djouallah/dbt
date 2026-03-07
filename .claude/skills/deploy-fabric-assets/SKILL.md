@@ -56,7 +56,10 @@ Per-environment keys override top-level defaults (e.g. `workspace_id`, `schedule
 
 ## API Endpoints
 - Fabric: `https://api.fabric.microsoft.com/v1`
-- Power BI refresh: `https://api.powerbi.com/v1.0/myorg/datasets/{id}/refreshes`
+- Power BI refresh: `https://api.powerbi.com/v1.0/myorg/groups/{workspace_id}/datasets/{id}/refreshes`
+  - **MUST** use `/groups/{workspace_id}/` path — `/myorg/datasets/` targets "My Workspace" which service principals can't access (403)
+  - **MUST** use Power BI token scope `https://analysis.windows.net/powerbi/api/.default` — the Fabric scope (`api.fabric.microsoft.com`) doesn't work for this endpoint
+  - Requires "Service principals can call Fabric public APIs" enabled in Admin Portal → Developer settings
 
 ## Deploy Pattern (all items)
 1. Check if item exists (GET list endpoint)
@@ -96,7 +99,8 @@ POST /v1/workspaces/{id}/lakehouses
 - **Must use TMSL (model.bim)** — TMDL create is NOT supported by Fabric REST API
 - Parts: `model.bim` (base64) + `definition.pbism` (base64 `{"version":"1.0"}`)
 - `{{ONELAKE_URL}}` placeholder in model.bim, substituted at deploy time
-- Refresh after deploy: clearValues (wait 15s) then full refresh
+- Refresh after deploy via Power BI Enhanced Refresh API (full refresh, async 202)
+- Refresh uses a **separate Power BI token** (`analysis.windows.net/powerbi/api/.default`), not the Fabric token
 
 ### pipeline
 - Type: `DataPipeline`, activity type: `TridentNotebook`
