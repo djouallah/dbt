@@ -11,6 +11,7 @@ permissions:
 
 env:
   WORKSPACE_ID: ${{ github.ref_name == 'main' && 'e446a5e7-6666-42ad-a331-0bfef3187fbf' || 'be079b0f-3416-4de2-9184-9c546bad223c' }}
+  SCHEDULE_INTERVAL_MINUTES: ${{ github.ref_name == 'main' && '43200' || '30' }}
 
 jobs:
   test:
@@ -164,7 +165,7 @@ jobs:
 
   pipeline:
     needs: test-semantic-model
-    if: ${{ !failure() && !cancelled() && github.ref_name == 'production' }}
+    if: ${{ !failure() && !cancelled() }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -181,7 +182,7 @@ jobs:
 
   schedule:
     needs: pipeline
-    if: ${{ !failure() && !cancelled() && github.ref_name == 'production' }}
+    if: ${{ !failure() && !cancelled() }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -197,8 +198,8 @@ jobs:
       - run: python deploy_to_fabric.py schedule
 
   deploy-docs:
-    needs: test-semantic-model
-    if: ${{ !failure() && !cancelled() && github.ref_name == 'production' }}
+    needs: schedule
+    if: ${{ !failure() && !cancelled() }}
     runs-on: ubuntu-latest
     environment:
       name: github-pages
