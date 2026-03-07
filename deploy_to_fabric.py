@@ -27,7 +27,7 @@ import requests
 from azure.identity import AzureCliCredential
 from azure.storage.filedatalake import DataLakeServiceClient
 
-ALL_STEPS = ["lakehouse", "files", "initial_load", "notebook", "semantic_model", "pipeline", "schedule"]
+ALL_STEPS = ["lakehouse", "files", "initial_load", "notebook", "run_notebook", "semantic_model", "test_semantic_model", "pipeline", "schedule"]
 parser = argparse.ArgumentParser(description="Deploy dbt project to Microsoft Fabric")
 parser.add_argument("steps", nargs="*", default=None,
                     help=f"Steps to deploy (default: all). Choices: {', '.join(ALL_STEPS)}")
@@ -549,8 +549,55 @@ notebook_id = None
 if "notebook" in STEPS:
     notebook_id = deploy_notebook(download_limit=DOWNLOAD_LIMIT, process_limit=PROCESS_LIMIT)
 
+if "run_notebook" in STEPS:
+    if notebook_id is None:
+        resp = requests.get(f"{BASE_URL}/workspaces/{WORKSPACE_ID}/notebooks", headers=headers)
+        resp.raise_for_status()
+        nb = next((nb for nb in resp.json().get("value", []) if nb["displayName"] == NOTEBOOK_NAME), None)
+        if nb:
+            notebook_id = nb["id"]
+        else:
+            print(f"  ERROR: notebook '{NOTEBOOK_NAME}' not found. Deploy notebook first.")
+            sys.exit(1)
+    success = run_notebook_and_wait(notebook_id)
+    if not success:
+        print("  FAILED: notebook run did not complete successfully")
+        sys.exit(1)
+
 if "semantic_model" in STEPS:
     deploy_semantic_model()
+
+if "test_semantic_model" in STEPS:
+    print(f"\nTesting semantic model '{SEMANTIC_MODEL_NAME}'...")
+    # Find the semantic model
+    resp = requests.get(f"{BASE_URL}/workspaces/{WORKSPACE_ID}/semanticModels", headers=headers)
+    resp.raise_for_status()
+    sm = next((s for s in resp.json().get("value", []) if s["displayName"] == SEMANTIC_MODEL_NAME), None)
+    if not sm:
+        print(f"  ERROR: semantic model '{SEMANTIC_MODEL_NAME}' not found")
+        sys.exit(1)
+    sm_id = sm["id"]
+    # Run DAX query to verify data
+    dax_query = "EVALUATE ROW(\"rows\", COUNTROWS(fct_summary), \"duids\", COUNTROWS(dim_duid), \"dates\", COUNTROWS(dim_calendar))"
+    resp = requests.post(
+        f"{BASE_URL}/workspaces/{WORKSPACE_ID}/semanticModels/{sm_id}/executeQueries",
+        headers=headers,
+        json={"queries": [{"query": dax_query}]},
+    )
+    resp.raise_for_status()
+    results = resp.json()
+    rows = results.get("results", [{}])[0].get("tables", [{}])[0].get("rows", [])
+    if not rows:
+        print("  FAILED: DAX query returned no results")
+        sys.exit(1)
+    row = rows[0]
+    print(f"  fct_summary: {row.get('[rows]', 0)} rows")
+    print(f"  dim_duid: {row.get('[duids]', 0)} rows")
+    print(f"  dim_calendar: {row.get('[dates]', 0)} rows")
+    if int(row.get("[rows]", 0)) == 0:
+        print("  FAILED: fct_summary has 0 rows")
+        sys.exit(1)
+    print("  semantic model test PASSED")
 
 if "pipeline" in STEPS:
     if notebook_id is None:

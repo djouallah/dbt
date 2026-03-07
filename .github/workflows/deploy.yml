@@ -2,7 +2,7 @@ name: Deploy to Fabric
 
 on:
   push:
-    branches: [production]
+    branches: [main, production]
 
 permissions:
   id-token: write
@@ -10,10 +10,38 @@ permissions:
   pages: write
 
 env:
-  WORKSPACE_ID: be079b0f-3416-4de2-9184-9c546bad223c
+  WORKSPACE_ID: ${{ github.ref_name == 'main' && 'e446a5e7-6666-42ad-a331-0bfef3187fbf' || 'be079b0f-3416-4de2-9184-9c546bad223c' }}
 
 jobs:
+  test:
+    runs-on: ubuntu-latest
+    env:
+      ROOT_PATH: az://dbt
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: pip install dbt-duckdb azure-storage-blob
+      - name: Start Azurite
+        run: |
+          npm install -g azurite
+          azurite-blob --silent --skipApiVersionCheck --blobPort 10000 &
+          for i in $(seq 1 10); do nc -z 127.0.0.1 10000 && break || sleep 1; done
+          python -c "
+          from azure.storage.blob import BlobServiceClient
+          c = BlobServiceClient.from_connection_string('DefaultEndpointsProtocol=http;AccountName=devstoreaccount1;AccountKey=Eby8vdM02xNOcqFlqUwJPLlmEtlCDXJ1OUzFT50uSRZ6IFsuFq2UVErCz4I6tq/K1SZFPTOtr/KBHBeksoGMGw==;BlobEndpoint=http://127.0.0.1:10000/devstoreaccount1;')
+          c.create_container('dbt')
+          "
+      - run: dbt run --target ci --profiles-dir .
+      - run: dbt test --target ci --profiles-dir .
+      - run: dbt docs generate --target ci --profiles-dir .
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: target
+
   lakehouse:
+    needs: test
     runs-on: ubuntu-latest
     outputs:
       first_deploy: ${{ steps.deploy.outputs.first_deploy }}
@@ -82,8 +110,26 @@ jobs:
           allow-no-subscriptions: true
       - run: python deploy_to_fabric.py notebook
 
-  semantic-model:
+  run-notebook:
     needs: notebook
+    if: ${{ !failure() && !cancelled() }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: pip install azure-identity azure-storage-file-datalake requests PyJWT
+      - uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          allow-no-subscriptions: true
+      - run: python deploy_to_fabric.py run_notebook
+
+  semantic-model:
+    needs: run-notebook
     if: ${{ !failure() && !cancelled() }}
     runs-on: ubuntu-latest
     steps:
@@ -99,9 +145,26 @@ jobs:
           allow-no-subscriptions: true
       - run: python deploy_to_fabric.py semantic_model
 
-  pipeline:
+  test-semantic-model:
     needs: semantic-model
     if: ${{ !failure() && !cancelled() }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: pip install azure-identity azure-storage-file-datalake requests PyJWT
+      - uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          allow-no-subscriptions: true
+      - run: python deploy_to_fabric.py test_semantic_model
+
+  pipeline:
+    needs: test-semantic-model
+    if: ${{ !failure() && !cancelled() && github.ref_name == 'production' }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -118,7 +181,7 @@ jobs:
 
   schedule:
     needs: pipeline
-    if: ${{ !failure() && !cancelled() }}
+    if: ${{ !failure() && !cancelled() && github.ref_name == 'production' }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -133,24 +196,9 @@ jobs:
           allow-no-subscriptions: true
       - run: python deploy_to_fabric.py schedule
 
-  docs:
-    needs: schedule
-    if: ${{ !failure() && !cancelled() }}
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
-      - run: pip install dbt-duckdb
-      - run: dbt docs generate --target dev --profiles-dir .
-      - uses: actions/upload-pages-artifact@v3
-        with:
-          path: target
-
   deploy-docs:
-    needs: docs
-    if: ${{ !failure() && !cancelled() }}
+    needs: test-semantic-model
+    if: ${{ !failure() && !cancelled() && github.ref_name == 'production' }}
     runs-on: ubuntu-latest
     environment:
       name: github-pages
