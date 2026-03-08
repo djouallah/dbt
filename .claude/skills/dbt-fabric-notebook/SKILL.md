@@ -36,15 +36,23 @@ import sys
 sys.exit(0)  # Restart kernel to pick up new packages
 ```
 
-### Cell 2 — Run dbt
+### Cell 2 — Run dbt (using Python API, not shell commands)
 ```python
 import os
 os.environ['ROOT_PATH']           = 'abfss://<workspace>@onelake.dfs.fabric.microsoft.com/<lakehouse>.Lakehouse'
 os.environ['METADATA_LOCAL_PATH'] = '/lakehouse/default/Files/metadata.db'
 os.environ['download_limit']      = '100'
 os.environ['process_limit']       = '1000'
-!cd /lakehouse/default/Files/dbt && dbt run --target prod --profiles-dir . && dbt test --target prod --profiles-dir .
+
+os.chdir('/lakehouse/default/Files/dbt')
+
+from dbt.cli.main import dbtRunner
+dbt = dbtRunner()
+dbt.invoke(["run", "--target", "prod", "--profiles-dir", "."])
+dbt.invoke(["test", "--target", "prod", "--profiles-dir", "."])
 ```
+
+**Why Python API instead of shell commands:** Fabric notebooks resolve `%cd` to `/synfs/...` instead of `/lakehouse/...`, causing `dbt_project.yml not found` errors. Using `os.chdir()` + `dbtRunner.invoke()` avoids all shell/path issues. The `dbtRunner` API (available since dbt v1.5) executes the same code paths as the CLI.
 
 | Variable | Purpose |
 |----------|---------|
