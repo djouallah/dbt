@@ -23,11 +23,13 @@ vars:
 on-run-start:
   - "CALL ducklake.set_option('rewrite_delete_threshold', 0)"
   - "CALL ducklake.set_option('target_file_size', '128MB')"
+  - "CALL ducklake.set_option('expire_older_than', '2 day')"
 
 
 on-run-end:
   - "CALL ducklake_rewrite_data_files('ducklake')"
   - "CALL ducklake_merge_adjacent_files('ducklake')"
+  - "CALL ducklake_cleanup_old_files('ducklake', cleanup_all => true);"
   - "CALL delta_export()"
 
 models:
