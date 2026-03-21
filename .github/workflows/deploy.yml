@@ -31,12 +31,12 @@ jobs:
           c = BlobServiceClient.from_connection_string('DefaultEndpointsProtocol=http;AccountName=devstoreaccount1;AccountKey=Eby8vdM02xNOcqFlqUwJPLlmEtlCDXJ1OUzFT50uSRZ6IFsuFq2UVErCz4I6tq/K1SZFPTOtr/KBHBeksoGMGw==;BlobEndpoint=http://127.0.0.1:10000/devstoreaccount1;')
           c.create_container('dbt')
           "
-      - run: dbt run --target ci --profiles-dir .
-      - run: dbt test --target ci --profiles-dir .
-      - run: dbt docs generate --target ci --profiles-dir .
+      - run: dbt run --target ci --project-dir dbt --profiles-dir dbt
+      - run: dbt test --target ci --project-dir dbt --profiles-dir dbt
+      - run: dbt docs generate --target ci --project-dir dbt --profiles-dir dbt
       - uses: actions/upload-pages-artifact@v3
         with:
-          path: target
+          path: dbt/target
 
   deploy:
     needs: test
