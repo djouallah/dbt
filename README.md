@@ -30,11 +30,12 @@ GitHub Actions CI
     │
     ▼
 deploy.py (Fabric CLI + Power BI API)
-    ├── fab deploy  → Lakehouse + Notebook
+    ├── fab create  → Lakehouse (with schemas)
+    ├── fab deploy  → Notebook
     ├── Copy dbt/   → OneLake Files
     ├── fab job run → Notebook runs dbt, DuckLake writes Delta tables
     ├── delta_export() finalizes Delta metadata
-    ├── fab deploy  → Semantic Model (Direct Lake)
+    ├── fab deploy  → Semantic Model (Direct Lake, GUIDs swapped)
     ├── Power BI API → Refresh semantic model
     └── fab deploy  → Data Pipeline + cron schedule
 ```
@@ -100,8 +101,7 @@ on-run-end:
 
 ## Configuration
 
-- `deploy_config.yml` — Workspace, lakehouse, notebook, pipeline IDs per environment
-- `parameter.yml` — Fabric CLI token substitution (dev GUIDs → `$workspace.id`, `$items.*`)
+- `deploy_config.yml` — Workspace ID, schedule, and settings per environment
 - `profiles.yml` — dbt targets with DuckLake attach config
 - `dbt_project.yml` — Model config, DuckLake hooks, variable defaults
 
@@ -117,13 +117,7 @@ Push to `main` runs CI tests and publishes dbt docs to GitHub Pages. Push to `pr
 
 ```bash
 az login
-python deploy.py
-```
-
-Run a specific step:
-
-```bash
-python deploy.py semantic_model
+python deploy.py --env main
 ```
 
 ## Requirements
