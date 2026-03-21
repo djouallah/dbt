@@ -25,7 +25,7 @@ def find_item(item_type):
         raise SystemExit(f"Expected exactly one {item_type} in fabric_items/, found {len(matches)}")
     return matches[0].name.removesuffix(f".{item_type}")
 
-LH_NAME  = find_item("Lakehouse")
+LH_NAME  = cfg["lakehouse_name"]
 NB_NAME  = find_item("Notebook")
 PL_NAME  = find_item("DataPipeline")
 SM_NAME  = find_item("SemanticModel")
@@ -150,11 +150,7 @@ else:
          "-i", json.dumps({"displayName": VL_NAME, "definition": vl_definition})])
     print(f"Created variable library '{VL_NAME}'")
 
-# 2a. Deploy lakehouse (no parameters needed)
-print("=== 2a. Deploy lakehouse ===")
-fab_deploy(["Lakehouse"])
-
-# 2b. Deploy notebook (no parameters — code uses notebookutils at runtime)
+# 2. Deploy notebook (no parameters — code uses notebookutils at runtime)
 print("=== 2b. Deploy notebook ===")
 fab_deploy(["Notebook"])
 
