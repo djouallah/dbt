@@ -9,4 +9,5 @@ find_replace:
 
   - find_value: "download_limit']      = '2'"
     replace_value:
+      deploy_test_github: "download_limit']      = '2'"
       prod: "download_limit']      = '60'"
