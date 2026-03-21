@@ -134,7 +134,7 @@ lakehouse_payload = json.dumps({
 })
 fab(["set", NOTEBOOK, "-q",
      "definition.parts[0].payload.metadata.dependencies.lakehouse",
-     "-i", lakehouse_payload])
+     "-i", lakehouse_payload, "-f"])
 
 # Get target notebook ID (now exists after deploy) and rebuild parameter.yml with it
 target_nb_id = get_target_item_id("Notebook", cfg["notebook"])
