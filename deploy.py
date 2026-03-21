@@ -77,7 +77,8 @@ with ThreadPoolExecutor(max_workers=8) as executor:
 
 # 4. Run notebook (blocks until dbt finishes and Delta tables are created)
 print("=== 4. Run notebook ===")
-fab(["job", "run", NOTEBOOK, "-i", "{}"])
+download_limit = 2 if args.env == "test" else 60
+fab(["job", "run", NOTEBOOK, "-i", f'{{"download_limit": {download_limit}}}'])
 
 # 5. Deploy semantic model
 print("=== 5. Deploy semantic model ===")
