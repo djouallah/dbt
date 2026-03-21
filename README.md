@@ -1,6 +1,8 @@
 # dbt on Microsoft Fabric — CI/CD with Fabric CLI
 
-A CI/CD pipeline that deploys a dbt project to Microsoft Fabric using the [Fabric CLI](https://microsoft.github.io/fabric-cli/) (`fab`). The notebook runs dbt inside Fabric and exports results to Delta Lake tables, which are served via a Direct Lake semantic model in Power BI.
+A CI/CD pipeline that deploys a dbt project to Microsoft Fabric using the [Fabric CLI](https://microsoft.github.io/fabric-cli/) (`fab`). A Python notebook runs dbt inside Fabric and exports results to Delta Lake tables, which are served via a Direct Lake semantic model in Power BI.
+
+> **Note:** The officially supported way to run dbt on Fabric is the [dbt-fabric adapter](https://github.com/microsoft/dbt-fabric) (connects to Fabric Data Warehouse via ODBC). Running dbt inside a Fabric Python notebook is **not officially supported** — this repo uses it as a workaround to run dbt-duckdb directly against OneLake without needing a dedicated warehouse.
 
 ## How it works
 
