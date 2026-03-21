@@ -35,48 +35,40 @@ def fab(args, cwd=root):
     subprocess.run(["fab"] + args, check=True, cwd=str(cwd))
 
 
-# Generate parameter.yml by scanning content files for GUIDs
 import re
-PARAM_TMP = root / "_parameter_tmp.yml"
-GUID_RE = re.compile(r'[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}', re.IGNORECASE)
+PARAM_FILE = root / "parameter.yml"
 
-# Regex all GUIDs from fabric_items/
-content_guids = set()
-for f in (root / "fabric_items").rglob("*"):
-    if f.is_file():
-        try:
-            content_guids.update(g.lower() for g in GUID_RE.findall(f.read_text(encoding="utf-8")))
-        except (UnicodeDecodeError, PermissionError):
-            pass
+# Extract source workspace_id and lakehouse_id from the bim file OneLake URL
+bim_text = (root / "fabric_items" / f"{SM_NAME}.SemanticModel" / "model.bim").read_text()
+url_match = re.search(r'onelake\.dfs\.fabric\.microsoft\.com/([0-9a-f-]{36})/([0-9a-f-]{36})', bim_text)
+if not url_match:
+    raise SystemExit("Could not find OneLake URL with workspace/lakehouse GUIDs in model.bim")
+source_ws_id = url_match.group(1)
+source_lh_id = url_match.group(2)
+print(f"Source workspace ID: {source_ws_id}")
+print(f"Source lakehouse ID: {source_lh_id}")
 
-# Source workspace GUID is in the config
-source_ws_id = all_cfg["main"]["ws_id"].lower()
-param_entries = []
+# Extract source notebook_id from .platform logicalId (used in pipeline-content.json)
+source_nb_id = json.loads(
+    (root / "fabric_items" / f"{cfg['notebook']}.Notebook" / ".platform").read_text()
+)["config"]["logicalId"]
+print(f"Source notebook ID:  {source_nb_id}")
 
-if source_ws_id in content_guids:
-    param_entries.append({"find_value": source_ws_id,
-                          "replace_value": {"_ALL_": "$workspace.id"}})
-    content_guids.discard(source_ws_id)
 
-# Remaining GUIDs: one API call to list items in source workspace
-r = subprocess.run(["fab", "api", "-X", "get", f"workspaces/{source_ws_id}/items"],
-                   capture_output=True, text=True, check=True, cwd=str(root))
-source_items = {i["id"].lower(): i for i in json.loads(r.stdout)["text"]["value"]}
-for guid in content_guids:
-    if guid in source_items:
-        item = source_items[guid]
-        token = f"$items.{item['type']}.{item['displayName']}.$id"
-        param_entries.append({"find_value": guid, "replace_value": {"_ALL_": token}})
+def get_target_item_id(item_type, display_name):
+    """Query target workspace for an item's ID by type and name."""
+    r = subprocess.run(
+        ["fab", "api", "-X", "get", f"workspaces/{WS_ID}/items?type={item_type}"],
+        capture_output=True, text=True, check=True, cwd=str(root),
+    )
+    return next(i["id"] for i in json.loads(r.stdout)["text"]["value"]
+                if i["displayName"] == display_name)
 
-# Env-specific: download_limit
-default_dl = all_cfg.get("defaults", {}).get("download_limit", "2")
-param_entries.append({
-    "find_value": f"download_limit']      = '{default_dl}'",
-    "replace_value": {"_ALL_": f"download_limit']      = '{cfg['download_limit']}'"}
-})
 
-PARAM_TMP.write_text(yaml.dump({"find_replace": param_entries}, default_flow_style=False))
-print(f"Generated parameter.yml with {len(param_entries)} entries")
+def write_parameter_yml(entries):
+    """Write parameter.yml with the given find_replace entries."""
+    PARAM_FILE.write_text(yaml.dump({"find_replace": entries}, default_flow_style=False))
+    print(f"Wrote parameter.yml with {len(entries)} entries")
 
 
 def fab_deploy(item_types, use_parameters=True):
@@ -87,7 +79,7 @@ def fab_deploy(item_types, use_parameters=True):
         '  repository_directory: "./fabric_items"\n'
     )
     if use_parameters:
-        content += f'  parameter: "./{PARAM_TMP.name}"\n'
+        content += f'  parameter: "./{PARAM_FILE.name}"\n'
     content += '  item_types_in_scope:\n'
     for t in item_types:
         content += f'    - {t}\n'
@@ -106,12 +98,49 @@ def fab_deploy(item_types, use_parameters=True):
 print("=== 1. Create lakehouse ===")
 subprocess.run(["fab", "create", LAKEHOUSE, "-P", "enableSchemas=true"], cwd=str(root))
 
-# 2. Deploy lakehouse first so $items.Lakehouse.data.$id resolves for notebook
+# Get target lakehouse ID (create above ensures it exists)
+target_lh_id = get_target_item_id("Lakehouse", cfg["lakehouse"])
+print(f"Target lakehouse ID: {target_lh_id}")
+
+# Build parameter.yml v1: workspace + lakehouse + download_limit
+param_entries = [
+    {"find_value": source_ws_id, "replace_value": {"_ALL_": "$workspace.id"}},
+    {"find_value": source_lh_id, "replace_value": {"_ALL_": target_lh_id}},
+]
+default_dl = all_cfg.get("defaults", {}).get("download_limit", "2")
+target_dl = cfg.get("download_limit", default_dl)
+if default_dl != target_dl:
+    param_entries.append({
+        "find_value": f"download_limit']      = '{default_dl}'",
+        "replace_value": {"_ALL_": f"download_limit']      = '{target_dl}'"},
+    })
+write_parameter_yml(param_entries)
+
+# 2a. Deploy lakehouse (no parameters needed)
 print("=== 2a. Deploy lakehouse ===")
 fab_deploy(["Lakehouse"], use_parameters=False)
 
+# 2b. Deploy notebook (uses parameter.yml v1: ws_id + lakehouse_id + download_limit)
 print("=== 2b. Deploy notebook ===")
 fab_deploy(["Notebook"])
+
+# 2c. Attach lakehouse to notebook
+print("=== 2c. Attach lakehouse to notebook ===")
+lakehouse_payload = json.dumps({
+    "known_lakehouses": [{"id": target_lh_id}],
+    "default_lakehouse": target_lh_id,
+    "default_lakehouse_name": cfg["lakehouse"],
+    "default_lakehouse_workspace_id": WS_ID,
+})
+fab(["set", NOTEBOOK, "-q",
+     "definition.parts[0].payload.metadata.dependencies.lakehouse",
+     "-i", lakehouse_payload])
+
+# Get target notebook ID (now exists after deploy) and rebuild parameter.yml with it
+target_nb_id = get_target_item_id("Notebook", cfg["notebook"])
+print(f"Target notebook ID:  {target_nb_id}")
+param_entries.append({"find_value": source_nb_id, "replace_value": {"_ALL_": target_nb_id}})
+write_parameter_yml(param_entries)
 
 # 3. Copy dbt files to OneLake
 print("=== 3. Copy dbt files to OneLake ===")
@@ -145,12 +174,7 @@ fab_deploy(["SemanticModel"])
 
 # 6. Refresh semantic model
 print("=== 6. Refresh semantic model ===")
-result = subprocess.run(
-    ["fab", "api", "-X", "get", f"workspaces/{WS_ID}/items?type=SemanticModel"],
-    capture_output=True, text=True, cwd=str(root), check=True
-)
-items = json.loads(result.stdout)
-sm_id = next(i["id"] for i in items["text"]["value"] if i["displayName"] == SM_NAME)
+sm_id = get_target_item_id("SemanticModel", SM_NAME)
 fab(["api", "-A", "powerbi", "-X", "post", f"groups/{WS_ID}/datasets/{sm_id}/refreshes"])
 
 # 7. Deploy DataPipeline + schedule
@@ -171,5 +195,5 @@ else:
          "--type", "cron", "--interval", cfg["schedule_interval"],
          "--start", cfg["schedule_start"], "--end", cfg["schedule_end"], "--enable"])
 
-PARAM_TMP.unlink(missing_ok=True)
+PARAM_FILE.unlink(missing_ok=True)
 print("=== Deploy complete ===")
