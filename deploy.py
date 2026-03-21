@@ -35,18 +35,48 @@ def fab(args, cwd=root):
     subprocess.run(["fab"] + args, check=True, cwd=str(cwd))
 
 
-# Generate parameter.yml from parameter_tokens.yml + deploy config
+# Generate parameter.yml by scanning content files for GUIDs
+import re
 PARAM_TMP = root / "_parameter_tmp.yml"
-tokens = yaml.safe_load((root / "parameter_tokens.yml").read_text())
+GUID_RE = re.compile(r'[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}', re.IGNORECASE)
+
+# Regex all GUIDs from fabric_items/
+content_guids = set()
+for f in (root / "fabric_items").rglob("*"):
+    if f.is_file():
+        try:
+            content_guids.update(g.lower() for g in GUID_RE.findall(f.read_text(encoding="utf-8")))
+        except (UnicodeDecodeError, PermissionError):
+            pass
+
+# Source workspace GUID is in the config
+source_ws_id = all_cfg["main"]["ws_id"].lower()
 param_entries = []
-for item in tokens["find_replace"]:
-    param_entries.append({"find_value": item["find"],
-                          "replace_value": {"_ALL_": item["token"]}})
-for item in tokens.get("env_replace", []):
-    value = cfg[item["config_key"]]
-    param_entries.append({"find_value": item["find"],
-                          "replace_value": {"_ALL_": item["template"].format(value=value)}})
+
+if source_ws_id in content_guids:
+    param_entries.append({"find_value": source_ws_id,
+                          "replace_value": {"_ALL_": "$workspace.id"}})
+    content_guids.discard(source_ws_id)
+
+# Remaining GUIDs: one API call to list items in source workspace
+r = subprocess.run(["fab", "api", "-X", "get", f"workspaces/{source_ws_id}/items"],
+                   capture_output=True, text=True, check=True, cwd=str(root))
+source_items = {i["id"].lower(): i for i in json.loads(r.stdout)["text"]["value"]}
+for guid in content_guids:
+    if guid in source_items:
+        item = source_items[guid]
+        token = f"$items.{item['type']}.{item['displayName']}.$id"
+        param_entries.append({"find_value": guid, "replace_value": {"_ALL_": token}})
+
+# Env-specific: download_limit
+default_dl = all_cfg.get("defaults", {}).get("download_limit", "2")
+param_entries.append({
+    "find_value": f"download_limit']      = '{default_dl}'",
+    "replace_value": {"_ALL_": f"download_limit']      = '{cfg['download_limit']}'"}
+})
+
 PARAM_TMP.write_text(yaml.dump({"find_replace": param_entries}, default_flow_style=False))
+print(f"Generated parameter.yml with {len(param_entries)} entries")
 
 
 def fab_deploy(item_types, use_parameters=True):
