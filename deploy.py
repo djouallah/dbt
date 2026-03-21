@@ -247,6 +247,6 @@ print("=== 8. Organize items into data folder ===")
 subprocess.run(["fab", "create", FOLDER], cwd=str(root))
 for item in [LAKEHOUSE, NOTEBOOK, PIPELINE]:
     r = subprocess.run(["fab", "mv", item, FOLDER], capture_output=True, text=True, cwd=str(root))
-    print(f"  mv {item} → {r.returncode} {r.stderr.strip()}")
+    print(f"  mv {item} → rc={r.returncode} stdout={r.stdout.strip()} stderr={r.stderr.strip()}")
 
 print("=== Deploy complete ===")
