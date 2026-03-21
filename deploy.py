@@ -91,11 +91,9 @@ def fab_deploy(item_types):
         tmp.unlink(missing_ok=True)
 
 
-# 0. Enable folder support and create "data" folder
+# 0. Enable folder support
 FOLDER = f"{ws}.Workspace/data.Folder"
-print("=== 0. Create data folder ===")
 fab(["config", "set", "folder_listing_enabled", "true"])
-subprocess.run(["fab", "create", FOLDER], cwd=str(root))
 
 # 1. Ensure lakehouse exists with schemas enabled
 print("=== 1. Create lakehouse ===")
@@ -244,8 +242,9 @@ else:
          "--type", "cron", "--interval", cfg["schedule_interval"],
          "--start", cfg["schedule_start"], "--end", cfg["schedule_end"], "--enable"])
 
-# 8. Move items into "data" folder (semantic model stays at root)
+# 8. Create "data" folder and move items into it (semantic model stays at root)
 print("=== 8. Organize items into data folder ===")
+subprocess.run(["fab", "create", FOLDER], cwd=str(root))
 for item in [LAKEHOUSE, NOTEBOOK, PIPELINE]:
     r = subprocess.run(["fab", "mv", item, FOLDER], capture_output=True, text=True, cwd=str(root))
     print(f"  mv {item} → {r.returncode} {r.stderr.strip()}")
