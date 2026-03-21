@@ -37,10 +37,10 @@ def fab(args, cwd=root):
 
 import base64
 import re
-PARAM_FILE = root / "parameter.yml"
 
 # Extract source workspace_id and lakehouse_id from the bim file OneLake URL
-bim_text = (root / "fabric_items" / f"{SM_NAME}.SemanticModel" / "model.bim").read_text()
+bim_path = root / "fabric_items" / f"{SM_NAME}.SemanticModel" / "model.bim"
+bim_text = bim_path.read_text()
 url_match = re.search(r'onelake\.dfs\.fabric\.microsoft\.com/([0-9a-f-]{36})/([0-9a-f-]{36})', bim_text)
 if not url_match:
     raise SystemExit("Could not find OneLake URL with workspace/lakehouse GUIDs in model.bim")
@@ -61,31 +61,20 @@ def get_target_item_id(item_type, display_name):
                 if i["displayName"] == display_name)
 
 
-def write_parameter_yml(entries):
-    """Write parameter.yml with the given find_replace entries."""
-    PARAM_FILE.write_text(yaml.dump({"find_replace": entries}, default_flow_style=False))
-    print(f"Wrote parameter.yml with {len(entries)} entries")
-
-
-def fab_deploy(item_types, use_parameters=True):
+def fab_deploy(item_types):
     """Write a temporary fab deploy config and run deploy, then clean up."""
     content = (
         'core:\n'
         f'  workspace: "{ws}"\n'
         '  repository_directory: "./fabric_items"\n'
+        '  item_types_in_scope:\n'
     )
-    if use_parameters:
-        content += f'  parameter: "./{PARAM_FILE.name}"\n'
-    content += '  item_types_in_scope:\n'
     for t in item_types:
         content += f'    - {t}\n'
     tmp = root / "_fab_deploy_tmp.yml"
     tmp.write_text(content)
     try:
-        cmd = ["deploy", "--config", tmp.name, "-f"]
-        if use_parameters:
-            cmd += ["--target_env", ws]
-        fab(cmd)
+        fab(["deploy", "--config", tmp.name, "-f"])
     finally:
         tmp.unlink(missing_ok=True)
 
@@ -103,12 +92,6 @@ subprocess.run(["fab", "create", LAKEHOUSE, "-P", "enableSchemas=true"], cwd=str
 target_lh_id = get_target_item_id("Lakehouse", cfg["lakehouse"])
 print(f"Target lakehouse ID: {target_lh_id}")
 
-# Build parameter.yml: workspace + lakehouse (no download_limit — handled by variable library)
-param_entries = [
-    {"find_value": source_ws_id, "replace_value": {"_ALL_": "$workspace.id"}},
-    {"find_value": source_lh_id, "replace_value": {"_ALL_": target_lh_id}},
-]
-write_parameter_yml(param_entries)
 
 # Create/update variable library with deploy_config (download_limit etc.)
 print("=== 1b. Create variable library ===")
@@ -156,11 +139,11 @@ else:
 
 # 2a. Deploy lakehouse (no parameters needed)
 print("=== 2a. Deploy lakehouse ===")
-fab_deploy(["Lakehouse"], use_parameters=False)
+fab_deploy(["Lakehouse"])
 
 # 2b. Deploy notebook (no parameters — code uses notebookutils at runtime)
 print("=== 2b. Deploy notebook ===")
-fab_deploy(["Notebook"], use_parameters=False)
+fab_deploy(["Notebook"])
 
 # 2c. Attach lakehouse to notebook via fab set
 print("=== 2c. Attach lakehouse to notebook ===")
@@ -204,9 +187,13 @@ with ThreadPoolExecutor(max_workers=8) as executor:
 print("=== 4. Run notebook ===")
 fab(["job", "run", NOTEBOOK, "-i", "{}"])
 
-# 5. Deploy semantic model
+# 5. Deploy semantic model (replace GUIDs in bim, deploy, restore)
 print("=== 5. Deploy semantic model ===")
-fab_deploy(["SemanticModel"])
+bim_path.write_text(bim_text.replace(source_ws_id, WS_ID).replace(source_lh_id, target_lh_id))
+try:
+    fab_deploy(["SemanticModel"])
+finally:
+    subprocess.run(["git", "checkout", str(bim_path)], cwd=str(root))
 
 # 6. Refresh semantic model
 print("=== 6. Refresh semantic model ===")
@@ -215,7 +202,7 @@ fab(["api", "-A", "powerbi", "-X", "post", f"groups/{WS_ID}/datasets/{sm_id}/ref
 
 # 7. Deploy DataPipeline + set notebook reference + schedule
 print("=== 7. Deploy pipeline ===")
-fab_deploy(["DataPipeline"], use_parameters=False)
+fab_deploy(["DataPipeline"])
 
 # 7b. Set notebook reference on pipeline via fab set
 print("=== 7b. Set notebook on pipeline ===")
@@ -245,5 +232,4 @@ print("=== 8. Organize items into data folder ===")
 for item in [LAKEHOUSE, NOTEBOOK, PIPELINE]:
     subprocess.run(["fab", "mv", item, FOLDER], cwd=str(root))
 
-PARAM_FILE.unlink(missing_ok=True)
 print("=== Deploy complete ===")
