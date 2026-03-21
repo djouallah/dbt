@@ -10,20 +10,43 @@ parser.add_argument("--env", default="prod")
 args = parser.parse_args()
 
 root       = Path(__file__).parent
-config_file = "deploy_config_test.yml" if args.env == "test" else "deploy_config.yml"
-cfg        = yaml.safe_load((root / config_file).read_text())
-ws         = cfg["workspace"]
-dbt        = root / cfg["dbt_dir"]
+all_cfg    = yaml.safe_load((root / "deploy_config.yml").read_text())
+if args.env not in all_cfg:
+    raise SystemExit(f"No '{args.env}' section in deploy_config.yml. Add it for this branch.")
+cfg        = {**all_cfg.get("defaults", {}), **all_cfg[args.env]}
+WS_ID     = cfg["ws_id"]
+dbt        = root / "dbt"
+SM_NAME   = cfg["sm_name"]
+
+# Resolve workspace name from ID
+result = subprocess.run(
+    ["fab", "api", "-X", "get", f"workspaces/{WS_ID}"],
+    capture_output=True, text=True, check=True, cwd=str(root),
+)
+ws = json.loads(result.stdout)["text"]["displayName"]
+print(f"Resolved workspace: {ws} ({WS_ID})")
 
 LAKEHOUSE = f"{ws}.Workspace/{cfg['lakehouse']}.Lakehouse"
 NOTEBOOK  = f"{ws}.Workspace/{cfg['notebook']}.Notebook"
 PIPELINE  = f"{ws}.Workspace/{cfg['pipeline']}.DataPipeline"
-WS_ID     = cfg["ws_id"]
-SM_NAME   = cfg["sm_name"]
 
 
 def fab(args, cwd=root):
     subprocess.run(["fab"] + args, check=True, cwd=str(cwd))
+
+
+# Generate parameter.yml from parameter_tokens.yml + deploy config
+PARAM_TMP = root / "_parameter_tmp.yml"
+tokens = yaml.safe_load((root / "parameter_tokens.yml").read_text())
+param_entries = []
+for item in tokens["find_replace"]:
+    param_entries.append({"find_value": item["find"],
+                          "replace_value": {"_ALL_": item["token"]}})
+for item in tokens.get("env_replace", []):
+    value = cfg[item["config_key"]]
+    param_entries.append({"find_value": item["find"],
+                          "replace_value": {"_ALL_": item["template"].format(value=value)}})
+PARAM_TMP.write_text(yaml.dump({"find_replace": param_entries}, default_flow_style=False))
 
 
 def fab_deploy(item_types, use_parameters=True):
@@ -34,7 +57,7 @@ def fab_deploy(item_types, use_parameters=True):
         '  repository_directory: "./fabric_items"\n'
     )
     if use_parameters:
-        content += '  parameter: "./parameter.yml"\n'
+        content += f'  parameter: "./{PARAM_TMP.name}"\n'
     content += '  item_types_in_scope:\n'
     for t in item_types:
         content += f'    - {t}\n'
@@ -118,4 +141,5 @@ else:
          "--type", "cron", "--interval", cfg["schedule_interval"],
          "--start", cfg["schedule_start"], "--end", cfg["schedule_end"], "--enable"])
 
+PARAM_TMP.unlink(missing_ok=True)
 print("=== Deploy complete ===")

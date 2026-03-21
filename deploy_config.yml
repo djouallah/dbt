@@ -1,11 +1,17 @@
-workspace: "prod"
-lakehouse: "data"
-notebook:  "run"
-pipeline:  "run_pipeline"
-ws_id:     "be079b0f-3416-4de2-9184-9c546bad223c"
-sm_name:   "aemo_electricity"
-dbt_dir:   "dbt"
+defaults:
+  lakehouse: "data"
+  notebook:  "run"
+  pipeline:  "run_pipeline"
+  sm_name:   "aemo_electricity"
+  download_limit: "2"
+  schedule_interval: "30"
+  schedule_start:    "2025-01-01T00:00:00"
+  schedule_end:      "2030-12-31T23:59:59"
 
-schedule_interval: "30"
-schedule_start:    "2025-01-01T00:00:00"
-schedule_end:      "2030-12-31T23:59:59"
+main:
+  ws_id: "e446a5e7-6666-42ad-a331-0bfef3187fbf"
+  schedule_interval: "720"
+
+production:
+  ws_id:     "be079b0f-3416-4de2-9184-9c546bad223c"
+  download_limit: "60"

@@ -1,0 +1,17 @@
+# Source GUIDs from dev workspace — these appear in fabric_items/ content files
+# and get replaced with Fabric CLI tokens at deploy time
+find_replace:
+  - find: "e446a5e7-6666-42ad-a331-0bfef3187fbf"
+    token: "$workspace.id"
+  - find: "da888b35-a17c-49ac-a8cf-1a5ffae91e20"
+    token: "$items.Notebook.run.$id"
+  - find: "cf8bbf8a-5488-4020-ac8f-293727b447b1"
+    token: "$items.Lakehouse.data.$id"
+
+# Environment-specific replacements
+# config_key: reads value from deploy_config_{branch}.yml
+# template: the replacement string, {value} is filled from the config
+env_replace:
+  - find: "download_limit']      = '2'"
+    config_key: download_limit
+    template: "download_limit']      = '{value}'"
