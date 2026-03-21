@@ -3,8 +3,10 @@ name: CI
 on:
   push:
     branches: [main]
+    paths: ["dbt/**"]
   pull_request:
     branches: [main]
+    paths: ["dbt/**"]
 
 permissions:
   contents: read

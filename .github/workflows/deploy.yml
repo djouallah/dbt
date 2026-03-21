@@ -3,6 +3,13 @@ name: Deploy to Fabric
 on:
   push:
     branches: [main, production]
+    paths:
+      - "dbt/**"
+      - "fabric_items/**"
+      - "deploy.py"
+      - "deploy_config*.yml"
+      - "parameter.yml"
+      - "fab_deploy*.yml"
   workflow_dispatch:
 
 concurrency:
