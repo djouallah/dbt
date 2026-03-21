@@ -49,9 +49,12 @@ def fab_deploy(item_types):
 print("=== 1. Create lakehouse ===")
 subprocess.run(["fab", "create", LAKEHOUSE, "-P", "enableSchemas=true"], cwd=str(root))
 
-# 2. Deploy notebook + lakehouse
-print("=== 2. Deploy notebook + lakehouse ===")
-fab_deploy(["Notebook", "Lakehouse"])
+# 2. Deploy lakehouse first so $items.Lakehouse.data.$id resolves for notebook
+print("=== 2a. Deploy lakehouse ===")
+fab_deploy(["Lakehouse"])
+
+print("=== 2b. Deploy notebook ===")
+fab_deploy(["Notebook"])
 
 # 3. Copy dbt files to OneLake
 print("=== 3. Copy dbt files to OneLake ===")
