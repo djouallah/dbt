@@ -2,7 +2,7 @@ name: Deploy to Fabric
 
 on:
   push:
-    branches: [production]
+    branches: [main, production]
   workflow_dispatch:
 
 concurrency:
@@ -10,7 +10,7 @@ concurrency:
   cancel-in-progress: false
 
 env:
-  DEPLOY_ENV: ${{ github.event_name == 'workflow_dispatch' && 'test' || 'prod' }}
+  DEPLOY_ENV: ${{ github.ref_name == 'production' && 'prod' || 'test' }}
 
 permissions:
   id-token: write
