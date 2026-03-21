@@ -99,6 +99,9 @@ fab_deploy(["DataPipeline"])
 
 result = subprocess.run(["fab", "job", "run-list", PIPELINE, "--schedule"],
                         capture_output=True, text=True, cwd=str(root))
+print(f"run-list stdout: {result.stdout!r}")
+print(f"run-list stderr: {result.stderr!r}")
+print(f"run-list returncode: {result.returncode}")
 try:
     has_schedule = bool(json.loads(result.stdout))
 except (json.JSONDecodeError, ValueError):
