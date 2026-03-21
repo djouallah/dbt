@@ -26,21 +26,25 @@ def fab(args, cwd=root):
     subprocess.run(["fab"] + args, check=True, cwd=str(cwd))
 
 
-def fab_deploy(item_types):
+def fab_deploy(item_types, use_parameters=True):
     """Write a temporary fab deploy config and run deploy, then clean up."""
     content = (
         'core:\n'
         f'  workspace: "{ws}"\n'
         '  repository_directory: "./fabric_items"\n'
-        '  parameter: "./parameter.yml"\n'
-        '  item_types_in_scope:\n'
     )
+    if use_parameters:
+        content += '  parameter: "./parameter.yml"\n'
+    content += '  item_types_in_scope:\n'
     for t in item_types:
         content += f'    - {t}\n'
     tmp = root / "_fab_deploy_tmp.yml"
     tmp.write_text(content)
     try:
-        fab(["deploy", "--config", tmp.name, "--target_env", ws, "-f"])
+        cmd = ["deploy", "--config", tmp.name, "-f"]
+        if use_parameters:
+            cmd += ["--target_env", ws]
+        fab(cmd)
     finally:
         tmp.unlink(missing_ok=True)
 
@@ -51,7 +55,7 @@ subprocess.run(["fab", "create", LAKEHOUSE, "-P", "enableSchemas=true"], cwd=str
 
 # 2. Deploy lakehouse first so $items.Lakehouse.data.$id resolves for notebook
 print("=== 2a. Deploy lakehouse ===")
-fab_deploy(["Lakehouse"])
+fab_deploy(["Lakehouse"], use_parameters=False)
 
 print("=== 2b. Deploy notebook ===")
 fab_deploy(["Notebook"])
