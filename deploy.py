@@ -33,7 +33,6 @@ def fab_deploy(item_types):
         f'  workspace: "{ws}"\n'
         '  repository_directory: "./fabric_items"\n'
         '  parameter: "./parameter.yml"\n'
-        f'  environment: "{ws}"\n'
         '  item_types_in_scope:\n'
     )
     for t in item_types:
@@ -41,7 +40,7 @@ def fab_deploy(item_types):
     tmp = root / "_fab_deploy_tmp.yml"
     tmp.write_text(content)
     try:
-        fab(["deploy", "--config", tmp.name, "-f"])
+        fab(["deploy", "--config", tmp.name, "--target_env", ws, "-f"])
     finally:
         tmp.unlink(missing_ok=True)
 
