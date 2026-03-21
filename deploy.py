@@ -35,6 +35,7 @@ def fab(args, cwd=root):
     subprocess.run(["fab"] + args, check=True, cwd=str(cwd))
 
 
+import base64
 import re
 PARAM_FILE = root / "parameter.yml"
 
@@ -102,19 +103,56 @@ subprocess.run(["fab", "create", LAKEHOUSE, "-P", "enableSchemas=true"], cwd=str
 target_lh_id = get_target_item_id("Lakehouse", cfg["lakehouse"])
 print(f"Target lakehouse ID: {target_lh_id}")
 
-# Build parameter.yml v1: workspace + lakehouse + download_limit
+# Build parameter.yml: workspace + lakehouse (no download_limit — handled by variable library)
 param_entries = [
     {"find_value": source_ws_id, "replace_value": {"_ALL_": "$workspace.id"}},
     {"find_value": source_lh_id, "replace_value": {"_ALL_": target_lh_id}},
 ]
-default_dl = all_cfg.get("defaults", {}).get("download_limit", "2")
-target_dl = cfg.get("download_limit", default_dl)
-if default_dl != target_dl:
-    param_entries.append({
-        "find_value": f"download_limit']      = '{default_dl}'",
-        "replace_value": {"_ALL_": f"download_limit']      = '{target_dl}'"},
-    })
 write_parameter_yml(param_entries)
+
+# Create/update variable library with deploy_config (download_limit etc.)
+print("=== 1b. Create variable library ===")
+VL_NAME = "deploy_config"
+
+def b64(obj):
+    return base64.b64encode(json.dumps(obj).encode()).decode()
+
+vl_variables = {
+    "$schema": "https://developer.microsoft.com/json-schemas/fabric/item/variableLibrary/definition/variables/1.0.0/schema.json",
+    "variables": [
+        {"name": "download_limit", "type": "String", "value": cfg.get("download_limit", "2")},
+    ],
+}
+vl_settings = {
+    "$schema": "https://developer.microsoft.com/json-schemas/fabric/item/variableLibrary/definition/settings/1.0.0/schema.json",
+    "valueSetsOrder": [],
+}
+vl_definition = {
+    "format": "VariableLibraryV1",
+    "parts": [
+        {"path": "variables.json", "payload": b64(vl_variables), "payloadType": "InlineBase64"},
+        {"path": "settings.json", "payload": b64(vl_settings), "payloadType": "InlineBase64"},
+    ],
+}
+
+# Check if variable library already exists
+r = subprocess.run(
+    ["fab", "api", "-X", "get", f"workspaces/{WS_ID}/variableLibraries"],
+    capture_output=True, text=True, check=True, cwd=str(root),
+)
+existing_vl = next((i for i in json.loads(r.stdout)["text"]["value"]
+                     if i["displayName"] == VL_NAME), None)
+
+if existing_vl:
+    # Update definition
+    fab(["api", "-X", "post",
+         f"workspaces/{WS_ID}/variableLibraries/{existing_vl['id']}/updateDefinition",
+         "-i", json.dumps({"definition": vl_definition})])
+    print(f"Updated variable library '{VL_NAME}'")
+else:
+    fab(["api", "-X", "post", f"workspaces/{WS_ID}/variableLibraries",
+         "-i", json.dumps({"displayName": VL_NAME, "definition": vl_definition})])
+    print(f"Created variable library '{VL_NAME}'")
 
 # 2a. Deploy lakehouse (no parameters needed)
 print("=== 2a. Deploy lakehouse ===")
