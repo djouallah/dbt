@@ -14,8 +14,8 @@
           "secureInput": false
         },
         "typeProperties": {
-          "notebookId": "$items.Notebook.run.$id",
-          "workspaceId": "$workspace.id"
+          "notebookId": "da888b35-a17c-49ac-a8cf-1a5ffae91e20",
+          "workspaceId": "e446a5e7-6666-42ad-a331-0bfef3187fbf"
         }
       }
     ]
