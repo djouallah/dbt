@@ -1,0 +1,11 @@
+workspace: "deploy_test_github"
+lakehouse: "data"
+notebook:  "run"
+pipeline:  "run_pipeline"
+ws_id:     "e446a5e7-6666-42ad-a331-0bfef3187fbf"
+sm_name:   "aemo_electricity"
+dbt_dir:   "dbt"
+
+schedule_interval: "30"
+schedule_start:    "2025-01-01T00:00:00"
+schedule_end:      "2030-12-31T23:59:59"
