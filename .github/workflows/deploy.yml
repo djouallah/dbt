@@ -2,14 +2,10 @@ name: Deploy to Fabric
 
 on:
   push:
-    branches: [production]
-  workflow_dispatch:
-    inputs:
-      environment:
-        description: Target environment
-        type: choice
-        options: [prod, test]
-        default: prod
+    branches: [main, production]
+
+env:
+  DEPLOY_ENV: ${{ github.ref_name == 'production' && 'prod' || 'test' }}
 
 permissions:
   id-token: write
@@ -60,7 +56,7 @@ jobs:
           FED_TOKEN=$(curl -sH "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
             "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=api://AzureADTokenExchange" | jq -r '.value')
           fab auth login -t ${{ secrets.AZURE_TENANT_ID }} -u ${{ secrets.AZURE_CLIENT_ID }} --federated-token "$FED_TOKEN"
-      - run: python deploy.py --env ${{ github.event_name == 'workflow_dispatch' && inputs.environment || 'prod' }}
+      - run: python deploy.py --env $DEPLOY_ENV
 
   deploy-docs:
     needs: deploy
