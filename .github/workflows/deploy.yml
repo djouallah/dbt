@@ -2,22 +2,13 @@ name: Deploy to Fabric
 
 on:
   push:
-    branches: [main, production]
+    branches: [main]
   workflow_dispatch:
-    inputs:
-      environment:
-        description: Target environment
-        type: choice
-        options: [test, production]
-        default: production
 
 permissions:
   id-token: write
   contents: read
   pages: write
-
-env:
-  DEPLOY_ENV: ${{ github.event_name == 'workflow_dispatch' && inputs.environment || (github.ref_name == 'main' && 'test' || 'production') }}
 
 jobs:
   test:
@@ -47,143 +38,25 @@ jobs:
         with:
           path: target
 
-  lakehouse:
+  deploy:
     needs: test
     runs-on: ubuntu-latest
-    outputs:
-      first_deploy: ${{ steps.deploy.outputs.first_deploy }}
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
-        with:
-          ref: main
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
-      - run: pip install azure-identity azure-storage-file-datalake requests PyJWT
+      - run: pip install ms-fabric-cli
       - uses: azure/login@v2
         with:
           client-id: ${{ secrets.AZURE_CLIENT_ID }}
           tenant-id: ${{ secrets.AZURE_TENANT_ID }}
           allow-no-subscriptions: true
-      - id: deploy
-        run: python deploy_to_fabric.py --env $DEPLOY_ENV lakehouse
-
-  files:
-    needs: lakehouse
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          ref: main
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
-      - run: pip install azure-identity azure-storage-file-datalake requests PyJWT
-      - uses: azure/login@v2
-        with:
-          client-id: ${{ secrets.AZURE_CLIENT_ID }}
-          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
-          allow-no-subscriptions: true
-      - run: python deploy_to_fabric.py --env $DEPLOY_ENV files
-
-  initial-load:
-    needs: [lakehouse, files]
-    if: needs.lakehouse.outputs.first_deploy == 'true'
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          ref: main
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
-      - run: pip install azure-identity azure-storage-file-datalake requests PyJWT
-      - uses: azure/login@v2
-        with:
-          client-id: ${{ secrets.AZURE_CLIENT_ID }}
-          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
-          allow-no-subscriptions: true
-      - run: python deploy_to_fabric.py --env $DEPLOY_ENV initial_load
-
-  notebook:
-    needs: initial-load
-    if: ${{ !failure() && !cancelled() }}
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          ref: main
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
-      - run: pip install azure-identity azure-storage-file-datalake requests PyJWT
-      - uses: azure/login@v2
-        with:
-          client-id: ${{ secrets.AZURE_CLIENT_ID }}
-          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
-          allow-no-subscriptions: true
-      - run: python deploy_to_fabric.py --env $DEPLOY_ENV notebook
-
-  semantic-model:
-    needs: notebook
-    if: ${{ !failure() && !cancelled() }}
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          ref: main
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
-      - run: pip install azure-identity azure-storage-file-datalake requests PyJWT
-      - uses: azure/login@v2
-        with:
-          client-id: ${{ secrets.AZURE_CLIENT_ID }}
-          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
-          allow-no-subscriptions: true
-      - run: python deploy_to_fabric.py --env $DEPLOY_ENV semantic_model
-
-  pipeline:
-    needs: semantic-model
-    if: ${{ !failure() && !cancelled() }}
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          ref: main
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
-      - run: pip install azure-identity azure-storage-file-datalake requests PyJWT
-      - uses: azure/login@v2
-        with:
-          client-id: ${{ secrets.AZURE_CLIENT_ID }}
-          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
-          allow-no-subscriptions: true
-      - run: python deploy_to_fabric.py --env $DEPLOY_ENV pipeline
-
-  schedule:
-    needs: pipeline
-    if: ${{ !failure() && !cancelled() }}
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          ref: main
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
-      - run: pip install azure-identity azure-storage-file-datalake requests PyJWT
-      - uses: azure/login@v2
-        with:
-          client-id: ${{ secrets.AZURE_CLIENT_ID }}
-          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
-          allow-no-subscriptions: true
-      - run: python deploy_to_fabric.py --env $DEPLOY_ENV schedule
+      - run: python deploy.py
 
   deploy-docs:
-    needs: schedule
+    needs: deploy
     if: ${{ !failure() && !cancelled() }}
     runs-on: ubuntu-latest
     environment:

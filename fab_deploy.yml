@@ -1,0 +1,7 @@
+core:
+  workspace: "prod"
+  repository_directory: "./fabric_items"
+  parameter: "./parameter.yml"
+  item_types_in_scope:
+    - Notebook
+    - Lakehouse

@@ -1,41 +1,41 @@
-# AEMO Electricity — dbt + DuckLake
+# dbt on Microsoft Fabric — CI/CD with Fabric CLI
 
-Downloads Australian electricity market data (AEMO NEM), transforms with dbt-duckdb + DuckLake, and exports to Delta Lake on Microsoft Fabric.
+A CI/CD pipeline that deploys a dbt project to Microsoft Fabric using the [Fabric CLI](https://microsoft.github.io/fabric-cli/) (`fab`). The notebook runs dbt inside Fabric and exports results to Delta Lake tables, which are served via a Direct Lake semantic model in Power BI.
 
-## Deployment to Microsoft Fabric
+## How it works
 
-### Option 1: CI/CD with GitHub Actions (recommended)
+1. **CI** — GitHub Actions runs `dbt run` + `dbt test` against a local DuckDB instance (Azurite for blob storage)
+2. **Deploy** — `python deploy.py` orchestrates the full deployment:
+   - Creates the lakehouse (idempotent)
+   - Deploys notebook + lakehouse via `fab deploy`
+   - Copies dbt project files to OneLake
+   - Runs the notebook synchronously (`fab job run`) — executes dbt, creates Delta tables
+   - Deploys the semantic model
+   - Refreshes the semantic model
+   - Deploys the pipeline and sets the cron schedule
 
-Requires an Azure AD app registration with federated credentials for GitHub Actions OIDC. Set `AZURE_CLIENT_ID` and `AZURE_TENANT_ID` as GitHub secrets, and update `WORKSPACE_ID` / `TENANT_ID` in `deploy_to_fabric.py`.
+## Configuration
 
-- Push to `main` — runs dbt CI (Azurite + `dbt run` + `dbt test`)
-- Push to `production` — deploys everything to Fabric + docs to GitHub Pages
-- First deploy creates the lakehouse and seeds data; subsequent deploys are safe to re-run
+All deployment targets are in `deploy_config.yml` — no hardcoded values in the scripts.
 
-### Option 2: Manual from laptop
+`parameter.yml` handles environment-specific value substitution (workspace ID, lakehouse ID) during `fab deploy`.
 
-No app registration needed — uses `az login`.
+## Requirements
+
+- [Microsoft Fabric CLI](https://microsoft.github.io/fabric-cli/) (`pip install ms-fabric-cli`)
+- Azure AD app registration with Fabric API permissions
+
+## CI/CD Setup (GitHub Actions)
+
+Set as GitHub secrets:
+- `AZURE_CLIENT_ID`
+- `AZURE_TENANT_ID`
+
+Push to `main` — runs CI tests then deploys to Fabric and publishes dbt docs to GitHub Pages.
+
+## Manual deploy
 
 ```bash
-az login --tenant YOUR_TENANT_ID
-python deploy_to_fabric.py                   # deploy everything
-python deploy_to_fabric.py semantic_model    # just one step
+az login
+python deploy.py
 ```
-
-### Option 3: Upload notebook
-
-Upload `dbt.ipynb` to a Fabric workspace, attach a lakehouse named `data`, and run it.
-
----
-
-See the [blog post](https://datamonkeysite.com/2026/03/05/building-a-data-pipeline-using-vscode-and-claude-out-of-thin-air/) for a full walkthrough.
-
-## Environment Variables
-
-| Variable               | Default                                  | Purpose                          |
-|------------------------|------------------------------------------|----------------------------------|
-| `ROOT_PATH`            | `abfss://{WORKSPACE}@onelake.../{LAKEHOUSE}` | OneLake storage root        |
-| `METADATA_LOCAL_PATH`  | `/lakehouse/default/Files/metadata.db`   | DuckLake SQLite metadata DB      |
-| `DBT_SCHEMA`           | `mart`                                   | Target schema                    |
-| `download_limit`       | `2`                                      | Max files to download per source |
-| `process_limit`        | `500`                                    | Max files to process per model   |

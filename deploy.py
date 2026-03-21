@@ -1,0 +1,102 @@
+import json
+import subprocess
+from pathlib import Path
+from concurrent.futures import ThreadPoolExecutor
+import yaml
+
+root   = Path(__file__).parent
+cfg    = yaml.safe_load((root / "deploy_config.yml").read_text())
+ws     = cfg["workspace"]
+dbt    = root / cfg["dbt_dir"]
+
+LAKEHOUSE = f"{ws}.Workspace/{cfg['lakehouse']}.Lakehouse"
+NOTEBOOK  = f"{ws}.Workspace/{cfg['notebook']}.Notebook"
+PIPELINE  = f"{ws}.Workspace/{cfg['pipeline']}.DataPipeline"
+WS_ID     = cfg["ws_id"]
+SM_NAME   = cfg["sm_name"]
+
+
+def fab(args, cwd=root):
+    subprocess.run(["fab"] + args, check=True, cwd=str(cwd))
+
+
+# 1. Ensure lakehouse exists with schemas enabled
+print("=== 1. Create lakehouse ===")
+subprocess.run(["fab", "create", LAKEHOUSE, "-P", "enableSchemas=true"], cwd=str(root))
+
+# 2. Deploy notebook + lakehouse
+print("=== 2. Deploy notebook + lakehouse ===")
+fab(["deploy", "--config", "fab_deploy.yml", "-f"])
+
+# 3. Copy dbt files to OneLake
+print("=== 3. Copy dbt files to OneLake ===")
+dirs = set()
+for f in dbt.rglob("*"):
+    if f.is_file():
+        p = f.relative_to(root).parent
+        while p.parts:
+            dirs.add(p.as_posix())
+            p = p.parent
+
+for d in sorted(dirs):
+    subprocess.run(["fab", "mkdir", f"{LAKEHOUSE}/Files/{d}"], cwd=str(root))
+
+files = [f for f in dbt.rglob("*") if f.is_file()]
+
+def copy_file(f):
+    rel = f.relative_to(root)
+    fab(["cp", rel.as_posix(), f"{LAKEHOUSE}/Files/{rel.parent.as_posix()}/", "-f"])
+
+with ThreadPoolExecutor(max_workers=8) as executor:
+    executor.map(copy_file, files)
+
+# 4. Run notebook (blocks until dbt finishes and Delta tables are created)
+print("=== 4. Run notebook ===")
+fab(["job", "run", NOTEBOOK, "-i", "{}"])
+
+# 5. Deploy semantic model + pipeline
+print("=== 5. Deploy semantic model + pipeline ===")
+fab(["deploy", "--config", "fab_deploy_sm.yml", "-f"])
+
+# 6. Refresh semantic model
+print("=== 6. Refresh semantic model ===")
+result = subprocess.run(
+    ["fab", "api", "-X", "get", f"workspaces/{WS_ID}/items?type=SemanticModel"],
+    capture_output=True, text=True, cwd=str(root), check=True
+)
+items = json.loads(result.stdout)
+sm_id = next(i["id"] for i in items["text"]["value"] if i["displayName"] == SM_NAME)
+fab(["api", "-A", "powerbi", "-X", "post", f"groups/{WS_ID}/datasets/{sm_id}/refreshes"])
+
+# 7. Deploy DataPipeline + schedule
+print("=== 7. Deploy pipeline + schedule ===")
+pipeline_yml = (
+    'core:\n'
+    f'  workspace: "{ws}"\n'
+    '  repository_directory: "./fabric_items"\n'
+    '  parameter: "./parameter.yml"\n'
+    '  item_types_in_scope:\n'
+    '    - DataPipeline\n'
+)
+pipeline_cfg = root / "_fab_deploy_pipeline.yml"
+pipeline_cfg.write_text(pipeline_yml)
+try:
+    fab(["deploy", "--config", "_fab_deploy_pipeline.yml", "-f"])
+finally:
+    pipeline_cfg.unlink(missing_ok=True)
+
+result = subprocess.run(["fab", "job", "run-list", PIPELINE, "--schedule"],
+                        capture_output=True, text=True, cwd=str(root))
+try:
+    has_schedule = bool(json.loads(result.stdout))
+except (json.JSONDecodeError, ValueError):
+    has_schedule = bool(result.stdout.strip())
+
+if has_schedule:
+    print("Pipeline already scheduled, skipping.")
+else:
+    fab(["job", "run-sch", PIPELINE,
+         "--type", "cron", "--interval", cfg["schedule_interval"],
+         "--start", cfg["schedule_start"], "--end", cfg["schedule_end"], "--enable"])
+
+print("=== Deploy complete ===")

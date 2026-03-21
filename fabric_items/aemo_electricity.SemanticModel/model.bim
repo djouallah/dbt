@@ -16,7 +16,7 @@
         "description": "Direct Lake connection to OneLake — reads Delta tables directly, no SQL endpoint",
         "expression": [
           "let",
-          "    Source = AzureStorage.DataLake(\"{{ONELAKE_URL}}\", [HierarchicalNavigation=true])",
+          "    Source = AzureStorage.DataLake(\"https://onelake.dfs.fabric.microsoft.com/e446a5e7-6666-42ad-a331-0bfef3187fbf/cf8bbf8a-5488-4020-ac8f-293727b447b1\", [HierarchicalNavigation=true])",
           "in",
           "    Source"
         ],
