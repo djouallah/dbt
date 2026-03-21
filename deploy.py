@@ -33,6 +33,7 @@ def fab_deploy(item_types):
         f'  workspace: "{ws}"\n'
         '  repository_directory: "./fabric_items"\n'
         '  parameter: "./parameter.yml"\n'
+        f'  environment: "{ws}"\n'
         '  item_types_in_scope:\n'
     )
     for t in item_types:
