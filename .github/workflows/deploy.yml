@@ -2,10 +2,11 @@ name: Deploy to Fabric
 
 on:
   push:
-    branches: [main, production]
+    branches: [production]
+  workflow_dispatch:
 
 env:
-  DEPLOY_ENV: ${{ github.ref_name == 'production' && 'prod' || 'test' }}
+  DEPLOY_ENV: ${{ github.event_name == 'workflow_dispatch' && 'test' || 'prod' }}
 
 permissions:
   id-token: write
