@@ -97,8 +97,18 @@ fab(["api", "-A", "powerbi", "-X", "post", f"groups/{WS_ID}/datasets/{sm_id}/ref
 print("=== 7. Deploy pipeline + schedule ===")
 fab_deploy(["DataPipeline"])
 
-fab(["job", "run-sch", PIPELINE,
-     "--type", "cron", "--interval", cfg["schedule_interval"],
-     "--start", cfg["schedule_start"], "--end", cfg["schedule_end"], "--enable"])
+result = subprocess.run(["fab", "job", "run-list", PIPELINE, "--schedule"],
+                        capture_output=True, text=True, cwd=str(root))
+try:
+    has_schedule = bool(json.loads(result.stdout))
+except (json.JSONDecodeError, ValueError):
+    has_schedule = False
+
+if has_schedule:
+    print("Pipeline already scheduled, skipping.")
+else:
+    fab(["job", "run-sch", PIPELINE,
+         "--type", "cron", "--interval", cfg["schedule_interval"],
+         "--start", cfg["schedule_start"], "--end", cfg["schedule_end"], "--enable"])
 
 print("=== Deploy complete ===")
