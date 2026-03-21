@@ -49,11 +49,6 @@ source_lh_id = url_match.group(2)
 print(f"Source workspace ID: {source_ws_id}")
 print(f"Source lakehouse ID: {source_lh_id}")
 
-# Extract source notebook_id from .platform logicalId (used in pipeline-content.json)
-source_nb_id = json.loads(
-    (root / "fabric_items" / f"{cfg['notebook']}.Notebook" / ".platform").read_text()
-)["config"]["logicalId"]
-print(f"Source notebook ID:  {source_nb_id}")
 
 
 def get_target_item_id(item_type, display_name):
@@ -174,11 +169,9 @@ fab(["set", NOTEBOOK, "-q",
      "definition.parts[0].payload.metadata.dependencies.lakehouse",
      "-i", lakehouse_payload, "-f"])
 
-# Get target notebook ID (now exists after deploy) and rebuild parameter.yml with it
+# Get target notebook ID (needed for pipeline fab set later)
 target_nb_id = get_target_item_id("Notebook", cfg["notebook"])
 print(f"Target notebook ID:  {target_nb_id}")
-param_entries.append({"find_value": source_nb_id, "replace_value": {"_ALL_": target_nb_id}})
-write_parameter_yml(param_entries)
 
 # 3. Copy dbt files to OneLake
 print("=== 3. Copy dbt files to OneLake ===")
@@ -215,9 +208,18 @@ print("=== 6. Refresh semantic model ===")
 sm_id = get_target_item_id("SemanticModel", SM_NAME)
 fab(["api", "-A", "powerbi", "-X", "post", f"groups/{WS_ID}/datasets/{sm_id}/refreshes"])
 
-# 7. Deploy DataPipeline + schedule
-print("=== 7. Deploy pipeline + schedule ===")
-fab_deploy(["DataPipeline"])
+# 7. Deploy DataPipeline + set notebook reference + schedule
+print("=== 7. Deploy pipeline ===")
+fab_deploy(["DataPipeline"], use_parameters=False)
+
+# 7b. Set notebook reference on pipeline via fab set
+print("=== 7b. Set notebook on pipeline ===")
+fab(["set", PIPELINE, "-q",
+     "definition.parts[0].payload.properties.activities[0].typeProperties.notebookId",
+     "-i", target_nb_id, "-f"])
+fab(["set", PIPELINE, "-q",
+     "definition.parts[0].payload.properties.activities[0].typeProperties.workspaceId",
+     "-i", WS_ID, "-f"])
 
 result = subprocess.run(["fab", "job", "run-list", PIPELINE, "--schedule"],
                         capture_output=True, text=True, cwd=str(root))
