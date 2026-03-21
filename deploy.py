@@ -103,13 +103,10 @@ result = subprocess.run(["fab", "job", "run-list", PIPELINE, "--schedule"],
 print(f"run-list stdout: {result.stdout!r}")
 print(f"run-list stderr: {result.stderr!r}")
 print(f"run-list returncode: {result.returncode}")
-try:
-    has_schedule = bool(json.loads(result.stdout))
-except (json.JSONDecodeError, ValueError):
-    has_schedule = False
+has_active_schedule = "True" in result.stdout
 
-if has_schedule:
-    print("Pipeline already scheduled, skipping.")
+if has_active_schedule:
+    print("Pipeline already scheduled and enabled, skipping.")
 else:
     fab(["job", "run-sch", PIPELINE,
          "--type", "cron", "--interval", cfg["schedule_interval"],
