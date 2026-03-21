@@ -124,18 +124,6 @@ fab_deploy(["Lakehouse"], use_parameters=False)
 print("=== 2b. Deploy notebook ===")
 fab_deploy(["Notebook"])
 
-# 2c. Attach lakehouse to notebook
-print("=== 2c. Attach lakehouse to notebook ===")
-lakehouse_payload = json.dumps({
-    "known_lakehouses": [{"id": target_lh_id}],
-    "default_lakehouse": target_lh_id,
-    "default_lakehouse_name": cfg["lakehouse"],
-    "default_lakehouse_workspace_id": WS_ID,
-})
-fab(["set", NOTEBOOK, "-q",
-     "definition.parts[0].payload.metadata.dependencies.lakehouse",
-     "-i", lakehouse_payload])
-
 # Get target notebook ID (now exists after deploy) and rebuild parameter.yml with it
 target_nb_id = get_target_item_id("Notebook", cfg["notebook"])
 print(f"Target notebook ID:  {target_nb_id}")
