@@ -90,6 +90,11 @@ def fab_deploy(item_types, use_parameters=True):
         tmp.unlink(missing_ok=True)
 
 
+# 0. Ensure "data" folder exists for organizing items
+FOLDER = f"{ws}.Workspace/data.Folder"
+print("=== 0. Create data folder ===")
+subprocess.run(["fab", "create", FOLDER], cwd=str(root))
+
 # 1. Ensure lakehouse exists with schemas enabled
 print("=== 1. Create lakehouse ===")
 subprocess.run(["fab", "create", LAKEHOUSE, "-P", "enableSchemas=true"], cwd=str(root))
@@ -234,6 +239,11 @@ else:
     fab(["job", "run-sch", PIPELINE,
          "--type", "cron", "--interval", cfg["schedule_interval"],
          "--start", cfg["schedule_start"], "--end", cfg["schedule_end"], "--enable"])
+
+# 8. Move items into "data" folder (semantic model stays at root)
+print("=== 8. Organize items into data folder ===")
+for item in [LAKEHOUSE, NOTEBOOK, PIPELINE]:
+    subprocess.run(["fab", "mv", item, FOLDER], cwd=str(root))
 
 PARAM_FILE.unlink(missing_ok=True)
 print("=== Deploy complete ===")
