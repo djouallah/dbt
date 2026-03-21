@@ -15,7 +15,7 @@
         },
         "typeProperties": {
           "notebookId": "$items.Notebook.run.$id",
-          "workspaceId": "$config.workspace_id"
+          "workspaceId": "$workspace.id"
         }
       }
     ]
