@@ -16,7 +16,19 @@ if args.env not in all_cfg:
 cfg        = {**all_cfg.get("defaults", {}), **all_cfg[args.env]}
 WS_ID     = cfg["ws_id"]
 dbt        = root / "dbt"
-SM_NAME   = cfg["sm_name"]
+
+# Derive item names from fabric_items/ folder names
+fabric_items = root / "fabric_items"
+def find_item(item_type):
+    matches = list(fabric_items.glob(f"*.{item_type}"))
+    if len(matches) != 1:
+        raise SystemExit(f"Expected exactly one {item_type} in fabric_items/, found {len(matches)}")
+    return matches[0].name.removesuffix(f".{item_type}")
+
+LH_NAME  = find_item("Lakehouse")
+NB_NAME  = find_item("Notebook")
+PL_NAME  = find_item("DataPipeline")
+SM_NAME  = find_item("SemanticModel")
 
 # Resolve workspace name from ID
 result = subprocess.run(
@@ -26,9 +38,9 @@ result = subprocess.run(
 ws = json.loads(result.stdout)["text"]["displayName"]
 print(f"Resolved workspace: {ws} ({WS_ID})")
 
-LAKEHOUSE = f"{ws}.Workspace/{cfg['lakehouse']}.Lakehouse"
-NOTEBOOK  = f"{ws}.Workspace/{cfg['notebook']}.Notebook"
-PIPELINE  = f"{ws}.Workspace/{cfg['pipeline']}.DataPipeline"
+LAKEHOUSE = f"{ws}.Workspace/{LH_NAME}.Lakehouse"
+NOTEBOOK  = f"{ws}.Workspace/{NB_NAME}.Notebook"
+PIPELINE  = f"{ws}.Workspace/{PL_NAME}.DataPipeline"
 
 
 def fab(args, cwd=root):
@@ -79,9 +91,10 @@ def fab_deploy(item_types):
         tmp.unlink(missing_ok=True)
 
 
-# 0. Ensure "data" folder exists for organizing items
+# 0. Enable folder support and create "data" folder
 FOLDER = f"{ws}.Workspace/data.Folder"
 print("=== 0. Create data folder ===")
+fab(["config", "set", "folder_listing_enabled", "true"])
 subprocess.run(["fab", "create", FOLDER], cwd=str(root))
 
 # 1. Ensure lakehouse exists with schemas enabled
@@ -89,7 +102,7 @@ print("=== 1. Create lakehouse ===")
 subprocess.run(["fab", "create", LAKEHOUSE, "-P", "enableSchemas=true"], cwd=str(root))
 
 # Get target lakehouse ID (create above ensures it exists)
-target_lh_id = get_target_item_id("Lakehouse", cfg["lakehouse"])
+target_lh_id = get_target_item_id("Lakehouse", LH_NAME)
 print(f"Target lakehouse ID: {target_lh_id}")
 
 
@@ -150,7 +163,7 @@ print("=== 2c. Attach lakehouse to notebook ===")
 lakehouse_payload = json.dumps({
     "known_lakehouses": [{"id": target_lh_id}],
     "default_lakehouse": target_lh_id,
-    "default_lakehouse_name": cfg["lakehouse"],
+    "default_lakehouse_name": LH_NAME,
     "default_lakehouse_workspace_id": WS_ID,
 })
 fab(["set", NOTEBOOK, "-q",
@@ -158,7 +171,7 @@ fab(["set", NOTEBOOK, "-q",
      "-i", lakehouse_payload, "-f"])
 
 # Get target notebook ID (needed for pipeline fab set later)
-target_nb_id = get_target_item_id("Notebook", cfg["notebook"])
+target_nb_id = get_target_item_id("Notebook", NB_NAME)
 print(f"Target notebook ID:  {target_nb_id}")
 
 # 3. Copy dbt files to OneLake
@@ -230,6 +243,7 @@ else:
 # 8. Move items into "data" folder (semantic model stays at root)
 print("=== 8. Organize items into data folder ===")
 for item in [LAKEHOUSE, NOTEBOOK, PIPELINE]:
-    subprocess.run(["fab", "mv", item, FOLDER], cwd=str(root))
+    r = subprocess.run(["fab", "mv", item, FOLDER], capture_output=True, text=True, cwd=str(root))
+    print(f"  mv {item} → {r.returncode} {r.stderr.strip()}")
 
 print("=== Deploy complete ===")
