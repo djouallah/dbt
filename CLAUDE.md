@@ -19,6 +19,26 @@ replace_value:
     _ALL_: "$items.Lakehouse.data.$id"
 ```
 
+### Tokens are ONLY resolved through parameter.yml
+Fabric CLI does NOT resolve `$workspace.id` or `$items.*` tokens inline in content files.
+Content files (e.g. pipeline-content.json) must contain the original dev GUIDs, and
+parameter.yml must have find_replace entries to swap them with `$` tokens.
+```json
+// WRONG — literal token strings end up deployed unresolved
+{ "workspaceId": "$workspace.id", "notebookId": "$items.Notebook.run.$id" }
+
+// CORRECT — use dev GUIDs, let parameter.yml replace them
+{ "workspaceId": "e446a5e7-6666-42ad-a331-0bfef3187fbf", "notebookId": "da888b35-..." }
+```
+
+### $items token format
+Required format: `$items.type.name.$attribute`
+```yaml
+$items.Lakehouse.data.$id    # correct — type=Lakehouse, name=data
+$items.Notebook.run.$id      # correct — type=Notebook, name=run
+$items.data.$id              # wrong — "Invalid $items variable syntax"
+```
+
 ### is_regex must be a string
 ```yaml
 is_regex: "true"   # correct
@@ -52,8 +72,9 @@ Split into two phases using two config files:
 **fab_deploy_sm.yml** — SemanticModel + DataPipeline
 
 Deploy sequence in deploy.py:
-1. `fab deploy --config fab_deploy.yml` (Notebook + Lakehouse)
-2. Copy dbt files to OneLake
+1. `fab deploy` Lakehouse (must exist before Notebook so `$items.Lakehouse.data.$id` resolves)
+2. `fab deploy` Notebook (now the Lakehouse token resolves)
+3. Copy dbt files to OneLake
 3. `fab job run prod.Workspace/run.Notebook -i '{}'` — runs notebook synchronously, creates Delta tables
 4. `fab deploy --config fab_deploy_sm.yml` (SemanticModel + DataPipeline)
 5. Schedule pipeline if not already scheduled
