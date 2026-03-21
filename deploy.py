@@ -99,7 +99,11 @@ subprocess.run(["fab", "create", FOLDER], cwd=str(root))
 
 # 1. Ensure lakehouse exists with schemas enabled
 print("=== 1. Create lakehouse ===")
-subprocess.run(["fab", "create", LAKEHOUSE, "-P", "enableSchemas=true"], cwd=str(root))
+import time
+result = subprocess.run(["fab", "create", LAKEHOUSE, "-P", "enableSchemas=true"], cwd=str(root))
+if result.returncode == 0:
+    print("New lakehouse — waiting 60s for provisioning...")
+    time.sleep(60)
 
 # Get target lakehouse ID (create above ensures it exists)
 target_lh_id = get_target_item_id("Lakehouse", LH_NAME)
