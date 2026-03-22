@@ -1,6 +1,9 @@
 import argparse
+import base64
 import json
+import re
 import subprocess
+import time
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor
 import yaml
@@ -47,9 +50,6 @@ def fab(args, cwd=root):
     subprocess.run(["fab"] + args, check=True, cwd=str(cwd))
 
 
-import base64
-import re
-
 # Extract source workspace_id and lakehouse_id from the bim file OneLake URL
 bim_path = root / "fabric_items" / f"{SM_NAME}.SemanticModel" / "model.bim"
 bim_text = bim_path.read_text()
@@ -63,14 +63,11 @@ print(f"Source lakehouse ID: {source_lh_id}")
 
 
 
-def get_target_item_id(item_type, display_name):
-    """Query target workspace for an item's ID by type and name."""
-    r = subprocess.run(
-        ["fab", "api", "-X", "get", f"workspaces/{WS_ID}/items?type={item_type}"],
-        capture_output=True, text=True, check=True, cwd=str(root),
-    )
-    return next(i["id"] for i in json.loads(r.stdout)["text"]["value"]
-                if i["displayName"] == display_name)
+def get_item_id(path):
+    """Get an item's ID using fab get -q id."""
+    r = subprocess.run(["fab", "get", path, "-q", "id"],
+                       capture_output=True, text=True, check=True, cwd=str(root))
+    return r.stdout.strip()
 
 
 def fab_deploy(item_types):
@@ -95,14 +92,17 @@ fab(["config", "set", "folder_listing_enabled", "true"])
 
 # 1. Ensure lakehouse exists with schemas enabled
 print("=== 1. Create lakehouse ===")
-import time
-result = subprocess.run(["fab", "create", LAKEHOUSE, "-P", "enableSchemas=true"], cwd=str(root))
-if result.returncode == 0:
+exists_result = subprocess.run(["fab", "exists", LAKEHOUSE],
+                               capture_output=True, text=True, cwd=str(root))
+if "true" not in exists_result.stdout.lower():
+    fab(["create", LAKEHOUSE, "-P", "enableSchemas=true"])
     print("New lakehouse — waiting 60s for provisioning...")
     time.sleep(60)
+else:
+    print(f"Lakehouse '{LH_NAME}' already exists, skipping create.")
 
 # Get target lakehouse ID (create above ensures it exists)
-target_lh_id = get_target_item_id("Lakehouse", LH_NAME)
+target_lh_id = get_item_id(LAKEHOUSE)
 print(f"Target lakehouse ID: {target_lh_id}")
 
 
@@ -132,17 +132,15 @@ vl_definition = {
 }
 
 # Check if variable library already exists
-r = subprocess.run(
-    ["fab", "api", "-X", "get", f"workspaces/{WS_ID}/variableLibraries"],
-    capture_output=True, text=True, check=True, cwd=str(root),
-)
-existing_vl = next((i for i in json.loads(r.stdout)["text"]["value"]
-                     if i["displayName"] == VL_NAME), None)
+VL_PATH = f"{ws}.Workspace/{VL_NAME}.VariableLibrary"
+vl_exists = subprocess.run(["fab", "exists", VL_PATH],
+                           capture_output=True, text=True, cwd=str(root))
 
-if existing_vl:
+if "true" in vl_exists.stdout.lower():
     # Update definition
+    vl_id = get_item_id(VL_PATH)
     fab(["api", "-X", "post",
-         f"workspaces/{WS_ID}/variableLibraries/{existing_vl['id']}/updateDefinition",
+         f"workspaces/{WS_ID}/variableLibraries/{vl_id}/updateDefinition",
          "-i", json.dumps({"definition": vl_definition})])
     print(f"Updated variable library '{VL_NAME}'")
 else:
@@ -162,12 +160,10 @@ lakehouse_payload = json.dumps({
     "default_lakehouse_name": LH_NAME,
     "default_lakehouse_workspace_id": WS_ID,
 })
-fab(["set", NOTEBOOK, "-q",
-     "definition.parts[0].payload.metadata.dependencies.lakehouse",
-     "-i", lakehouse_payload, "-f"])
+fab(["set", NOTEBOOK, "-q", "lakehouse", "-i", lakehouse_payload, "-f"])
 
 # Get target notebook ID (needed for pipeline fab set later)
-target_nb_id = get_target_item_id("Notebook", NB_NAME)
+target_nb_id = get_item_id(NOTEBOOK)
 print(f"Target notebook ID:  {target_nb_id}")
 
 # 3. Copy dbt files to OneLake
@@ -206,7 +202,8 @@ finally:
 
 # 6. Refresh semantic model
 print("=== 6. Refresh semantic model ===")
-sm_id = get_target_item_id("SemanticModel", SM_NAME)
+SEMANTIC_MODEL = f"{ws}.Workspace/{SM_NAME}.SemanticModel"
+sm_id = get_item_id(SEMANTIC_MODEL)
 fab(["api", "-A", "powerbi", "-X", "post", f"groups/{WS_ID}/datasets/{sm_id}/refreshes"])
 
 # 7. Deploy DataPipeline + set notebook reference + schedule
