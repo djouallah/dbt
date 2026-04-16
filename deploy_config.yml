@@ -9,7 +9,7 @@ defaults:
 
 local:
   ws_id:         "e446a5e7-6666-42ad-a331-0bfef3187fbf"
-  lakehouse_id:  "0435cb32-9fc7-4eb7-a5bc-cbdc011b1410"
+  lakehouse_id:  "9b512019-971f-47f9-8f20-ac2b7c2b2f32"
   process_limit: "1000"
   dbt_path:      "/lakehouse/default/Files/dbt_fabric_python_notebook/dbt"
   metadata_path: "/lakehouse/default/Files/dbt_fabric_python_notebook/metadata.db"
