@@ -1,14 +1,25 @@
 defaults:
-  lakehouse_name: "data"
-  download_limit: "2"
+  lakehouse_name:     "data"
+  download_limit:     "2"
+  dbt_path:           "/lakehouse/default/Files/dbt"
+  metadata_path:      "/lakehouse/default/Files/metadata.db"
   schedule_interval: "30"
   schedule_start:    "2025-01-01T00:00:00"
   schedule_end:      "2030-12-31T23:59:59"
 
+local:
+  ws_id:         "e446a5e7-6666-42ad-a331-0bfef3187fbf"
+  lakehouse_id:  "0435cb32-9fc7-4eb7-a5bc-cbdc011b1410"
+  process_limit: "1000"
+  dbt_path:      "/lakehouse/default/Files/dbt_fabric_python_notebook/dbt"
+  metadata_path: "/lakehouse/default/Files/dbt_fabric_python_notebook/metadata.db"
+
 main:
   ws_id: "e446a5e7-6666-42ad-a331-0bfef3187fbf"
   schedule_interval: "720"
+  process_limit: "100"
 
 production:
-  ws_id:     "be079b0f-3416-4de2-9184-9c546bad223c"
+  ws_id:          "be079b0f-3416-4de2-9184-9c546bad223c"
   download_limit: "60"
+  process_limit:  "600"

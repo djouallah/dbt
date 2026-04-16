@@ -116,7 +116,12 @@ def b64(obj):
 vl_variables = {
     "$schema": "https://developer.microsoft.com/json-schemas/fabric/item/variableLibrary/definition/variables/1.0.0/schema.json",
     "variables": [
-        {"name": "download_limit", "type": "String", "value": cfg.get("download_limit", "2")},
+        {"name": "download_limit", "type": "String", "value": cfg["download_limit"]},
+        {"name": "process_limit",   "type": "String", "value": cfg["process_limit"]},
+        {"name": "lakehouse_name",  "type": "String", "value": cfg["lakehouse_name"]},
+        {"name": "workspace_id",    "type": "String", "value": cfg["ws_id"]},
+        {"name": "dbt_path",        "type": "String", "value": cfg["dbt_path"]},
+        {"name": "metadata_path",   "type": "String", "value": cfg["metadata_path"]},
     ],
 }
 vl_settings = {
