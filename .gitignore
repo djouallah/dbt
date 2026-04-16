@@ -5,3 +5,5 @@ nul
 %SystemDrive%/
 _fab_deploy_pipeline.yml
 blog.md
+dbt/.user.yml
+*.db
