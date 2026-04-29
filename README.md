@@ -1,7 +1,10 @@
 # dbt + DuckLake on Microsoft Fabric
 
 
-> **Note:** The official dbt adapter for Fabric is [dbt-fabric](https://github.com/microsoft/dbt-fabric) (connects via ODBC to Fabric Warehouse). This repo is side project, using **dbt-duckdb** with **DuckLake** inside a notebook for lightweight SQL transformations that write directly to OneLake.
+> **Note:** The official dbt adapter for Fabric is [dbt-fabric](https://github.com/microsoft/dbt-fabric) (connects via ODBC to Fabric Warehouse). This repo is side project, using **dbt-duckdb** with **DuckLake** inside a notebook for lightweight SQL transformations that write directly to OneLake, Notice it is a single writer, and does not support conccurency unless you use Postgresql which is out of scope
+
+
+> **Limitation:** it is a single writer, and does not support conccurency unless you use Postgresql which is out of scope 
 
 Run **dbt** inside a **Microsoft Fabric Python notebook** using **DuckDB** and **DuckLake** to build and manage Delta Lake tables on OneLake, with full CI/CD via GitHub Actions and the [Fabric CLI](https://microsoft.github.io/fabric-cli/).
 
