@@ -1,5 +1,4 @@
 import argparse
-import base64
 import json
 import re
 import subprocess
@@ -106,56 +105,25 @@ target_lh_id = get_item_id(LAKEHOUSE)
 print(f"Target lakehouse ID: {target_lh_id}")
 
 
-# Create/update variable library with deploy_config (download_limit etc.)
-print("=== 1b. Create variable library ===")
-VL_NAME = "deploy_config"
-
-def b64(obj):
-    return base64.b64encode(json.dumps(obj).encode()).decode()
-
+# 2. Deploy notebook + variable library (variables.json rewritten per env, reverted after)
+print("=== 2. Deploy notebook + variable library ===")
+vl_path = fabric_items / "deploy_config.VariableLibrary" / "variables.json"
 vl_variables = {
     "$schema": "https://developer.microsoft.com/json-schemas/fabric/item/variableLibrary/definition/variables/1.0.0/schema.json",
     "variables": [
         {"name": "download_limit", "type": "String", "value": cfg["download_limit"]},
-        {"name": "process_limit",   "type": "String", "value": cfg["process_limit"]},
-        {"name": "lakehouse_name",  "type": "String", "value": cfg["lakehouse_name"]},
-        {"name": "workspace_id",    "type": "String", "value": cfg["ws_id"]},
-        {"name": "dbt_path",        "type": "String", "value": cfg["dbt_path"]},
-        {"name": "metadata_path",   "type": "String", "value": cfg["metadata_path"]},
+        {"name": "process_limit",  "type": "String", "value": cfg["process_limit"]},
+        {"name": "lakehouse_name", "type": "String", "value": cfg["lakehouse_name"]},
+        {"name": "workspace_id",   "type": "String", "value": cfg["ws_id"]},
+        {"name": "dbt_path",       "type": "String", "value": cfg["dbt_path"]},
+        {"name": "metadata_path",  "type": "String", "value": cfg["metadata_path"]},
     ],
 }
-vl_settings = {
-    "$schema": "https://developer.microsoft.com/json-schemas/fabric/item/variableLibrary/definition/settings/1.0.0/schema.json",
-    "valueSetsOrder": [],
-}
-vl_definition = {
-    "format": "VariableLibraryV1",
-    "parts": [
-        {"path": "variables.json", "payload": b64(vl_variables), "payloadType": "InlineBase64"},
-        {"path": "settings.json", "payload": b64(vl_settings), "payloadType": "InlineBase64"},
-    ],
-}
-
-# Check if variable library already exists
-VL_PATH = f"{ws}.Workspace/{VL_NAME}.VariableLibrary"
-vl_exists = subprocess.run(["fab", "exists", VL_PATH],
-                           capture_output=True, text=True, cwd=str(root))
-
-if "true" in vl_exists.stdout.lower():
-    # Update definition
-    vl_id = get_item_id(VL_PATH)
-    fab(["api", "-X", "post",
-         f"workspaces/{WS_ID}/variableLibraries/{vl_id}/updateDefinition",
-         "-i", json.dumps({"definition": vl_definition})])
-    print(f"Updated variable library '{VL_NAME}'")
-else:
-    fab(["api", "-X", "post", f"workspaces/{WS_ID}/variableLibraries",
-         "-i", json.dumps({"displayName": VL_NAME, "definition": vl_definition})])
-    print(f"Created variable library '{VL_NAME}'")
-
-# 2. Deploy notebook (no parameters — code uses notebookutils at runtime)
-print("=== 2b. Deploy notebook ===")
-fab_deploy(["Notebook"])
+vl_path.write_text(json.dumps(vl_variables, indent=4))
+try:
+    fab_deploy(["Notebook", "VariableLibrary"])
+finally:
+    subprocess.run(["git", "checkout", str(vl_path)], cwd=str(root))
 
 # 2c. Attach lakehouse to notebook via fab set
 print("=== 2c. Attach lakehouse to notebook ===")
@@ -224,14 +192,12 @@ fab(["set", PIPELINE, "-q",
      "definition.parts[0].payload.properties.activities[0].typeProperties.workspaceId",
      "-i", WS_ID, "-f"])
 
-result = subprocess.run(["fab", "job", "run-list", PIPELINE, "--schedule"],
-                        capture_output=True, text=True, cwd=str(root))
-print(f"run-list stdout: {result.stdout!r}")
-print(f"run-list stderr: {result.stderr!r}")
-print(f"run-list returncode: {result.returncode}")
-has_active_schedule = "True" in result.stdout
-
-if has_active_schedule:
+result = subprocess.run(
+    ["fab", "job", "run-list", PIPELINE, "--schedule", "--output_format", "json"],
+    capture_output=True, text=True, check=True, cwd=str(root),
+)
+schedules = json.loads(result.stdout)["result"]["data"]
+if any(s["enabled"] for s in schedules):
     print("Pipeline already scheduled and enabled, skipping.")
 else:
     fab(["job", "run-sch", PIPELINE,

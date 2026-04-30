@@ -1,0 +1,11 @@
+{
+    "$schema": "https://developer.microsoft.com/json-schemas/fabric/item/variableLibrary/definition/variables/1.0.0/schema.json",
+    "variables": [
+        {"name": "download_limit", "type": "String", "value": "2"},
+        {"name": "process_limit", "type": "String", "value": "1000"},
+        {"name": "lakehouse_name", "type": "String", "value": "data"},
+        {"name": "workspace_id", "type": "String", "value": "e446a5e7-6666-42ad-a331-0bfef3187fbf"},
+        {"name": "dbt_path", "type": "String", "value": "/lakehouse/default/Files/dbt_fabric_python_notebook/dbt"},
+        {"name": "metadata_path", "type": "String", "value": "/lakehouse/default/Files/dbt_fabric_python_notebook/metadata.db"}
+    ]
+}
