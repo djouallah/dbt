@@ -186,7 +186,7 @@ result = subprocess.run(
     ["fab", "job", "run-list", PIPELINE, "--schedule", "--output_format", "json"],
     capture_output=True, text=True, check=True, cwd=str(root),
 )
-schedules = json.loads(result.stdout)["result"]["data"]
+schedules = json.loads(result.stdout).get("result", {}).get("data", [])
 if any(s["enabled"] for s in schedules):
     print("Pipeline already scheduled and enabled, skipping.")
 else:
