@@ -4,7 +4,7 @@
 > **Note:** The official dbt adapter for Fabric is [dbt-fabric](https://github.com/microsoft/dbt-fabric) (connects via ODBC to Fabric Warehouse). This repo is side project, using **dbt-duckdb** with **DuckLake** inside a notebook for lightweight SQL transformations that write directly to OneLake, Notice it is a single writer, and does not support conccurency unless you use Postgresql which is out of scope
 
 
-> **Limitation:** it is a single writer, and does not support conccurency unless you use Postgresql which is out of scope 
+> **Limitation:** still a single-writer model — DuckLake cannot run multiple concurrent writers against the same SQLite catalog. The notebook now acquires an exclusive OneLake lease on `metadata.db` so accidental concurrent runs fail fast instead of corrupting the catalog. See [Concurrency safety](#concurrency-safety) below. For true multi-writer concurrency you'd need a Postgres catalog, which is out of scope. 
 
 Run **dbt** inside a **Microsoft Fabric Python notebook** using **DuckDB** and **DuckLake** to build and manage Delta Lake tables on OneLake, with full CI/CD via GitHub Actions and the [Fabric CLI](https://microsoft.github.io/fabric-cli/).
 
@@ -101,6 +101,45 @@ on-run-end:
 | `dev` | Local filesystem (`/tmp/Tables`) | Local SQLite | Development |
 | `ci` | Azurite (`az://dbt/Tables`) | Local SQLite | GitHub Actions |
 | `prod` | OneLake (`abfss://...`) | Lakehouse SQLite | Fabric notebook |
+
+## Concurrency safety
+
+The notebook protects the DuckLake catalog (`metadata.db`) with an exclusive OneLake lease so that an accidental second run cannot corrupt it.
+
+Each run does:
+
+1. Acquire an infinite lease on `Files/metadata.db` via the Azure Data Lake SDK (token from `notebookutils.credentials.getToken("storage")`).
+2. Download `metadata.db` to local `/tmp/metadata.db` and point dbt at it (`METADATA_LOCAL_PATH`).
+3. Run dbt. The lease is held the whole time.
+4. Upload the modified file back under the lease, then release.
+
+If a second notebook starts while the first is running, `acquire_lease` fails immediately with `LeaseAlreadyPresent` and the second run aborts — no silent corruption.
+
+**Stale-lease auto-heal.** Azure leases are either 15–60 s fixed or infinite, so a 12 h "soft" expiry is implemented with file metadata. On acquire, the notebook stamps `acquired_at = <utc iso>` into the file's blob metadata. On a lease conflict, the next run reads that timestamp; if it's older than 12 hours (or missing/unparseable), the notebook calls `break_lease` and re-acquires. So a crashed/killed run self-heals within 12 hours with no manual intervention.
+
+**Manual unstick** (if you need to recover before the 12 h window):
+
+```python
+from azure.storage.filedatalake import DataLakeServiceClient, DataLakeLeaseClient
+from azure.core.credentials import AccessToken, TokenCredential
+import notebookutils
+
+class StaticToken(TokenCredential):
+    def __init__(self, t): self.t = t
+    def get_token(self, *_, **__): return AccessToken(self.t, 9999999999)
+
+workspace_id = "<ws-guid>"
+lakehouse_id = "<lh-guid>"
+file = (
+    DataLakeServiceClient("https://onelake.dfs.fabric.microsoft.com",
+                          credential=StaticToken(notebookutils.credentials.getToken("storage")))
+    .get_file_system_client(workspace_id)
+    .get_file_client(f"{lakehouse_id}/Files/metadata.db")
+)
+DataLakeLeaseClient(file).break_lease(lease_break_period=0)
+```
+
+Only the SQLite catalog is leased — Delta data files under `Tables/` are not. That's fine: DuckLake's atomicity comes from the catalog, so protecting `metadata.db` is sufficient to prevent split-brain writes.
 
 ## Configuration
 
