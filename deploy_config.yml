@@ -1,3 +1,15 @@
+# deploy_config.yml — one section per deploy target.
+#
+# How it wires up: the GitHub Actions deploy workflow runs
+#   python deploy.py --env <branch-name>
+# so the top-level key here MUST match the git branch name.
+#   - branch `main`       -> section `main`       -> test Fabric workspace
+#   - branch `production` -> section `production` -> prod Fabric workspace
+#   - any other branch    -> deploy is skipped (no matching section)
+#
+# `defaults` is merged into every env. `local` is NOT a deploy target — it's
+# used by the notebook's fallback when run outside Fabric (e.g. from VS Code).
+
 defaults:
   lakehouse_name:     "data"
   download_limit:     "2"
@@ -7,6 +19,7 @@ defaults:
   schedule_start:    "2025-01-01T00:00:00"
   schedule_end:      "2030-12-31T23:59:59"
 
+# Notebook fallback when run outside Fabric. Not a deploy target.
 local:
   ws_id:         "e446a5e7-6666-42ad-a331-0bfef3187fbf"
   lakehouse_id:  "9b512019-971f-47f9-8f20-ac2b7c2b2f32"
@@ -14,11 +27,13 @@ local:
   dbt_path:      "/lakehouse/default/Files/dbt_fabric_python_notebook/dbt"
   metadata_path: "/lakehouse/default/Files/dbt_fabric_python_notebook/metadata.db"
 
+# Branch `main` -> test Fabric workspace.
 main:
   ws_id: "e446a5e7-6666-42ad-a331-0bfef3187fbf"
   schedule_interval: "720"
   process_limit: "100"
 
+# Branch `production` -> prod Fabric workspace.
 production:
   ws_id:          "be079b0f-3416-4de2-9184-9c546bad223c"
   download_limit: "60"

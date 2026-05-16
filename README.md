@@ -147,19 +147,32 @@ Only the SQLite catalog is leased — Delta data files under `Tables/` are not. 
 - `profiles.yml` — dbt targets with DuckLake attach config
 - `dbt_project.yml` — Model config, DuckLake hooks, variable defaults
 
+## Branches → Fabric workspaces
+
+This repo uses **one branch per Fabric workspace**. The branch name has to match a top-level key in [`deploy_config.yml`](deploy_config.yml) — the deploy workflow runs `python deploy.py --env <branch-name>`, and the section under that key tells it which workspace to deploy to.
+
+| Branch | `deploy_config.yml` section | Target | Purpose |
+|--------|----------------------------|--------|---------|
+| `main` | `main:` | Fabric **test** workspace | Pre-prod validation |
+| `production` | `production:` | Fabric **production** workspace | Live |
+| anything else | _(no match)_ | _(deploy skipped)_ | Feature branches |
+
+CI (Azurite + dbt run/test/docs) fires on push to `main` and on PRs to `main`. The Fabric deploy fires on any branch — but is skipped unless that branch has a matching `deploy_config.yml` section.
+
+To add a new environment: create a branch, add a section with the same name to `deploy_config.yml`, push.
+
 ## CI/CD setup (GitHub Actions)
 
 Set as GitHub secrets:
 - `AZURE_CLIENT_ID`
 - `AZURE_TENANT_ID`
 
-Push to `main` runs CI tests and publishes dbt docs to GitHub Pages. Push to `production` deploys to Fabric.
-
 ## Manual deploy
 
 ```bash
 az login
-python deploy.py --env main
+python deploy.py --env main         # -> test workspace
+python deploy.py --env production   # -> prod workspace
 ```
 
 ## Requirements
