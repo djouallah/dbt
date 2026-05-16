@@ -125,16 +125,6 @@ try:
 finally:
     subprocess.run(["git", "checkout", str(vl_path)], cwd=str(root))
 
-# 2c. Attach lakehouse to notebook via fab set
-print("=== 2c. Attach lakehouse to notebook ===")
-lakehouse_payload = json.dumps({
-    "known_lakehouses": [{"id": target_lh_id}],
-    "default_lakehouse": target_lh_id,
-    "default_lakehouse_name": LH_NAME,
-    "default_lakehouse_workspace_id": WS_ID,
-})
-fab(["set", NOTEBOOK, "-q", "lakehouse", "-i", lakehouse_payload, "-f"])
-
 # Get target notebook ID (needed for pipeline fab set later)
 target_nb_id = get_item_id(NOTEBOOK)
 print(f"Target notebook ID:  {target_nb_id}")

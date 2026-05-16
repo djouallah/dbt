@@ -22,10 +22,9 @@ defaults:
 # Notebook fallback when run outside Fabric. Not a deploy target.
 local:
   ws_id:         "e446a5e7-6666-42ad-a331-0bfef3187fbf"
-  lakehouse_id:  "9b512019-971f-47f9-8f20-ac2b7c2b2f32"
+  lakehouse_id:  "2bf73e83-8c65-47ca-b341-5329ca730b20"
   process_limit: "1000"
-  dbt_path:      "/lakehouse/default/Files/dbt_fabric_python_notebook/dbt"
-  metadata_path: "/lakehouse/default/Files/dbt_fabric_python_notebook/metadata.db"
+  dbt_path:      "/lakehouse/default/Files/dbt_fabric_python_notebook_ducklake/dbt"
 
 # Branch `main` -> test Fabric workspace.
 main:
