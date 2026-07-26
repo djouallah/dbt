@@ -120,7 +120,9 @@ jobs:
         # `|| dbt retry`: a killed Livy session (or any transient failure) fails only the
         # models it touched; retry re-runs just those in a FRESH session/process instead of
         # failing the whole leg. retry replays the original flags from target/run_results.
-        run: dbt run --target ${{ matrix.engine }} --profiles-dir . || dbt retry --profiles-dir .
+        # retry needs --target too: without it dbt renders the profile's DEFAULT target
+        # (duckrun), which demands ONELAKE_TABLES_PATH this job doesn't have.
+        run: dbt run --target ${{ matrix.engine }} --profiles-dir . || dbt retry --target ${{ matrix.engine }} --profiles-dir .
       - if: always()
         uses: actions/upload-artifact@v4
         with:

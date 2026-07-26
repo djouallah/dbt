@@ -41,9 +41,10 @@ SELECT
   YEAR(TRY_CAST([SETTLEMENTDATE] AS DATETIME2(6))) AS [YEAR]
 FROM {{ openrowset_csv_files(new_files, read_cols) }} AS src
 WHERE [I] = 'D' AND [PRICE] = 'PRICE'
-{#-- Guard for the wildcard fallback (pending > 1024): dedup re-read files. No-op cost when
-     the file list is explicit. --#}
-{%- if is_incremental() %}
+{#-- Dedup guard, rendered ONLY on the wildcard fallback (pending > 1024): T-SQL rejects
+     filepath(N) when the BULK path has no wildcard to index, so it must not appear when the
+     file list is explicit — and the explicit list already excludes ingested files anyway. --#}
+{%- if is_incremental() and new_files | length == 1 and '*' in new_files[0] %}
   AND {{ parse_filename('src.filepath(1)') }} NOT IN (SELECT [file] FROM {{ this }})
 {%- endif %}
 {%- endif %}
