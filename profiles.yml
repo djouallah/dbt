@@ -78,6 +78,11 @@ aemo_electricity:
       authentication: "{{ env_var('FABRIC_AUTH', 'CLI') }}"
       threads: 8
       connect_retries: 1
+      # Fabric reaps Livy sessions on its default idle TTL (~20 min). A backlog-draining run
+      # holds long CTAS statements for 35+ min and the session came back "Livy state : dead"
+      # mid-run (HTTP 400 — which dbt-fabricspark does NOT auto-recover from; it only
+      # re-acquires on 404). Stretch the idle timeout to outlive the longest run.
+      session_idle_timeout: "90m"
       # dbt-fabricspark requires spark_config.name (the Livy session/app name).
       spark_config:
         name: dbt_aemo

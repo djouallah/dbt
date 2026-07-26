@@ -95,7 +95,8 @@ jobs:
     name: fabric-server ${{ matrix.engine }}
     needs: land
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    # Backlog-draining spark runs (1024-file folds) reach ~40 min; leave room for one retry.
+    timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
@@ -124,7 +125,10 @@ jobs:
             echo "::add-mask::$SQL"; echo "FABRIC_ACCESS_TOKEN=$SQL" >> "$GITHUB_ENV"
           fi
       - name: dbt run --target ${{ matrix.engine }}
-        run: dbt run --target ${{ matrix.engine }} --profiles-dir .
+        # `|| dbt retry`: a killed Livy session (or any transient failure) fails only the
+        # models it touched; retry re-runs just those in a FRESH session/process instead of
+        # failing the whole leg. retry replays the original flags from target/run_results.
+        run: dbt run --target ${{ matrix.engine }} --profiles-dir . || dbt retry --profiles-dir .
       - if: always()
         uses: actions/upload-artifact@v4
         with:
