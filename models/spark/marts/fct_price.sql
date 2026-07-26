@@ -39,7 +39,7 @@
 
 -- depends_on: {{ ref('stg_csv_archive_log') }}
 
-{% set new_files = spark_new_files('daily', this if is_incremental() else none) %}
+{% set new_files = spark_new_files('daily', this) if is_incremental() else [] %}
 {#-- Plain (non-trimming) tags: {%- -%} here would eat the newline that ends the depends_on
      comment above and glue `WITH raw AS (` onto it, commenting out the CTE header. --#}
 {% if is_incremental() and new_files | length == 0 %}
@@ -50,7 +50,7 @@ WITH raw AS (
   SELECT
     from_csv(value, '{{ view_schema }}', map('mode', 'PERMISSIVE')) AS r,
     _metadata.file_name AS _fname
-  FROM text.`{{ get_csv_archive_path() }}/daily/{{ '{' ~ new_files | join(',') ~ '}' }}`
+  FROM text.`{{ get_csv_archive_path() }}/daily{{ ('/{' ~ new_files | join(',') ~ '}') if is_incremental() else '' }}`
 )
 SELECT
   r.UNIT,

@@ -19,7 +19,7 @@ import duckrun
 # Config the shipped project reads via env_var() — forwarded into the notebook if present.
 # Deliberately excludes tokens and the runner-only OneLake curl transport (AZURE_TRANSPORT_*).
 _FORWARD = ("FILES_PATH", "ONELAKE_TABLES_PATH", "WAREHOUSE_PATH", "ONELAKE_ENDPOINT",
-            "DBT_SCHEMA", "process_limit", "download_limit", "daily_download_limit")
+            "DBT_SCHEMA", "download_limit", "daily_download_limit")
 
 
 def main() -> int:

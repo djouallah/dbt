@@ -41,4 +41,9 @@ SELECT
   YEAR(TRY_CAST([SETTLEMENTDATE] AS DATETIME2(6))) AS [YEAR]
 FROM {{ openrowset_csv_files(new_files, read_cols) }} AS src
 WHERE [I] = 'D' AND [PRICE] = 'PRICE'
+{#-- Guard for the wildcard fallback (pending > 1024): dedup re-read files. No-op cost when
+     the file list is explicit. --#}
+{%- if is_incremental() %}
+  AND {{ parse_filename('src.filepath(1)') }} NOT IN (SELECT [file] FROM {{ this }})
+{%- endif %}
 {%- endif %}

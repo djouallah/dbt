@@ -23,8 +23,9 @@
      CSV table with an explicit schema ("External tables with partition columns or schema or
      properties are not supported"). A path scan is not a catalog object, so the persistent tmp
      view may reference it, and from_csv carries the explicit schema the ragged AEMO rows need.
-     The path is an explicit brace glob of THIS RUN's new files (see spark_new_files) — a bare
-     folder scan re-read the whole archive every run and took 30+ minutes. --#}
+     On incremental runs the path is an explicit brace glob of THIS RUN's new files (see
+     spark_new_files) — a bare folder scan re-read the whole archive every run and took 30+
+     minutes. A first/full-refresh build DOES read the bare folder: everything is new then. --#}
 {{ config(
     materialized='incremental',
     incremental_strategy='append'
@@ -32,7 +33,7 @@
 
 -- depends_on: {{ ref('stg_csv_archive_log') }}
 
-{% set new_files = spark_new_files('daily', this if is_incremental() else none) %}
+{% set new_files = spark_new_files('daily', this) if is_incremental() else [] %}
 {#-- Plain (non-trimming) tags: {%- -%} here would eat the newline that ends the depends_on
      comment above and glue `WITH raw AS (` onto it, commenting out the CTE header. --#}
 {% if is_incremental() and new_files | length == 0 %}
@@ -43,7 +44,7 @@ WITH raw AS (
   SELECT
     from_csv(value, '{{ view_schema }}', map('mode', 'PERMISSIVE')) AS r,
     _metadata.file_name AS _fname
-  FROM text.`{{ get_csv_archive_path() }}/daily/{{ '{' ~ new_files | join(',') ~ '}' }}`
+  FROM text.`{{ get_csv_archive_path() }}/daily{{ ('/{' ~ new_files | join(',') ~ '}') if is_incremental() else '' }}`
 )
 SELECT
   r.UNIT,

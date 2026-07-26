@@ -12,7 +12,7 @@
 -- next: 2018-08-30/31, 2019-12-31/2020-01-01 — pairs summing to 288) sit far
 -- outside this window, so they can never fail it.
 -- Deliberately NOT tagged heavy: unlike the scada-vs-summary assertions this only
--- reads fct_summary itself, so CI's small process_limit can't false-positive it.
+-- reads fct_summary itself, so a partially drained backlog can't false-positive it.
 -- Remediation: DELETE the flagged dates from fct_summary — the next incremental
 -- run's daily branch re-inserts them in full from fct_scada.
 

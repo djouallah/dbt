@@ -135,7 +135,4 @@ elif mode == "dwh":
 else:
     raise SystemExit(f"unknown mode {mode}")
 
-if mode != "land":
-    out += [f"process_limit={os.environ.get('CI_PROCESS_LIMIT', '1024')}"]
-
 print("\n".join(out))

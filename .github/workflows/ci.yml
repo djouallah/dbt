@@ -16,10 +16,6 @@ on:
         description: "files to download per source"
         type: string
         default: "200"
-      process_limit:
-        description: "files to fold into the marts per build (1024 max — Fabric BULK limit)"
-        type: string
-        default: "1024"
       cores:
         description: "Fabric Python-notebook vCores"
         type: choice
@@ -43,10 +39,6 @@ env:
   CURL_CA_INFO: /etc/ssl/certs/ca-certificates.crt
   DUCKDB_TEMP_DIR: /tmp/duckdb_spill
   CI_DOWNLOAD_LIMIT: ${{ inputs.download_limit || '200' }}
-  # 1024 = Fabric OPENROWSET's per-statement BULK limit, the lowest ceiling of the four engines,
-  # so every leg folds the same number of files per run. Must stay above CI_DOWNLOAD_LIMIT or the
-  # backlog never drains.
-  CI_PROCESS_LIMIT: ${{ inputs.process_limit || '1024' }}
   FABRIC_CORES: ${{ inputs.cores || '8' }}
 
 jobs:
