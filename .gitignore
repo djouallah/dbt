@@ -1,0 +1,13 @@
+target/
+dbt_packages/
+logs/
+*.duckdb
+*.duckdb.wal
+metadata.db
+warehouse/
+landing/
+.user.yml
+.DS_Store
+__pycache__/
+*.pyc
+.ipynb_checkpoints/

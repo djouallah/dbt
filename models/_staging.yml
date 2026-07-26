@@ -1,0 +1,30 @@
+version: 2
+
+# Shared across all dialects — model names are identical in models/duckdb, models/dwh
+# and models/spark, so ONE patch documents/tests whichever tree is enabled for the target.
+
+models:
+  - name: stg_csv_archive_log
+    description: >
+      View over the archive log the shared download_aemo.py script writes to the landing
+      lakehouse (Files/csv_raw_archive_log.parquet). One log; every engine reads it with SQL.
+    columns:
+      - name: source_filename
+        description: Name of the downloaded file
+        tests:
+          - not_null
+      - name: source_type
+        description: Type of source (daily, scada_today, price_today, duid_*)
+        tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: ['daily', 'scada_today', 'price_today', 'duid_data', 'duid_facilities', 'duid_wa_energy', 'duid_geo_data']
+      - name: csv_filename
+        description: Actual CSV filename (without extension) extracted from the ZIP
+        tests:
+          - not_null
+      - name: archived_at
+        description: Timestamp when the file was archived
+        tests:
+          - not_null

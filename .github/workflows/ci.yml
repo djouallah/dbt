@@ -1,0 +1,194 @@
+name: dbt
+
+# land once -> run the same models on 4 engines in Fabric -> test every output with one
+# neutral reader -> report. Compute is always Fabric; the runner only downloads and drives.
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      workspace:
+        description: "Fabric workspace GUID"
+        type: string
+        default: "ea575278-bd81-459c-9680-47829898c902"
+      download_limit:
+        description: "files to download per source"
+        type: string
+        default: "200"
+      process_limit:
+        description: "files to fold into the marts per build (1024 max — Fabric BULK limit)"
+        type: string
+        default: "1024"
+      cores:
+        description: "Fabric Python-notebook vCores"
+        type: choice
+        options: ["4", "8", "16", "32", "64"]
+        default: "8"
+
+concurrency:
+  group: onelake-${{ github.ref_name }}
+  cancel-in-progress: false
+
+permissions:
+  id-token: write
+  contents: read
+
+env:
+  WS_ID: ${{ inputs.workspace || 'ea575278-bd81-459c-9680-47829898c902' }}
+  AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+  AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+  DBT_SCHEMA: mart
+  AZURE_TRANSPORT_OPTION_TYPE: curl
+  CURL_CA_INFO: /etc/ssl/certs/ca-certificates.crt
+  DUCKDB_TEMP_DIR: /tmp/duckdb_spill
+  CI_DOWNLOAD_LIMIT: ${{ inputs.download_limit || '200' }}
+  # 1024 = Fabric OPENROWSET's per-statement BULK limit, the lowest ceiling of the four engines,
+  # so every leg folds the same number of files per run. Must stay above CI_DOWNLOAD_LIMIT or the
+  # backlog never drains.
+  CI_PROCESS_LIMIT: ${{ inputs.process_limit || '1024' }}
+  FABRIC_CORES: ${{ inputs.cores || '8' }}
+
+jobs:
+  land:
+    name: land data
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    outputs:
+      files_path: ${{ steps.prov.outputs.files_path }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: {python-version: "3.11"}
+      - run: pip install duckrun
+      - name: Provision landing lakehouse
+        id: prov
+        run: |
+          python .github/scripts/provision.py land | tee /tmp/land.env >> "$GITHUB_ENV"
+          echo "files_path=$(grep '^FILES_PATH=' /tmp/land.env | cut -d= -f2-)" >> "$GITHUB_OUTPUT"
+      - name: Download AEMO data (obstore -> OneLake)
+        run: python download_aemo.py
+
+  # DuckDB-family: duckrun.run_python ships `dbt run` into a Fabric notebook.
+  fabric:
+    name: fabric ${{ matrix.engine }}
+    needs: land
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        engine: [duckrun, iceberg]
+    env:
+      FILES_PATH: ${{ needs.land.outputs.files_path }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: {python-version: "3.11"}
+      - run: pip install duckrun
+      - run: python .github/scripts/provision.py ${{ matrix.engine }} >> "$GITHUB_ENV"
+      - name: dbt run in Fabric
+        run: python .github/scripts/fabric_run.py ${{ matrix.engine }}
+
+  # dwh + spark: dbt client on the runner, compute on Fabric's own servers.
+  server:
+    name: fabric-server ${{ matrix.engine }}
+    needs: land
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - {engine: dwh, install: "dbt-fabric-samdebruyn dbt-core==1.11.10 dbt-adapters==1.23.0"}
+          - {engine: spark, install: "dbt-fabricspark"}
+    env:
+      FILES_PATH: ${{ needs.land.outputs.files_path }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: {python-version: "3.11"}
+      - run: pip install ${{ matrix.install }} requests pytz
+      - uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          allow-no-subscriptions: true
+      - run: python .github/scripts/provision.py ${{ matrix.engine }} >> "$GITHUB_ENV"
+      - name: Mint OneLake tokens
+        run: |
+          ST=$(az account get-access-token --resource https://storage.azure.com/ --query accessToken -o tsv)
+          echo "::add-mask::$ST"; echo "ONELAKE_TOKEN=$ST" >> "$GITHUB_ENV"
+          if [ "${{ matrix.engine }}" = "dwh" ]; then
+            SQL=$(az account get-access-token --resource https://database.windows.net --query accessToken -o tsv)
+            echo "::add-mask::$SQL"; echo "FABRIC_ACCESS_TOKEN=$SQL" >> "$GITHUB_ENV"
+          fi
+      - name: dbt run --target ${{ matrix.engine }}
+        run: dbt run --target ${{ matrix.engine }} --profiles-dir .
+      - if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: dbt-target-${{ matrix.engine }}
+          path: target/
+
+  # One neutral duckrun reader (DuckDB + delta_scan) grades EVERY engine's output: the thesis is
+  # "engine doesn't matter, output does". Read via Delta, not the iceberg reader — that one chokes
+  # on XTable-generated metadata, but every item is also a Delta table on OneLake.
+  test:
+    name: test ${{ matrix.engine }}
+    needs: [fabric, server]
+    # Run even when an engine leg failed: the surviving legs still get graded (the run stays
+    # red via the failed leg; a failed leg's own test reads stale tables, which the summary
+    # dashboard exposes). Without this, one broken engine hides ALL verification signal.
+    if: ${{ !cancelled() }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - {engine: duckrun, item: dbt_delta, kind: lakehouses}
+          - {engine: iceberg, item: dbt_iceberg, kind: lakehouses}
+          - {engine: dwh, item: dbt_dwh, kind: warehouses}
+          - {engine: spark, item: dbt_spark, kind: lakehouses}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: {python-version: "3.11"}
+      - run: pip install duckrun pytz
+      - name: Resolve ${{ matrix.item }} -> ONELAKE_TABLES_PATH
+        run: python .github/scripts/item_path.py ${{ matrix.item }} ${{ matrix.kind }} >> "$GITHUB_ENV"
+      - name: dbt test — ${{ matrix.engine }} output
+        run: |
+          rc=0; dbt test --target duckrun --profiles-dir . \
+            --exclude tag:heavy assert_fct_summary_no_partial_dates || rc=$?
+          cp target/run_results.json "rr-${{ matrix.engine }}.json" 2>/dev/null || true
+          exit $rc
+      - if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-results-${{ matrix.engine }}
+          path: rr-${{ matrix.engine }}.json
+          if-no-files-found: warn
+
+  # The workflow's ONLY step summary. always(): the report matters most when a leg failed.
+  summary:
+    name: summary
+    needs: test
+    if: always()
+    runs-on: ubuntu-latest
+    # get_stats() over OneLake is slow on the iceberg item (12m+ observed for that one engine);
+    # 15 minutes was cancelling stats.py mid-table and turning slowness into a red run.
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: {python-version: "3.11"}
+      - run: pip install duckrun requests
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: test-results-*
+          path: rr
+          merge-multiple: true
+      - run: python .github/scripts/summary.py rr >> "$GITHUB_STEP_SUMMARY"
+      - run: python .github/scripts/stats.py >> "$GITHUB_STEP_SUMMARY"

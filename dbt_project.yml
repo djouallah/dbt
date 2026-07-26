@@ -1,0 +1,56 @@
+name: 'aemo_electricity'
+version: '1.0.0'
+
+profile: 'aemo_electricity'
+
+model-paths: ["models"]
+macro-paths: ["macros"]
+test-paths: ["tests"]
+seed-paths: ["seeds"]
+
+clean-targets:
+  - "target"
+  - "dbt_packages"
+
+# Engine-specific session setup. Each hook renders to whitespace (a no-op) on the
+# targets it doesn't apply to, so ONE project file serves all four engines.
+on-run-start:
+  # DuckDB azure transport (Delta + Iceberg read OneLake CSV/parquet through it). Only fire
+  # when explicitly configured (cloud runners set it to 'curl'); skipped on a local/offline
+  # run where the azure extension isn't loaded and the SET would raise.
+  - "{% if target.name in ['duckrun', 'iceberg'] and env_var('AZURE_TRANSPORT_OPTION_TYPE', 'default') != 'default' %}SET GLOBAL azure_transport_option_type = '{{ env_var('AZURE_TRANSPORT_OPTION_TYPE') }}'{% endif %}"
+  # Iceberg spills large aggregations; set the temp dir once before anything spills.
+  - "{% if target.name == 'iceberg' %}SET GLOBAL temp_directory = '{{ env_var('DUCKDB_TEMP_DIR', '/tmp/duckdb_spill') }}'{% endif %}"
+  # duckrun: cap DuckDB memory and spill to disk so a big fact build can't OOM the runner.
+  - "{% if target.name == 'duckrun' %}SET GLOBAL memory_limit = '{{ env_var('DUCKDB_MEMORY_LIMIT', '4GB') }}'{% endif %}"
+  - "{% if target.name == 'duckrun' %}SET GLOBAL preserve_insertion_order = false{% endif %}"
+  - "{% if target.name == 'duckrun' %}SET GLOBAL temp_directory = '{{ env_var('DUCKDB_TEMP_DIR', '/tmp/duckdb_spill') }}'{% endif %}"
+  # Fabric Warehouse has no implicit schemas — create them before any model runs.
+  - "{% if target.type == 'fabric' %}{{ create_schemas_if_not_exists(['landing', 'mart']) }}{% endif %}"
+
+# Three model folders, one per SQL dialect. Exactly one is enabled per target, so the
+# model NAMES are shared across dialects and ref()/tests are identical everywhere.
+models:
+  aemo_electricity:
+    duckdb:                                                  # Delta (duckrun) + Iceberg
+      +enabled: "{{ target.type in ['duckrun', 'duckdb'] }}"
+      staging:    {+materialized: view,        +schema: landing}
+      dimensions: {+materialized: table,       +schema: mart}
+      marts:      {+materialized: incremental,  +schema: landing}
+    dwh:                                                     # Fabric Warehouse (T-SQL)
+      +enabled: "{{ target.type == 'fabric' }}"
+      staging:    {+materialized: view,        +schema: landing}
+      dimensions: {+materialized: table,       +schema: mart}
+      marts:      {+materialized: incremental,  +schema: landing}
+    spark:                                                   # Fabric Spark (Spark SQL)
+      +enabled: "{{ target.type == 'fabricspark' }}"
+      staging:    {+materialized: view,        +schema: landing}
+      dimensions: {+materialized: table,       +schema: mart}
+      marts:      {+materialized: incremental,  +schema: landing}
+
+# Custom singular tests (tests/*.sql) are written in DuckDB SQL and are the reference
+# assertion suite — enabled only on the DuckDB-family targets. The generic column tests
+# in models/_*.yml still run on ALL four targets (dbt renders them per adapter dialect).
+data_tests:
+  aemo_electricity:
+    +enabled: "{{ target.type in ['duckrun', 'duckdb'] }}"

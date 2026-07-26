@@ -1,0 +1,83 @@
+# One profile, four targets. Switch the engine with `dbt run --target <name>`.
+# The models are identical within a SQL dialect; only this file and the enabled-gated
+# model folders (models/duckdb, models/dwh, models/spark) change per engine.
+#
+#   duckrun  -> DuckDB executes, delta-rs writes Delta Lake   (default; runs offline)
+#   iceberg  -> DuckDB + Iceberg REST catalog on OneLake
+#   dwh      -> Fabric Warehouse (T-SQL) via dbt-fabric-samdebruyn
+#   spark    -> Fabric Spark (Livy) via dbt-fabricspark, writes Delta
+#
+# All four read the SAME landed files (the shared download_aemo.py script lands plain
+# CSV + csv_raw_archive_log.parquet into a separate landing lakehouse). Point FILES_PATH
+# at that landing location. For a quick offline try, use the `duckrun` target with
+# ONELAKE_TABLES_PATH and FILES_PATH set to local folders.
+
+aemo_electricity:
+  target: duckrun
+  outputs:
+
+    # --- DuckDB -> Delta Lake (delta-rs). Local path or abfss:// via ONELAKE_TABLES_PATH.
+    duckrun:
+      type: duckrun
+      schema: "{{ env_var('DBT_SCHEMA', 'mart') }}"
+      root_path: "{{ env_var('ONELAKE_TABLES_PATH') }}"
+
+    # --- DuckDB + Iceberg REST catalog on OneLake.
+    iceberg:
+      type: duckdb
+      path: ':memory:'
+      database: onelake
+      schema: "{{ env_var('DBT_SCHEMA', 'mart') }}"
+      threads: 8
+      settings:
+        preserve_insertion_order: false
+      secrets:
+        - type: azure
+          name: onelake_storage
+          provider: access_token
+          access_token: "{{ env_var('ONELAKE_TOKEN') }}"
+      attach:
+        - path: "{{ env_var('WAREHOUSE_PATH') }}"
+          alias: onelake
+          type: iceberg
+          options:
+            endpoint: "{{ env_var('ONELAKE_ENDPOINT') }}"
+            token: "{{ env_var('ONELAKE_TOKEN') }}"
+            access_delegation_mode: 'none'
+            stage_create_tables: 0
+            skip_create_table_metadata_updates: 1
+            default_schema: dbo
+
+    # --- Fabric Warehouse (T-SQL). dbt-fabric-samdebruyn: type stays `fabric`, no ODBC.
+    dwh:
+      type: fabric
+      server: "{{ env_var('FABRIC_DWH_SERVER') }}"
+      database: "{{ env_var('FABRIC_DWH_NAME') }}"
+      schema: "{{ env_var('DBT_SCHEMA', 'mart') }}"
+      workspace_id: "{{ env_var('FABRIC_WORKSPACE_ID', '') }}"
+      authentication: "{{ env_var('FABRIC_AUTH', 'CLI') }}"
+      tenant_id: "{{ env_var('AZURE_TENANT_ID', '') }}"
+      client_id: "{{ env_var('AZURE_CLIENT_ID', '') }}"
+      client_secret: "{{ env_var('AZURE_CLIENT_SECRET', '') }}"
+      access_token: "{{ env_var('FABRIC_ACCESS_TOKEN', '') }}"
+      encrypt: true
+      trust_cert: false
+      threads: 8
+      retries: 1
+
+    # --- Fabric Spark (Livy) via dbt-fabricspark, writes Delta to the Lakehouse.
+    spark:
+      type: fabricspark
+      method: livy
+      endpoint: https://api.fabric.microsoft.com/v1
+      workspaceid: "{{ env_var('FABRIC_WORKSPACE_ID') }}"
+      workspace_name: "{{ env_var('FABRIC_WORKSPACE_NAME', '') }}"   # needed for schema-enabled lakehouse relations
+      lakehouseid: "{{ env_var('FABRIC_LAKEHOUSE_ID') }}"
+      lakehouse: "{{ env_var('FABRIC_LAKEHOUSE_NAME') }}"
+      schema: "{{ env_var('DBT_SCHEMA', 'mart') }}"
+      authentication: "{{ env_var('FABRIC_AUTH', 'CLI') }}"
+      threads: 8
+      connect_retries: 1
+      # dbt-fabricspark requires spark_config.name (the Livy session/app name).
+      spark_config:
+        name: dbt_aemo
