@@ -7,6 +7,8 @@ per dialect (`models/duckdb`, `models/dwh`, `models/spark`, gated by `+enabled` 
 Delta on OneLake.
 
 The traps below have all been hit for real. Each one cost a CI run or worse.
+[LEARNINGS.md](LEARNINGS.md) records the longer investigations behind some of them — measured
+numbers, and the routes that were tried and did not work.
 
 ## Verify locally before you push — CI is the last check, not the first
 
@@ -43,7 +45,14 @@ EOF
 It prints a verdict per branch, not a wall of header comments — the thing you're checking is
 that SQL starts at a bare `WITH`, never glued onto a `--` line. Render **every** branch:
 `is_incremental()` both ways, each target, and any env-var switch. A branch you didn't render
-is a branch you didn't test.
+is a branch you didn't test. On the spark daily models that also means both an empty and a
+non-empty `spark_new_files` list, and asserting on the rendered `pre_hook` — they select
+genuinely different SQL, not just different text.
+
+Two Jinja bugs this has caught that the `-%}` rule alone does not describe: a trimming comment
+between `FROM text.\`path\`` and a following `WHERE` glues them into `` …`path`WHERE ``, and
+Jinja comments **do not nest** — writing the trimming tokens inside a `{# … #}` closes it early
+and leaks the prose into the SQL.
 
 When a build does fail, the job uploads `target/` as an artifact. Read the *compiled* SQL
 instead of guessing at the error:
@@ -128,8 +137,26 @@ still run it by hand to reproduce a CI failure. That is a debugging affordance, 
 - **XTable *does* convert Iceberg positional deletes** into Delta deletion vectors. Emitting
   deletes is not what forces `iceberg` to stay insert-only; the REST catalog's 400 on
   matched-UPDATE is.
-- **Livy compute is workspace-side.** `spark_config` in `profiles.yml` cannot size the session;
-  change the workspace Spark pool.
+- **Livy compute is workspace-side.** Change the workspace Spark pool to resize a session. The
+  HC acquire payload does accept `numExecutors`/`executorCores` and the adapter forwards them
+  from `spark_config`, so "cannot" is untested rather than proven — but nothing here sets them,
+  and the observed 1-executor launch is the pool's dynamic-allocation floor, not a cap (it
+  scaled to 9 under load).
+- **Deleting a table's folder does not delete the table.** dbt asks the catalog, not storage.
+  A `Tables/<schema>/<name>` directory removed by hand leaves the entry behind, `is_incremental()`
+  stays true, and the model emits DML against nothing —
+  `[DELTA_TABLE_NOT_FOUND]` on spark, `Catalog Error … does not exist` on duckrun. Use
+  `DROP TABLE IF EXISTS <schema>.<name>`. A directory holding parquet with no `_delta_log` is
+  the same trap from the other direction.
+- **`threads` on the spark target must stay ≤ 4.** dbt-fabricspark defaults to high concurrency
+  and opens one Spark REPL per thread; Fabric packs at most five REPLs per Livy session, so more
+  threads means a second Spark application, separately billed, for one `dbt run`.
+- **Spark cannot read CSV with an explicit schema from a path in SQL.** `USING csv` exists only
+  on `CREATE TEMPORARY VIEW`, and a temp view is unreachable from the persistent `__dbt_tmp`
+  view the incremental path builds. It *is* reachable from the bare `CREATE TABLE AS SELECT`
+  that the first-build and `--full-refresh` paths use, which is why `fct_price`/`fct_scada`
+  carry two different reads. See [LEARNINGS.md](LEARNINGS.md) for the routes already ruled out —
+  `csv.\`path\``, external CSV tables, `read_files()`, Python models — so they don't get retried.
 - Scripts writing to `$GITHUB_ENV` / `$GITHUB_STEP_SUMMARY` must keep stdout clean —
   diagnostics go to stderr, and library chatter gets fenced with `redirect_stdout(sys.stderr)`.
 
