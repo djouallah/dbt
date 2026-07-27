@@ -21,6 +21,10 @@ on:
         type: choice
         options: ["4", "8", "16", "32", "64"]
         default: "8"
+      rebuild_summary:
+        description: "full-history rebuild of fct_summary (delete+insert, no DROP)"
+        type: boolean
+        default: false
 
 concurrency:
   group: onelake-${{ github.ref_name }}
@@ -43,6 +47,9 @@ env:
   DUCKDB_TEMP_DIR: /tmp/duckdb_spill
   CI_DOWNLOAD_LIMIT: ${{ inputs.download_limit || '200' }}
   FABRIC_CORES: ${{ inputs.cores || '8' }}
+  # '1' makes every engine's fct_summary emit ALL dates through its normal delete+insert
+  # write path — the drift-reconciliation lever (fabric_run.py forwards it into notebooks).
+  REBUILD_SUMMARY: ${{ inputs.rebuild_summary && '1' || '0' }}
 
 jobs:
   land:
@@ -185,7 +192,7 @@ jobs:
       - name: dbt test — ${{ matrix.engine }} output
         run: |
           rc=0; dbt test --target duckrun --profiles-dir . \
-            --exclude tag:heavy assert_fct_summary_no_partial_dates || rc=$?
+            --exclude tag:heavy || rc=$?
           cp target/run_results.json "rr-${{ matrix.engine }}.json" 2>/dev/null || true
           exit $rc
       - if: always()

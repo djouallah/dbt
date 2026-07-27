@@ -161,7 +161,11 @@ def fmt(v, kind):
 
 
 def parity_table(per_engine, engines):
-    """Row counts side by side — the thesis check. ⚠️ = differs or missing across engines."""
+    """Row counts side by side — the thesis check. ⚠️ = differs or missing across engines.
+
+    The last two rows fold in what used to be a separate per-engine totals table:
+    total rows carries the parity ⚠️ (counts must line up); total MB doesn't (physical
+    size legitimately differs by writer/compression)."""
     print("## 🧮 Row-count parity\n")
     print("<sub>⚠️ = differs or missing across engines.</sub>\n")
     print("| table | " + " | ".join(engines) + " |")
@@ -172,6 +176,21 @@ def parity_table(per_engine, engines):
         match = len(present) == len(engines) and len(set(present)) == 1
         print(f"| `{t}`{'' if match else ' ⚠️'} | "
               + " | ".join(fmt(v, "num") for v in vals) + " |")
+
+    def total(e, key):
+        # An engine whose stats fetch failed has an empty dict: render "—", not 0.
+        if not per_engine[e]:
+            return None
+        return sum(d.get(key) or 0 for d in per_engine[e].values())
+
+    rows = [total(e, "total_rows") for e in engines]
+    present = [v for v in rows if v is not None]
+    match = len(present) == len(engines) and len(set(present)) == 1
+    print(f"| **total rows**{'' if match else ' ⚠️'} | "
+          + " | ".join(fmt(v, "num") for v in rows) + " |")
+    mbs = [total(e, "size_mb") for e in engines]
+    print("| **total MB** | "
+          + " | ".join(fmt(None if v is None else round(v, 1), "num") for v in mbs) + " |")
     print()
 
 
@@ -203,16 +222,7 @@ def detail_tables(per_engine, engines):
             cells = [fmt(None if d is None else d.get(key), kind) for key, _, kind in DETAIL_COLS]
             print(f"| {name} | {e} | `{WRITER.get(e, e)}` | " + " | ".join(cells) + " |")
     print()
-
-    # Per-engine totals, so a leg that produced nothing at all is obvious without reading rows.
-    print("| engine | tables | total rows | total MB |")
-    print("| --- | --: | --: | --: |")
-    for e in engines:
-        tables = per_engine.get(e) or {}
-        print(f"| {e} | {len(tables)} | "
-              f"{sum(d.get('total_rows') or 0 for d in tables.values()):,} | "
-              f"{sum(d.get('size_mb') or 0 for d in tables.values()):,.1f} |")
-    print()
+    # Per-engine totals now live as the last two rows of the parity table above.
 
 
 def one_engine(item, kind):

@@ -1,122 +1,49 @@
 -- depends_on: {{ ref('fct_scada_today') }}
 -- depends_on: {{ ref('fct_price_today') }}
 
-{#-- Rebuild-vs-append is decided by the RUNNER, not the model. The runner (notebook + CI) checks
-     the check_new_daily run-operation and, when a new daily file landed, reruns this model with
-     `--vars 'rebuild_summary: true'`. We deliberately do NOT use --full-refresh: on dbt-fabric
-     that DROPs + recreates the table (a Sch-M DDL swap that deadlocks Fabric's background
-     stats/clustering maintenance, loses grants, and rebinds Direct Lake every run).
-       - rebuild (new daily): incremental_strategy='delete+insert' on unique_key
-         [date,time,DUID]. The full-rebuild branch emits the complete history, so the keyed
-         DELETE removes every existing row and the INSERT repopulates it (a native delete+insert,
-         no DROP, no hook). The table object, CLUSTER BY definition and grants are preserved.
-       - plain run: incremental_strategy='append' adds today's intraday. The cutoff watermark
-         already excludes rows already in the table, so there is nothing to update/delete. --#}
+{#-- Determinism contract (see the duckdb version for the full story): every run recomputes,
+     with the SAME SQL as a full rebuild, exactly the dates whose stored content could be
+     stale, and replaces them wholesale via delete+insert keyed on [date] — a native keyed
+     DELETE + INSERT, no DROP. Incremental == full-rebuild by construction for every date
+     it touches; no cutoff watermark, no run-history dependence, no runner-decided branch.
+
+     We deliberately do NOT use --full-refresh on this engine: on dbt-fabric that DROPs +
+     recreates the table (a Sch-M DDL swap that deadlocks Fabric's background stats
+     maintenance, loses grants, and rebinds Direct Lake every run). The full-history
+     rebuild lever is REBUILD_SUMMARY=1 / --vars 'rebuild_summary: true', which keeps the
+     same delete+insert write path and just emits every date. --#}
 {{ config(
     materialized='incremental',
-    incremental_strategy=('delete+insert' if var('rebuild_summary', false) else 'append'),
-    unique_key=['date', 'time', 'DUID'],
+    incremental_strategy='delete+insert',
+    unique_key=['date'],
     schema='mart'
 ) }}
 {#-- cluster_by was REMOVED: on a CLUSTER BY table Fabric runs automatic background
-     clustering/compaction that holds a lock on the table, and every fct_summary write (even a
-     plain intraday INSERT) then deadlocked against it *reproducibly* — the retry deadlocked too,
-     same process id. Dropping cluster_by is what stops the deadlocks; the summary is small and
-     date/DUID filtering is fine without physical clustering. Do not re-add it here. --#}
+     clustering/compaction that holds a lock on the table, and every fct_summary write then
+     deadlocked against it *reproducibly* — the retry deadlocked too, same process id.
+     Dropping cluster_by is what stops the deadlocks; the summary is small and date/DUID
+     filtering is fine without physical clustering. Do not re-add it here. --#}
 
-{%- set rebuild = var('rebuild_summary', false) -%}
+{%- set rebuild = var('rebuild_summary', false) or env_var('REBUILD_SUMMARY', '0') == '1' -%}
+{%- set scoped = is_incremental() and not rebuild -%}
 
-{#-- Which branch an incremental run takes is decided the SAME way as the duckdb and spark
-     versions: compare distinct daily dates in fct_scada against distinct dates already in the
-     summary. Previously this leg only ever appended intraday unless a caller passed
-     rebuild_summary=true — and nothing in CI does — so every daily file folded into fct_scada
-     after the first build was silently absent from fct_summary here while the other engines
-     backfilled it. The backfill below is a plain keyed append (dates the summary does not have
-     yet), so it does NOT need the delete+insert/DROP path the header warns about. --#}
-{%- set has_new_daily_query -%}
-SELECT
-  (SELECT COUNT(DISTINCT [DATE]) FROM {{ ref('fct_scada') }} WHERE INTERVENTION = 0) AS scada_days,
-  (SELECT COUNT(DISTINCT [date]) FROM {{ this }}) AS summary_days
-{%- endset -%}
-
-{%- if is_incremental() and not rebuild and execute and flags.WHICH in ('run', 'build', 'retry') -%}
-  {%- set result = run_query(has_new_daily_query) -%}
-  {%- set has_new_daily = result and result.rows[0][0] > result.rows[0][1] -%}
-{%- else -%}
-  {%- set has_new_daily = false -%}
-{%- endif -%}
-
-{% if is_incremental() and not rebuild and has_new_daily %}
-
--- New daily data: backfill ONLY the dates the summary is missing (keyed append, no rewrite).
-WITH daily_backfill AS (
-  SELECT
-    s.[DATE] AS [date],
-    DATEPART(HOUR, s.SETTLEMENTDATE) * 100 + DATEPART(MINUTE, s.SETTLEMENTDATE) AS [time],
-    s.DUID,
-    MAX(s.INITIALMW) AS mw,
-    MAX(p.RRP) AS price
-  FROM {{ ref('fct_scada') }} s
-  LEFT JOIN {{ ref('dim_duid') }} d ON s.DUID = d.DUID
-  LEFT JOIN {{ ref('fct_price') }} p
-    ON s.SETTLEMENTDATE = p.SETTLEMENTDATE AND d.Region = p.REGIONID
-  WHERE
-    s.INTERVENTION = 0
-    AND s.INITIALMW <> 0
-    AND p.INTERVENTION = 0
+WITH
+{% if scoped %}
+-- Dates whose stored content could differ from a clean recomputation: missing dates,
+-- the newest daily date (its daily file may have just superseded intraday rows), and
+-- intraday dates. Everything older was last written from its daily file by this same
+-- date-replace logic and is immutable.
+rebuild_dates AS (
+  SELECT DISTINCT s.[DATE] AS [date] FROM {{ ref('fct_scada') }} s
+  WHERE s.INTERVENTION = 0
     AND s.[DATE] NOT IN (SELECT DISTINCT [date] FROM {{ this }})
-  GROUP BY s.[DATE], DATEPART(HOUR, s.SETTLEMENTDATE) * 100 + DATEPART(MINUTE, s.SETTLEMENTDATE), s.DUID
-)
-
-SELECT
-  [date],
-  [time],
-  DUID,
-  CAST(mw AS DECIMAL(18, 4)) AS mw,
-  CAST(price AS DECIMAL(18, 4)) AS price,
-  (SELECT MAX(SETTLEMENTDATE) FROM {{ ref('fct_scada') }}) AS cutoff
-FROM daily_backfill
-
-{% elif is_incremental() and not rebuild %}
-
--- Append intraday: today's rows after the last cutoff baked into the table.
-WITH max_cutoff AS (
-  SELECT MAX(cutoff) AS cutoff FROM {{ this }}
+  UNION
+  SELECT MAX(s.[DATE]) FROM {{ ref('fct_scada') }} s
+  UNION
+  SELECT DISTINCT s.[DATE] FROM {{ ref('fct_scada_today') }} s
 ),
-
-incremental_data AS (
-  SELECT
-    s.[DATE] AS [date],
-    s.SETTLEMENTDATE,
-    s.DUID,
-    MAX(s.INITIALMW) AS mw,
-    MAX(p.RRP) AS price
-  FROM {{ ref('fct_scada_today') }} s
-  JOIN {{ ref('dim_duid') }} d ON s.DUID = d.DUID
-  JOIN {{ ref('fct_price_today') }} p
-    ON s.SETTLEMENTDATE = p.SETTLEMENTDATE AND d.Region = p.REGIONID
-  CROSS JOIN max_cutoff mc
-  WHERE
-    s.INITIALMW <> 0
-    AND p.INTERVENTION = 0
-    AND s.SETTLEMENTDATE > mc.cutoff
-  GROUP BY s.[DATE], s.SETTLEMENTDATE, s.DUID
-)
-
-SELECT
-  [date],
-  DATEPART(HOUR, SETTLEMENTDATE) * 100 + DATEPART(MINUTE, SETTLEMENTDATE) AS [time],
-  DUID,
-  CAST(mw AS DECIMAL(18, 4)) AS mw,
-  CAST(price AS DECIMAL(18, 4)) AS price,
-  CAST(MAX(SETTLEMENTDATE) OVER () AS DATETIME2(6)) AS cutoff
-FROM incremental_data
-
-{% else %}
-
--- Full rebuild (runs when rebuild_summary=true via delete+insert, or on first build): authoritative daily + today's
--- intraday after the daily cutoff. The cutoff column is the watermark the append path reads.
-WITH scada_cutoff AS (
+{% endif %}
+scada_cutoff AS (
   SELECT MAX(SETTLEMENTDATE) AS c FROM {{ ref('fct_scada') }}
 ),
 cutoff_calc AS (
@@ -135,17 +62,23 @@ daily_summary AS (
     MAX(s.INITIALMW) AS mw,
     MAX(p.RRP) AS price
   FROM {{ ref('fct_scada') }} s
-  LEFT JOIN {{ ref('dim_duid') }} d ON s.DUID = d.DUID
-  LEFT JOIN {{ ref('fct_price') }} p
+  -- INNER joins: `WHERE p.INTERVENTION = 0` always discarded null-price rows anyway.
+  JOIN {{ ref('dim_duid') }} d ON s.DUID = d.DUID
+  JOIN {{ ref('fct_price') }} p
     ON s.SETTLEMENTDATE = p.SETTLEMENTDATE AND d.Region = p.REGIONID
   WHERE
     s.INTERVENTION = 0
     AND s.INITIALMW <> 0
     AND p.INTERVENTION = 0
+    {% if scoped %}
+    AND s.[DATE] IN (SELECT [date] FROM rebuild_dates)
+    {% endif %}
   GROUP BY s.[DATE], DATEPART(HOUR, s.SETTLEMENTDATE) * 100 + DATEPART(MINUTE, s.SETTLEMENTDATE), s.DUID
 
   UNION ALL
 
+  -- Intraday tail: intervals beyond the daily horizon. Every date here is in
+  -- rebuild_dates by construction.
   SELECT
     s.[DATE] AS [date],
     DATEPART(HOUR, s.SETTLEMENTDATE) * 100 + DATEPART(MINUTE, s.SETTLEMENTDATE) AS [time],
@@ -169,7 +102,7 @@ SELECT
   DUID,
   CAST(mw AS DECIMAL(18, 4)) AS mw,
   CAST(price AS DECIMAL(18, 4)) AS price,
+  -- Provenance column only — no read path depends on it anymore. Kept (and kept
+  -- populated) to avoid a schema change that would force a DROP here.
   (SELECT cutoff FROM cutoff_calc) AS cutoff
 FROM daily_summary
-
-{% endif %}
