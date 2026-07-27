@@ -25,7 +25,10 @@
      filtering is fine without physical clustering. Do not re-add it here. --#}
 
 {%- set rebuild = var('rebuild_summary', false) or env_var('REBUILD_SUMMARY', '0') == '1' -%}
-{%- set scoped = is_incremental() and not rebuild -%}
+{# Closes with `%}`, NOT `-%}`: a right-strip swallows the newlines after this tag and
+   glues WITH onto the `-- depends_on` comment line above, commenting the keyword out —
+   which is exactly how this model failed with "Incorrect syntax near 'scada_cutoff'". #}
+{%- set scoped = is_incremental() and not rebuild %}
 
 WITH
 {% if scoped %}

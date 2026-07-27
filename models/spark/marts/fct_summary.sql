@@ -20,7 +20,9 @@
 {# Full-history rebuild lever is plain `--full-refresh` (CI adds that step when the
    rebuild_summary input is set) — never a var that makes this branch emit all history,
    which would hand the merge a 143M-row source. #}
-{%- set scoped = is_incremental() -%}
+{# Closes with `%}`, NOT `-%}`: a right-strip swallows the newlines after this tag and
+   glues WITH onto the `-- depends_on` comment line above, commenting the keyword out. #}
+{%- set scoped = is_incremental() %}
 
 WITH
 {% if scoped %}

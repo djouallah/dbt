@@ -43,7 +43,10 @@
 {# Full-history rebuild lever here is plain `--full-refresh` (a streaming overwrite);
    REBUILD_SUMMARY=1 makes CI add that step. Deliberately NOT a var that makes the
    incremental branch emit all history: that would hand the merge a 143M-row source. #}
-{%- set scoped = is_incremental() -%}
+{# Closes with `%}`, NOT `-%}`: a right-strip swallows the newlines after this tag and
+   glues WITH onto the `-- depends_on` comment line above, commenting the keyword out
+   (the compiled SQL then starts at `daily_summary AS (` and the parser errors there). #}
+{%- set scoped = is_incremental() %}
 
 WITH
 {% if scoped %}
