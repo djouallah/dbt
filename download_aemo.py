@@ -212,13 +212,8 @@ summary, landed = download_aemo(con, FILES_PATH, DOWNLOAD_LIMIT, DAILY_DOWNLOAD_
 summary.show()
 print("Landed this run: " + ", ".join(f"{k}={v}" for k, v in landed.items()))
 
-# CI hand-off: how heavy the fold the engines are about to run is. PUBLIC_DAILY files are whole
-# days of dispatch; the intraday snapshots are tiny and never decide anything, so `new_daily` is
-# the whole signal — ci.yml turns 0 into "build on the GitHub runner" and anything else into
-# "ship it to a Fabric notebook". Facts only: the policy lives in the workflow, not here. Guarded
-# so the notebook / laptop path is untouched.
-if os.environ.get("GITHUB_OUTPUT"):
-    with open(os.environ["GITHUB_OUTPUT"], "a") as f:
-        f.write(f"new_daily={landed['daily']}\n")
+# No CI hand-off here any more. What landed this run says nothing about how big the fold is —
+# a from-scratch lakehouse has the whole archive outstanding with nothing new landed — so the
+# engine jobs size their own backlog instead (.github/scripts/pending_files.py).
 
 print("Done. Now run:  dbt run --target duckrun   (or iceberg / dwh / spark)")

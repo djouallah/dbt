@@ -47,6 +47,10 @@ env:
   DUCKDB_TEMP_DIR: /tmp/duckdb_spill
   CI_DOWNLOAD_LIMIT: ${{ inputs.download_limit || '200' }}
   FABRIC_CORES: ${{ inputs.cores || '8' }}
+  # Pending-file count at or below which a DuckDB-family fold is cheaper on the GitHub runner
+  # than a Fabric session takes to start. A steady-state intraday run is a handful of files; a
+  # backlog or a from-scratch lakehouse is hundreds to thousands and belongs on Fabric compute.
+  LOCAL_FOLD_MAX_FILES: "20"
   # Drift-reconciliation lever (fabric_run.py forwards it into notebooks). '1' rebuilds
   # fct_summary from scratch: --full-refresh on the merge engines (duckrun/iceberg/spark),
   # and on dwh a full emit through its normal delete+insert, since a DROP there deadlocks
@@ -60,8 +64,6 @@ jobs:
     timeout-minutes: 30
     outputs:
       files_path: ${{ steps.prov.outputs.files_path }}
-      # New PUBLIC_DAILY files landed this run — the fabric job's runner-vs-Fabric signal.
-      new_daily: ${{ steps.dl.outputs.new_daily }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -73,7 +75,6 @@ jobs:
           python .github/scripts/provision.py land | tee /tmp/land.env >> "$GITHUB_ENV"
           echo "files_path=$(grep '^FILES_PATH=' /tmp/land.env | cut -d= -f2-)" >> "$GITHUB_OUTPUT"
       - name: Download AEMO data (obstore -> OneLake)
-        id: dl
         run: python download_aemo.py
       - name: Cancel whole run on failure
         if: failure()
@@ -81,10 +82,15 @@ jobs:
         run: gh run cancel ${{ github.run_id }} -R ${{ github.repository }}
 
   # DuckDB-family: both engines are just DuckDB in a Python process, so CI is free to place that
-  # process. It builds HERE when `land` downloaded no new PUBLIC_DAILY file (an intraday-only fold
-  # the runner reads in a minute — a Fabric session start-up would cost more than the build), and
-  # ships into a Fabric notebook (duckrun.run_python) otherwise, so a real fold stays data-local to
-  # OneLake. Same driver (fabric_build.py) either way; only the interpreter it runs in changes.
+  # process. It builds HERE for a small fold (the runner reads it in a minute — a Fabric session
+  # start-up would cost more than the build), and ships into a Fabric notebook
+  # (duckrun.run_python) for a big one, so a real fold stays data-local to OneLake. Same driver
+  # (fabric_build.py) either way; only the interpreter it runs in changes.
+  #
+  # The size signal is PENDING FILES for THIS engine — archive-log entries its tables have not
+  # folded yet — not "did a new daily file land this run". Those differ exactly where it matters:
+  # a from-scratch lakehouse has the whole ~3000-file archive outstanding with nothing new landed,
+  # and the old signal read that as 0 and kept it on the runner.
   fabric:
     name: fabric ${{ matrix.engine }}
     needs: land
@@ -103,14 +109,19 @@ jobs:
       # pytz: a runner-side `dbt run` needs it too, not just the notebook (fabric_run.py pip list).
       - run: pip install duckrun pytz
       - run: python .github/scripts/provision.py ${{ matrix.engine }} >> "$GITHUB_ENV"
-      # Exactly one of these two runs. Anything other than a literal '0' — including an empty
-      # output if the downloader died before reporting — takes the Fabric branch, the path that
-      # works at any size.
-      - name: dbt run on the runner (no new daily file landed)
-        if: needs.land.outputs.new_daily == '0'
+      # Measured per engine, after provisioning (it reads that engine's own tables). The script
+      # never fails the job: it reports a huge count if it cannot measure, so an unknown fold
+      # goes to Fabric. The `||` covers it dying before printing anything at all.
+      - name: Size the fold (pending source files)
+        run: |
+          python .github/scripts/pending_files.py ${{ matrix.engine }} >> "$GITHUB_ENV" \
+            || echo "PENDING_FILES=999999" >> "$GITHUB_ENV"
+      # Exactly one of these two runs; fromJSON makes the comparison numeric rather than string.
+      - name: dbt run on the runner (small fold)
+        if: fromJSON(env.PENDING_FILES) <= fromJSON(env.LOCAL_FOLD_MAX_FILES)
         run: python .github/scripts/fabric_build.py ${{ matrix.engine }}
-      - name: dbt run in Fabric
-        if: needs.land.outputs.new_daily != '0'
+      - name: dbt run in Fabric (large fold)
+        if: fromJSON(env.PENDING_FILES) > fromJSON(env.LOCAL_FOLD_MAX_FILES)
         run: python .github/scripts/fabric_run.py ${{ matrix.engine }}
       - name: Cancel whole run on failure
         if: failure()
