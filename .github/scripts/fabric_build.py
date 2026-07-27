@@ -9,6 +9,7 @@ neutral DuckDB/Iceberg reader. Config (FILES_PATH, the output path, schema, limi
 from fabric_run.py; the OneLake token is NOT shipped — it is acquired here from the Fabric runtime.
 """
 import os
+import subprocess
 import sys
 import time
 
@@ -29,25 +30,28 @@ def main() -> int:
     scratch = os.environ.get("TMPDIR") or "/tmp"
     os.environ.setdefault("DUCKDB_TEMP_DIR", os.path.join(scratch, "duckdb_spill"))
 
-    from dbt.cli.main import dbtRunner
-
     # `dbt run` only — no tests. Testing is a separate CI job: a neutral DuckDB/Iceberg reader runs
     # the reference suite against every engine's output (the engine must not grade its own homework).
-    args = ["run", "--target", engine, "--profiles-dir", "."]
+    base = ["--target", engine, "--profiles-dir", "."]
 
     # Retry ladder: the OneLake Iceberg REST catalog intermittently rejects a commit with
     # 409 Conflict ("One or more requirements failed. The client may retry.") under optimistic
-    # concurrency — the same transient the standalone iceberg pipeline retries. The models are
-    # incremental + idempotent (append / merge-do-nothing), so re-running the whole build is safe:
-    # already-built models are up to date and the conflicted one commits on a later attempt.
-    dbt = dbtRunner()
+    # concurrency — the same transient the standalone iceberg pipeline retries.
+    #
+    # Each attempt is a FRESH dbt subprocess, NOT an in-process dbtRunner re-invoke:
+    # dbt-duckdb caches the DuckDB connection at module level, so a second invoke re-runs the
+    # on-run-start `SET GLOBAL temp_directory` on a session whose temp dir is already in use —
+    # "Cannot switch temporary directory after the current one has been used" — and every retry
+    # is dead on arrival. Retries use `dbt retry` (with --target, else it renders the profile's
+    # default target) so only the failed models re-run, not the whole idempotent build.
     ok = False
     for attempt in range(1, _MAX_ATTEMPTS + 1):
-        res = dbt.invoke(args)
-        ok = bool(getattr(res, "success", False))
-        for r in (getattr(res, "result", None) or []):
-            node = getattr(getattr(r, "node", None), "name", None)
-            print(f"  {node}: {getattr(r, 'status', '')}")
+        if attempt == 1 or not os.path.exists("target/run_results.json"):
+            cmd = ["dbt", "run", *base]
+        else:
+            cmd = ["dbt", "retry", *base]
+        print(f"[fabric_build] $ {' '.join(cmd)}", flush=True)
+        ok = subprocess.run(cmd).returncode == 0
         if ok:
             break
         if attempt < _MAX_ATTEMPTS:
