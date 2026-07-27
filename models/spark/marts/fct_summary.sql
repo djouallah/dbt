@@ -4,38 +4,41 @@
 -- Power BI-facing summary at (date, time, DUID). Same logic as the DuckDB/DWH versions,
 -- in Spark SQL: strftime -> date_format, TIMESTAMPTZ -> TIMESTAMP.
 --
--- Determinism contract (see the duckdb version for the full story): every run recomputes,
--- with the SAME SQL as a full refresh, exactly the dates whose stored content could be
--- stale, and replaces them wholesale — delete+insert keyed on `date` (dbt-fabricspark's
--- delete+insert: delete target rows whose unique_key appears in the batch, insert the
--- batch). Incremental == full-refresh by construction for every date it touches; no
--- cutoff watermark, no run history dependence.
+-- Determinism contract (see the duckdb version for the full story): the defect was in what
+-- the SOURCE emitted — only wholly-missing dates, so an incomplete date could never be
+-- repaired. Now every run emits the COMPLETE recomputation for exactly the dates whose
+-- stored content could still be stale, and the merge reconciles that batch key by key.
+-- No cutoff watermark, no dependence on this engine's run history.
 {{ config(
     materialized='incremental',
-    incremental_strategy='delete+insert',
+    incremental_strategy='merge',
     file_format='delta',
-    unique_key=['date'],
+    unique_key=['date', 'time', 'DUID'],
     schema='mart'
 ) }}
 
-{# Full-history rebuild lever: REBUILD_SUMMARY=1 in the env (CI workflow_dispatch input)
-   or --vars 'rebuild_summary: true'. Same write path, source just emits every date. #}
-{%- set rebuild = var('rebuild_summary', false) or env_var('REBUILD_SUMMARY', '0') == '1' -%}
-{%- set scoped = is_incremental() and not rebuild -%}
+{# Full-history rebuild lever is plain `--full-refresh` (CI adds that step when the
+   rebuild_summary input is set) — never a var that makes this branch emit all history,
+   which would hand the merge a 143M-row source. #}
+{%- set scoped = is_incremental() -%}
 
 WITH
 {% if scoped %}
--- Dates whose stored content could differ from a clean recomputation: missing dates,
--- the newest daily date (its daily file may have just superseded intraday rows), and
--- intraday dates. Everything older was last written from its daily file by this same
--- date-replace logic and is immutable.
+-- Dates whose stored content could differ from a clean recomputation; everything older
+-- is settled. The trailing window must stay >= the window
+-- assert_fct_summary_matches_recomputation checks (see the duckdb version).
 rebuild_dates AS (
+  -- Never seen before: archive backfill, or a first build catching up.
   SELECT DISTINCT s.DATE AS date FROM {{ ref('fct_scada') }} s
   WHERE s.INTERVENTION = 0
     AND s.DATE NOT IN (SELECT DISTINCT date FROM {{ this }})
   UNION
-  SELECT MAX(s.DATE) FROM {{ ref('fct_scada') }} s
+  -- Recently settled: incomplete until the daily file lands, which is several days later
+  -- if the pipeline missed a run — so a window, not just the newest daily date.
+  SELECT DISTINCT s.DATE FROM {{ ref('fct_scada') }} s
+  WHERE s.DATE >= (SELECT date_sub(MAX(DATE), 6) FROM {{ ref('fct_scada') }})
   UNION
+  -- Still in flux until their daily file lands.
   SELECT DISTINCT s.DATE FROM {{ ref('fct_scada_today') }} s
 ),
 {% endif %}

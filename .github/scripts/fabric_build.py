@@ -70,6 +70,15 @@ def main() -> int:
                   f"retrying in {backoff}s (transient OneLake commit conflicts)", flush=True)
             time.sleep(backoff)
 
+    # One-time drift reconciliation. fct_summary's incremental path is a MERGE whose source
+    # is only the handful of dates that can still be stale, so the rebuild lever has to be
+    # dbt's own --full-refresh (a streaming overwrite) — a var that made the incremental
+    # branch emit all history would hand delta_rs a 143M-row merge source instead.
+    if ok and os.environ.get("REBUILD_SUMMARY") == "1":
+        cmd = ["dbt", "run", "--select", "fct_summary", "--full-refresh", *base]
+        print(f"[fabric_build] $ {' '.join(cmd)}", flush=True)
+        ok = subprocess.run(cmd).returncode == 0
+
     print(f"[fabric_build] {engine} build success={ok}")
     return 0 if ok else 1
 

@@ -47,8 +47,10 @@ env:
   DUCKDB_TEMP_DIR: /tmp/duckdb_spill
   CI_DOWNLOAD_LIMIT: ${{ inputs.download_limit || '200' }}
   FABRIC_CORES: ${{ inputs.cores || '8' }}
-  # '1' makes every engine's fct_summary emit ALL dates through its normal delete+insert
-  # write path — the drift-reconciliation lever (fabric_run.py forwards it into notebooks).
+  # Drift-reconciliation lever (fabric_run.py forwards it into notebooks). '1' rebuilds
+  # fct_summary from scratch: --full-refresh on the merge engines (duckrun/iceberg/spark),
+  # and on dwh a full emit through its normal delete+insert, since a DROP there deadlocks
+  # Fabric's background maintenance and rebinds Direct Lake.
   REBUILD_SUMMARY: ${{ inputs.rebuild_summary && '1' || '0' }}
 
 jobs:
@@ -156,6 +158,11 @@ jobs:
         # retry needs --target too: without it dbt renders the profile's DEFAULT target
         # (duckrun), which demands ONELAKE_TABLES_PATH this job doesn't have.
         run: dbt run --target ${{ matrix.engine }} --profiles-dir . || dbt retry --target ${{ matrix.engine }} --profiles-dir .
+      # spark merges its summary, so its rebuild lever is --full-refresh. dwh needs no step:
+      # REBUILD_SUMMARY is in the env and its model reads it (delete+insert, never a DROP).
+      - name: Rebuild fct_summary
+        if: matrix.engine == 'spark' && env.REBUILD_SUMMARY == '1'
+        run: dbt run --select fct_summary --full-refresh --target spark --profiles-dir .
       - if: always()
         uses: actions/upload-artifact@v4
         with:

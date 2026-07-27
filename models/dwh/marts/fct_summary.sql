@@ -29,17 +29,21 @@
 
 WITH
 {% if scoped %}
--- Dates whose stored content could differ from a clean recomputation: missing dates,
--- the newest daily date (its daily file may have just superseded intraday rows), and
--- intraday dates. Everything older was last written from its daily file by this same
--- date-replace logic and is immutable.
+-- Dates whose stored content could differ from a clean recomputation; everything older
+-- is settled. The trailing window must stay >= the window
+-- assert_fct_summary_matches_recomputation checks (see the duckdb version).
 rebuild_dates AS (
+  -- Never seen before: archive backfill, or a first build catching up.
   SELECT DISTINCT s.[DATE] AS [date] FROM {{ ref('fct_scada') }} s
   WHERE s.INTERVENTION = 0
     AND s.[DATE] NOT IN (SELECT DISTINCT [date] FROM {{ this }})
   UNION
-  SELECT MAX(s.[DATE]) FROM {{ ref('fct_scada') }} s
+  -- Recently settled: incomplete until the daily file lands, which is several days later
+  -- if the pipeline missed a run — so a window, not just the newest daily date.
+  SELECT DISTINCT s.[DATE] FROM {{ ref('fct_scada') }} s
+  WHERE s.[DATE] >= (SELECT DATEADD(DAY, -6, MAX([DATE])) FROM {{ ref('fct_scada') }})
   UNION
+  -- Still in flux until their daily file lands.
   SELECT DISTINCT s.[DATE] FROM {{ ref('fct_scada_today') }} s
 ),
 {% endif %}

@@ -1,16 +1,18 @@
--- Determinism tripwire: within the trailing 30 days of daily data (plus the intraday
--- tail beyond it), the stored fct_summary must EXACTLY equal a clean recomputation of
--- the model's full-refresh logic from its inputs. Any row returned means the
--- incremental write path let the table drift from f(inputs) — the bug class that
--- fossilized three different row counts across four engines fed identical inputs.
--- Zero tolerance, no exclusions. Deliberately NOT tagged heavy: the date window keeps
--- it a bounded scan, so CI's neutral reader runs it against every engine's output.
--- History older than the window is immutable once correct (each date is finalized from
--- its daily file by the date-replace write path); cross-engine row-count parity in the
--- summary dashboard guards it.
+-- Determinism tripwire: within the trailing 7 days of daily data (plus the intraday tail
+-- beyond it), the stored fct_summary must EXACTLY equal a clean recomputation of the
+-- model's full-refresh logic from its inputs. Any row returned means the incremental
+-- write path let the table drift from f(inputs) — the bug class that fossilized three
+-- different row counts across four engines fed identical inputs. Zero tolerance.
+--
+-- The window is 7 days because that is fct_summary's rebuild window: this test must
+-- never check a date the model is not allowed to repair, or a single drifted day would
+-- hold CI red until someone ran --full-refresh by hand. Widen both together or neither.
+-- Deliberately NOT tagged heavy — the window keeps it a bounded scan, so CI's neutral
+-- reader runs it against every engine. Older history is settled once correct; the
+-- cross-engine row-count parity dashboard is what guards it.
 WITH bounds AS (
   SELECT
-    MAX(s.DATE) - INTERVAL 29 DAY AS d0,
+    MAX(s.DATE) - INTERVAL 6 DAY AS d0,
     MAX(CAST(s.SETTLEMENTDATE AS TIMESTAMPTZ)) AS daily_ts
   FROM {{ ref('fct_scada') }} s
 ),

@@ -9,44 +9,65 @@
 -- engine's schedule left, forever, and the four engines fossilized different tables
 -- from identical inputs.
 --
--- Now every run recomputes, with the SAME SQL as a full refresh, exactly the dates
--- whose stored content could be stale, and replaces them wholesale via delete+insert
--- keyed on `date` (a date-partition overwrite): incremental == full-refresh by
--- construction for every date it touches. On the Iceberg REST catalog the DELETE and
--- INSERT are separate commits, so the one-snapshot-per-commit limit that forbade an
--- updating merge does not apply (dim_calendar has proven this path on all engines).
+-- The defect was in WHAT THE SOURCE EMITTED, not in how it was written: the source only
+-- ever offered wholly-missing dates, so a date that existed but was incomplete could
+-- never be repaired by any write strategy. Now every run emits the COMPLETE
+-- recomputation — the same SQL as a full refresh — for exactly the dates whose stored
+-- content could still be stale, and the write reconciles that batch key by key.
 --
--- Known edge: a rebuilt date whose recomputation yields ZERO rows leaves its stale
--- rows in place (no key in the batch, nothing deleted). assert_fct_summary_matches_
--- recomputation trips on it; REBUILD_SUMMARY=1 (or --full-refresh) clears it.
+-- Write strategy stays each target's proven one; only the source changed:
+--   duckrun -> merge (update matched + insert new) on the grain. delta_rs prunes target
+--     files from the source's own stats, so a ~3-date batch touches only those files.
+--     NOT delete+insert: this adapter implements that as a fenced FULL-TABLE overwrite
+--     (it materializes every surviving target row plus the batch into a DuckDB temp
+--     table, then overwrites), which would rewrite all 143M rows on every run.
+--   iceberg -> merge with WHEN MATCHED DO NOTHING, unchanged — it MUST stay insert-only.
+--     XTable cannot convert Iceberg positional deletes into the Delta representation
+--     OneLake surfaces, and CI grades every engine by reading that Delta side, so any
+--     strategy emitting deletes (delete+insert, matched-UPDATE) would quietly drop this
+--     table out of the test suite. The REST catalog rejects a matched-UPDATE merge
+--     anyway (BadRequest 400: one add-snapshot update per commit). Insert-only suffices
+--     because every input is append-only: a (date, time, DUID) value is final once
+--     produced, and craters are missing keys, which insert repairs.
+--
+-- Residual, deliberate: neither path DELETES a stored row that the recomputation no
+-- longer produces. That cannot happen while fct_scada/fct_price/dim_duid stay
+-- append-only (rows only ever appear). assert_fct_summary_matches_recomputation is the
+-- tripwire if it ever does; `dbt run --full-refresh -s fct_summary` is the repair.
 {{ config(
     materialized='incremental',
-    incremental_strategy='delete+insert',
-    unique_key=['date'],
+    incremental_strategy='merge',
+    unique_key=['date', 'time', 'DUID'],
+    merge_clauses=none if target.name == 'duckrun' else {'when_matched': [{'action': 'do_nothing'}]},
     schema='mart'
 ) }}
 
-{# Full-history rebuild lever: REBUILD_SUMMARY=1 in the env (CI workflow_dispatch input,
-   forwarded into Fabric notebooks) or --vars 'rebuild_summary: true'. Same delete+insert
-   write path, source just emits every date — no DROP, table object preserved. #}
-{%- set rebuild = var('rebuild_summary', false) or env_var('REBUILD_SUMMARY', '0') == '1' -%}
-{%- set scoped = is_incremental() and not rebuild -%}
+{# Full-history rebuild lever here is plain `--full-refresh` (a streaming overwrite);
+   REBUILD_SUMMARY=1 makes CI add that step. Deliberately NOT a var that makes the
+   incremental branch emit all history: that would hand the merge a 143M-row source. #}
+{%- set scoped = is_incremental() -%}
 
 WITH
 {% if scoped %}
--- Dates whose stored content could differ from a clean recomputation:
---   * missing from the summary entirely (first sight of a daily file, or catch-up);
---   * the newest daily date (its daily file may have just superseded intraday rows);
---   * intraday dates (in flux until their daily file lands).
--- Everything older is immutable: it was last written from its daily file by this same
--- date-replace logic, so recomputing it would reproduce it byte-for-byte.
+-- Dates whose stored content could differ from a clean recomputation. Everything older
+-- is settled: its daily file has landed and been folded in, so recomputing it would
+-- reproduce it exactly.
+--
+-- The trailing window must stay >= the window assert_fct_summary_matches_recomputation
+-- checks, or CI can go permanently red on drift this model is not allowed to repair.
 rebuild_dates AS (
+  -- Never seen before: archive backfill, or a first build catching up.
   SELECT DISTINCT s.DATE AS date FROM {{ ref('fct_scada') }} s
   WHERE s.INTERVENTION = 0
     AND s.DATE NOT IN (SELECT DISTINCT date FROM {{ this }})
   UNION
-  SELECT MAX(s.DATE) FROM {{ ref('fct_scada') }} s
+  -- Recently settled: a date first written from the intraday feed is incomplete until
+  -- its daily file lands, which is several days later if the pipeline missed a run — so
+  -- a window, not just the newest daily date.
+  SELECT DISTINCT s.DATE FROM {{ ref('fct_scada') }} s
+  WHERE s.DATE >= (SELECT MAX(DATE) - INTERVAL 6 DAY FROM {{ ref('fct_scada') }})
   UNION
+  -- Still in flux: the intraday feed keeps extending these until their daily file lands.
   SELECT DISTINCT s.DATE FROM {{ ref('fct_scada_today') }} s
 ),
 {% endif %}
