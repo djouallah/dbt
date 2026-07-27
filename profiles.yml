@@ -76,7 +76,13 @@ aemo_electricity:
       lakehouse: "{{ env_var('FABRIC_LAKEHOUSE_NAME') }}"
       schema: "{{ env_var('DBT_SCHEMA', 'mart') }}"
       authentication: "{{ env_var('FABRIC_AUTH', 'CLI') }}"
-      threads: 8
+      # 4, not 8: dbt-fabricspark defaults to high_concurrency, which opens one HC session
+      # (= one Spark REPL) PER THREAD, and Fabric packs at most five REPLs into one Livy
+      # session. 8 threads therefore spilled into a second Livy session — a second Spark
+      # application, separately started and separately billed, for one `dbt run`. 4 stays
+      # under the cap with a slot spare, since sessionTag packing is a hint and racing
+      # acquires can still fan out.
+      threads: 4
       connect_retries: 1
       # Deliberately NO session_idle_timeout: setting it forces Fabric to bypass starter pools
       # (cold on-demand cluster, slower startup) and it did NOT stop the observed session
