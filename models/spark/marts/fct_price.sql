@@ -36,10 +36,30 @@
 ] -%}
 {%- set not_double = ['I','UNIT','XX','SETTLEMENTDATE','REGIONID'] -%}
 {%- set view_schema %}{% for c in csv_cols %}`{{ c }}` STRING{{ ', ' if not loop.last }}{% endfor %}{% endset %}
-{#-- No pre-created raw object at all — see the note in fct_scada.sql. --#}
+{#-- Two different reads, picked by is_incremental() — see the note in fct_scada.sql for why
+     neither one can serve both.
+
+     NOT incremental (first build / --full-refresh): the materialization runs a bare
+     CREATE TABLE AS SELECT with no __dbt_tmp at all, and a CTAS executes immediately, so it
+     MAY reference a TEMPORARY VIEW. That buys the real CSV datasource with an explicit
+     schema — vectorized, column-pruning, the same read the notebook version of this pipeline
+     used. This is the path that matters: it folds the whole ~3,000-file archive.
+
+     Incremental: the materialization builds __dbt_tmp as a PERSISTENT view, whose stored
+     definition cannot reference a temp view, so this path keeps from_csv. It only ever reads
+     THIS run's new files, so the per-row parse is noise.
+
+     USING csv is only legal on a TEMPORARY view — persistent CREATE VIEW is `AS query` only
+     and cannot carry USING/OPTIONS, and CREATE TABLE ... USING csv with a schema is rejected
+     by Fabric. So temp is forced, which is exactly why it only works on the CTAS path. --#}
+{%- set daily_root = get_csv_archive_path() ~ '/daily' -%}
+{%- set raw_view = 'raw_daily_price' -%}
 {{ config(
     materialized='incremental',
-    incremental_strategy='append'
+    incremental_strategy='append',
+    pre_hook=(none if is_incremental() else
+      "CREATE OR REPLACE TEMPORARY VIEW " ~ raw_view ~ " (" ~ view_schema ~ ")"
+      ~ " USING csv OPTIONS (path '" ~ daily_root ~ "', header 'true', mode 'PERMISSIVE')")
 ) }}
 
 -- depends_on: {{ ref('stg_csv_archive_log') }}
@@ -50,12 +70,30 @@
 {% if is_incremental() and new_files | length == 0 %}
 {#-- No new daily files this run: compile to a zero-row no-op (append inserts nothing). --#}
 SELECT * FROM {{ this }} WHERE 1 = 0
+{% elif not is_incremental() %}
+{#-- CTAS path: read the temp view the pre_hook built. Real CSV datasource, so the columns
+     arrive already split — no `r.` struct prefix, and the file name comes from
+     input_file_name() rather than _metadata (a view with a declared column list does not
+     expose _metadata). parse_filename handles a full abfss path either way. --#}
+SELECT
+  UNIT,
+  REGIONID,
+  {%- for name in csv_cols if name not in not_double %}
+  CAST({{ name }} AS DOUBLE) AS {{ name }},
+  {%- endfor %}
+  {{ parse_filename('input_file_name()') }} AS file,
+  -- See the SETTLEMENTDATE note in the incremental branch below.
+  to_timestamp(SETTLEMENTDATE, 'yyyy/MM/dd HH:mm:ss') AS SETTLEMENTDATE,
+  to_date(SETTLEMENTDATE, 'yyyy/MM/dd HH:mm:ss') AS DATE,
+  CAST(YEAR(to_timestamp(SETTLEMENTDATE, 'yyyy/MM/dd HH:mm:ss')) AS INT) AS YEAR
+FROM {{ raw_view }}
+WHERE I = 'D' AND UNIT = 'DREGION' AND VERSION = '3'
 {% else %}
 WITH raw AS (
   SELECT
     from_csv(value, '{{ view_schema }}', map('mode', 'PERMISSIVE')) AS r,
     _metadata.file_name AS _fname
-  FROM text.`{{ get_csv_archive_path() }}/daily{{ ('/{' ~ new_files | join(',') ~ '}') if is_incremental() else '' }}`
+  FROM text.`{{ get_csv_archive_path() }}/daily/{{ '{' ~ new_files | join(',') ~ '}' }}`
   {# Non-trimming comment tags on purpose. The trimming form used elsewhere in this file eats
      the newline after the backtick path and renders the WHERE glued onto it, which is the same
      family of bug as the depends_on trap. Do not "tidy" this into the trimming form, and do not

@@ -29,9 +29,18 @@
      On incremental runs the path is an explicit brace glob of THIS RUN's new files (see
      spark_new_files) — a bare folder scan re-read the whole archive every run and took 30+
      minutes. A first/full-refresh build DOES read the bare folder: everything is new then. --#}
+{#-- Read shape is picked by is_incremental(); see the long note in fct_price.sql. Short form:
+     the non-incremental path is a bare CTAS with no __dbt_tmp, and a CTAS may reference a
+     TEMPORARY VIEW, so it gets the real CSV datasource. The incremental path goes through a
+     persistent __dbt_tmp view, which may not, so it keeps from_csv over text.`path`. --#}
+{%- set daily_root = get_csv_archive_path() ~ '/daily' -%}
+{%- set raw_view = 'raw_daily_scada' -%}
 {{ config(
     materialized='incremental',
-    incremental_strategy='append'
+    incremental_strategy='append',
+    pre_hook=(none if is_incremental() else
+      "CREATE OR REPLACE TEMPORARY VIEW " ~ raw_view ~ " (" ~ view_schema ~ ")"
+      ~ " USING csv OPTIONS (path '" ~ daily_root ~ "', header 'true', mode 'PERMISSIVE')")
 ) }}
 
 -- depends_on: {{ ref('stg_csv_archive_log') }}
@@ -42,12 +51,29 @@
 {% if is_incremental() and new_files | length == 0 %}
 {#-- No new daily files this run: compile to a zero-row no-op (append inserts nothing). --#}
 SELECT * FROM {{ this }} WHERE 1 = 0
+{% elif not is_incremental() %}
+{#-- CTAS path: columns arrive already split from the temp view, so no `r.` prefix, and the
+     file name comes from input_file_name() — a view with a declared column list does not
+     expose _metadata. --#}
+SELECT
+  UNIT,
+  DUID,
+  {%- for name in csv_cols if name not in not_double %}
+  CAST({{ name }} AS DOUBLE) AS {{ name }},
+  {%- endfor %}
+  {{ parse_filename('input_file_name()') }} AS file,
+  -- See the SETTLEMENTDATE note in the incremental branch below.
+  to_timestamp(SETTLEMENTDATE, 'yyyy/MM/dd HH:mm:ss') AS SETTLEMENTDATE,
+  to_date(SETTLEMENTDATE, 'yyyy/MM/dd HH:mm:ss') AS DATE,
+  CAST(YEAR(to_timestamp(SETTLEMENTDATE, 'yyyy/MM/dd HH:mm:ss')) AS INT) AS YEAR
+FROM {{ raw_view }}
+WHERE I = 'D' AND UNIT = 'DUNIT' AND VERSION = '3'
 {% else %}
 WITH raw AS (
   SELECT
     from_csv(value, '{{ view_schema }}', map('mode', 'PERMISSIVE')) AS r,
     _metadata.file_name AS _fname
-  FROM text.`{{ get_csv_archive_path() }}/daily{{ ('/{' ~ new_files | join(',') ~ '}') if is_incremental() else '' }}`
+  FROM text.`{{ get_csv_archive_path() }}/daily/{{ '{' ~ new_files | join(',') ~ '}' }}`
   {# Non-trimming comment tags on purpose; the trimming form glues WHERE onto the backtick
      path line. See the longer note on the same guard in fct_price.sql.
      Discard non-DUNIT lines BEFORE from_csv.
