@@ -11,3 +11,6 @@ landing/
 __pycache__/
 *.pyc
 .ipynb_checkpoints/
+
+# Spark driver logs pulled from Fabric for debugging
+stderr
