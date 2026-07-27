@@ -61,6 +61,65 @@ Filtering the raw line first (`WHERE value LIKE 'D,DREGION,%'`) fixes the second
 fixing the first — `WHERE` is evaluated ahead of the `SELECT` list, so the plan becomes
 Scan → Filter → Project. Useful on the path where the temp view isn't available.
 
+## A neutral reader cannot grade a writer's rounding
+
+`assert_fct_summary_matches_recomputation` failed on `spark` and `dwh` while `duckrun` passed,
+across every run, with `Got 7 results` — one row per date in its 7-day window. It survived a
+full rebuild of `fct_price` and a second pass at `fct_summary`, so it was not drift.
+
+What the numbers said, measured with local `duckrun.connect()` against both lakehouses:
+
+- Row counts per date **identical** — 65,680 vs 65,680, all seven dates.
+- Sums apart by ~0.011 on ~6.9M — about 2 parts per billion, `actual` always the larger.
+- Joining the two `fct_summary` tables key-for-key: ~146 rows per date differ out of ~65,000,
+  every row joins, no key mismatch.
+- The distribution of those differences is **only two values**: `+0.0001` × 132 and
+  `-0.0001` × 14. Nothing else. 118 × 0.0001 = 0.0118, exactly the reported delta.
+
+One unit in the last place of `DECIMAL(18,4)`, every time. Sample rows:
+
+| DUID | spark | duckrun |
+|---|---|---|
+| CROOKWF3 | 2.5876 | 2.5875 |
+| BW04 | 526.3875 | 526.3874 |
+| WALGRV1 | **-0.3007** | **-0.3006** |
+
+Every underlying double is an exact tie at the 5th decimal (2.58755, 526.38745, −0.30065).
+Spark moves away from zero on all of them — note the negative going *more* negative, which is
+away-from-zero, not "up". DuckDB lands on the even digit. **Spark casts `DOUBLE → DECIMAL` with
+HALF_UP, DuckDB with HALF_EVEN**, and T-SQL is a third implementation, which is why `dwh` fails
+alongside `spark`. The 132/14 split is the signature: HALF_UP moves on every tie, HALF_EVEN only
+when the neighbour is odd.
+
+Ruled out with measurements along the way, each of which looked plausible first:
+
+- **Duplicate rows from `append`.** `fct_scada` for one date: 163,295 rows, 2 source files,
+  **0** duplicate `(DUID, SETTLEMENTDATE)` keys and **0** keys with differing values — identical
+  on both engines. (`fct_scada`/`fct_price` do use `append`, not `merge`, on duckrun and spark;
+  the file-level `NOT IN` filter is what keeps that safe, and it assumes dbt is the only writer.)
+- **A stored-type mismatch.** Both lakehouses: `mw`/`price` `DECIMAL(18,4)`, `INITIALMW`/`RRP`
+  `DOUBLE`, `SETTLEMENTDATE` `TIMESTAMP WITH TIME ZONE`. Byte-identical schemas.
+- **The spark CSV rewrite.** `dwh` shares no model code with `models/spark/` and fails with the
+  same count. That alone exonerates any spark-side change.
+
+The real lesson is about the test, not the engines. Its header promises the stored table
+"EXACTLY equal a clean recomputation of the model's full-refresh logic" — but it recomputes in
+the **reader's** dialect, not the **writer's**. For spark, `fct_summary` *is* `f(inputs)`;
+it is Spark's `f`. A DuckDB reader cannot reproduce Spark's rounding, so the assertion can only
+ever hold for the engine that shares the reader's dialect. No rebuild fixes it, and
+`REBUILD_SUMMARY=1` recomputes the same values and fails identically.
+
+Row counts are dialect-independent and are the guard that actually matters — the bug this test
+exists for was three different *row counts* across four engines. Sums need a tolerance, since
+real drift is orders of magnitude above 0.011. Making the outputs genuinely byte-identical is
+possible (`FLOOR(x*10000+0.5)/10000` is IEEE-754 arithmetic and agrees everywhere; only the
+`DECIMAL` cast's tie rule diverges) but costs three model changes plus a one-off full rebuild on
+every engine, and leaves older history mixed until then.
+
+Method note: this took several CI round trips before the obvious move — `duckrun.connect()`
+against both lakehouses from a laptop, which answered every one of the above in minutes. The
+tables are reachable locally; reach for that before instrumenting a workflow.
+
 ## "The table exists" can be a lie, in two different engines
 
 Two incidents, same shape: the existence check consults metadata, the metadata disagrees with

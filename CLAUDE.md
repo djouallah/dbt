@@ -148,6 +148,15 @@ still run it by hand to reproduce a CI failure. That is a debugging affordance, 
   `[DELTA_TABLE_NOT_FOUND]` on spark, `Catalog Error … does not exist` on duckrun. Use
   `DROP TABLE IF EXISTS <schema>.<name>`. A directory holding parquet with no `_delta_log` is
   the same trap from the other direction.
+- **The neutral reader cannot grade another engine's rounding.** `DOUBLE → DECIMAL` tie-breaking
+  differs per dialect — Spark HALF_UP, DuckDB HALF_EVEN, T-SQL a third — so a test asserting a
+  DuckDB recomputation *exactly* equals a stored value can only ever pass for `duckrun`. The
+  symptom is ±0.0001 on a few hundred rows and no row-count difference at all. Row counts are
+  dialect-independent; assert those exactly and give the sums a tolerance. See
+  [LEARNINGS.md](LEARNINGS.md).
+- **Query the lakehouses directly before instrumenting CI.** `duckrun.connect(<abfss Tables
+  path>, read_only=True)` works from a laptop against any of the four items and answers
+  schema/row/value questions in minutes. Several CI round trips were spent not doing this.
 - **`threads` on the spark target must stay ≤ 4.** dbt-fabricspark defaults to high concurrency
   and opens one Spark REPL per thread; Fabric packs at most five REPLs per Livy session, so more
   threads means a second Spark application, separately billed, for one `dbt run`.
