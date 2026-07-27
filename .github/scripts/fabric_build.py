@@ -1,17 +1,15 @@
 """Run `dbt run` for one DuckDB-family engine (argv[1]: `duckrun` = Delta | `iceberg`) against the
 landed data, writing to that engine's OneLake lakehouse.
 
-The SAME driver serves both places ci.yml can put the build, so a small fold and a big one go
-through identical code:
+CI always runs this inside a throwaway Fabric Python notebook, as the entry script fabric_run.py
+ships via duckrun.run_python — a fresh interpreter whose cwd is the unpacked project root, with
+duckrun / dbt-duckdb already pip-installed. ci.yml used to invoke it on the GitHub runner too for
+folds a pending-file count called small; that path is gone.
 
-  - on the GitHub runner, invoked directly, when `land` downloaded no new PUBLIC_DAILY file;
-  - inside a throwaway Fabric Python notebook otherwise, as the entry script fabric_run.py ships
-    via duckrun.run_python — a fresh interpreter whose cwd is the unpacked project root, with
-    duckrun / dbt-duckdb already pip-installed.
-
-Nothing below is location-specific: duckrun.auth resolves the OneLake token from whatever is
-there (the Fabric runtime in a notebook, GitHub OIDC on the runner), so the token is never
-shipped, and config (FILES_PATH, the output path, schema, limits) always arrives via env.
+Nothing below is location-specific, and it is worth keeping that way — it is what makes this
+runnable by hand when you need to reproduce a CI failure. duckrun.auth resolves the OneLake token
+from whatever is there (the Fabric runtime in a notebook, GitHub OIDC on a runner), so the token
+is never shipped, and config (FILES_PATH, the output path, schema, limits) always arrives via env.
 
 Tests are NOT run here — a separate CI job tests every engine's output with one neutral
 DuckDB/Iceberg reader.
@@ -36,7 +34,7 @@ def main() -> int:
 
     # Spill DuckDB temp files to the notebook's big work disk (the harness points TMPDIR there),
     # not the cramped /tmp overlay — a large iceberg aggregation / delta merge would fill /tmp.
-    # On the runner ci.yml sets DUCKDB_TEMP_DIR outright, so the setdefault below leaves it alone.
+    # setdefault, not assignment: a caller that already picked a spill dir keeps it.
     scratch = os.environ.get("TMPDIR") or "/tmp"
     os.environ.setdefault("DUCKDB_TEMP_DIR", os.path.join(scratch, "duckdb_spill"))
 

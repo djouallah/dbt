@@ -103,24 +103,23 @@ needs just `AZURE_CLIENT_ID` / `AZURE_TENANT_ID` secrets and a federated credent
 
 ### Where the DuckDB-family build actually runs
 
-`duckrun` and `iceberg` are the two engines CI is free to place, because both are just DuckDB in
-a Python process — the same process can live on the GitHub runner or in a Fabric notebook. The
-`land` job already knows how heavy the fold is (it just downloaded the files), so it decides:
+In a Fabric notebook, always. `duckrun` and `iceberg` are both just DuckDB in a Python process, so
+that process *could* live on the GitHub runner — but CI no longer tries to decide. `fabric_run.py`
+zips the project into a throwaway notebook via `duckrun.run_python` and runs `fabric_build.py`
+there, data-local to OneLake, so a backlog drain never pulls the corpus over the public internet.
+`dwh` and `spark` never had the choice: their compute *is* Fabric's server, and the runner only
+ever holds the dbt client.
 
-| new `PUBLIC_DAILY` files landed | where `dbt run` executes | why |
-|---|---|---|
-| `0` | the GitHub runner | only intraday snapshots to fold — a Fabric session start-up costs more than the build |
-| one or more (or unknown) | a Fabric notebook | a whole day of dispatch per file; keep it data-local to OneLake instead of pulling it over the public internet |
+Two placement heuristics were tried and removed. The first asked whether `land` had downloaded a
+new `PUBLIC_DAILY` file, which describes the download rather than the backlog — a from-scratch
+lakehouse has the whole ~3000-file archive waiting with nothing new landed, and that reads as
+"small". The second counted each engine's genuinely pending files, but had to read that count
+through the very tables the build was about to write, so an unreadable table collapsed the
+estimate to its fail-safe sentinel regardless.
 
-Both branches run the identical driver (`fabric_build.py`), so the build is the same either way;
-only the interpreter it runs in changes. `dwh` and `spark` have no such choice: their compute *is*
-Fabric's server, and the runner only ever holds the dbt client.
-
-The signal is this run's **download**, not the engines' true backlog. If a leg fails, the run is
-cancelled with files landed but unfolded, and the next push lands `0` new daily files and picks the
-runner for a fold that isn't actually small — the job timeout is the backstop. Measuring the real
-backlog means reading every engine's output, which isn't worth the machinery for the case a re-run
-fixes.
+The saving on offer was one Fabric session start-up on quiet intraday runs. The cost of being
+wrong was a 7GB runner thrashing through a full archive fold. One path is worth more than the
+saving.
 
 ### Verify offline (no warehouse)
 

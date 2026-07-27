@@ -103,17 +103,25 @@ Rules that keep it honest:
 
 ## Where the DuckDB fold runs
 
-Decided per engine by `.github/scripts/pending_files.py`: archive-log rows whose
-`csv_filename` isn't yet in the consuming table's `[file]` column, compared against
-`LOCAL_FOLD_MAX_FILES`. Small fold → GitHub runner; big fold → Fabric notebook, data-local to
-OneLake.
+Always in a Fabric notebook, via `fabric_run.py` → `duckrun.run_python` → `fabric_build.py`.
+There is no runner-side branch and nothing decides placement.
 
-Do **not** go back to "did a new daily file land this run". That describes the download, not
-the backlog: a from-scratch lakehouse has ~3000 files outstanding with nothing new landed, and
-that heuristic puts it on a 7GB runner.
+Two attempts at deciding it are already buried, so don't dig up a third:
 
-Fail-safe direction is always Fabric — it handles a fold of any size, the runner doesn't. If
-the count can't be measured, report a huge number.
+1. *"Did a new daily file land this run?"* — describes the download, not the backlog. A
+   from-scratch lakehouse has ~3000 files outstanding with nothing new landed; that reads as 0
+   and puts the whole archive on a 7GB runner.
+2. *Count pending files per engine* (`pending_files.py`, deleted) — measured the right thing but
+   had to read the backlog through the very tables the build was about to write. When
+   `landing.fct_scada` in `dbt_delta` went unreadable, the probe threw, the aborted DuckDB
+   transaction poisoned every later probe, and it fell back to its sentinel anyway.
+
+Both failed the same way: placement is a prediction made before the build, and a wrong one is
+paid for by the leg that can least afford it. Fabric handles a fold of any size; the runner
+handles a small one slightly cheaper. That trade was never worth a decision that could be wrong.
+
+`fabric_build.py` stays location-agnostic — it resolves its own token either side — so you can
+still run it by hand to reproduce a CI failure. That is a debugging affordance, not a CI path.
 
 ## Facts that are easy to get wrong
 

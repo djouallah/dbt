@@ -212,8 +212,10 @@ summary, landed = download_aemo(con, FILES_PATH, DOWNLOAD_LIMIT, DAILY_DOWNLOAD_
 summary.show()
 print("Landed this run: " + ", ".join(f"{k}={v}" for k, v in landed.items()))
 
-# No CI hand-off here any more. What landed this run says nothing about how big the fold is —
-# a from-scratch lakehouse has the whole archive outstanding with nothing new landed — so the
-# engine jobs size their own backlog instead (.github/scripts/pending_files.py).
+# No CI hand-off here. This count once decided where the DuckDB-family build ran, which it had no
+# business doing — what landed this run says nothing about how big the fold is, since a
+# from-scratch lakehouse has the whole archive outstanding with nothing new landed. Nothing
+# decides that any more: those builds always run in a Fabric notebook. The line above is for a
+# human reading the log.
 
 print("Done. Now run:  dbt run --target duckrun   (or iceberg / dwh / spark)")

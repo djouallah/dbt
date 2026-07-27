@@ -50,10 +50,6 @@ env:
   DUCKDB_TEMP_DIR: /tmp/duckdb_spill
   CI_DOWNLOAD_LIMIT: ${{ inputs.download_limit || '200' }}
   FABRIC_CORES: ${{ inputs.cores || '8' }}
-  # Pending-file count at or below which a DuckDB-family fold is cheaper on the GitHub runner
-  # than a Fabric session takes to start. A steady-state intraday run is a handful of files; a
-  # backlog or a from-scratch lakehouse is hundreds to thousands and belongs on Fabric compute.
-  LOCAL_FOLD_MAX_FILES: "20"
   # Drift-reconciliation lever (fabric_run.py forwards it into notebooks). '1' rebuilds
   # fct_summary from scratch: --full-refresh on the merge engines (duckrun/iceberg/spark),
   # and on dwh a full emit through its normal delete+insert, since a DROP there deadlocks
@@ -80,16 +76,16 @@ jobs:
       - name: Download AEMO data (obstore -> OneLake)
         run: python download_aemo.py
 
-  # DuckDB-family: both engines are just DuckDB in a Python process, so CI is free to place that
-  # process. It builds HERE for a small fold (the runner reads it in a minute — a Fabric session
-  # start-up would cost more than the build), and ships into a Fabric notebook
-  # (duckrun.run_python) for a big one, so a real fold stays data-local to OneLake. Same driver
-  # (fabric_build.py) either way; only the interpreter it runs in changes.
+  # DuckDB-family: both engines are just DuckDB in a Python process, and that process always runs
+  # in a Fabric notebook (duckrun.run_python), data-local to OneLake. The runner only ships
+  # fabric_build.py there and relays its exit code.
   #
-  # The size signal is PENDING FILES for THIS engine — archive-log entries its tables have not
-  # folded yet — not "did a new daily file land this run". Those differ exactly where it matters:
-  # a from-scratch lakehouse has the whole ~3000-file archive outstanding with nothing new landed,
-  # and the old signal read that as 0 and kept it on the runner.
+  # There used to be a second path — build on the runner when the fold looked small enough — sized
+  # by a pending-file count. It is gone. Placement was a guess that had to be right every run: it
+  # read the backlog through the very tables the build was about to write, so any table it could
+  # not read collapsed the estimate, and the cheap case it optimised for (a handful of intraday
+  # files) saved a session start-up while the expensive case it mis-sized cost a 7GB runner
+  # thrashing on a real fold. One path, always remote, is the same build with nothing to get wrong.
   fabric:
     name: fabric ${{ matrix.engine }}
     needs: land
@@ -106,22 +102,11 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with: {python-version: "3.11"}
-      # pytz: a runner-side `dbt run` needs it too, not just the notebook (fabric_run.py pip list).
-      - run: pip install duckrun pytz
+      # The runner never builds, so it needs only what fabric_run.py imports. pytz goes into the
+      # notebook's own pip list, not here.
+      - run: pip install duckrun
       - run: python .github/scripts/provision.py ${{ matrix.engine }} >> "$GITHUB_ENV"
-      # Measured per engine, after provisioning (it reads that engine's own tables). The script
-      # never fails the job: it reports a huge count if it cannot measure, so an unknown fold
-      # goes to Fabric. The `||` covers it dying before printing anything at all.
-      - name: Size the fold (pending source files)
-        run: |
-          python .github/scripts/pending_files.py ${{ matrix.engine }} >> "$GITHUB_ENV" \
-            || echo "PENDING_FILES=999999" >> "$GITHUB_ENV"
-      # Exactly one of these two runs; fromJSON makes the comparison numeric rather than string.
-      - name: dbt run on the runner (small fold)
-        if: fromJSON(env.PENDING_FILES) <= fromJSON(env.LOCAL_FOLD_MAX_FILES)
-        run: python .github/scripts/fabric_build.py ${{ matrix.engine }}
-      - name: dbt run in Fabric (large fold)
-        if: fromJSON(env.PENDING_FILES) > fromJSON(env.LOCAL_FOLD_MAX_FILES)
+      - name: dbt run in Fabric
         run: python .github/scripts/fabric_run.py ${{ matrix.engine }}
 
   # dwh + spark: dbt client on the runner, compute on Fabric's own servers.

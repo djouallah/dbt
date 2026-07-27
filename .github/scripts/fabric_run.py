@@ -1,7 +1,8 @@
 """Ship this dbt project into a throwaway Fabric Python notebook and run `dbt run` there.
 
-Used when `land` downloaded a new PUBLIC_DAILY file — a whole day of dispatch per file. (An
-intraday-only fold runs fabric_build.py on the GitHub runner instead; see ci.yml.) Here,
+This is the only way the DuckDB-family engines build. There was once a second path — run
+fabric_build.py directly on the GitHub runner when the fold looked small — chosen per run by a
+pending-file count; it is gone, and with it the risk of guessing wrong. Here,
 duckrun.run_python zips the project, uploads it to a temporary Fabric notebook,
 pip-installs duckrun, and runs .github/scripts/fabric_build.py as a subprocess on Fabric compute —
 data-local to OneLake, so a backlog drain never pulls the corpus across the public internet —
