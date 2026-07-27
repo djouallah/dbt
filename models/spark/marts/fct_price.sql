@@ -1,5 +1,10 @@
 -- Regional spot prices from the daily AEMO files (Spark). from_csv over the landed CSV folder
--- with an explicit schema (Fabric Spark 3.5 has no read_files); select by column name.
+-- with an explicit schema; select by column name. The reason it is from_csv and not the CSV
+-- datasource is NOT that Spark lacks a reader -- `spark.read.format("csv").schema(...)` works
+-- fine and is what a notebook would use. It is that neither catalog-object form survives here;
+-- see the note in fct_scada.sql. from_csv is the only shape that carries an explicit schema
+-- without being a catalog object, so the cost is paid per row and the WHERE below is what
+-- keeps that cost off the rows we do not want.
 {%- set csv_cols = [
     'I','UNIT','XX','VERSION','SETTLEMENTDATE','RUNNO','REGIONID','INTERVENTION',
     'RRP','EEP','ROP','APCFLAG','MARKETSUSPENDEDFLAG','TOTALDEMAND','DEMANDFORECAST',
@@ -51,6 +56,20 @@ WITH raw AS (
     from_csv(value, '{{ view_schema }}', map('mode', 'PERMISSIVE')) AS r,
     _metadata.file_name AS _fname
   FROM text.`{{ get_csv_archive_path() }}/daily{{ ('/{' ~ new_files | join(',') ~ '}') if is_incremental() else '' }}`
+  {# Non-trimming comment tags on purpose. The trimming form used elsewhere in this file eats
+     the newline after the backtick path and renders the WHERE glued onto it, which is the same
+     family of bug as the depends_on trap. Do not "tidy" this into the trimming form, and do not
+     write the trimming tokens inside a comment either -- Jinja comments do not nest.
+
+     Discard non-DREGION lines BEFORE from_csv, not after. WHERE is evaluated ahead of the
+     SELECT list, so the plan is Scan -> Filter -> Project and from_csv never runs on a row
+     this rejects. Same predicate as the tail WHERE, expressed against the raw line: a
+     PUBLIC_DAILY file holds every report type AEMO ships that day and DREGION is a sliver of
+     it (5 regions x 288 intervals), so without this the model fully parses 130 columns of
+     every DISPATCH/TRADING/etc. row and then throws it away. That is what made a full rebuild
+     1,773 tasks at ~150s each. The tail WHERE stays -- it is the correctness check and still
+     enforces VERSION; this is only the cheap pre-pass. #}
+  WHERE value LIKE 'D,DREGION,%'
 )
 SELECT
   r.UNIT,

@@ -1,5 +1,5 @@
 -- Generation SCADA from the daily AEMO files (Spark). from_csv over the landed CSV folder
--- with an explicit schema (Fabric Spark 3.5 has no read_files); select by column name.
+-- with an explicit schema; select by column name.
 {%- set csv_cols = [
     'I','UNIT','XX','VERSION','SETTLEMENTDATE','RUNNO','DUID','INTERVENTION',
     'DISPATCHMODE','AGCSTATUS','INITIALMW','TOTALCLEARED','RAMPDOWNRATE','RAMPUPRATE',
@@ -17,7 +17,10 @@
 {%- set not_double = ['I','UNIT','XX','SETTLEMENTDATE','DUID'] -%}
 {%- set view_schema %}{% for c in csv_cols %}`{{ c }}` STRING{{ ', ' if not loop.last }}{% endfor %}{% endset %}
 {#-- The raw CSVs are read inline via from_csv over the text.`path` datasource — no pre-created
-     raw object AT ALL. Both catalog-object approaches are illegal on a schema-enabled lakehouse:
+     raw object AT ALL. This is NOT because Spark has no CSV reader: the obvious fix, and the
+     one a notebook uses, is `spark.read.format("csv").schema(user_schema).load(paths)`, which
+     is vectorized and prunes columns the way DuckDB's read_csv does. dbt cannot reach it.
+     Both catalog-object approaches are illegal on a schema-enabled lakehouse:
      dbt-fabricspark builds its <model>__dbt_tmp intermediate as a PERSISTENT view, which cannot
      reference a TEMPORARY VIEW (INVALID_TEMP_OBJ_REFERENCE), and Fabric Spark rejects an external
      CSV table with an explicit schema ("External tables with partition columns or schema or
@@ -45,6 +48,12 @@ WITH raw AS (
     from_csv(value, '{{ view_schema }}', map('mode', 'PERMISSIVE')) AS r,
     _metadata.file_name AS _fname
   FROM text.`{{ get_csv_archive_path() }}/daily{{ ('/{' ~ new_files | join(',') ~ '}') if is_incremental() else '' }}`
+  {# Non-trimming comment tags on purpose; the trimming form glues WHERE onto the backtick
+     path line. See the longer note on the same guard in fct_price.sql.
+     Discard non-DUNIT lines BEFORE from_csv.
+     DUNIT is a much larger share of a PUBLIC_DAILY file than DREGION is, so the win here is
+     smaller, but it still skips a 53-column parse per rejected row. #}
+  WHERE value LIKE 'D,DUNIT,%'
 )
 SELECT
   r.UNIT,
