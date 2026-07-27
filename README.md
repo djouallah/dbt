@@ -137,18 +137,3 @@ Generic column tests (`not_null`, `unique`, `relationships`, `accepted_values` i
 `models/_*.yml`) run on **all four** targets — dbt renders them per adapter dialect. The custom
 singular assertions in `tests/` are written in DuckDB SQL and are the **reference suite**,
 enabled only on the DuckDB-family targets (`dbt_project.yml`).
-
-## Intentionally out of scope
-
-No `deploy.py`, semantic models, or Fabric pipelines — this repo is about the dbt
-profile-switch idea, not deployment (CI does run the pipeline on OneLake, see above). The full
-production machinery (deploy, Direct Lake models, scheduled runs) lives in the four origin repos:
-`dbt_fabric_python_notebook_{delta,ducklake,iceberg,dwh}`.
-
-## Notes / caveats
-
-- **Spark `read_files()`**: the Spark models read the landed CSVs with the `read_files()` TVF.
-  Confirm your Fabric Spark runtime supports it; if not, land a Spark-friendly source (e.g. a raw
-  Delta table) from the notebook and read it via `source()` instead.
-- `dbt-fabricspark` has **no Python model support** — which is exactly why the download is one
-  external notebook rather than a dbt model.
