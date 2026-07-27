@@ -191,6 +191,16 @@ jobs:
             --exclude tag:heavy || rc=$?
           cp target/run_results.json "rr-${{ matrix.engine }}.json" 2>/dev/null || true
           exit $rc
+      # A failing determinism test reports only a row COUNT, which says the table drifted but not
+      # how. The test body is plain SQL over refs, so `dbt show --inline` re-runs it verbatim and
+      # prints the offending dates with expected vs actual side by side. Read it as: actual >
+      # expected on every date means rows the write path could not remove; expected differing
+      # BETWEEN engines means an input differs, not fct_summary.
+      - name: Show fct_summary diff rows — ${{ matrix.engine }}
+        if: failure()
+        run: |
+          dbt show --target duckrun --profiles-dir . --limit 50 \
+            --inline "$(cat tests/assert_fct_summary_matches_recomputation.sql)" || true
       - if: always()
         uses: actions/upload-artifact@v4
         with:
