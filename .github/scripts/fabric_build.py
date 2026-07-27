@@ -1,12 +1,20 @@
-"""Runs INSIDE a throwaway Fabric Python notebook (shipped by fabric_run.py via
-duckrun.run_python). It is the notebook's entry script — a fresh interpreter whose cwd is the
-unpacked dbt project root, with duckrun / dbt-duckdb already pip-installed.
+"""Run `dbt run` for one DuckDB-family engine (argv[1]: `duckrun` = Delta | `iceberg`) against the
+landed data, writing to that engine's OneLake lakehouse.
 
-Runs `dbt run` for one engine (argv[1]: `duckrun` = Delta | `iceberg`) against the landed data,
-writing to that engine's OneLake lakehouse on Fabric compute — data-local, no data over the
-GitHub runner. Tests are NOT run here — a separate CI job tests every engine's output with one
-neutral DuckDB/Iceberg reader. Config (FILES_PATH, the output path, schema, limits) arrives via env
-from fabric_run.py; the OneLake token is NOT shipped — it is acquired here from the Fabric runtime.
+The SAME driver serves both places ci.yml can put the build, so a small fold and a big one go
+through identical code:
+
+  - on the GitHub runner, invoked directly, when `land` downloaded no new PUBLIC_DAILY file;
+  - inside a throwaway Fabric Python notebook otherwise, as the entry script fabric_run.py ships
+    via duckrun.run_python — a fresh interpreter whose cwd is the unpacked project root, with
+    duckrun / dbt-duckdb already pip-installed.
+
+Nothing below is location-specific: duckrun.auth resolves the OneLake token from whatever is
+there (the Fabric runtime in a notebook, GitHub OIDC on the runner), so the token is never
+shipped, and config (FILES_PATH, the output path, schema, limits) always arrives via env.
+
+Tests are NOT run here — a separate CI job tests every engine's output with one neutral
+DuckDB/Iceberg reader.
 """
 import os
 import subprocess
@@ -20,13 +28,15 @@ def main() -> int:
     engine = sys.argv[1] if len(sys.argv) > 1 else "duckrun"
 
     # The iceberg target (type: duckdb) reads ONELAKE_TOKEN from the env for its Iceberg REST
-    # catalog + azure secret; acquire it from the Fabric runtime (notebookutils). duckrun (Delta)
-    # self-acquires its own token, so setting it is harmless there.
+    # catalog + azure secret. get_onelake_token() picks the right source for wherever this is
+    # running — notebookutils in Fabric, GitHub OIDC on the runner. duckrun (Delta) self-acquires
+    # its own token, so setting it is harmless there.
     from duckrun import auth
     os.environ.setdefault("ONELAKE_TOKEN", auth.get_onelake_token())
 
     # Spill DuckDB temp files to the notebook's big work disk (the harness points TMPDIR there),
     # not the cramped /tmp overlay — a large iceberg aggregation / delta merge would fill /tmp.
+    # On the runner ci.yml sets DUCKDB_TEMP_DIR outright, so the setdefault below leaves it alone.
     scratch = os.environ.get("TMPDIR") or "/tmp"
     os.environ.setdefault("DUCKDB_TEMP_DIR", os.path.join(scratch, "duckdb_spill"))
 

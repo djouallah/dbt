@@ -51,6 +51,8 @@ jobs:
     timeout-minutes: 30
     outputs:
       files_path: ${{ steps.prov.outputs.files_path }}
+      # New PUBLIC_DAILY files landed this run — the fabric job's runner-vs-Fabric signal.
+      new_daily: ${{ steps.dl.outputs.new_daily }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -62,13 +64,18 @@ jobs:
           python .github/scripts/provision.py land | tee /tmp/land.env >> "$GITHUB_ENV"
           echo "files_path=$(grep '^FILES_PATH=' /tmp/land.env | cut -d= -f2-)" >> "$GITHUB_OUTPUT"
       - name: Download AEMO data (obstore -> OneLake)
+        id: dl
         run: python download_aemo.py
       - name: Cancel whole run on failure
         if: failure()
         env: {GH_TOKEN: "${{ github.token }}"}
         run: gh run cancel ${{ github.run_id }} -R ${{ github.repository }}
 
-  # DuckDB-family: duckrun.run_python ships `dbt run` into a Fabric notebook.
+  # DuckDB-family: both engines are just DuckDB in a Python process, so CI is free to place that
+  # process. It builds HERE when `land` downloaded no new PUBLIC_DAILY file (an intraday-only fold
+  # the runner reads in a minute — a Fabric session start-up would cost more than the build), and
+  # ships into a Fabric notebook (duckrun.run_python) otherwise, so a real fold stays data-local to
+  # OneLake. Same driver (fabric_build.py) either way; only the interpreter it runs in changes.
   fabric:
     name: fabric ${{ matrix.engine }}
     needs: land
@@ -84,9 +91,17 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with: {python-version: "3.11"}
-      - run: pip install duckrun
+      # pytz: a runner-side `dbt run` needs it too, not just the notebook (fabric_run.py pip list).
+      - run: pip install duckrun pytz
       - run: python .github/scripts/provision.py ${{ matrix.engine }} >> "$GITHUB_ENV"
+      # Exactly one of these two runs. Anything other than a literal '0' — including an empty
+      # output if the downloader died before reporting — takes the Fabric branch, the path that
+      # works at any size.
+      - name: dbt run on the runner (no new daily file landed)
+        if: needs.land.outputs.new_daily == '0'
+        run: python .github/scripts/fabric_build.py ${{ matrix.engine }}
       - name: dbt run in Fabric
+        if: needs.land.outputs.new_daily != '0'
         run: python .github/scripts/fabric_run.py ${{ matrix.engine }}
       - name: Cancel whole run on failure
         if: failure()

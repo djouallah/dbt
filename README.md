@@ -101,6 +101,27 @@ Auth is **OIDC only** (the `fabric-github-deploy` app is Admin in the workspace)
 needs just `AZURE_CLIENT_ID` / `AZURE_TENANT_ID` secrets and a federated credential trusting
 `repo:djouallah/dbt:ref:refs/heads/main`.
 
+### Where the DuckDB-family build actually runs
+
+`duckrun` and `iceberg` are the two engines CI is free to place, because both are just DuckDB in
+a Python process — the same process can live on the GitHub runner or in a Fabric notebook. The
+`land` job already knows how heavy the fold is (it just downloaded the files), so it decides:
+
+| new `PUBLIC_DAILY` files landed | where `dbt run` executes | why |
+|---|---|---|
+| `0` | the GitHub runner | only intraday snapshots to fold — a Fabric session start-up costs more than the build |
+| one or more (or unknown) | a Fabric notebook | a whole day of dispatch per file; keep it data-local to OneLake instead of pulling it over the public internet |
+
+Both branches run the identical driver (`fabric_build.py`), so the build is the same either way;
+only the interpreter it runs in changes. `dwh` and `spark` have no such choice: their compute *is*
+Fabric's server, and the runner only ever holds the dbt client.
+
+The signal is this run's **download**, not the engines' true backlog. If a leg fails, the run is
+cancelled with files landed but unfolded, and the next push lands `0` new daily files and picks the
+runner for a fold that isn't actually small — the job timeout is the backstop. Measuring the real
+backlog means reading every engine's output, which isn't worth the machinery for the case a re-run
+fixes.
+
 ### Verify offline (no warehouse)
 
 Targets also compile without connecting — useful locally:

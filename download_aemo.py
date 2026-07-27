@@ -204,7 +204,21 @@ def download_aemo(session, files_path, download_limit, daily_download_limit):
                 '{st}', '{sf}', '/duid/{fn}', '{now}'::TIMESTAMPTZ, NULL, '{url}', NULL, '{base}')""")
 
     save_log()
-    return session.sql("SELECT source_type, count(*) AS files FROM _csv_archive_log GROUP BY source_type ORDER BY source_type")
+    summary = session.sql("""SELECT source_type, count(*) AS files FROM _csv_archive_log
+                             GROUP BY source_type ORDER BY source_type""")
+    return summary, {"daily": len(daily), "scada_today": len(scada), "price_today": len(price)}
 
-download_aemo(con, FILES_PATH, DOWNLOAD_LIMIT, DAILY_DOWNLOAD_LIMIT).show()
+summary, landed = download_aemo(con, FILES_PATH, DOWNLOAD_LIMIT, DAILY_DOWNLOAD_LIMIT)
+summary.show()
+print("Landed this run: " + ", ".join(f"{k}={v}" for k, v in landed.items()))
+
+# CI hand-off: how heavy the fold the engines are about to run is. PUBLIC_DAILY files are whole
+# days of dispatch; the intraday snapshots are tiny and never decide anything, so `new_daily` is
+# the whole signal — ci.yml turns 0 into "build on the GitHub runner" and anything else into
+# "ship it to a Fabric notebook". Facts only: the policy lives in the workflow, not here. Guarded
+# so the notebook / laptop path is untouched.
+if os.environ.get("GITHUB_OUTPUT"):
+    with open(os.environ["GITHUB_OUTPUT"], "a") as f:
+        f.write(f"new_daily={landed['daily']}\n")
+
 print("Done. Now run:  dbt run --target duckrun   (or iceberg / dwh / spark)")

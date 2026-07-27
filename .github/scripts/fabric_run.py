@@ -1,8 +1,10 @@
 """Ship this dbt project into a throwaway Fabric Python notebook and run `dbt run` there.
 
-Instead of running dbt on the 2-core GitHub runner (see ci.yml), duckrun.run_python zips the
-project, uploads it to a temporary Fabric notebook, pip-installs duckrun, and runs
-.github/scripts/fabric_build.py as a subprocess on Fabric compute — data-local to OneLake —
+Used when `land` downloaded a new PUBLIC_DAILY file — a whole day of dispatch per file. (An
+intraday-only fold runs fabric_build.py on the GitHub runner instead; see ci.yml.) Here,
+duckrun.run_python zips the project, uploads it to a temporary Fabric notebook,
+pip-installs duckrun, and runs .github/scripts/fabric_build.py as a subprocess on Fabric compute —
+data-local to OneLake, so a backlog drain never pulls the corpus across the public internet —
 streaming the log back, then deletes the notebook.
 
 argv[1] is the engine (`duckrun` = Delta | `iceberg`). Its output lakehouse and the landing
