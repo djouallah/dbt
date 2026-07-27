@@ -33,9 +33,12 @@ concurrency:
 permissions:
   id-token: write
   contents: read
-  # Fail-fast rule: any failed job cancels the WHOLE run (see the cancel steps) — a doomed
-  # run must not keep burning Fabric compute on the other legs.
-  actions: write
+  # No longer `write`: a failed job used to cancel the whole run, which cost more than it
+  # saved. Cancelling a GitHub job does not stop the Fabric-side notebook or Livy session it
+  # already started, so the compute got spent anyway — what the cancel actually bought was a
+  # run where every leg reads `cancelled`, including the one that failed, and no artifacts or
+  # logs from the legs that were still mid-flight. Let each leg finish and report itself.
+  actions: read
 
 env:
   WS_ID: ${{ inputs.workspace || 'ea575278-bd81-459c-9680-47829898c902' }}
@@ -76,10 +79,6 @@ jobs:
           echo "files_path=$(grep '^FILES_PATH=' /tmp/land.env | cut -d= -f2-)" >> "$GITHUB_OUTPUT"
       - name: Download AEMO data (obstore -> OneLake)
         run: python download_aemo.py
-      - name: Cancel whole run on failure
-        if: failure()
-        env: {GH_TOKEN: "${{ github.token }}"}
-        run: gh run cancel ${{ github.run_id }} -R ${{ github.repository }}
 
   # DuckDB-family: both engines are just DuckDB in a Python process, so CI is free to place that
   # process. It builds HERE for a small fold (the runner reads it in a minute — a Fabric session
@@ -97,7 +96,8 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 90
     strategy:
-      fail-fast: true
+      # One engine failing says nothing about the other — they share only the landed data.
+      fail-fast: false
       matrix:
         engine: [duckrun, iceberg]
     env:
@@ -123,10 +123,6 @@ jobs:
       - name: dbt run in Fabric (large fold)
         if: fromJSON(env.PENDING_FILES) > fromJSON(env.LOCAL_FOLD_MAX_FILES)
         run: python .github/scripts/fabric_run.py ${{ matrix.engine }}
-      - name: Cancel whole run on failure
-        if: failure()
-        env: {GH_TOKEN: "${{ github.token }}"}
-        run: gh run cancel ${{ github.run_id }} -R ${{ github.repository }}
 
   # dwh + spark: dbt client on the runner, compute on Fabric's own servers.
   server:
@@ -136,7 +132,7 @@ jobs:
     # Backlog-draining spark runs (1024-file folds) reach ~40 min; leave room for one retry.
     timeout-minutes: 60
     strategy:
-      fail-fast: true
+      fail-fast: false
       matrix:
         include:
           - {engine: dwh, install: "dbt-fabric-samdebruyn dbt-core==1.11.10 dbt-adapters==1.23.0"}
@@ -179,10 +175,6 @@ jobs:
         with:
           name: dbt-target-${{ matrix.engine }}
           path: target/
-      - name: Cancel whole run on failure
-        if: failure()
-        env: {GH_TOKEN: "${{ github.token }}"}
-        run: gh run cancel ${{ github.run_id }} -R ${{ github.repository }}
 
   # One neutral duckrun reader (DuckDB + delta_scan) grades EVERY engine's output: the thesis is
   # "engine doesn't matter, output does". Read via Delta, not the iceberg reader — that one chokes
@@ -193,7 +185,8 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     strategy:
-      fail-fast: true
+      # Grading four outputs is the point — one bad output must not hide the other three.
+      fail-fast: false
       matrix:
         include:
           - {engine: duckrun, item: dbt_delta, kind: lakehouses}
@@ -219,16 +212,13 @@ jobs:
           name: test-results-${{ matrix.engine }}
           path: rr-${{ matrix.engine }}.json
           if-no-files-found: warn
-      - name: Cancel whole run on failure
-        if: failure()
-        env: {GH_TOKEN: "${{ github.token }}"}
-        run: gh run cancel ${{ github.run_id }} -R ${{ github.repository }}
 
-  # The workflow's ONLY step summary. always(): the report matters most when a leg failed.
+  # The workflow's ONLY step summary. No `if: always()`: it reports on all four engines side by
+  # side, so a partial run would publish a table with holes in it and read as real drift. If a
+  # leg failed, that leg's own job is where to look — fix it, then the summary means something.
   summary:
     name: summary
     needs: test
-    if: always()
     runs-on: ubuntu-latest
     # get_stats() over OneLake is slow on the iceberg item (12m+ observed for that one engine);
     # 15 minutes was cancelling stats.py mid-table and turning slowness into a red run.

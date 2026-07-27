@@ -130,8 +130,11 @@ the count can't be measured, report a huge number.
 - Cancel superseded runs immediately (`gh run cancel <id>`) — spark and Fabric legs cost money.
 - Pushing to `main` triggers a run. If you want a dispatch with inputs instead, cancel the push
   run first; the concurrency group is not `cancel-in-progress`.
-- Fail-fast means the *failing* job runs `gh run cancel` on the whole run, so its own
-  conclusion shows as `cancelled`, not `failure`. Read per-step conclusions to find the real
-  one: `gh run view <id> --json jobs`.
+- Jobs no longer cancel the run when they fail, and no matrix is `fail-fast`. Every leg runs to
+  its own conclusion, so `gh run view <id> --json jobs` reads straight: `failure` means that
+  leg failed. Cancelling never saved the Fabric compute anyway — the notebook or Livy session
+  keeps running workspace-side after the GitHub job dies — it only erased the evidence.
+- `summary` has no `if: always()`. It compares all four engines side by side, so it runs only
+  when every leg is green; a summary with holes in it reads as drift that isn't there.
 - Build jobs never run tests — the engine must not grade its own homework. Testing is a
   separate job with one neutral reader.
