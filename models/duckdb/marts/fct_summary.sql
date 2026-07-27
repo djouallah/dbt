@@ -21,14 +21,12 @@
 --     NOT delete+insert: this adapter implements that as a fenced FULL-TABLE overwrite
 --     (it materializes every surviving target row plus the batch into a DuckDB temp
 --     table, then overwrites), which would rewrite all 143M rows on every run.
---   iceberg -> merge with WHEN MATCHED DO NOTHING, unchanged — it MUST stay insert-only.
---     XTable cannot convert Iceberg positional deletes into the Delta representation
---     OneLake surfaces, and CI grades every engine by reading that Delta side, so any
---     strategy emitting deletes (delete+insert, matched-UPDATE) would quietly drop this
---     table out of the test suite. The REST catalog rejects a matched-UPDATE merge
---     anyway (BadRequest 400: one add-snapshot update per commit). Insert-only suffices
---     because every input is append-only: a (date, time, DUID) value is final once
---     produced, and craters are missing keys, which insert repairs.
+--   iceberg -> merge with WHEN MATCHED DO NOTHING, unchanged. The OneLake Iceberg REST
+--     catalog rejects a matched-UPDATE branch (BadRequest 400: only one add-snapshot
+--     update per commit). Insert-only suffices because every input is append-only: a
+--     (date, time, DUID) value is final once produced, and craters are missing keys,
+--     which insert repairs. (Emitting deletes is NOT the blocker — XTable converts
+--     Iceberg positional deletes to Delta deletion vectors fine.)
 --
 -- Residual, deliberate: neither path DELETES a stored row that the recomputation no
 -- longer produces. That cannot happen while fct_scada/fct_price/dim_duid stay
