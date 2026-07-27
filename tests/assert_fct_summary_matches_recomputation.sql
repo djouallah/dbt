@@ -79,7 +79,23 @@ SELECT
   a.price AS actual_price
 FROM expected e
 FULL OUTER JOIN actual a USING (date)
+-- Row count stays EXACT. It is dialect-independent, and a wrong count is the bug this test was
+-- written for — three engines fed identical inputs holding three different counts. A NULL on
+-- either side (a date present in one and not the other) is caught here too, via IS DISTINCT FROM.
 WHERE a.n IS DISTINCT FROM e.n
-   OR a.mw IS DISTINCT FROM e.mw
-   OR a.price IS DISTINCT FROM e.price
+-- Sums cannot be exact across engines, and no rebuild will make them so. `expected` is
+-- recomputed by the neutral DuckDB reader; `actual` was written by Spark or Fabric Warehouse.
+-- The three disagree on how DOUBLE -> DECIMAL(18,4) breaks a tie — Spark rounds HALF_UP (away
+-- from zero, confirmed on negatives), DuckDB HALF_EVEN, T-SQL a third way — so a value sitting
+-- exactly on a half at the 5th decimal lands 0.0001 apart. Measured: ~146 rows per date of
+-- ~65,000, deltas of EXACTLY +/-0.0001 and nothing else, netting ~0.012 per date. See
+-- LEARNINGS.md. The engines are not drifting; the assertion was un-satisfiable as written.
+--
+-- Tolerance is n * 0.0001, not a hand-picked constant: one ULP per row, every row tied, all in
+-- the same direction. That is the largest divergence rounding CAN produce, so anything above it
+-- is provably something else. On a real date that is ~6.5 against sums of ~6.9M — still 1e-6
+-- relative, and ~550x the drift actually observed, while a single wrong row moves the sum by
+-- whole MW. Widen this only with a measurement that says why.
+   OR abs(a.mw - e.mw) > e.n * 0.0001
+   OR abs(a.price - e.price) > e.n * 0.0001
 ORDER BY date

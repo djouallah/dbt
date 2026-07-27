@@ -201,25 +201,6 @@ jobs:
         run: |
           dbt show --target duckrun --profiles-dir . --limit 50 \
             --inline "$(cat tests/assert_fct_summary_matches_recomputation.sql)" || true
-      # The diff above is ~2e-9 relative with identical row counts, which is the signature of
-      # summing a float rather than a decimal — but every dialect already CASTs to
-      # DECIMAL(18,4), so the STORED type is the thing to confirm rather than assume. Print what
-      # each engine actually wrote, as the neutral reader sees it.
-      - name: Stored schema — ${{ matrix.engine }}
-        if: failure()
-        run: |
-          python - <<'PY' || true
-          import os, sys, duckrun
-          con = duckrun.connect(os.environ["ONELAKE_TABLES_PATH"], read_only=True)
-          for t in ("mart.fct_summary", "landing.fct_scada"):
-              try:
-                  rows = con.con.sql(f"DESCRIBE {t}").fetchall()
-              except Exception as exc:
-                  print(f"{t}: DESCRIBE failed ({exc})"); continue
-              keep = {"mw", "price", "INITIALMW", "RRP", "date", "time", "DUID"}
-              cols = [(c[0], c[1]) for c in rows if c[0] in keep]
-              print(f"{t}: " + ", ".join(f"{n} {ty}" for n, ty in cols))
-          PY
       - if: always()
         uses: actions/upload-artifact@v4
         with:
