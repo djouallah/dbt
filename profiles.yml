@@ -84,11 +84,9 @@ aemo_electricity:
       # Fabric-side and not configurable here. The `|| dbt retry` in ci.yml heals the tail:
       # a fresh process gets a fresh session and re-runs only the failed models.
       # dbt-fabricspark requires spark_config.name (the Livy session/app name).
+      # NOTE: compute sizing is NOT configurable from here — Livy API sessions take the
+      # WORKSPACE Spark pool settings (the observed "initial executors = 1" launch is the
+      # pool's dynamic-allocation floor). To change launch size, change the workspace pool
+      # (e.g. disable dynamic allocation / raise the executor count), not this file.
       spark_config:
         name: dbt_aemo
-        # The session LAUNCHES with 1 executor ("Using initial executors = 1" in the Livy
-        # submit log — the pool's 1-9 is only the autoscale ceiling), so four concurrent fact
-        # folds shared a single 8-core node until autoscale deigned to ramp: fct_price sat 40
-        # minutes behind the FAIR scheduler. numExecutors feeds spark.executor.instances,
-        # which raises the LAUNCH size; autoscale can still grow toward the pool ceiling.
-        numExecutors: 4
