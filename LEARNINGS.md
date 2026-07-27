@@ -61,6 +61,45 @@ Filtering the raw line first (`WHERE value LIKE 'D,DREGION,%'`) fixes the second
 fixing the first — `WHERE` is evaluated ahead of the `SELECT` list, so the plan becomes
 Scan → Filter → Project. Useful on the path where the temp view isn't available.
 
+## One trailing space split the engines in half, for over a year
+
+`fct_summary` on `dwh` held ~250 more rows per date than a recomputation produced. It looked
+like write-path drift on dwh. It was the opposite: dwh was the only engine that was right.
+
+`dim_duid.DUID` contained `'ERB01 '` — one trailing space, straight from the AEMO registration
+CSV. One row out of 689. The engines then disagreed about what `s.DUID = d.DUID` means:
+
+| dialect | `'ERB01' = 'ERB01 '` |
+|---|---|
+| T-SQL | **TRUE** — ANSI pads on comparison |
+| DuckDB | FALSE |
+| Spark | FALSE |
+
+So `dwh` joined the unit and carried it into `fct_summary` — 113,959 rows, from 2025-03-04
+onward. `duckrun`, `iceberg` and `spark` dropped it silently and had **never** included it.
+A real generating unit was missing from three of four outputs for more than a year.
+
+Nothing failed. Nothing warned. The only symptom was a row-count gap that pointed at the wrong
+engine, because the neutral reader is DuckDB and therefore inherits DuckDB's equality.
+
+Two things this cost, worth remembering separately from the bug:
+
+- **Reading the count as the cause.** `spark` and `dwh` both reported `Got 7 results` and were
+  assumed to share a failure. They did not: spark's was ±0.0001 rounding, dwh's was 258 whole
+  rows. The counts matched only because both differ on the same 7-day window. Tightening the
+  row-count gate while loosening the sums is what finally separated them.
+- **Not querying the warehouse in its own dialect.** Reading dwh's `dim_duid` through Delta with
+  `WHERE DUID = 'ERB01'` returned nothing, which looked like the row was absent; the same query
+  in T-SQL returned 1. Both statements were true — DuckDB will not match a padded key. The
+  divergence *was* the finding, and it was invisible until the same question was asked twice in
+  two dialects. `dbt show --target dwh --inline "…"` reaches the warehouse from a laptop.
+
+Guarded by `tests/assert_duid_has_no_whitespace.sql`: no DUID may contain whitespace anywhere.
+It is a one-line assertion at the point the value enters, and it would have caught this on the
+day the CSV changed instead of a year later via a row-count gap on the wrong engine. The class
+is general — any string join key crossing these four engines needs the same guarantee, because
+padding is the one difference the dialects will not agree on and will never report.
+
 ## A neutral reader cannot grade a writer's rounding
 
 `assert_fct_summary_matches_recomputation` failed on `spark` and `dwh` while `duckrun` passed,

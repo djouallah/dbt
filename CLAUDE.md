@@ -148,6 +148,11 @@ still run it by hand to reproduce a CI failure. That is a debugging affordance, 
   `[DELTA_TABLE_NOT_FOUND]` on spark, `Catalog Error … does not exist` on duckrun. Use
   `DROP TABLE IF EXISTS <schema>.<name>`. A directory holding parquet with no `_delta_log` is
   the same trap from the other direction.
+- **String join keys must be whitespace-clean, and only a test can guarantee it.** T-SQL pads on
+  comparison (`'ERB01' = 'ERB01 '` is TRUE); DuckDB and Spark do not. One trailing space in
+  `dim_duid.DUID` put a real unit in `dwh` and in none of the other three, for a year, silently
+  — and the row-count gap it produced accused the one engine that was correct.
+  `assert_duid_has_no_whitespace` guards it; any new string key crossing engines needs the same.
 - **The neutral reader cannot grade another engine's rounding.** `DOUBLE → DECIMAL` tie-breaking
   differs per dialect — Spark HALF_UP, DuckDB HALF_EVEN, T-SQL a third — so a test asserting a
   DuckDB recomputation *exactly* equals a stored value can only ever pass for `duckrun`. The
