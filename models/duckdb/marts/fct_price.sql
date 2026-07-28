@@ -45,7 +45,10 @@ AND csv_filename NOT IN (SELECT DISTINCT file FROM {{ this }})
     incremental_strategy='insert' if target.name == 'duckrun' else 'merge',
     merge_clauses=none if target.name == 'duckrun' else {'when_matched': [{'action': 'do_nothing'}]},
     unique_key=['file', 'REGIONID', 'SETTLEMENTDATE','INTERVENTION'],
-    incremental_predicates=pending_file_predicate(pending_files),
+    partition_by=['month_key'] if target.name == 'duckrun' else none,
+    incremental_predicates=(['target.month_key = source.month_key']
+                            if target.name == 'duckrun'
+                            else pending_file_predicate(pending_files)),
     pre_hook="SET VARIABLE price_daily_paths = (SELECT COALESCE(NULLIF(list('{{ get_csv_archive_path() }}' || archive_path), []), ['']) FROM (SELECT archive_path FROM {{ ref('stg_csv_archive_log') }} WHERE source_type = 'daily'{% if is_incremental() %} AND csv_filename NOT IN (SELECT DISTINCT file FROM {{ this }}){% endif %} ORDER BY archive_path))"
 ) }}
 
@@ -119,7 +122,12 @@ SELECT
   {{ parse_filename('filename') }} AS file,
   CAST(SETTLEMENTDATE AS TIMESTAMPTZ) AS SETTLEMENTDATE,
   CAST(SETTLEMENTDATE AS DATE) AS DATE,
-  CAST(YEAR(CAST(SETTLEMENTDATE AS TIMESTAMP)) AS INT) AS YEAR
+  CAST(YEAR(CAST(SETTLEMENTDATE AS TIMESTAMP)) AS INT) AS YEAR{% if target.name == 'duckrun' %},
+  -- Monthly partition key (YYYYMM), the Delta partition column -- same expression as the duckrun
+  -- AEMO reference model. duckrun only; see fct_scada.sql for why iceberg does not get it.
+  CAST(YEAR(CAST(SETTLEMENTDATE AS TIMESTAMP)) AS INT) * 100
+    + CAST(MONTH(CAST(SETTLEMENTDATE AS TIMESTAMP)) AS INT) AS month_key
+{% endif %}
 FROM price_staging
 {% else %}
 SELECT * FROM {{ this }} WHERE FALSE

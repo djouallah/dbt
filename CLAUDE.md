@@ -110,36 +110,49 @@ Before changing a strategy, read the adapter's own source rather than assuming t
 what it does elsewhere. duckrun's lives in `dbt/adapters/duckrun/delta_plugin.py`; the Fabric ones
 in `dbt/include/fabric{,spark}/macros/materializations/models/incremental/`.
 
-### A keyed merge reads the target — prune it with LITERAL values or it reads all of it
+### A keyed merge reads the target, and on duckrun that means the table must be PARTITIONED
 
-Moving the facts off `append` made every run scan `fct_scada`/`fct_price` looking for key
-collisions. On OneLake that is a full-table parquet read: the duckrun leg died on a single GET
-that sat 212s and failed, three attempts running, while the other three engines passed.
+Moving the facts off `append` made every run scan the target looking for key collisions. The
+other three engines absorbed it (dwh 48s, iceberg 49s, spark 95s on `fct_scada`). duckrun did
+not, twice: first a OneLake GET that sat 212s and failed, then — after adding a pruning
+predicate — a run that died mid-merge with **no dbt error at all**, just a leaked-semaphore
+warning. No error line means the process was killed, not a query that failed. `fct_scada` is
+369,205,022 rows and duckrun's merge is memory bound.
 
-Measured against delta-rs, 60-file table, merging one new file:
+**The fix is `partition_by`, not a cleverer predicate.** Both duckrun AEMO reference models
+(`tests/integration_tests/aemo/models/marts/fct_{price,scada}.sql`) carry:
 
-| predicate | target files scanned |
-|---|---|
-| key only | 60 / 60 |
-| key + `target.DATE = source.DATE` | 60 / 60 |
-| key + `target.month_key = source.month_key` | 60 / 60 |
-| …same, table partitioned by `month_key` | 60 / 60 |
-| key + a **literal** filter | **0 / 60** |
+```jinja
+partition_by=['month_key'],
+incremental_predicates=['target.month_key = source.month_key'],
+```
 
-**A column-to-column predicate prunes nothing, and `partition_by` does not rescue it** — delta-rs
-cannot know the source's range when it chooses target files. Only literals prune. The duckrun
-integration-test model's `incremental_predicates=['target.month_key = source.month_key']` reads
-like the lever but is not what makes it fast; don't copy it expecting pruning.
+with `month_key = YEAR*100 + MONTH` in the SELECT. All four `models/duckdb/marts/fct_*` models
+now do the same on the duckrun branch.
 
-`macros/pending_file_predicate.sql` builds the real thing from the pending file names, which are
-already known at compile time: `IN (...)` up to 200 files, else `BETWEEN min AND max`. Because
-`file` leads every fact's `unique_key`, the predicate is *implied* by the merge ON clause — it
-removes no match the key would have made. The race is still caught: on a deliberate duplicate,
-1/60 files scanned and 0 rows inserted.
+Two things that cost real time here, worth not rediscovering:
 
-Write it with dbt's `DBT_INTERNAL_DEST` alias, never `target.`. dbt-duckdb (iceberg) builds its ON
-clause with `DBT_INTERNAL_DEST` and knows no `target` alias, so `target.file` fails that leg
-outright; duckrun rewrites `DBT_INTERNAL_DEST` → `target` itself before calling delta-rs.
+- **Partitioning is set at table creation.** `_store_overwrite` passes `partition_by` through
+  (`delta_plugin.py` 253→301); `_store_merge` does not, because a merge writes into whatever
+  partitioning already exists. Adding `partition_by` to a live table does nothing — the table
+  has to be dropped and rebuilt. All four duckrun facts were dropped for this.
+- **A column-to-column predicate does not prune target FILES.** Measured against delta-rs on a
+  60-file table merging one new file: key only, `target.DATE = source.DATE`,
+  `target.month_key = source.month_key`, and even the same with the table partitioned, all
+  scanned 60/60; only a *literal* filter reached 0/60. So do not reach for
+  `incremental_predicates` expecting file skipping — on duckrun its job is partition selection,
+  which is a different mechanism and is what bounds the memory.
+
+`macros/pending_file_predicate.sql` is the literal-value version, built from the pending file
+names known at compile time (`IN (...)` up to 200 files, else `BETWEEN min AND max`). It now
+serves the **iceberg** branch only. Because `file` leads every fact's `unique_key` the predicate
+is *implied* by the merge ON clause, so it removes no match the key would have made; on a
+deliberate duplicate it still scanned the 1 file that could collide and inserted 0 rows.
+
+Write that one with dbt's `DBT_INTERNAL_DEST` alias, never `target.` — dbt-duckdb builds its ON
+clause with `DBT_INTERNAL_DEST` and knows no `target` alias, so `target.file` fails the iceberg
+leg outright. duckrun is the opposite: its own aliases *are* `target`/`source`, which is why the
+partition predicate above is written that way and is duckrun-only.
 
 ## `fct_summary` must be a pure function of its inputs
 

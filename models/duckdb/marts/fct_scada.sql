@@ -7,6 +7,17 @@
 -- no-op gate and incremental_predicates, and config() needs the latter. Same single query
 -- that used to return only COUNT(*), so it costs no extra read of {{ this }}. See
 -- macros/pending_file_predicate.sql for why the predicate must carry literal file names.
+--
+-- fct_scada is the big one (369M rows), so it uses the same pruning pattern as the duckrun
+-- AEMO reference model (tests/integration_tests/aemo/models/marts/fct_scada.sql): the table is
+-- PARTITIONED on month_key and the merge carries a month_key predicate, so it touches only the
+-- partitions the incoming batch covers rather than the whole table.
+-- duckrun only. That reference project has a single target; this file also renders for iceberg,
+-- whose adapter takes no partition_by and uses DBT_INTERNAL_DEST/SOURCE aliases, so iceberg
+-- keeps the predicate it last ran green with.
+-- NOTE: partitioning is a physical layout change — the existing unpartitioned table must be
+-- DROPped (DROP TABLE, not a folder delete: dbt asks the catalog, so a deleted folder leaves
+-- is_incremental() true and the model emits DML against nothing) and rebuilt once.
 {%- set pending_files_query -%}
 SELECT csv_filename FROM {{ ref('stg_csv_archive_log') }}
 WHERE source_type = 'daily'
@@ -29,7 +40,10 @@ AND csv_filename NOT IN (SELECT DISTINCT file FROM {{ this }})
     incremental_strategy='insert' if target.name == 'duckrun' else 'merge',
     merge_clauses=none if target.name == 'duckrun' else {'when_matched': [{'action': 'do_nothing'}]},
     unique_key=['file', 'DUID', 'SETTLEMENTDATE','INTERVENTION'],
-    incremental_predicates=pending_file_predicate(pending_files),
+    partition_by=['month_key'] if target.name == 'duckrun' else none,
+    incremental_predicates=(['target.month_key = source.month_key']
+                            if target.name == 'duckrun'
+                            else pending_file_predicate(pending_files)),
     pre_hook="SET VARIABLE scada_daily_paths = (SELECT COALESCE(NULLIF(list('{{ get_csv_archive_path() }}' || archive_path), []), ['']) FROM (SELECT archive_path FROM {{ ref('stg_csv_archive_log') }} WHERE source_type = 'daily'{% if is_incremental() %} AND csv_filename NOT IN (SELECT DISTINCT file FROM {{ this }}){% endif %} ORDER BY archive_path))"
 ) }}
 
@@ -84,7 +98,14 @@ SELECT
   {{ parse_filename('filename') }} AS file,
   CAST(SETTLEMENTDATE AS TIMESTAMPTZ) AS SETTLEMENTDATE,
   CAST(SETTLEMENTDATE AS DATE) AS DATE,
-  CAST(YEAR(CAST(SETTLEMENTDATE AS TIMESTAMP)) AS INT) AS YEAR
+  CAST(YEAR(CAST(SETTLEMENTDATE AS TIMESTAMP)) AS INT) AS YEAR{% if target.name == 'duckrun' %},
+  -- Monthly partition key (YYYYMM), the Delta partition column -- same expression as the duckrun
+  -- AEMO reference model, and the same key dwh already carries. duckrun only: the iceberg table
+  -- was not dropped, so adding a column there would have to schema-evolve through the REST
+  -- catalog, which is where this project has repeatedly hit 400s.
+  CAST(YEAR(CAST(SETTLEMENTDATE AS TIMESTAMP)) AS INT) * 100
+    + CAST(MONTH(CAST(SETTLEMENTDATE AS TIMESTAMP)) AS INT) AS month_key
+{% endif %}
 FROM scada_staging
 {% else %}
 SELECT * FROM {{ this }} WHERE FALSE
