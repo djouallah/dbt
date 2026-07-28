@@ -1,13 +1,17 @@
 -- Staging table over the archive log the shared download notebook writes to the landing
 -- lakehouse (Files/csv_raw_archive_log.parquet). Every engine reads the log with SQL.
--- INCREMENTAL (append), not table/view: the DuckDB Iceberg catalog supports neither CREATE
--- VIEW nor the table materialization's temp-table RENAME, but it does CREATE TABLE AS +
--- INSERT. `append` (not `insert`) because `insert` is a duckrun-only strategy — dbt-duckdb
--- (the iceberg target) has no insert macro; append works on both and the WHERE below keeps
--- it idempotent (only rows for files not already logged).
+-- INCREMENTAL, not table/view: the DuckDB Iceberg catalog supports neither CREATE VIEW nor
+-- the table materialization's temp-table RENAME, but it does CREATE TABLE AS + INSERT.
+-- Insert-only on both targets, keyed on (source_type, source_filename) — duckrun spells that
+-- 'insert' (a duckrun-only strategy) and iceberg spells it merge + when_matched do_nothing,
+-- since dbt-duckdb has no insert macro. See the fct_price.sql header for the full reasoning.
+-- The WHERE below stays: it keeps the merge source to just the unlogged rows, and reading
+-- {{ this }} in the body puts the read and the commit on one snapshot.
 {{ config(
     materialized='incremental',
-    incremental_strategy='append',
+    incremental_strategy='insert' if target.name == 'duckrun' else 'merge',
+    merge_clauses=none if target.name == 'duckrun' else {'when_matched': [{'action': 'do_nothing'}]},
+    unique_key=['source_type', 'source_filename'],
     schema='landing'
 ) }}
 

@@ -1,13 +1,16 @@
 {{ config(
     materialized='incremental',
-    incremental_strategy='append',
+    incremental_strategy='merge',
+    unique_key=['[file]', '[REGIONID]', '[SETTLEMENTDATE]', '[INTERVENTION]'],
     schema='landing'
 ) }}
 
 {#-- Intraday price — reads the new price_today files. The file set comes from the archive log
      (new_source_files) and is passed to OPENROWSET as an EXPLICIT BULK (...) list, not a folder
      glob (which would re-read the whole archive each run). The list already excludes files in
-     {{ this }}, so the append stays idempotent at file grain. --#}
+     {{ this }}, but it is computed before the write, so merge on the natural key is the guard
+     against two overlapping runs both inserting the same file. See the fct_price.sql header for
+     why this merge cannot be insert-only on dbt-fabric. --#}
 
 {%- set read_cols = [
   'I','DISPATCH','PRICE','xx','SETTLEMENTDATE','RUNNO','REGIONID','DISPATCHINTERVAL','INTERVENTION','RRP',

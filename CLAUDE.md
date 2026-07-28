@@ -80,15 +80,35 @@ away.
 
 ## Incremental write strategies are per engine, and not interchangeable
 
+**Nothing writes with `append` any more, and nothing should go back to it.** Append has no
+write-time key check, so the only thing preventing duplicate rows was the *file selection* —
+`new_source_files` on dwh, `spark_new_files` on spark, the `SET VARIABLE` pre-hook on duckdb.
+That list is computed **before** the write. Two overlapping runs (a re-dispatch, a `dbt retry`
+racing a scheduled run) both see a file as new and both append it. The file lists all stay —
+they are what keeps the merge source small — but the key match is now the guard underneath.
+
+Every fact model is **insert-only** where the adapter can express it: the data is append-only,
+so a matched row never needs updating.
+
 | target | strategy | why not something else |
 |---|---|---|
-| `duckrun` | `merge` | `delete+insert` in this adapter is a fenced **full-table overwrite** — it materializes every surviving target row plus the batch into a DuckDB temp table, then overwrites. On a 143M-row table that is a full rewrite *every run*. `merge` goes through delta-rs, which prunes target files from the source's own stats. |
-| `iceberg` | `merge` + `when_matched: do_nothing` | The OneLake Iceberg REST catalog rejects a matched-UPDATE branch: `BadRequest 400`, one add-snapshot update per commit. Insert-only is sufficient because every input is append-only. |
-| `spark` | `merge` | — |
-| `dwh` | `delete+insert` | Real T-SQL DELETE+INSERT, cheap. Never `--full-refresh` here: on dbt-fabric that DROPs and recreates, which deadlocks Fabric's background stats maintenance, loses grants, and rebinds Direct Lake. Use `REBUILD_SUMMARY=1` instead. |
+| `duckrun` | `insert` on the facts, `merge` on `fct_summary` | `insert` *is* delta-rs insert-only merge (`insert_only=True`), OCC-fenced on the version the model read — a concurrent commit fails with `CommitFailedError` rather than duplicating. Not `merge` + `when_matched do_nothing`: duckrun's clause translator accepts only `update`/`delete` and **raises** on `do_nothing` (`_specs_from_merge_clauses`). Not `delete+insert`: in this adapter that is a fenced **full-table overwrite** — every surviving target row plus the batch into a DuckDB temp table, then overwrite. On a 143M-row table that is a full rewrite *every run*. |
+| `iceberg` | `merge` + `when_matched: do_nothing` | The OneLake Iceberg REST catalog rejects a matched-UPDATE branch: `BadRequest 400`, one add-snapshot update per commit. Omitting `when_matched` is not the same as insert-only — dbt-duckdb defaults it to update-by-name and draws the 400. |
+| `spark` | `merge` + `skip_matched_step=true` | dbt-fabricspark honours `skip_matched_step`, which omits the WHEN MATCHED branch entirely — genuinely insert-only, and it cannot hit a multiple-source-row match error because there is no matched clause. Requires `file_format='delta'`. `merge` and `append` take the identical path in that materialization (persistent `__dbt_tmp` view, then one DML), so switching strategy does not disturb the CSV read. |
+| `dwh` | `merge` on the facts, `delete+insert` on `fct_summary` | Insert-only is **not expressible** here: dbt-fabric merge is `default__get_merge_sql`, which always emits `WHEN MATCHED THEN UPDATE SET <every column>` (`merge_update_columns=[]` is falsy and falls through to all columns). For append-only data that branch is a semantic no-op — a matched row is rewritten with its own values — so it is correct, just not free. If the leg gets slow, fall back to `delete+insert` on `unique_key=['[file]']`. Bracket every key column: dbt interpolates them raw into the ON clause and `file`/`date` are reserved words. Never `--full-refresh` here: on dbt-fabric that DROPs and recreates, which deadlocks Fabric's background stats maintenance, loses grants, and rebinds Direct Lake. Use `REBUILD_SUMMARY=1` instead. |
+
+Concurrency is not equal across the four. duckrun, iceberg and spark check the commit, so a real
+overlap **fails loudly** instead of duplicating. Fabric Warehouse does not: under snapshot
+isolation two transactions overlapping in time can still both insert. Merge shrinks that window
+from *[compile-time file list → write]*, which is unbounded, down to the transaction overlap, and
+T-SQL offers nothing stronger without application locks Fabric DW lacks.
+`assert_fct_price_grain` / `assert_fct_scada_grain` are the detector for the remainder — both are
+scoped to a rolling 30-day window and deliberately **not** tagged `heavy`, because the CI test job
+runs `--exclude tag:heavy` and a tagged tripwire would never fire.
 
 Before changing a strategy, read the adapter's own source rather than assuming the name means
-what it does elsewhere. duckrun's lives in `dbt/adapters/duckrun/delta_plugin.py`.
+what it does elsewhere. duckrun's lives in `dbt/adapters/duckrun/delta_plugin.py`; the Fabric ones
+in `dbt/include/fabric{,spark}/macros/materializations/models/incremental/`.
 
 ## `fct_summary` must be a pure function of its inputs
 

@@ -1,12 +1,16 @@
 {{ config(
     materialized='incremental',
-    incremental_strategy='append',
-    unique_key='date'
+    incremental_strategy='merge',
+    unique_key=['[date]']
 ) }}
 
 -- One-off, fixed calendar dimension. Built in full on the first run; once the table
 -- exists, every later run selects nothing (WHERE 1=0) so it's a no-op — dbt's idiom
--- for "create if not exists, otherwise skip".
+-- for "create if not exists, otherwise skip". merge rather than append is uniformity
+-- with the rest of the project rather than a fix: the source is empty on every
+-- incremental run, so the statement matches nothing and costs nothing. The key is a
+-- one-element LIST, not a scalar — a scalar routes through dbt's equals() macro,
+-- the list form emits a plain `=` — and it is bracketed because `date` is reserved.
 --
 -- DuckDB's generate_series(...INTERVAL 1 DAY) has no T-SQL equivalent that survives
 -- dbt-fabric's subquery wrapping (OPTION(MAXRECURSION) can't live in a derived table),

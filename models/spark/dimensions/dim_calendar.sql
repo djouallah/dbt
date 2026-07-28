@@ -1,9 +1,13 @@
 -- Calendar dimension. Spark builds the date range with sequence()+explode() (the
--- DuckDB generate_series() equivalent). Idempotent via the file-level style NOT IN filter.
+-- DuckDB generate_series() equivalent). Insert-only merge on date, with the NOT IN filter
+-- below kept so the merge source stays empty on a steady-state run. Was 'append' with an
+-- inert unique_key (append ignores it); ~3k rows, so the key match costs nothing.
 {{ config(
     materialized='incremental',
+    incremental_strategy='merge',
+    file_format='delta',
     unique_key='date',
-    incremental_strategy='append'
+    skip_matched_step=true
 ) }}
 
 SELECT

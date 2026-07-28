@@ -54,9 +54,24 @@
      by Fabric. So temp is forced, which is exactly why it only works on the CTAS path. --#}
 {%- set daily_root = get_csv_archive_path() ~ '/daily' -%}
 {%- set raw_view = 'raw_daily_price' -%}
+{#-- Insert-only merge, not append. skip_matched_step drops the WHEN MATCHED branch entirely
+     (dbt-fabricspark honours it in fabricspark__get_merge_sql), so this is MERGE ... WHEN NOT
+     MATCHED THEN INSERT and nothing else -- the right shape for append-only data, and it
+     cannot hit a multiple-source-row match error because there is no matched clause.
+
+     Why not append: spark_new_files() below excludes files already in {{ this }}, but that
+     list is computed BEFORE the write. Two overlapping runs both see a file as new and both
+     append it. The key match is the write-time guard underneath the file list.
+
+     merge and append take the identical path in this materialization -- the compiled SQL
+     becomes a persistent __dbt_tmp view either way, and only the DML that follows differs --
+     so the CSV read below is untouched by this. --#}
 {{ config(
     materialized='incremental',
-    incremental_strategy='append',
+    incremental_strategy='merge',
+    file_format='delta',
+    unique_key=['file', 'REGIONID', 'SETTLEMENTDATE', 'INTERVENTION'],
+    skip_matched_step=true,
     pre_hook=(none if is_incremental() else
       "CREATE OR REPLACE TEMPORARY VIEW " ~ raw_view ~ " (" ~ view_schema ~ ")"
       ~ " USING csv OPTIONS (path '" ~ daily_root ~ "', header 'true', mode 'PERMISSIVE')")
@@ -68,7 +83,7 @@
 {#-- Plain (non-trimming) tags: {%- -%} here would eat the newline that ends the depends_on
      comment above and glue `WITH raw AS (` onto it, commenting out the CTE header. --#}
 {% if is_incremental() and new_files | length == 0 %}
-{#-- No new daily files this run: compile to a zero-row no-op (append inserts nothing). --#}
+{#-- No new daily files this run: compile to a zero-row no-op (the merge source is empty). --#}
 SELECT * FROM {{ this }} WHERE 1 = 0
 {% elif not is_incremental() %}
 {#-- CTAS path: read the temp view the pre_hook built. Real CSV datasource, so the columns

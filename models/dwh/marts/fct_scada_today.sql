@@ -1,13 +1,17 @@
 {{ config(
     materialized='incremental',
-    incremental_strategy='append',
+    incremental_strategy='merge',
+    unique_key=['[file]', '[DUID]', '[SETTLEMENTDATE]'],
     schema='landing'
 ) }}
 
 {#-- Intraday SCADA — reads the new scada_today files. The file set comes from the archive log
      (new_source_files) and is passed to OPENROWSET as an EXPLICIT BULK (...) list, not a folder
      glob (~288 small files land per day; globbing would re-read the whole archive each run). The
-     list already excludes files in {{ this }}, so the append stays idempotent at file grain. --#}
+     list already excludes files in {{ this }}, but it is computed before the write, so merge on
+     the natural key is the guard against two overlapping runs both inserting the same file. No
+     INTERVENTION in the key: this feed has no such column. See the fct_price.sql header for why
+     this merge cannot be insert-only on dbt-fabric. --#}
 
 {%- set read_cols = [
   'I','DISPATCH','UNIT_SCADA','xx','SETTLEMENTDATE','DUID','SCADAVALUE','LASTCHANGED'

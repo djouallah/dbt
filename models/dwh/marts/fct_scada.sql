@@ -1,15 +1,17 @@
 {{ config(
     materialized='incremental',
-    incremental_strategy='append',
+    incremental_strategy='merge',
+    unique_key=['[file]', '[DUID]', '[SETTLEMENTDATE]', '[INTERVENTION]'],
     schema='landing'
 ) }}
 
 {#-- Reads the new AEMO daily files, filtering to the DUNIT SCADA records. The set of files is
      resolved from the archive log (new_source_files) and passed to OPENROWSET as an EXPLICIT
-     BULK (...) list — NOT a folder glob, which would re-read the whole archive every run. append
-     stays idempotent at file grain: the file list already excludes anything in {{ this }} (see
-     fct_price for the full rationale on why this replaces duckrun's safeappend). No partition_by
-     in Fabric; month_key kept as a plain column. --#}
+     BULK (...) list — NOT a folder glob, which would re-read the whole archive every run. That
+     list still does the selection, but it is computed before the write, so merge on the natural
+     key is what actually guards against two overlapping runs both inserting the same file. See
+     the fct_price.sql header for why this merge cannot be insert-only on dbt-fabric, and for the
+     delete+insert fallback. No partition_by in Fabric; month_key kept as a plain column. --#}
 
 {%- set read_cols = [
   'I','UNIT','XX','VERSION','SETTLEMENTDATE','RUNNO','DUID','INTERVENTION','DISPATCHMODE','AGCSTATUS',
@@ -27,7 +29,7 @@
 
 {%- set new_files = new_source_files('daily', this if is_incremental() else none) -%}
 {%- if is_incremental() and new_files | length == 0 -%}
-{#-- No new daily files this run: compile to a zero-row no-op (append inserts nothing). --#}
+{#-- No new daily files this run: compile to a zero-row no-op (the merge source is empty). --#}
 SELECT * FROM {{ this }} WHERE 1 = 0
 {%- else -%}
 SELECT

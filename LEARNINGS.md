@@ -134,8 +134,10 @@ Ruled out with measurements along the way, each of which looked plausible first:
 
 - **Duplicate rows from `append`.** `fct_scada` for one date: 163,295 rows, 2 source files,
   **0** duplicate `(DUID, SETTLEMENTDATE)` keys and **0** keys with differing values — identical
-  on both engines. (`fct_scada`/`fct_price` do use `append`, not `merge`, on duckrun and spark;
-  the file-level `NOT IN` filter is what keeps that safe, and it assumes dbt is the only writer.)
+  on both engines. (At the time `fct_scada`/`fct_price` did use `append` on duckrun and spark,
+  with the file-level `NOT IN` filter as the only guard — which assumes dbt is the only writer.
+  That assumption is what later moved every fact model onto a keyed insert-only strategy; the
+  measurement above still stands, and is the evidence that the merge keys are unique.)
 - **A stored-type mismatch.** Both lakehouses: `mw`/`price` `DECIMAL(18,4)`, `INITIALMW`/`RRP`
   `DOUBLE`, `SETTLEMENTDATE` `TIMESTAMP WITH TIME ZONE`. Byte-identical schemas.
 - **The spark CSV rewrite.** `dwh` shares no model code with `models/spark/` and fails with the

@@ -1,10 +1,11 @@
--- Insert-only merge (WHEN MATCHED THEN DO NOTHING): every commit stays a single
--- append snapshot -- the OneLake catalog rejects multi-snapshot commits (see the
--- fct_summary.sql header) -- while re-processed files dedupe on the unique_key
--- instead of double-inserting.
+-- Insert-only on both targets: matched rows are left alone, so every commit stays a single
+-- append snapshot, while a re-processed file dedupes on the unique_key instead of
+-- double-inserting. duckrun spells that 'insert', iceberg spells it merge + when_matched
+-- do_nothing -- see the fct_price.sql header for why the two cannot be written the same way,
+-- and for why neither is 'append'.
 {{ config(
     materialized='incremental',
-    incremental_strategy='append' if target.name == 'duckrun' else 'merge',
+    incremental_strategy='insert' if target.name == 'duckrun' else 'merge',
     merge_clauses=none if target.name == 'duckrun' else {'when_matched': [{'action': 'do_nothing'}]},
     unique_key=['file', 'DUID', 'SETTLEMENTDATE','INTERVENTION'],
     pre_hook="SET VARIABLE scada_daily_paths = (SELECT COALESCE(NULLIF(list('{{ get_csv_archive_path() }}' || archive_path), []), ['']) FROM (SELECT archive_path FROM {{ ref('stg_csv_archive_log') }} WHERE source_type = 'daily'{% if is_incremental() %} AND csv_filename NOT IN (SELECT DISTINCT file FROM {{ this }}){% endif %} ORDER BY archive_path))"

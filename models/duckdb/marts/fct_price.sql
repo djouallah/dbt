@@ -1,10 +1,24 @@
--- Insert-only merge (WHEN MATCHED THEN DO NOTHING): every commit stays a single
--- append snapshot -- the OneLake catalog rejects multi-snapshot commits (see the
--- fct_summary.sql header) -- while re-processed files dedupe on the unique_key
--- instead of double-inserting.
+-- Insert-only on both targets: matched rows are left alone, so every commit stays a
+-- single append snapshot -- the OneLake catalog rejects multi-snapshot commits (see the
+-- fct_summary.sql header) -- while a re-processed file dedupes on the unique_key instead
+-- of double-inserting.
+--
+-- Two spellings for the same semantics, because the adapters expose it differently:
+--   duckrun -> incremental_strategy='insert'. delta-rs insert-only merge, and the commit
+--     is OCC-fenced on the version the model read, so a concurrent writer loses the race
+--     with CommitFailedError instead of appending a duplicate. NOT merge_clauses
+--     do_nothing: duckrun's clause translator accepts only 'update'/'delete' for
+--     when_matched and raises on 'do_nothing' (delta_plugin.py, _specs_from_merge_clauses).
+--   iceberg -> merge + when_matched do_nothing, which dbt-duckdb does support. Omitting
+--     when_matched would default to update-by-name and draw the REST catalog's 400.
+--
+-- This is NOT append. The pre_hook file list already excludes ingested files, but it is
+-- computed before the write, so two overlapping runs both see a file as new and both
+-- append it. The key match is the guard underneath that; the file list stays as the thing
+-- that keeps the merge source small.
 {{ config(
     materialized='incremental',
-    incremental_strategy='append' if target.name == 'duckrun' else 'merge',
+    incremental_strategy='insert' if target.name == 'duckrun' else 'merge',
     merge_clauses=none if target.name == 'duckrun' else {'when_matched': [{'action': 'do_nothing'}]},
     unique_key=['file', 'REGIONID', 'SETTLEMENTDATE','INTERVENTION'],
     pre_hook="SET VARIABLE price_daily_paths = (SELECT COALESCE(NULLIF(list('{{ get_csv_archive_path() }}' || archive_path), []), ['']) FROM (SELECT archive_path FROM {{ ref('stg_csv_archive_log') }} WHERE source_type = 'daily'{% if is_incremental() %} AND csv_filename NOT IN (SELECT DISTINCT file FROM {{ this }}){% endif %} ORDER BY archive_path))"

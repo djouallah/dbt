@@ -1,9 +1,10 @@
 -- DUID dimension (Spark). The reference CSVs are headered, so register them as temp views
--- (USING csv, header+inferSchema) in pre_hooks, then join. merge upsert on DUID.
+-- (USING csv, header+inferSchema) in pre_hooks, then join. Full table replace every run --
+-- atomic, so no concurrent-writer duplicate risk, and attribute changes flow through. It
+-- previously also carried incremental_strategy='merge' and unique_key, which materialized
+-- ='table' silently ignores; they are gone rather than left to describe a merge that never ran.
 {{ config(
     materialized='table',
-    incremental_strategy='merge',
-    unique_key=['DUID'],
     pre_hook=[
       "CREATE OR REPLACE TEMPORARY VIEW duid_data USING csv OPTIONS (path '" ~ get_csv_archive_path() ~ "/duid/duid_data.csv', header 'true', inferSchema 'true')",
       "CREATE OR REPLACE TEMPORARY VIEW facilities USING csv OPTIONS (path '" ~ get_csv_archive_path() ~ "/duid/facilities.csv', header 'true', inferSchema 'true')",

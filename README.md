@@ -57,10 +57,12 @@ intraday facts `fct_price[_today]`, `fct_scada[_today]` → `fct_summary` (the P
 `(date, time, DUID)` grain joining generation to price). Every engine emits this identical set of
 tables.
 
-Each engine keeps the incremental strategy that actually fits it — e.g. the DuckDB models use an
-insert-only `merge` (the OneLake Iceberg catalog rejects multi-snapshot commits), the Spark
-models use `append` with a file-level filter. **De-duplication removed the copy-paste, not the
-real engine differences.**
+Every fact model writes with a keyed, insert-only strategy — never `append`, which has no
+write-time key check and lets two overlapping runs both insert the same file. Each engine spells
+that differently because the adapters differ: duckrun `insert`, iceberg `merge` +
+`when_matched: do_nothing` (its catalog rejects multi-snapshot commits), spark `merge` +
+`skip_matched_step`, and dwh a plain `merge`, the one adapter that cannot drop the matched
+branch. **De-duplication removed the copy-paste, not the real engine differences.**
 
 ## Run it
 

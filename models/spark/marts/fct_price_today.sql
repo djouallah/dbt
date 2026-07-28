@@ -19,9 +19,14 @@
 {%- set not_double = ['I','DISPATCH','PRICE','xx','SETTLEMENTDATE','REGIONID','LASTCHANGED','PRICE_STATUS','OCD_STATUS','MII_STATUS'] -%}
 {%- set view_schema %}{% for c in csv_cols %}`{{ c }}` STRING{{ ', ' if not loop.last }}{% endfor %}{% endset %}
 {#-- No pre-created raw object at all — see the note in fct_scada.sql. --#}
+{#-- Insert-only merge, not append -- skip_matched_step drops the WHEN MATCHED branch. See the
+     fct_price.sql header for why. --#}
 {{ config(
     materialized='incremental',
-    incremental_strategy='append'
+    incremental_strategy='merge',
+    file_format='delta',
+    unique_key=['file', 'REGIONID', 'SETTLEMENTDATE', 'INTERVENTION'],
+    skip_matched_step=true
 ) }}
 
 -- depends_on: {{ ref('stg_csv_archive_log') }}
@@ -30,7 +35,7 @@
 {#-- Plain (non-trimming) tags: {%- -%} here would eat the newline that ends the depends_on
      comment above and glue `WITH raw AS (` onto it, commenting out the CTE header. --#}
 {% if is_incremental() and new_files | length == 0 %}
-{#-- No new intraday files this run: compile to a zero-row no-op (append inserts nothing). --#}
+{#-- No new intraday files this run: compile to a zero-row no-op (the merge source is empty). --#}
 SELECT * FROM {{ this }} WHERE 1 = 0
 {% else %}
 WITH raw AS (

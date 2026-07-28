@@ -35,9 +35,14 @@
      persistent __dbt_tmp view, which may not, so it keeps from_csv over text.`path`. --#}
 {%- set daily_root = get_csv_archive_path() ~ '/daily' -%}
 {%- set raw_view = 'raw_daily_scada' -%}
+{#-- Insert-only merge, not append -- skip_matched_step drops the WHEN MATCHED branch. See the
+     fct_price.sql header for why, and for why the CSV read below is unaffected. --#}
 {{ config(
     materialized='incremental',
-    incremental_strategy='append',
+    incremental_strategy='merge',
+    file_format='delta',
+    unique_key=['file', 'DUID', 'SETTLEMENTDATE', 'INTERVENTION'],
+    skip_matched_step=true,
     pre_hook=(none if is_incremental() else
       "CREATE OR REPLACE TEMPORARY VIEW " ~ raw_view ~ " (" ~ view_schema ~ ")"
       ~ " USING csv OPTIONS (path '" ~ daily_root ~ "', header 'true', mode 'PERMISSIVE')")
@@ -49,7 +54,7 @@
 {#-- Plain (non-trimming) tags: {%- -%} here would eat the newline that ends the depends_on
      comment above and glue `WITH raw AS (` onto it, commenting out the CTE header. --#}
 {% if is_incremental() and new_files | length == 0 %}
-{#-- No new daily files this run: compile to a zero-row no-op (append inserts nothing). --#}
+{#-- No new daily files this run: compile to a zero-row no-op (the merge source is empty). --#}
 SELECT * FROM {{ this }} WHERE 1 = 0
 {% elif not is_incremental() %}
 {#-- CTAS path: columns arrive already split from the temp view, so no `r.` prefix, and the

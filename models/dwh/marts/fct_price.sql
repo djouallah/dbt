@@ -1,17 +1,29 @@
 {{ config(
     materialized='incremental',
-    incremental_strategy='append',
+    incremental_strategy='merge',
+    unique_key=['[file]', '[REGIONID]', '[SETTLEMENTDATE]', '[INTERVENTION]'],
     schema='landing'
 ) }}
 
 {#-- Reads the new AEMO daily files, filtering to the DREGION price records. The file set comes
      from the archive log (new_source_files) and is passed to OPENROWSET as an EXPLICIT BULK (...)
-     list — NOT a folder glob, which would re-read the whole archive every run. append (not merge):
-     the file list already excludes anything in {{ this }}, so dedup is done by file selection — a
-     key-join merge would be redundant work that scans the target. The duckrun original used
-     'safeappend' (DuckDB compare-and-swap); Fabric has no such thing, but the explicit new-file
-     list keeps the append idempotent at file grain. No partition_by — Fabric Warehouse has no
-     table partitioning; month_key is kept as a plain column. --#}
+     list — NOT a folder glob, which would re-read the whole archive every run.
+
+     merge, not append. The file list already excludes anything in {{ this }}, but it is computed
+     BEFORE the write, so two overlapping runs both see a file as new and both append it — silent
+     duplicates. The key match is the write-time guard; the file list stays as the thing that
+     keeps the merge source small.
+
+     Unlike spark, this cannot be insert-only: dbt-fabric merge is default__get_merge_sql, which
+     always emits WHEN MATCHED THEN UPDATE SET <every column> (merge_update_columns=[] is falsy
+     and falls through to all columns). For append-only data that branch is a semantic no-op — a
+     matched row is rewritten with its own identical values — so this is correct, just not free.
+     If the leg gets slow, the fallback is delete+insert on unique_key=['[file]'], the strategy
+     fct_summary already uses here.
+
+     Key columns are bracketed: dbt interpolates them raw into the ON clause and `file` is a
+     reserved word. No partition_by — Fabric Warehouse has no table partitioning; month_key is
+     kept as a plain column. --#}
 
 {%- set read_cols = [
   'I','UNIT','XX','VERSION','SETTLEMENTDATE','RUNNO','REGIONID','INTERVENTION','RRP','EEP',
@@ -45,7 +57,7 @@
 
 {%- set new_files = new_source_files('daily', this if is_incremental() else none) -%}
 {%- if is_incremental() and new_files | length == 0 -%}
-{#-- No new daily files this run: compile to a zero-row no-op (append inserts nothing). --#}
+{#-- No new daily files this run: compile to a zero-row no-op (the merge source is empty). --#}
 SELECT * FROM {{ this }} WHERE 1 = 0
 {%- else -%}
 SELECT
