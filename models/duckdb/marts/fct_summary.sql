@@ -28,10 +28,20 @@
 --     which insert repairs. (Emitting deletes is NOT the blocker — XTable converts
 --     Iceberg positional deletes to Delta deletion vectors fine.)
 --
--- Residual, deliberate: neither path DELETES a stored row that the recomputation no
--- longer produces. That cannot happen while fct_scada/fct_price/dim_duid stay
--- append-only (rows only ever appear). assert_fct_summary_matches_recomputation is the
--- tripwire if it ever does; `dbt run --full-refresh -s fct_summary` is the repair.
+-- Neither merge path DELETES a stored row the recomputation no longer produces, and that
+-- is NOT free just because the inputs are append-only — the assumption this header used
+-- to make. No input row has to disappear: a row's PRODUCING BRANCH switches from intraday
+-- to daily when the daily file lands, and the two branches read different AEMO tables
+-- covering DIFFERENT UNIT UNIVERSES. fct_scada (DISPATCH_UNIT_SOLUTION) has 644 DUIDs;
+-- fct_scada_today (DISPATCH_UNIT_SCADA) has 406, of which 26 non-scheduled units
+-- (ROWALLAN, WAUBRAWF, ROYALLA1, GERMCRK, ...) have ZERO rows in fct_scada across all
+-- 369M — they publish telemetry but are never dispatched. The intraday branch wrote them;
+-- once the date settled nothing could reproduce them, so they became permanent orphans:
+-- 5,861 rows on one date, every date, on all three merge engines. dwh only looked healthy
+-- because delete+insert on [date] can retract; it was not more correct.
+-- Hence dispatch_duids below: the intraday branch may only emit units the daily branch
+-- will be able to reproduce. assert_fct_summary_matches_recomputation applies the SAME
+-- filter and is the tripwire; the two must always change together.
 {{ config(
     materialized='incremental',
     incremental_strategy='merge',
@@ -49,6 +59,17 @@
 {%- set scoped = is_incremental() %}
 
 WITH
+-- The unit universe the DAILY branch can reproduce. Gates the intraday branch so it never
+-- emits a unit that will be unreproducible once the date settles (see the header).
+-- Deliberately UNBOUNDED, not a trailing window: fct_scada is append-only, so this set only
+-- ever GROWS and can never orphan a row it previously admitted. A rolling window would
+-- reintroduce the same bug from the other side — a unit ageing out of the window turns its
+-- already-written intraday rows into orphans, which merge still cannot delete.
+-- Outside the `scoped` block on purpose: a --full-refresh runs the intraday branch too and
+-- must apply the identical filter.
+dispatch_duids AS (
+  SELECT DISTINCT DUID FROM {{ ref('fct_scada') }}
+),
 {% if scoped %}
 -- Dates whose stored content could differ from a clean recomputation. Everything older
 -- is settled: its daily file has landed and been folded in, so recomputing it would
@@ -112,6 +133,8 @@ daily_summary AS (
   WHERE
     s.INITIALMW <> 0
     AND p.INTERVENTION = 0
+    -- Only units the daily branch will be able to reproduce once this date settles.
+    AND s.DUID IN (SELECT DUID FROM dispatch_duids)
     AND s.SETTLEMENTDATE > (SELECT MAX(CAST(SETTLEMENTDATE AS TIMESTAMPTZ)) FROM {{ ref('fct_scada') }})
   GROUP BY ALL
 )

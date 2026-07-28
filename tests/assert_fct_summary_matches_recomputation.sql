@@ -17,6 +17,14 @@ WITH bounds AS (
   FROM {{ ref('fct_scada') }} s
 ),
 
+-- Must stay byte-for-byte equivalent to fct_summary's own dispatch_duids CTE: the model
+-- gates its intraday branch on this set, so a test that did not would fail by construction.
+-- The two change together or not at all. Rationale (26 non-scheduled units that publish
+-- SCADA telemetry but are never dispatched) is in the model header.
+dispatch_duids AS (
+  SELECT DISTINCT DUID FROM {{ ref('fct_scada') }}
+),
+
 -- The model's own grain-level logic, recomputed from upstream (same joins, same
 -- filters, same casts as fct_summary's full-refresh branch).
 recomputed AS (
@@ -52,6 +60,8 @@ recomputed AS (
   WHERE
     s.INITIALMW <> 0
     AND p.INTERVENTION = 0
+    -- Mirrors the model's intraday gate. Without it this test fails by construction.
+    AND s.DUID IN (SELECT DUID FROM dispatch_duids)
     AND s.SETTLEMENTDATE > (SELECT daily_ts FROM bounds)
   GROUP BY ALL
 ),

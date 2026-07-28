@@ -11,7 +11,14 @@
      recreates the table (a Sch-M DDL swap that deadlocks Fabric's background stats
      maintenance, loses grants, and rebinds Direct Lake every run). The full-history
      rebuild lever is REBUILD_SUMMARY=1 / --vars 'rebuild_summary: true', which keeps the
-     same delete+insert write path and just emits every date. --#}
+     same delete+insert write path and just emits every date.
+
+     The intraday branch is gated on dispatch_duids because the two branches read AEMO
+     tables with DIFFERENT UNIT UNIVERSES: 26 non-scheduled units publish SCADA telemetry
+     but have zero rows in fct_scada ever. This engine's delete+insert on [date] retracted
+     them for free, which is why only the three merge engines went red — dwh was not more
+     correct, just able to rewrite a whole date. Filter it here too so all four agree.
+     See the duckdb version for the full story. --#}
 {{ config(
     materialized='incremental',
     incremental_strategy='delete+insert',
@@ -31,6 +38,13 @@
 {%- set scoped = is_incremental() and not rebuild %}
 
 WITH
+-- The unit universe the DAILY branch can reproduce. Deliberately UNBOUNDED, not a trailing
+-- window: fct_scada is append-only, so this set only ever GROWS and can never orphan a row
+-- it previously admitted. Outside the `scoped` block on purpose — a REBUILD_SUMMARY run
+-- emits the intraday branch too and must apply the identical filter.
+dispatch_duids AS (
+  SELECT DISTINCT DUID FROM {{ ref('fct_scada') }}
+),
 {% if scoped %}
 -- Dates whose stored content could differ from a clean recomputation; everything older
 -- is settled. The trailing window must stay >= the window
@@ -99,6 +113,8 @@ daily_summary AS (
   WHERE
     s.INITIALMW <> 0
     AND p.INTERVENTION = 0
+    -- Only units the daily branch will be able to reproduce once this date settles.
+    AND s.DUID IN (SELECT DUID FROM dispatch_duids)
     AND s.SETTLEMENTDATE > (SELECT c FROM scada_cutoff)
   GROUP BY s.[DATE], DATEPART(HOUR, s.SETTLEMENTDATE) * 100 + DATEPART(MINUTE, s.SETTLEMENTDATE), s.DUID
 )

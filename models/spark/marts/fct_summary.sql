@@ -9,6 +9,11 @@
 -- repaired. Now every run emits the COMPLETE recomputation for exactly the dates whose
 -- stored content could still be stale, and the merge reconciles that batch key by key.
 -- No cutoff watermark, no dependence on this engine's run history.
+--
+-- The intraday branch is gated on dispatch_duids because the two branches read AEMO tables
+-- with DIFFERENT UNIT UNIVERSES: 26 non-scheduled units publish SCADA telemetry but have
+-- zero rows in fct_scada ever, so rows written for them became permanent orphans once the
+-- date settled and merge could not delete them. See the duckdb version for the full story.
 {{ config(
     materialized='incremental',
     incremental_strategy='merge',
@@ -25,6 +30,13 @@
 {%- set scoped = is_incremental() %}
 
 WITH
+-- The unit universe the DAILY branch can reproduce. Deliberately UNBOUNDED, not a trailing
+-- window: fct_scada is append-only, so this set only ever GROWS and can never orphan a row
+-- it previously admitted. Outside the `scoped` block on purpose — a --full-refresh runs the
+-- intraday branch too and must apply the identical filter.
+dispatch_duids AS (
+  SELECT DISTINCT DUID FROM {{ ref('fct_scada') }}
+),
 {% if scoped %}
 -- Dates whose stored content could differ from a clean recomputation; everything older
 -- is settled. The trailing window must stay >= the window
@@ -83,6 +95,8 @@ daily_summary AS (
   WHERE
     s.INITIALMW <> 0
     AND p.INTERVENTION = 0
+    -- Only units the daily branch will be able to reproduce once this date settles.
+    AND s.DUID IN (SELECT DUID FROM dispatch_duids)
     AND s.SETTLEMENTDATE > (SELECT MAX(CAST(SETTLEMENTDATE AS TIMESTAMP)) FROM {{ ref('fct_scada') }})
   GROUP BY ALL
 )
