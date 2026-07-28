@@ -110,6 +110,37 @@ Before changing a strategy, read the adapter's own source rather than assuming t
 what it does elsewhere. duckrun's lives in `dbt/adapters/duckrun/delta_plugin.py`; the Fabric ones
 in `dbt/include/fabric{,spark}/macros/materializations/models/incremental/`.
 
+### A keyed merge reads the target — prune it with LITERAL values or it reads all of it
+
+Moving the facts off `append` made every run scan `fct_scada`/`fct_price` looking for key
+collisions. On OneLake that is a full-table parquet read: the duckrun leg died on a single GET
+that sat 212s and failed, three attempts running, while the other three engines passed.
+
+Measured against delta-rs, 60-file table, merging one new file:
+
+| predicate | target files scanned |
+|---|---|
+| key only | 60 / 60 |
+| key + `target.DATE = source.DATE` | 60 / 60 |
+| key + `target.month_key = source.month_key` | 60 / 60 |
+| …same, table partitioned by `month_key` | 60 / 60 |
+| key + a **literal** filter | **0 / 60** |
+
+**A column-to-column predicate prunes nothing, and `partition_by` does not rescue it** — delta-rs
+cannot know the source's range when it chooses target files. Only literals prune. The duckrun
+integration-test model's `incremental_predicates=['target.month_key = source.month_key']` reads
+like the lever but is not what makes it fast; don't copy it expecting pruning.
+
+`macros/pending_file_predicate.sql` builds the real thing from the pending file names, which are
+already known at compile time: `IN (...)` up to 200 files, else `BETWEEN min AND max`. Because
+`file` leads every fact's `unique_key`, the predicate is *implied* by the merge ON clause — it
+removes no match the key would have made. The race is still caught: on a deliberate duplicate,
+1/60 files scanned and 0 rows inserted.
+
+Write it with dbt's `DBT_INTERNAL_DEST` alias, never `target.`. dbt-duckdb (iceberg) builds its ON
+clause with `DBT_INTERNAL_DEST` and knows no `target` alias, so `target.file` fails that leg
+outright; duckrun rewrites `DBT_INTERNAL_DEST` → `target` itself before calling delta-rs.
+
 ## `fct_summary` must be a pure function of its inputs
 
 It once held three different row counts across four engines while every input table was in
