@@ -24,15 +24,25 @@ AND csv_filename NOT IN (SELECT DISTINCT file FROM {{ this }})
 {%- endif -%}
 {%- set has_files = pending_files is none or pending_files | length > 0 -%}
 
+{#-- duckrun gets BOTH predicates. The literal file predicate is the only thing that prunes
+    target FILES: a column-to-column predicate scans 60/60 even when the table is partitioned
+    (measured -- see macros/pending_file_predicate.sql), so month_key alone "reads like the lever
+    but is not the thing doing the work". Shipping it alone is what got fct_scada OOM-killed on a
+    122 GiB notebook. month_key stays because it selects the partitions the write lands in.
+    Safe to AND them: every key match shares SETTLEMENTDATE, hence month_key, and the file name
+    leads the unique_key -- so both are implied by the ON clause and remove no match it would make.
+    The macro emits DBT_INTERNAL_DEST and duckrun rewrites that to `target` itself, so one
+    spelling serves both adapters. --#}
+{%- set file_predicate = pending_file_predicate(pending_files) -%}
+{%- set duckrun_predicates = (file_predicate if file_predicate else []) + ['target.month_key = source.month_key'] %}
+
 {{ config(
     materialized='incremental',
     incremental_strategy='insert' if target.name == 'duckrun' else 'merge',
     merge_clauses=none if target.name == 'duckrun' else {'when_matched': [{'action': 'do_nothing'}]},
     unique_key=['file', 'REGIONID', 'SETTLEMENTDATE','INTERVENTION'],
     partition_by=['month_key'] if target.name == 'duckrun' else none,
-    incremental_predicates=(['target.month_key = source.month_key']
-                            if target.name == 'duckrun'
-                            else pending_file_predicate(pending_files)),
+    incremental_predicates=(duckrun_predicates if target.name == 'duckrun' else file_predicate),
     pre_hook="SET VARIABLE price_today_paths = (SELECT COALESCE(NULLIF(list('{{ get_csv_archive_path() }}' || archive_path), []), ['']) FROM (SELECT archive_path FROM {{ ref('stg_csv_archive_log') }} WHERE source_type = 'price_today'{% if is_incremental() %} AND csv_filename NOT IN (SELECT DISTINCT file FROM {{ this }}){% endif %} ORDER BY archive_path))"
 ) }}
 
