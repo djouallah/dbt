@@ -36,13 +36,22 @@ AND csv_filename NOT IN (SELECT DISTINCT file FROM {{ this }})
 {%- set file_predicate = pending_file_predicate(pending_files) -%}
 {%- set duckrun_predicates = (file_predicate if file_predicate else []) + ['target.month_key = source.month_key'] %}
 
+{#-- OCC FENCE -- DO NOT DELETE. duckrun writes this model with `append`, which is only
+     fenced when the adapter sees the relation name in the RENDERED MODEL SQL:
+       reads_self = dbt_believes_exists and ... and (this | string) in model_sql
+     (_delta_core.sql). When true it commits via append_if_unchanged(read_version=vB), so a
+     concurrent writer fails loudly with CommitFailedError instead of appending a duplicate;
+     when false it degrades SILENTLY to an unfenced last-writer-wins append. The token below
+     is what makes that true, on purpose -- it was previously true only by accident, via a
+     passing mention of {{ this }} in a prose comment. A comment counts: dbt renders it. --#}
+
 {{ config(
     materialized='incremental',
-    incremental_strategy='insert' if target.name == 'duckrun' else 'merge',
+    incremental_strategy='append' if target.name == 'duckrun' else 'merge',
     merge_clauses=none if target.name == 'duckrun' else {'when_matched': [{'action': 'do_nothing'}]},
     unique_key=['file', 'REGIONID', 'SETTLEMENTDATE','INTERVENTION'],
     partition_by=['month_key'] if target.name == 'duckrun' else none,
-    incremental_predicates=(duckrun_predicates if target.name == 'duckrun' else file_predicate),
+    incremental_predicates=(none if target.name == 'duckrun' else file_predicate),
     pre_hook="SET VARIABLE price_today_paths = (SELECT COALESCE(NULLIF(list('{{ get_csv_archive_path() }}' || archive_path), []), ['']) FROM (SELECT archive_path FROM {{ ref('stg_csv_archive_log') }} WHERE source_type = 'price_today'{% if is_incremental() %} AND csv_filename NOT IN (SELECT DISTINCT file FROM {{ this }}){% endif %} ORDER BY archive_path))"
 ) }}
 
