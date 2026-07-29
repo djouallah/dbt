@@ -161,6 +161,128 @@ Method note: this took several CI round trips before the obvious move — `duckr
 against both lakehouses from a laptop, which answered every one of the above in minutes. The
 tables are reachable locally; reach for that before instrumenting a workflow.
 
+## Two branches of one model, two different unit universes
+
+`assert_fct_summary_matches_recomputation` went red on `duckrun`, `iceberg` and `spark`, two
+rows each. `dwh` passed. The obvious reading — "dwh is the reference and three engines drifted"
+— is wrong twice over: the test never compares engines, and dwh was not more correct.
+
+The test grades each engine against **its own lakehouse**: recompute `fct_summary` from that
+item's `fct_scada`/`fct_price`/`dim_duid` and diff it against that item's stored `fct_summary`.
+Red means a table disagrees with its own inputs. Measured for 2026-07-27:
+
+| | rows |
+|---|---|
+| recomputed from that lakehouse's own inputs | 64,718 |
+| duckrun / iceberg / spark stored | 70,579 (+5,861) |
+| dwh stored | 64,718 |
+
+The surplus is **28 DUIDs that have zero rows in `fct_scada` across all 369,368,318 of them,
+ever** — ROWALLAN, WAUBRAWF, ROYALLA1, GERMCRK, CLUNY, PALOONA, BUTLERSG, CAPTL_WF and 20 more.
+Non-scheduled units: they publish SCADA telemetry but are never dispatched.
+
+The model reads two AEMO tables whose unit coverage differs:
+
+| branch | source | distinct DUIDs |
+|---|---|---|
+| daily | `fct_scada` — DISPATCH_UNIT_SOLUTION | 644 |
+| intraday | `fct_scada_today` — DISPATCH_UNIT_SCADA | 406 |
+
+While a date is fresh the intraday branch writes those units. When the daily file lands, the
+date's recomputation comes only from the daily branch, which **cannot** reproduce them. Nothing
+disappeared from any input — the row's *producing branch switched*, and the branches do not
+cover the same units. The model header asserted this could not happen "while the inputs stay
+append-only". Append-only was never the relevant property.
+
+Every engine writes them. On 2026-07-28, still inside the intraday window, **dwh held 5,016 of
+those rows too**. dwh only looked healthy because `delete+insert` on `unique_key=['date']`
+rewrites a whole date and so can retract; the merge engines key on `['date','time','DUID']`,
+which inserts but never deletes. Same model, same rows written, different ability to take them
+back.
+
+Scale: 11,540 orphan rows over two dates, identical on all three merge engines, and it re-fires
+**every day** a date crosses the daily horizon. The last green run before it was timing luck —
+07-27's daily file had not landed yet.
+
+The fix gates the intraday branch on `SELECT DISTINCT DUID FROM fct_scada`, deliberately
+**unbounded**. `fct_scada` is append-only, so that set only ever grows and can never orphan a
+row it previously admitted. A trailing window would reintroduce the identical bug from the other
+side — a unit ageing out turns its already-written rows into orphans, which merge still cannot
+delete. Cost of the unbounded scan: 644 rows out of 369M, 1m44s from a laptop over the WAN,
+which is the pessimistic bound since CI runs co-located with OneLake.
+
+Two method notes, both of which changed the answer:
+
+- **Sampling one date gave the wrong DUID list.** Deriving it from 07-27's surplus produced 26
+  units. The authoritative query — `DUID NOT IN (SELECT DISTINCT DUID FROM fct_scada)` over the
+  whole table — produced **28**: `BUTLERSG` and `CAPTL_WF` appear only on 07-28. Two of 28 would
+  have survived a purge built from the sample.
+- **`duckrun.connect(..., read_only=True)` from a laptop reproduced CI's numbers exactly**
+  (64,718 / 70,579 and 62,244 / 62,552), which made the whole diagnosis a local exercise. Set
+  `SET TimeZone='UTC'` first — CI writes under UTC, and `CAST(SETTLEMENTDATE AS TIMESTAMPTZ)`
+  renders in the session zone, so a `+10` laptop reads shifted timestamps.
+
+Before pushing, the rendered DuckDB-dialect SQL was **executed** against empty dummy tables in a
+local DuckDB — models and the test, both `is_incremental()` states. That catches column and
+syntax errors the render check in [CLAUDE.md](CLAUDE.md) cannot, because rendering only proves
+the Jinja produced text.
+
+## `--full-refresh` is not a rebuild lever on every engine
+
+`REBUILD_SUMMARY=1` fans out to three different mechanisms: `fabric_build.py` appends
+`dbt run --select fct_summary --full-refresh` for **both** duckrun and iceberg, `ci.yml` adds its
+own `--full-refresh` step for spark, and the dwh model reads the env var and emits every date
+through its ordinary `delete+insert`. Only dwh's route is documented as special. The other three
+were assumed equivalent. Two of them are not.
+
+**iceberg cannot full-refresh at all.** In the same job the ordinary run passed
+`PASS=14 WARN=0 ERROR=0`; the appended rebuild step then failed:
+
+```
+Runtime Error in model fct_summary
+TransactionContext Error: Failed to commit: Failed to commit Iceberg transaction:
+Table fct_summary__dbt_tmp does not exist
+```
+
+This is **not** an Iceberg limitation, and conflating the two costs a diagnosis. Probed directly
+against the OneLake Iceberg REST catalog through `duckrun.IcebergSession`:
+
+```
+OK   CREATE TABLE mart.zz_drop_probe AS SELECT 1 AS x
+OK   DROP TABLE mart.zz_drop_probe
+OK   DROP TABLE IF EXISTS mart.zz_not_there
+```
+
+[DuckDB's docs](https://duckdb.org/docs/current/core_extensions/iceberg/writing) agree —
+`CREATE`/`DROP TABLE`, `ALTER … RENAME TO`, `INSERT`, `UPDATE`, `DELETE` and `MERGE INTO` are all
+supported against an attached REST catalog. What fails is **how dbt-duckdb materializes a full
+refresh**: it builds `<model>__dbt_tmp` and swaps it in, and that relation is not visible to the
+Iceberg transaction at commit time. The catalog's capabilities and the adapter's materialization
+strategy are separate layers; the error names the second.
+
+Consequence: the failed swap leaves a `mart.fct_summary__dbt_backup` behind, holding a full copy.
+And the repair lever recorded for the merge engines is fiction for this one — the ordinary
+incremental path is unaffected, so there is no in-band way to rebuild that table.
+
+**duckrun can be killed by it.** The 143,753,905-row full refresh died with **no dbt error line
+at all**:
+
+```
+Duckrun adapter: merge spill cap: 36.65 GiB (60% of 61.09 GiB available RAM)
+resource_tracker: There appear to be 2 leaked semaphore objects to clean up at shutdown
+[fabric_run] duckrun success=False returncode=1
+```
+
+No error line means the process was killed, not that a query failed — the same signature as the
+memory-bound merge already recorded in [CLAUDE.md](CLAUDE.md). A separate Fabric-side failure hit
+the same leg first: `PythonComputeClientException … isRetriable: False`, the job dying *before
+the payload ran*, which is infrastructure and not attributable to the model.
+
+Net: `--full-refresh` works on spark, is forbidden on dwh (it DROPs and recreates), fails
+outright on iceberg, and is a coin flip on duckrun at this table size. Firing it for all four
+from one flag is what turned a rebuild that only dwh needed into two failed legs — duckrun and
+iceberg had both already been rebuilt from scratch by the preceding run and needed nothing.
+
 ## "The table exists" can be a lie, in two different engines
 
 Two incidents, same shape: the existence check consults metadata, the metadata disagrees with

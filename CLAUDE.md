@@ -54,6 +54,14 @@ between `FROM text.\`path\`` and a following `WHERE` glues them into `` …`path
 Jinja comments **do not nest** — writing the trimming tokens inside a `{# … #}` closes it early
 and leaks the prose into the SQL.
 
+**Rendering only proves the Jinja produced text — go one step further and *execute* it.** For
+the DuckDB-family models and the singular tests, create empty dummy tables carrying just the
+columns the SQL references (`tbl_fct_scada`, `tbl_fct_price`, `tbl_dim_duid`, …), point `ref()`
+at them, and run every rendered branch through a local `duckdb.connect()`. It costs seconds, needs
+no credentials, and catches the column and syntax errors a render check cannot see. It will not
+cover the spark or dwh dialects — those are structurally identical here, so CI remains their
+first real check.
+
 When a build does fail, the job uploads `target/` as an artifact. Read the *compiled* SQL
 instead of guessing at the error:
 
@@ -171,8 +179,27 @@ Rules that keep it honest:
 - **The rebuild window must be ≥ the window `assert_fct_summary_matches_recomputation`
   checks.** A test that inspects a date the model may not repair holds CI red until someone
   runs `--full-refresh` by hand. Widen both together or neither.
-- Repair lever: `dbt run --full-refresh -s fct_summary` on the merge engines,
-  `REBUILD_SUMMARY=1` on dwh.
+- **Both branches must cover the same unit universe.** The daily branch reads `fct_scada`
+  (DISPATCH_UNIT_SOLUTION, 644 DUIDs); the intraday branch reads `fct_scada_today`
+  (DISPATCH_UNIT_SCADA, 406). 28 non-scheduled units appear only in the second — zero rows in
+  `fct_scada` across all 369M, ever. Ungated, the intraday branch wrote them, and when the date
+  crossed the daily horizon nothing could reproduce them: 11,540 permanent orphans, re-firing
+  daily. The intraday branch is therefore gated on a `dispatch_duids` CTE, and
+  `assert_fct_summary_matches_recomputation` applies the **identical** filter — the two change
+  together or the test fails by construction. Keep that set **unbounded**
+  (`SELECT DISTINCT DUID FROM fct_scada`): the table is append-only so the set only grows and can
+  never orphan a row it admitted, whereas a trailing window recreates the bug from the other side.
+  Note this class of drift is invisible to "the inputs are append-only" reasoning — no input row
+  vanishes, the row's *producing branch* changes.
+- Repair lever, and it is **not uniform** — do not assume `--full-refresh` works everywhere:
+  `REBUILD_SUMMARY=1` on dwh (never `--full-refresh`, it DROPs); `--full-refresh` on spark and
+  duckrun, but on duckrun that is a 143M-row rebuild that has been killed outright (no dbt error,
+  just a leaked-semaphore warning). On **iceberg it fails every time** —
+  `Failed to commit Iceberg transaction: Table fct_summary__dbt_tmp does not exist`. That is
+  dbt-duckdb's swap materialization, *not* an Iceberg limit: `CREATE`/`DROP`/`RENAME`/`MERGE` all
+  work against that catalog when issued directly. `fabric_build.py` fires the rebuild step for
+  duckrun **and** iceberg from one flag, so `REBUILD_SUMMARY=1` breaks the iceberg leg and leaves
+  a `fct_summary__dbt_backup` behind. See [LEARNINGS.md](LEARNINGS.md).
 
 ## Where the DuckDB fold runs
 
@@ -223,6 +250,13 @@ still run it by hand to reproduce a CI failure. That is a debugging affordance, 
   symptom is ±0.0001 on a few hundred rows and no row-count difference at all. Row counts are
   dialect-independent; assert those exactly and give the sums a tolerance. See
   [LEARNINGS.md](LEARNINGS.md).
+- **A green engine is not a reference, and the tests are not cross-engine.**
+  `assert_fct_summary_matches_recomputation` recomputes from *the same item's* inputs and diffs
+  against *that item's* stored table — it asserts self-consistency, never agreement with another
+  engine. So "three red, one green" does not mean the green one is right: dwh passed the
+  intraday-unit bug purely because `delete+insert` on `[date]` can retract rows, while holding
+  5,016 of the very same rows on the still-open date. Read a lone green leg as "this write path
+  can retract", not as ground truth, and diff it against the others before believing it.
 - **Query the lakehouses directly before instrumenting CI.** `duckrun.connect(<abfss Tables
   path>, read_only=True)` works from a laptop against any of the four items and answers
   schema/row/value questions in minutes. Several CI round trips were spent not doing this.
