@@ -31,7 +31,7 @@ on:
       runs:
         description: "HOT runs per query per model (run 1/2 dropped as warm; rest median'd)"
         type: string
-        default: "5"
+        default: "3"
       cold:
         description: "measure cold by dehydrating (clearValues+full) before each query"
         type: boolean
@@ -39,11 +39,11 @@ on:
       cold_repeats:
         description: "cold dehydrate->query cycles per cold-tier query (median + spread reported)"
         type: string
-        default: "3"
+        default: "1"
       gap_seconds:
         description: "idle seconds between models (>5min CU smoothing => clean gaps in the capacity chart)"
         type: string
-        default: "300"
+        default: "600"
 
 # SHARED with ci.yml on purpose, and load-bearing. Not for correctness — this run only reads — but
 # because a concurrent dbt build contends for the same Fabric capacity, and capacity contention is
@@ -83,7 +83,7 @@ jobs:
     runs-on: ubuntu-latest
     # Upstream's XMLA step took 21 min for TWO models over 15 cold-measured queries with one 300s
     # gap. This runs four models over 21, and one of them (`raw_scada_mw`) transcodes a column of the
-    # largest table in the project — so budget several times that, plus three 300s gaps.
+    # largest table in the project — so budget several times that, plus three 600s gaps.
     # It is billed Fabric capacity: cancel a superseded run immediately (CLAUDE.md, CI etiquette),
     # and use the scouting inputs in benchmark/README.md before committing to a full pass.
     timeout-minutes: 330

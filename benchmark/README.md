@@ -120,8 +120,11 @@ both reports recomputes from it offline.
 - **`hot_only`** (4) — a selectivity ladder (1 year → 1 month → 1 DUID → both). Hot only: row-group
   elimination is only visible once resident, since cold is dominated by full-column transcode.
 
-21 of the 25 are cold-measured, so at `cold_repeats=3` each engine pays 63 dehydrate→query cycles.
-That is the bulk of the run's cost — scout first.
+21 of the 25 are cold-measured, so each engine pays 21 × `cold_repeats` dehydrate→query cycles —
+21 at the default of 1, 63 at the old default of 3. That is the bulk of the run's cost, which is
+why the default was cut to 1: this job runs on shared, billed capacity and the dehydrate cycles are
+what an interactive-CU spike looks like to a capacity admin. Scout first, and raise `cold_repeats`
+only for a run whose result has to survive argument.
 
 Cold is forced per query by **dehydrating** first — a TMSL `clearValues` evicts all transcoded
 column data, then a `full` reframes (metadata only on Direct Lake) — so the next query pays the full
@@ -131,6 +134,13 @@ give a median and a spread instead of an n=1 point.
 Verdicts use **medians, never means** (one capacity spike among 110ms runs blows up a mean and
 fabricates a winner), hot runs 1 and 2 are dropped as the warm transition, and a per-query result
 inside the larger of the two spreads is a **tie**, not a win.
+
+**The defaults trade statistical strength for capacity cost, deliberately.** At `cold_repeats=1`
+and `runs=3` there is exactly one measured sample per query per tier, so "median" is that sample
+and both spreads are 0 — which in turn means the tie rule never fires and `render_summary`'s
+>25%-cold-spread noise filter flags nothing. Read a default-inputs run as a *smoke test with
+timings*, not as a defensible ranking. `cold_repeats=3 runs=5` (the previous defaults) is what a
+result worth quoting costs.
 
 ## Running it
 

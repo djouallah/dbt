@@ -418,6 +418,18 @@ takes to **query** them. Ported from `djouallah/duckrun`'s `parquet_layout.yml`.
 [benchmark/README.md](benchmark/README.md) has the detail; what matters when touching this repo:
 
 - **`workflow_dispatch` only, and nothing depends on it.** Never triggered by a push, never a gate.
+  Do not add `schedule`, `push`, `workflow_run`, `repository_dispatch` or a `needs:` from another
+  workflow — not even a nightly, not even behind an `if:`. This is a standing instruction, not a
+  default to be weighed against convenience. The benchmark's dehydrate→query cycles are
+  **interactive CU** on shared Fabric capacity, which is the class of usage a capacity admin sees
+  and asks about; a run nobody chose to start is the one that causes trouble. A human dispatches
+  it, or it does not run.
+- **The dispatch defaults are tuned for capacity cost, not statistical strength**: `cold_repeats=1`,
+  `runs=3`, `gap_seconds=600`. That is one measured sample per query per tier, so both spreads are
+  0, the tie rule never fires and `render_summary`'s >25%-cold-spread noise filter flags nothing —
+  a default run is a smoke test with timings, not a defensible ranking. `cold_repeats=3 runs=5` (the
+  previous defaults) is what a quotable result costs; raise them per dispatch, don't raise the
+  defaults back.
 - **Deploy models, run queries, report timings — that is the whole scope.** Upstream had to *build*
   the layouts it compared; here the four engines' own `mart.fct_summary` already are four layouts, at
   row-count parity. So there is no build phase, and deliberately **no stats phase either**: physical

@@ -26,15 +26,21 @@ Env in:
   PBI_WORKSPACE  — workspace *display name* (XMLA data source uses the name, not the id)
   PBI_TOKEN      — optional; else self-acquired via duckrun (analysis.windows.net/powerbi/api)
   ADOMD_DIR      — folder containing Microsoft.AnalysisServices.AdomdClient.dll
-  BENCH_RUNS     — HOT repetitions per query per model (default 5); run1/run2 dropped as warm.
-  COLD_REPEATS   — cold dehydrate→query cycles per cold-tier query (default 3); we report the
-                   median + spread over these, so a single cold sample no longer decides a winner.
+  BENCH_RUNS     — HOT repetitions per query per model (default 3); run1/run2 dropped as warm.
+                   At the default that leaves ONE measured hot sample per query, so the hot
+                   "median" is that sample and the hot spread is 0. Raise it to get a real one.
+  COLD_REPEATS   — cold dehydrate→query cycles per cold-tier query (default 1); we report the
+                   median + spread over these. The defaults are set for capacity cost, not
+                   statistical strength: at 1 the cold median IS the single sample and the
+                   spread is 0, which also means render_summary's >25%-spread noise filter
+                   flags nothing. Raise both when a result actually has to be defended.
   BENCH_COLD     — "true"/"false": measure cold via dehydrate (default true). Falls back to
                    hot-only automatically if the token can't run the refresh (needs write).
 
 Cold is a black box probed only by wall-clock: dehydrate (clearValues+full) forces a full
 Delta→memory transcode on the next query, so COLD_REPEATS cycles give a small distribution
-instead of an n=1 point. Queries are tiered — see QUERIES below.
+instead of an n=1 point — at the default of 1 it IS an n=1 point. Queries are tiered — see
+QUERIES below.
 
 Exit 0 always — this is a benchmark, not a pass/fail gate.
 """
@@ -453,10 +459,10 @@ def main():
     from duckrun import auth
     token = os.environ.get("PBI_TOKEN") or auth.get_powerbi_token()  # self-acquire the XMLA token
     adomd_dir = os.environ.get("ADOMD_DIR", ".")
-    runs = int(os.environ.get("BENCH_RUNS", "5"))
-    cold_repeats = int(os.environ.get("COLD_REPEATS", "3"))
+    runs = int(os.environ.get("BENCH_RUNS", "3"))
+    cold_repeats = int(os.environ.get("COLD_REPEATS", "1"))
     want_cold = (os.environ.get("BENCH_COLD", "true").strip().lower() != "false")
-    gap = int(os.environ.get("BENCH_GAP_SECONDS", "300"))  # idle gap between models (>CU smoothing)
+    gap = int(os.environ.get("BENCH_GAP_SECONDS", "600"))  # idle gap between models (>CU smoothing)
 
     _load_adomd(adomd_dir)
     base, others = discover_models()
