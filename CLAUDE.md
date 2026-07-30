@@ -365,8 +365,12 @@ still run it by hand to reproduce a CI failure. That is a debugging affordance, 
 ## CI etiquette
 
 - Cancel superseded runs immediately (`gh run cancel <id>`) — spark and Fabric legs cost money.
-- Pushing to `main` triggers a run. If you want a dispatch with inputs instead, cancel the push
-  run first; the concurrency group is not `cancel-in-progress`.
+- **Nothing runs on push. Both workflows are `workflow_dispatch` only.** Pushing to `main` used to
+  trigger the four Fabric legs, which meant any code change — a script, a workflow file, a comment —
+  spent paid capacity nobody asked for, and a batch of edits queued several such runs on the
+  concurrency group. `paths-ignore` did not fix that: it is per-PUSH, not per-file, so a commit
+  touching a doc *and* anything else still ran. Commit and push freely; start a build with
+  `gh workflow run dbt` when you actually want one.
 - Jobs no longer cancel the run when they fail, and no matrix is `fail-fast`. Every leg runs to
   its own conclusion, so `gh run view <id> --json jobs` reads straight: `failure` means that
   leg failed. Cancelling never saved the Fabric compute anyway — the notebook or Livy session
@@ -423,8 +427,8 @@ takes to **query** them. Ported from `djouallah/duckrun`'s `parquet_layout.yml`.
   counting it and the parity dashboard reads it as drift.
 - **It shares `ci.yml`'s concurrency group (`onelake-<ref>`) deliberately.** Not for correctness, but
   because a concurrent dbt build contends for the same capacity, and capacity contention is the one
-  thing a wall-clock benchmark cannot absorb. A dispatch queues behind a push run rather than racing
-  it. Do not give it its own group to make it start sooner.
+  thing a wall-clock benchmark cannot absorb. So a benchmark dispatch queues behind a `dbt` dispatch
+  rather than racing it. Do not give it its own group to make it start sooner.
 - **`dwh` is DirectQuery, not Direct Lake, and that asymmetry is load-bearing.** duckrun's
   `deploy(warehouse=…)` rewrites `Sql.Database(...)` for a DirectQuery bim; `deploy(lakehouse=…)`
   rewrites the OneLake GUIDs for a Direct Lake one — they are different templates, hence
@@ -436,6 +440,15 @@ takes to **query** them. Ported from `djouallah/duckrun`'s `parquet_layout.yml`.
   URL **anywhere in the file, prose included** — `_is_directlake_bim()` greps the raw bytes, so a
   `description` string naming the mode flips the model and makes deploy attempt a reframe it cannot
   serve. `benchmark/test_templates.py` asserts this; it caught exactly that mistake once already.
+- **The models carry every shared table, not just the mart three** — the same eight `stats.py`
+  reports on, in the schemas dbt writes them to (`mart` for `fct_summary`/`dim_duid`/`dim_calendar`,
+  `landing` for the raw facts and the archive log), with one `raw`-tier query per raw table so none of
+  them is dead weight. Two invariants a test pins, both of which fail *silently* rather than loudly:
+  the table set must match `stats.py`'s `TABLES` (add a model there and the benchmark stops covering
+  it), and **only `fct_summary`'s relationships may set `relyOnReferentialIntegrity`** — that flag
+  permits an inner join, and the raw facts genuinely carry DUIDs missing from `dim_duid` (that is what
+  `duid_probe` exists for), so asserting it there would make the benchmark measure fewer rows on the
+  tables it is comparing. The wide facts are a deliberate column subset; `fct_price` alone has ~130.
 - **The reference engine is `BENCH_ENGINES[0]`, explicitly.** Upstream picked the base by name
   (`endswith('_auto_sort')`, else the shortest). With one model per engine the shortest name is
   `aemo_dwh`, so inheriting that heuristic would silently make the DirectQuery leg the thing every

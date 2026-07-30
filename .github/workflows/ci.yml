@@ -10,16 +10,17 @@ name: dbt
 # spark are now graded by their generic column tests alone. The separate test job that used to run
 # the reference suite against all four items through one duckrun reader is gone.
 
+# DISPATCH ONLY — deliberately no `push:` trigger. Every run lands four Fabric legs on paid
+# capacity, so a push-triggered build meant that any code change, including one that only touched a
+# script or a workflow file, spent compute nobody had asked for. During a batch of edits that is
+# several runs racing each other on the concurrency group, and cancelling them does not stop the
+# Fabric-side notebook or Livy session anyway (see `permissions` below).
+#
+# `paths-ignore: ['**.md', 'LICENSE']` used to soften this, but it is per-PUSH, not per-file: a
+# commit touching a doc AND anything else still ran. It was not a cost control.
+#
+# Run it with `gh workflow run dbt` (or the Actions UI) when a build is actually wanted.
 on:
-  push:
-    branches: [main]
-    # A prose-only commit changes no model, macro, script or workflow, so running the four
-    # Fabric legs for it buys nothing. paths-ignore is per-PUSH, not per-file: a commit that
-    # touches a doc AND anything else still runs, which is what we want. Dispatch ignores this
-    # entirely, so `gh workflow run` is still the way to force a build after a docs-only push.
-    paths-ignore:
-      - '**.md'
-      - 'LICENSE'
   workflow_dispatch:
     inputs:
       workspace:

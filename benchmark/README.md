@@ -51,9 +51,27 @@ table, for the current state — its `vorder` column is the live answer.
 
 ## What is compared
 
-One semantic model per engine, named `aemo_<engine>`, over that engine's `mart.fct_summary` +
-`mart.dim_duid` + `mart.dim_calendar`. Identical tables, columns and measures in every model, so the
-DAX suite is byte-identical across them and only the *engine and its layout* differ.
+One semantic model per engine, named `aemo_<engine>`, over **every shared table that engine emits** —
+the same eight `stats.py` reports on, in the schemas dbt writes them to:
+
+| schema | tables |
+|---|---|
+| `mart` | `fct_summary`, `dim_duid`, `dim_calendar` |
+| `landing` | `fct_scada`, `fct_price`, `fct_scada_today`, `fct_price_today`, `stg_csv_archive_log` |
+
+The wide raw facts are a **column subset**: `fct_price` has ~130 columns and `fct_scada` ~55, nearly
+all AEMO FCAS fields nothing here queries. Keys, timestamps, and the measure-bearing numerics are
+carried; a Direct Lake column costs nothing until a query transcodes it, but it does cost anyone
+reading the model. Both `.bim` files are generated from one spec so their semantic surfaces are
+identical by construction, and [`test_templates.py`](test_templates.py) asserts they stay that way —
+that identity is what lets one DAX suite run against a Direct Lake and a DirectQuery model alike.
+
+Relationships wire each fact to `dim_duid` / `dim_calendar`, but **only `fct_summary`'s two set
+`relyOnReferentialIntegrity`**. That flag lets the engine use an inner join, which silently drops rows
+whose key is missing from the dimension. `fct_summary` is built with an INNER JOIN to `dim_duid`, so
+its RI holds by construction; the raw facts carry retired units absent from the current AEMO
+registration list — which is precisely what `stats.py`'s `duid_probe` exists to diagnose. Asserting RI
+there would make the benchmark quietly measure fewer rows on the tables it is comparing.
 
 | mode | engines | template | what the timing means |
 |---|---|---|---|
@@ -89,15 +107,21 @@ both reports recomputes from it offline.
 
 ## The query suite
 
-Three tiers, in [`xmla_compare.py`](xmla_compare.py):
+25 queries in four tiers, in [`xmla_compare.py`](xmla_compare.py):
 
-- **`probe`** — one column, full scan, scalar result. Cold time ≈ that column's transcode cost plus
-  fixed overhead; `probe_rowcount` is the ~zero-column control, so subtracting it gives the marginal
-  per-column cost. Measured cold **and** hot.
-- **`composite`** — nine realistic multi-column workloads. Cold and hot.
-- **`hot_only`** — a selectivity ladder (1 year → 1 month → 1 DUID → both). Measured hot only:
-  row-group elimination is only visible once resident, since cold is dominated by full-column
-  transcode.
+- **`probe`** (6) — one `fct_summary` column, full scan, scalar result. Cold time ≈ that column's
+  transcode cost plus fixed overhead; `probe_rowcount` is the ~zero-column control, so subtracting it
+  gives the marginal per-column cost. Cold **and** hot.
+- **`composite`** (9) — realistic multi-column mart workloads. Cold and hot.
+- **`raw`** (6) — one query per raw landing table, so nothing in the model goes unmeasured. Cold and
+  hot. `raw_scada_mw` is the heaviest measurement in the suite: `fct_scada` is the largest table in
+  the project, so a cold sum over one of its columns is the biggest Delta→memory transcode any engine
+  here performs, and where a layout difference has the most room to show.
+- **`hot_only`** (4) — a selectivity ladder (1 year → 1 month → 1 DUID → both). Hot only: row-group
+  elimination is only visible once resident, since cold is dominated by full-column transcode.
+
+21 of the 25 are cold-measured, so at `cold_repeats=3` each engine pays 63 dehydrate→query cycles.
+That is the bulk of the run's cost — scout first.
 
 Cold is forced per query by **dehydrating** first — a TMSL `clearValues` evicts all transcoded
 column data, then a `full` reframes (metadata only on Direct Lake) — so the next query pays the full

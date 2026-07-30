@@ -25,28 +25,28 @@
           {
             "name": "date",
             "dataType": "dateTime",
-            "description": "Calendar date (primary key). Grain: one row per day.",
-            "isKey": true,
-            "formatString": "yyyy-MM-dd",
             "sourceColumn": "date",
             "sourceLineageTag": "date",
-            "summarizeBy": "none"
+            "summarizeBy": "none",
+            "description": "Calendar date (primary key). One row per day.",
+            "isKey": true,
+            "formatString": "yyyy-MM-dd"
           },
           {
             "name": "year",
             "dataType": "int64",
-            "description": "Calendar year (e.g. 2024)",
             "sourceColumn": "year",
             "sourceLineageTag": "year",
-            "summarizeBy": "none"
+            "summarizeBy": "none",
+            "description": "Calendar year (e.g. 2024)"
           },
           {
             "name": "month",
             "dataType": "int64",
-            "description": "Calendar month number (1-12)",
             "sourceColumn": "month",
             "sourceLineageTag": "month",
-            "summarizeBy": "none"
+            "summarizeBy": "none",
+            "description": "Calendar month number (1-12)"
           }
         ],
         "partitions": [
@@ -68,65 +68,65 @@
       },
       {
         "name": "dim_duid",
-        "description": "Generator unit reference dimension for the Australian National Electricity Market (NEM).\nEach row represents a unique Dispatchable Unit Identifier (DUID) — a power station or generation unit.\nIncludes fuel type, region, participant, and geographic coordinates.",
+        "description": "Generator unit reference dimension for the Australian National Electricity Market (NEM).\nOne row per Dispatchable Unit Identifier (DUID) — a power station or generation unit.",
         "sourceLineageTag": "[mart].[dim_duid]",
         "columns": [
           {
             "name": "DUID",
             "dataType": "string",
-            "description": "Dispatchable Unit Identifier — unique code for each generator unit (primary key)",
-            "isKey": true,
             "sourceColumn": "DUID",
             "sourceLineageTag": "DUID",
-            "summarizeBy": "none"
+            "summarizeBy": "none",
+            "description": "Dispatchable Unit Identifier (primary key)",
+            "isKey": true
           },
           {
             "name": "Region",
             "dataType": "string",
-            "description": "NEM region code (e.g. NSW1, QLD1, VIC1, SA1, TAS1, WA1)",
             "sourceColumn": "Region",
             "sourceLineageTag": "Region",
-            "summarizeBy": "none"
+            "summarizeBy": "none",
+            "description": "NEM region code (NSW1, QLD1, VIC1, SA1, TAS1, WA1)"
           },
           {
             "name": "State",
             "dataType": "string",
-            "description": "Australian state name (e.g. New South Wales, Queensland)",
             "sourceColumn": "State",
             "sourceLineageTag": "State",
-            "summarizeBy": "none"
+            "summarizeBy": "none",
+            "description": "Australian state name"
           },
           {
             "name": "FuelSourceDescriptor",
             "dataType": "string",
-            "description": "Fuel source type (e.g. Black coal, Natural gas, Solar, Wind)",
             "sourceColumn": "FuelSourceDescriptor",
             "sourceLineageTag": "FuelSourceDescriptor",
-            "summarizeBy": "none"
+            "summarizeBy": "none",
+            "description": "Fuel source type (Black coal, Natural gas, Solar, Wind)"
           },
           {
             "name": "Participant",
             "dataType": "string",
-            "description": "Market participant company name",
             "sourceColumn": "Participant",
             "sourceLineageTag": "Participant",
-            "summarizeBy": "none"
+            "summarizeBy": "none",
+            "description": "Market participant company name"
           },
           {
             "name": "latitude",
             "dataType": "double",
-            "description": "Geographic latitude of the generator unit",
             "sourceColumn": "latitude",
             "sourceLineageTag": "latitude",
-            "summarizeBy": "none"
+            "summarizeBy": "none",
+            "description": "Geographic latitude of the unit"
           },
           {
             "name": "longitude",
             "dataType": "double",
-            "description": "Geographic longitude of the generator unit",
             "sourceColumn": "longitude",
             "sourceLineageTag": "longitude",
-            "summarizeBy": "none"
+            "summarizeBy": "none",
+            "description": "Geographic longitude of the unit"
           }
         ],
         "partitions": [
@@ -148,90 +148,90 @@
       },
       {
         "name": "fct_summary",
-        "description": "Fact table combining SCADA dispatch and price data from the Australian NEM.\nGrain: one row per 5-minute dispatch interval per generator unit (DUID).\nCombines daily historical data with intraday updates.",
+        "description": "The mart fact: SCADA dispatch joined to price.\nGrain: one row per 5-minute dispatch interval per DUID. Daily history plus the intraday tail.",
         "sourceLineageTag": "[mart].[fct_summary]",
         "columns": [
           {
             "name": "date",
             "dataType": "dateTime",
-            "description": "Dispatch date",
-            "formatString": "yyyy-MM-dd",
             "sourceColumn": "date",
             "sourceLineageTag": "date",
-            "summarizeBy": "none"
+            "summarizeBy": "none",
+            "description": "Dispatch date",
+            "formatString": "yyyy-MM-dd"
           },
           {
             "name": "time",
             "dataType": "int64",
-            "description": "Time of day as HHMM integer (e.g. 1430 = 2:30 PM)",
             "sourceColumn": "time",
             "sourceLineageTag": "time",
-            "summarizeBy": "none"
+            "summarizeBy": "none",
+            "description": "Time of day as HHMM integer (1430 = 2:30 PM)"
           },
           {
             "name": "DUID",
             "dataType": "string",
-            "description": "Generator unit identifier — foreign key to dim_duid",
             "sourceColumn": "DUID",
             "sourceLineageTag": "DUID",
-            "summarizeBy": "none"
+            "summarizeBy": "none",
+            "description": "Generator unit identifier — foreign key to dim_duid"
           },
           {
             "name": "mw",
             "dataType": "decimal",
-            "description": "Power output in megawatts (MW) for this 5-minute interval",
-            "formatString": "#,##0.00",
             "sourceColumn": "mw",
             "sourceLineageTag": "mw",
-            "summarizeBy": "sum"
+            "summarizeBy": "sum",
+            "description": "Power output in MW for this 5-minute interval",
+            "formatString": "#,##0.00"
           },
           {
             "name": "price",
             "dataType": "decimal",
-            "description": "Regional reference price in AUD per megawatt-hour ($/MWh)",
-            "formatString": "$#,##0.00",
             "sourceColumn": "price",
             "sourceLineageTag": "price",
-            "summarizeBy": "none"
+            "summarizeBy": "none",
+            "description": "Regional reference price in AUD/MWh",
+            "formatString": "$#,##0.00"
           },
           {
             "name": "cutoff",
             "dataType": "dateTime",
-            "description": "Timestamp of the latest data refresh cutoff",
-            "formatString": "yyyy-MM-dd HH:mm",
             "sourceColumn": "cutoff",
             "sourceLineageTag": "cutoff",
-            "summarizeBy": "none"
+            "summarizeBy": "none",
+            "description": "Timestamp of the latest data refresh cutoff",
+            "formatString": "yyyy-MM-dd HH:mm"
           }
         ],
         "measures": [
           {
             "name": "Total MW",
-            "description": "Total megawatts across all selected generators and time periods",
+            "description": "Total megawatts across the selection",
             "expression": "SUM(fct_summary[mw])",
             "formatString": "#,##0"
           },
           {
             "name": "Total MWh",
-            "description": "Total megawatt-hours. Divides MW by 12 because each row is a 5-minute interval (60/5 = 12).",
+            "description": "Total megawatt-hours. MW/12 because each row is a 5-minute interval (60/5).",
             "expression": "SUM(fct_summary[mw]) / 12",
             "formatString": "#,##0"
           },
           {
             "name": "Avg Price",
-            "description": "Average electricity price in AUD per MWh across selected data",
+            "description": "Average electricity price in AUD/MWh",
             "expression": "AVERAGE(fct_summary[price])",
             "formatString": "$#,##0.00"
           },
           {
             "name": "Generator Count",
-            "description": "Count of distinct generator units (DUIDs) in the current selection",
+            "description": "Distinct generator units in the selection",
             "expression": "DISTINCTCOUNT(fct_summary[DUID])",
             "formatString": "#,##0"
           },
           {
             "name": "Latest Update",
-            "description": "Most recent data refresh timestamp, ignoring all filters",
+            "description": "Most recent refresh cutoff, ignoring all filters",
             "expression": "CALCULATE(MAX(fct_summary[cutoff]), REMOVEFILTERS())",
             "formatString": "yyyy-MM-dd HH:mm"
           }
@@ -246,6 +246,524 @@
                 "let",
                 "    Source = Warehouse,",
                 "    data = Source{[Schema=\"mart\",Item=\"fct_summary\"]}[Data]",
+                "in",
+                "    data"
+              ]
+            }
+          }
+        ]
+      },
+      {
+        "name": "fct_scada",
+        "description": "Raw AEMO DISPATCH_UNIT_SOLUTION: per-unit dispatch, daily archive. The largest table in the project and the heaviest cold transcode in the benchmark.\nColumn subset — the source carries ~55 fields, mostly FCAS.",
+        "sourceLineageTag": "[landing].[fct_scada]",
+        "columns": [
+          {
+            "name": "DUID",
+            "dataType": "string",
+            "sourceColumn": "DUID",
+            "sourceLineageTag": "DUID",
+            "summarizeBy": "none",
+            "description": "Generator unit identifier"
+          },
+          {
+            "name": "SETTLEMENTDATE",
+            "dataType": "dateTime",
+            "sourceColumn": "SETTLEMENTDATE",
+            "sourceLineageTag": "SETTLEMENTDATE",
+            "summarizeBy": "none",
+            "description": "Dispatch interval timestamp",
+            "formatString": "yyyy-MM-dd HH:mm"
+          },
+          {
+            "name": "DATE",
+            "dataType": "dateTime",
+            "sourceColumn": "DATE",
+            "sourceLineageTag": "DATE",
+            "summarizeBy": "none",
+            "description": "Dispatch date — foreign key to dim_calendar",
+            "formatString": "yyyy-MM-dd"
+          },
+          {
+            "name": "YEAR",
+            "dataType": "int64",
+            "sourceColumn": "YEAR",
+            "sourceLineageTag": "YEAR",
+            "summarizeBy": "none",
+            "description": "Dispatch year"
+          },
+          {
+            "name": "INTERVENTION",
+            "dataType": "double",
+            "sourceColumn": "INTERVENTION",
+            "sourceLineageTag": "INTERVENTION",
+            "summarizeBy": "none",
+            "description": "0 = the physical run; 1 = an intervention run"
+          },
+          {
+            "name": "INITIALMW",
+            "dataType": "double",
+            "sourceColumn": "INITIALMW",
+            "sourceLineageTag": "INITIALMW",
+            "summarizeBy": "sum",
+            "description": "Unit output at the start of the interval",
+            "formatString": "#,##0.00"
+          },
+          {
+            "name": "TOTALCLEARED",
+            "dataType": "double",
+            "sourceColumn": "TOTALCLEARED",
+            "sourceLineageTag": "TOTALCLEARED",
+            "summarizeBy": "sum",
+            "description": "Target output for the interval",
+            "formatString": "#,##0.00"
+          },
+          {
+            "name": "AVAILABILITY",
+            "dataType": "double",
+            "sourceColumn": "AVAILABILITY",
+            "sourceLineageTag": "AVAILABILITY",
+            "summarizeBy": "sum",
+            "description": "Available capacity for the interval",
+            "formatString": "#,##0.00"
+          },
+          {
+            "name": "file",
+            "dataType": "string",
+            "sourceColumn": "file",
+            "sourceLineageTag": "file",
+            "summarizeBy": "none",
+            "description": "Source archive file — the incremental key"
+          }
+        ],
+        "measures": [
+          {
+            "name": "Scada Rows",
+            "description": "Row count of the raw dispatch fact",
+            "expression": "COUNTROWS(fct_scada)",
+            "formatString": "#,##0"
+          },
+          {
+            "name": "Scada MW",
+            "description": "Sum of raw unit output",
+            "expression": "SUM(fct_scada[INITIALMW])",
+            "formatString": "#,##0"
+          }
+        ],
+        "partitions": [
+          {
+            "name": "fct_scada",
+            "mode": "directQuery",
+            "source": {
+              "type": "m",
+              "expression": [
+                "let",
+                "    Source = Warehouse,",
+                "    data = Source{[Schema=\"landing\",Item=\"fct_scada\"]}[Data]",
+                "in",
+                "    data"
+              ]
+            }
+          }
+        ]
+      },
+      {
+        "name": "fct_price",
+        "description": "Raw AEMO DISPATCHPRICE / regional summary: per-region price, daily archive.\nColumn subset — the source carries ~130 fields, almost all FCAS prices.",
+        "sourceLineageTag": "[landing].[fct_price]",
+        "columns": [
+          {
+            "name": "REGIONID",
+            "dataType": "string",
+            "sourceColumn": "REGIONID",
+            "sourceLineageTag": "REGIONID",
+            "summarizeBy": "none",
+            "description": "NEM region code"
+          },
+          {
+            "name": "SETTLEMENTDATE",
+            "dataType": "dateTime",
+            "sourceColumn": "SETTLEMENTDATE",
+            "sourceLineageTag": "SETTLEMENTDATE",
+            "summarizeBy": "none",
+            "description": "Dispatch interval timestamp",
+            "formatString": "yyyy-MM-dd HH:mm"
+          },
+          {
+            "name": "DATE",
+            "dataType": "dateTime",
+            "sourceColumn": "DATE",
+            "sourceLineageTag": "DATE",
+            "summarizeBy": "none",
+            "description": "Dispatch date — foreign key to dim_calendar",
+            "formatString": "yyyy-MM-dd"
+          },
+          {
+            "name": "YEAR",
+            "dataType": "int64",
+            "sourceColumn": "YEAR",
+            "sourceLineageTag": "YEAR",
+            "summarizeBy": "none",
+            "description": "Dispatch year"
+          },
+          {
+            "name": "INTERVENTION",
+            "dataType": "double",
+            "sourceColumn": "INTERVENTION",
+            "sourceLineageTag": "INTERVENTION",
+            "summarizeBy": "none",
+            "description": "0 = the physical run; 1 = an intervention run"
+          },
+          {
+            "name": "RRP",
+            "dataType": "double",
+            "sourceColumn": "RRP",
+            "sourceLineageTag": "RRP",
+            "summarizeBy": "none",
+            "description": "Regional reference price, AUD/MWh",
+            "formatString": "$#,##0.00"
+          },
+          {
+            "name": "ROP",
+            "dataType": "double",
+            "sourceColumn": "ROP",
+            "sourceLineageTag": "ROP",
+            "summarizeBy": "none",
+            "description": "Regional original price, before any cap",
+            "formatString": "$#,##0.00"
+          },
+          {
+            "name": "TOTALDEMAND",
+            "dataType": "double",
+            "sourceColumn": "TOTALDEMAND",
+            "sourceLineageTag": "TOTALDEMAND",
+            "summarizeBy": "sum",
+            "description": "Regional total demand, MW",
+            "formatString": "#,##0.00"
+          },
+          {
+            "name": "file",
+            "dataType": "string",
+            "sourceColumn": "file",
+            "sourceLineageTag": "file",
+            "summarizeBy": "none",
+            "description": "Source archive file — the incremental key"
+          }
+        ],
+        "measures": [
+          {
+            "name": "Price Rows",
+            "description": "Row count of the raw price fact",
+            "expression": "COUNTROWS(fct_price)",
+            "formatString": "#,##0"
+          },
+          {
+            "name": "Avg RRP",
+            "description": "Average regional reference price",
+            "expression": "AVERAGE(fct_price[RRP])",
+            "formatString": "$#,##0.00"
+          }
+        ],
+        "partitions": [
+          {
+            "name": "fct_price",
+            "mode": "directQuery",
+            "source": {
+              "type": "m",
+              "expression": [
+                "let",
+                "    Source = Warehouse,",
+                "    data = Source{[Schema=\"landing\",Item=\"fct_price\"]}[Data]",
+                "in",
+                "    data"
+              ]
+            }
+          }
+        ]
+      },
+      {
+        "name": "fct_scada_today",
+        "description": "Raw AEMO DISPATCH_UNIT_SCADA: the intraday tail beyond the daily archive horizon. Covers 406 DUIDs including 28 non-scheduled units that never appear in fct_scada.",
+        "sourceLineageTag": "[landing].[fct_scada_today]",
+        "columns": [
+          {
+            "name": "DUID",
+            "dataType": "string",
+            "sourceColumn": "DUID",
+            "sourceLineageTag": "DUID",
+            "summarizeBy": "none",
+            "description": "Generator unit identifier"
+          },
+          {
+            "name": "SETTLEMENTDATE",
+            "dataType": "dateTime",
+            "sourceColumn": "SETTLEMENTDATE",
+            "sourceLineageTag": "SETTLEMENTDATE",
+            "summarizeBy": "none",
+            "description": "Dispatch interval timestamp",
+            "formatString": "yyyy-MM-dd HH:mm"
+          },
+          {
+            "name": "LASTCHANGED",
+            "dataType": "dateTime",
+            "sourceColumn": "LASTCHANGED",
+            "sourceLineageTag": "LASTCHANGED",
+            "summarizeBy": "none",
+            "description": "When AEMO last revised this row",
+            "formatString": "yyyy-MM-dd HH:mm"
+          },
+          {
+            "name": "DATE",
+            "dataType": "dateTime",
+            "sourceColumn": "DATE",
+            "sourceLineageTag": "DATE",
+            "summarizeBy": "none",
+            "description": "Dispatch date — foreign key to dim_calendar",
+            "formatString": "yyyy-MM-dd"
+          },
+          {
+            "name": "YEAR",
+            "dataType": "int64",
+            "sourceColumn": "YEAR",
+            "sourceLineageTag": "YEAR",
+            "summarizeBy": "none",
+            "description": "Dispatch year"
+          },
+          {
+            "name": "INITIALMW",
+            "dataType": "double",
+            "sourceColumn": "INITIALMW",
+            "sourceLineageTag": "INITIALMW",
+            "summarizeBy": "sum",
+            "description": "Unit output at the start of the interval",
+            "formatString": "#,##0.00"
+          },
+          {
+            "name": "file",
+            "dataType": "string",
+            "sourceColumn": "file",
+            "sourceLineageTag": "file",
+            "summarizeBy": "none",
+            "description": "Source file — the incremental key"
+          }
+        ],
+        "measures": [
+          {
+            "name": "Scada Today Rows",
+            "description": "Row count of the intraday tail",
+            "expression": "COUNTROWS(fct_scada_today)",
+            "formatString": "#,##0"
+          },
+          {
+            "name": "Scada Today MW",
+            "description": "Sum of intraday unit output",
+            "expression": "SUM(fct_scada_today[INITIALMW])",
+            "formatString": "#,##0"
+          }
+        ],
+        "partitions": [
+          {
+            "name": "fct_scada_today",
+            "mode": "directQuery",
+            "source": {
+              "type": "m",
+              "expression": [
+                "let",
+                "    Source = Warehouse,",
+                "    data = Source{[Schema=\"landing\",Item=\"fct_scada_today\"]}[Data]",
+                "in",
+                "    data"
+              ]
+            }
+          }
+        ]
+      },
+      {
+        "name": "fct_price_today",
+        "description": "Raw AEMO intraday price feed: per-region price beyond the daily archive horizon.\nColumn subset — the source carries ~65 fields.",
+        "sourceLineageTag": "[landing].[fct_price_today]",
+        "columns": [
+          {
+            "name": "REGIONID",
+            "dataType": "string",
+            "sourceColumn": "REGIONID",
+            "sourceLineageTag": "REGIONID",
+            "summarizeBy": "none",
+            "description": "NEM region code"
+          },
+          {
+            "name": "SETTLEMENTDATE",
+            "dataType": "dateTime",
+            "sourceColumn": "SETTLEMENTDATE",
+            "sourceLineageTag": "SETTLEMENTDATE",
+            "summarizeBy": "none",
+            "description": "Dispatch interval timestamp",
+            "formatString": "yyyy-MM-dd HH:mm"
+          },
+          {
+            "name": "DATE",
+            "dataType": "dateTime",
+            "sourceColumn": "DATE",
+            "sourceLineageTag": "DATE",
+            "summarizeBy": "none",
+            "description": "Dispatch date — foreign key to dim_calendar",
+            "formatString": "yyyy-MM-dd"
+          },
+          {
+            "name": "YEAR",
+            "dataType": "int64",
+            "sourceColumn": "YEAR",
+            "sourceLineageTag": "YEAR",
+            "summarizeBy": "none",
+            "description": "Dispatch year"
+          },
+          {
+            "name": "INTERVENTION",
+            "dataType": "double",
+            "sourceColumn": "INTERVENTION",
+            "sourceLineageTag": "INTERVENTION",
+            "summarizeBy": "none",
+            "description": "0 = the physical run; 1 = an intervention run"
+          },
+          {
+            "name": "RRP",
+            "dataType": "double",
+            "sourceColumn": "RRP",
+            "sourceLineageTag": "RRP",
+            "summarizeBy": "none",
+            "description": "Regional reference price, AUD/MWh",
+            "formatString": "$#,##0.00"
+          },
+          {
+            "name": "file",
+            "dataType": "string",
+            "sourceColumn": "file",
+            "sourceLineageTag": "file",
+            "summarizeBy": "none",
+            "description": "Source file — the incremental key"
+          }
+        ],
+        "measures": [
+          {
+            "name": "Price Today Rows",
+            "description": "Row count of the intraday price feed",
+            "expression": "COUNTROWS(fct_price_today)",
+            "formatString": "#,##0"
+          }
+        ],
+        "partitions": [
+          {
+            "name": "fct_price_today",
+            "mode": "directQuery",
+            "source": {
+              "type": "m",
+              "expression": [
+                "let",
+                "    Source = Warehouse,",
+                "    data = Source{[Schema=\"landing\",Item=\"fct_price_today\"]}[Data]",
+                "in",
+                "    data"
+              ]
+            }
+          }
+        ]
+      },
+      {
+        "name": "stg_csv_archive_log",
+        "description": "The download watermark: one row per CSV extracted into the landing lakehouse. What the pipeline has already ingested.",
+        "sourceLineageTag": "[landing].[stg_csv_archive_log]",
+        "columns": [
+          {
+            "name": "source_type",
+            "dataType": "string",
+            "sourceColumn": "source_type",
+            "sourceLineageTag": "source_type",
+            "summarizeBy": "none",
+            "description": "Which AEMO source the file came from"
+          },
+          {
+            "name": "source_filename",
+            "dataType": "string",
+            "sourceColumn": "source_filename",
+            "sourceLineageTag": "source_filename",
+            "summarizeBy": "none",
+            "description": "Name of the downloaded archive"
+          },
+          {
+            "name": "archive_path",
+            "dataType": "string",
+            "sourceColumn": "archive_path",
+            "sourceLineageTag": "archive_path",
+            "summarizeBy": "none",
+            "description": "OneLake path the CSV was written to"
+          },
+          {
+            "name": "archived_at",
+            "dataType": "dateTime",
+            "sourceColumn": "archived_at",
+            "sourceLineageTag": "archived_at",
+            "summarizeBy": "none",
+            "description": "When the file was ingested",
+            "formatString": "yyyy-MM-dd HH:mm"
+          },
+          {
+            "name": "row_count",
+            "dataType": "int64",
+            "sourceColumn": "row_count",
+            "sourceLineageTag": "row_count",
+            "summarizeBy": "sum",
+            "description": "Rows extracted from this file",
+            "formatString": "#,##0"
+          },
+          {
+            "name": "source_url",
+            "dataType": "string",
+            "sourceColumn": "source_url",
+            "sourceLineageTag": "source_url",
+            "summarizeBy": "none",
+            "description": "URL the archive was fetched from"
+          },
+          {
+            "name": "etag",
+            "dataType": "string",
+            "sourceColumn": "etag",
+            "sourceLineageTag": "etag",
+            "summarizeBy": "none",
+            "description": "HTTP ETag of the fetched archive"
+          },
+          {
+            "name": "csv_filename",
+            "dataType": "string",
+            "sourceColumn": "csv_filename",
+            "sourceLineageTag": "csv_filename",
+            "summarizeBy": "none",
+            "description": "Name of the extracted CSV"
+          }
+        ],
+        "measures": [
+          {
+            "name": "Archive Files",
+            "description": "Files ingested",
+            "expression": "COUNTROWS(stg_csv_archive_log)",
+            "formatString": "#,##0"
+          },
+          {
+            "name": "Archive Source Rows",
+            "description": "Rows extracted across those files",
+            "expression": "SUM(stg_csv_archive_log[row_count])",
+            "formatString": "#,##0"
+          }
+        ],
+        "partitions": [
+          {
+            "name": "stg_csv_archive_log",
+            "mode": "directQuery",
+            "source": {
+              "type": "m",
+              "expression": [
+                "let",
+                "    Source = Warehouse,",
+                "    data = Source{[Schema=\"landing\",Item=\"stg_csv_archive_log\"]}[Data]",
                 "in",
                 "    data"
               ]
@@ -270,6 +788,54 @@
         "toTable": "dim_calendar",
         "toColumn": "date",
         "relyOnReferentialIntegrity": true
+      },
+      {
+        "name": "fct_scada_to_dim_duid",
+        "fromTable": "fct_scada",
+        "fromColumn": "DUID",
+        "toTable": "dim_duid",
+        "toColumn": "DUID",
+        "relyOnReferentialIntegrity": false
+      },
+      {
+        "name": "fct_scada_to_dim_calendar",
+        "fromTable": "fct_scada",
+        "fromColumn": "DATE",
+        "toTable": "dim_calendar",
+        "toColumn": "date",
+        "relyOnReferentialIntegrity": false
+      },
+      {
+        "name": "fct_scada_today_to_dim_duid",
+        "fromTable": "fct_scada_today",
+        "fromColumn": "DUID",
+        "toTable": "dim_duid",
+        "toColumn": "DUID",
+        "relyOnReferentialIntegrity": false
+      },
+      {
+        "name": "fct_scada_today_to_dim_calendar",
+        "fromTable": "fct_scada_today",
+        "fromColumn": "DATE",
+        "toTable": "dim_calendar",
+        "toColumn": "date",
+        "relyOnReferentialIntegrity": false
+      },
+      {
+        "name": "fct_price_to_dim_calendar",
+        "fromTable": "fct_price",
+        "fromColumn": "DATE",
+        "toTable": "dim_calendar",
+        "toColumn": "date",
+        "relyOnReferentialIntegrity": false
+      },
+      {
+        "name": "fct_price_today_to_dim_calendar",
+        "fromTable": "fct_price_today",
+        "fromColumn": "DATE",
+        "toTable": "dim_calendar",
+        "toColumn": "date",
+        "relyOnReferentialIntegrity": false
       }
     ]
   }

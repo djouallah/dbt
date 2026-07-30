@@ -81,10 +81,12 @@ jobs:
     name: benchmark
     needs: checks
     runs-on: ubuntu-latest
-    # Upstream's XMLA step took 21 min for 2 models with one 300s gap. Four models with three gaps
-    # is ~42 min of queries + 15 min of gaps + deploy/refresh, so this leaves real headroom. It is
-    # billed Fabric capacity: cancel a superseded run immediately (CLAUDE.md, CI etiquette).
-    timeout-minutes: 150
+    # Upstream's XMLA step took 21 min for TWO models over 15 cold-measured queries with one 300s
+    # gap. This runs four models over 21, and one of them (`raw_scada_mw`) transcodes a column of the
+    # largest table in the project — so budget several times that, plus three 300s gaps.
+    # It is billed Fabric capacity: cancel a superseded run immediately (CLAUDE.md, CI etiquette),
+    # and use the scouting inputs in benchmark/README.md before committing to a full pass.
+    timeout-minutes: 330
     env:
       # The ONLY Azure inputs, same two secrets as ci.yml: the OIDC federated identity. duckrun mints
       # every token it needs (storage, Fabric control plane, Power BI) and resolves the workspace and

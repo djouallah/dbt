@@ -59,13 +59,15 @@ import report  # noqa: E402
 #   probe      — one column, full scan, scalar result. Cold time ≈ that column's transcode cost +
 #                fixed overhead; probe_rowcount is the ~zero-column control (subtract it in P3 to
 #                get the marginal per-column cost). Measured cold (COLD_REPEATS×) AND hot.
-#   composite  — realistic multi-column workloads, also measured cold AND hot.
+#   composite  — realistic multi-column workloads over the mart, also measured cold AND hot.
+#   raw        — one query per RAW landing table, so every table in the model is measured and none
+#                is dead weight. Cold and hot. `raw_scada_mw` is the heaviest measurement here.
 #   hot_only   — selectivity ladder on the sort-key column, measured HOT only (segment/row-group
 #                elimination is only visible once resident — cold is dominated by full-column
 #                transcode). "{duid}" is filled at runtime with the top DUID by MWh.
-# All columns/measures exist in BOTH templates (fct_summary: date,time,DUID,mw,price,cutoff;
-# measures Total MW, Total MWh, Avg Price, Generator Count; dim_duid, dim_calendar) — that identity
-# is what makes the suite portable across Direct Lake and DirectQuery models.
+# Every table, column and measure referenced below exists in BOTH templates — benchmark/
+# test_templates.py asserts the two semantic surfaces are identical, and that identity is what makes
+# one suite portable across the Direct Lake and DirectQuery models.
 QUERIES = [
     # --- Tier 1: per-column cold probes ---
     ("probe", "probe_mw",       'EVALUATE ROW("x", SUM(fct_summary[mw]))'),
@@ -105,7 +107,28 @@ QUERIES = [
      '"c", [Total MW], "d", [Generator Count])'),
     ("composite", "narrow_one_measure",
      'EVALUATE SUMMARIZECOLUMNS(dim_calendar[year], "a", [Total MWh])'),
-    # --- Tier 3: hot-only selectivity ladder (SUMX lifts work above the XMLA noise floor) ---
+    # --- Tier 3: the RAW tables, one query per table so nothing in the model goes unmeasured ---
+    # These are why the semantic model carries all eight tables and not just the mart three. The
+    # first is the single heaviest measurement in the suite: fct_scada is the largest table in the
+    # project, so a cold SUM over one of its columns is the biggest Delta->memory transcode any
+    # engine here has to do, and it is where a layout difference has the most room to show.
+    ("raw", "raw_scada_mw", 'EVALUATE ROW("x", [Scada MW])'),
+    ("raw", "raw_scada_x_region_year",
+     'EVALUATE SUMMARIZECOLUMNS(dim_duid[Region], dim_calendar[year], '
+     '"MW", [Scada MW], "Rows", [Scada Rows])'),
+    ("raw", "raw_price_x_region_year",
+     'EVALUATE SUMMARIZECOLUMNS(fct_price[REGIONID], dim_calendar[year], '
+     '"AvgRRP", [Avg RRP], "Demand", SUM(fct_price[TOTALDEMAND]))'),
+    ("raw", "raw_intraday_scada",
+     'EVALUATE SUMMARIZECOLUMNS(fct_scada_today[DUID], '
+     '"MW", [Scada Today MW], "Rows", [Scada Today Rows])'),
+    ("raw", "raw_intraday_price",
+     'EVALUATE SUMMARIZECOLUMNS(fct_price_today[REGIONID], '
+     '"AvgRRP", AVERAGE(fct_price_today[RRP]), "Rows", [Price Today Rows])'),
+    ("raw", "raw_archive_log",
+     'EVALUATE SUMMARIZECOLUMNS(stg_csv_archive_log[source_type], '
+     '"Files", [Archive Files], "Rows", [Archive Source Rows])'),
+    # --- Tier 4: hot-only selectivity ladder (SUMX lifts work above the XMLA noise floor) ---
     ("hot_only", "sel_1yr",
      'EVALUATE ROW("r", CALCULATE(SUMX(fct_summary, fct_summary[mw] * fct_summary[price]), '
      'dim_calendar[year] = 2024))'),
@@ -120,7 +143,7 @@ QUERIES = [
      'fct_summary[DUID] = "{duid}", dim_calendar[year] = 2024, dim_calendar[month] = 6))'),
 ]
 
-COLD_TIERS = ("probe", "composite")   # tiers that get the dehydrate→query cold path
+COLD_TIERS = ("probe", "composite", "raw")   # tiers that get the dehydrate→query cold path
 
 
 def resolve_queries(top_duid):
