@@ -13,10 +13,16 @@ only — no transcode), so the next query pays the full cold Delta→memory cost
 EACH query because the queries share the big fact columns (mw/price/DUID/date/time) — without a
 per-query dehydrate only the first query would be cold.
 
-The `dwh` engine is served as DirectQuery, not Direct Lake (see benchmark/engines.py). It therefore
-has no transcoded data to evict, its dehydrate is expected to fail, and `bench_model` degrades it to
-hot-only automatically. Its timings measure SQL endpoint pushdown, not a Delta layout — they are
-real, but they are not the same kind of number as the other three.
+All four engines are Direct Lake now, `dwh` included (duckrun 0.4.36's `deploy(mode=)` — a
+warehouse's tables are Delta in OneLake like any other). So all four dehydrate, all four have a cold
+tier, and every timing on every leg measures the same thing: a Delta→memory transcode shaped by the
+physical layout. `dwh` used to be DirectQuery — no transcoded data to evict, dehydrate expected to
+fail, degraded to hot-only, and its numbers were SQL-endpoint pushdown rather than a layout.
+
+That degradation path is still here and still generic (`bench_model` catches a failing dehydrate and
+drops to hot-only), driven by `engines.MODE` rather than by the engine's name — so flipping any
+engine back to `"directQuery"` still works and is still labelled. It just has nothing to do while
+all four match.
 
 Uses the XMLA endpoint (ADOMD.NET), NOT the throttled /executeQueries REST endpoint.
 Run headless — see .github/workflows/benchmark.yml.

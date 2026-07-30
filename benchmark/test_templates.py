@@ -1,13 +1,18 @@
-"""Guards on the two semantic-model templates, checked against duckrun's OWN regexes.
+"""Guards on the semantic-model template, checked against duckrun's OWN regexes.
 
 Every assertion here fails at *deploy* time otherwise — after the job has already installed
 ADOMD.NET and resolved the workspace — or worse, deploys something that quietly points at the wrong
 item or the wrong query mode. All of it is a JSON read; no Fabric, no network.
 
-The sharpest trap, which this caught for real while the templates were being written:
-`_is_directlake_bim()` greps the model.bim's RAW BYTES for the camelCase Direct-Lake token, so a
-*description string* mentioning it flips the DirectQuery template into "Direct Lake" and makes
-deploy attempt a reframe the model cannot serve. Prose counts.
+There is ONE template now. There were two — this one plus `fct_summary_dq.SemanticModel`, a
+hand-authored DirectQuery copy — because before duckrun 0.4.36 a warehouse could only be read by
+DirectQuery, and the two files had to be kept in lockstep or the single DAX suite silently stopped
+being comparable. `deploy(mode=)` replaced that: one authored .bim ships as either mode, so the
+copy is gone and `engines.MODE` decides. The old file's sharpest trap is worth remembering if
+anyone reintroduces a DirectQuery bim rather than using `mode=`: `_is_directlake_bim()` greps the
+model.bim's RAW BYTES for the camelCase Direct-Lake token, so a *description string* mentioning the
+mode was enough to flip it and make deploy attempt a reframe the model could not serve. Prose
+counts. It caught that for real, once.
 """
 import json
 import os
@@ -16,14 +21,10 @@ import re
 
 import pytest
 
-from duckrun.workspace import _ONELAKE_REF, _SQL_DATABASE_REF, _is_directlake_bim
+from duckrun.workspace import _ONELAKE_REF, _is_directlake_bim, _normalize_mode
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 DL = os.path.join(HERE, "fct_summary.SemanticModel", "model.bim")
-DQ = os.path.join(HERE, "fct_summary_dq.SemanticModel", "model.bim")
-
-# Spelled by construction so this file itself can hold the assertion without tripping it.
-_DL_TOKEN = "direct" + "Lake"
 
 
 def _raw(path):
@@ -40,16 +41,6 @@ def _parts(path):
             for t in m["model"]["tables"]}
 
 
-def _surface(path):
-    """The semantic surface the DAX suite depends on: table names, column names, the source columns
-    behind them, and measure names."""
-    m = json.loads(_raw(path))
-    return {t["name"]: ([c["name"] for c in t["columns"]],
-                        [c["sourceColumn"] for c in t["columns"]],
-                        [x["name"] for x in t.get("measures", [])])
-            for t in m["model"]["tables"]}
-
-
 # Every shared table each engine emits, and the schema it lands in. Same set `.github/scripts/stats.py`
 # reports on — the two must not disagree about what "all the tables" means.
 EXPECTED = {"stg_csv_archive_log": "landing",
@@ -62,13 +53,11 @@ EXPECTED = {"stg_csv_archive_log": "landing",
             "fct_summary": "mart"}
 
 
-@pytest.mark.parametrize("path", [DL, DQ])
-def test_template_carries_every_shared_table(path):
-    assert set(_parts(path)) == set(EXPECTED)
+def test_template_carries_every_shared_table():
+    assert set(_parts(DL)) == set(EXPECTED)
 
 
-@pytest.mark.parametrize("path", [DL, DQ])
-def test_template_table_set_matches_the_parity_dashboard(path):
+def test_template_table_set_matches_the_parity_dashboard():
     """`stats.py`'s TABLES is the definition of "every shared table each engine emits". If a model is
     added or renamed there and not here, the benchmark quietly stops covering it."""
     stats = pathlib.Path(".github/scripts/stats.py")
@@ -77,14 +66,7 @@ def test_template_table_set_matches_the_parity_dashboard(path):
     src = stats.read_text(encoding="utf-8")
     block = re.search(r"^TABLES = \[(.*?)\]", src, re.S | re.M)
     assert block, "could not find TABLES in stats.py"
-    assert set(re.findall(r'"([^"]+)"', block.group(1))) == set(_parts(path))
-
-
-def test_dax_surface_is_identical_across_the_two_templates():
-    """xmla_compare.py runs ONE query suite against every model. If the two templates disagree on a
-    table, column, sourceColumn or measure name, the suite silently stops being comparable — or
-    errors mid-benchmark, after the capacity is already spent."""
-    assert _surface(DL) == _surface(DQ)
+    assert set(re.findall(r'"([^"]+)"', block.group(1))) == set(_parts(DL))
 
 
 # ------------------------------------------------------------------ Direct Lake template
@@ -107,73 +89,25 @@ def test_direct_lake_template_reads_the_real_tables_in_the_real_schemas():
     assert _parts(DL) == {t: ("direct" + "Lake", schema, t) for t, schema in EXPECTED.items()}
 
 
-# ------------------------------------------------------------------ DirectQuery template
-
-def test_directquery_template_is_not_mistaken_for_direct_lake():
-    """The trap. _is_directlake_bim() greps raw bytes, so a description string naming the mode is
-    enough to flip this — and then deploy tries to reframe a model that queries live."""
-    assert not _is_directlake_bim(_raw(DQ))
-
-
-def test_directquery_template_mentions_the_direct_lake_token_nowhere():
-    """The specific failure mode behind the test above, asserted directly so the diagnosis is
-    obvious: it is a substring match over the whole file, PROSE INCLUDED."""
-    assert _DL_TOKEN not in _raw(DQ).decode("utf-8")
-    assert not _ONELAKE_REF.search(_raw(DQ).decode("utf-8"))
-
-
-def test_directquery_template_matches_duckruns_sql_database_pattern():
-    """`deploy(warehouse=...)` RAISES unless this exact literal shape is present — both the
-    `*.datawarehouse.fabric.microsoft.com` server and the database name are rewritten from it."""
-    m = _SQL_DATABASE_REF.search(_raw(DQ).decode("utf-8"))
-    assert m, "no Sql.Database(<endpoint>, <db>) reference for duckrun to repoint"
-    assert m.group("server").endswith(".datawarehouse.fabric.microsoft.com")
-    assert m.group("db")
-
-
-def test_directquery_partitions_are_all_directquery():
-    assert {p[0] for p in _parts(DQ).values()} == {"directQuery"}
-
-
-def test_directquery_partitions_navigate_to_the_right_schema_and_table():
-    """DirectQuery partitions carry an M expression rather than an entity reference, so the
-    schema/table pair lives in the expression TEXT and no structural assertion would catch a typo
-    there — it would surface as an empty table at query time."""
-    m = json.loads(_raw(DQ))
-    for t in m["model"]["tables"]:
-        expr = " ".join(t["partitions"][0]["source"]["expression"])
-        schema = EXPECTED[t["name"]]
-        assert f'Schema="{schema}"' in expr, f"{t['name']}: partition does not read {schema}"
-        assert f'Item="{t["name"]}"' in expr, f"{t['name']}: partition reads a different table"
-        assert "Source = Warehouse" in expr, f"{t['name']}: not wired to the Warehouse expression"
-
-
-def test_directquery_expression_name_matches_what_the_partitions_reference():
-    m = json.loads(_raw(DQ))
-    assert [e["name"] for e in m["model"]["expressions"]] == ["Warehouse"]
-
-
 # ------------------------------------------------------------------ relationships
 
-@pytest.mark.parametrize("path", [DL, DQ])
-def test_relationships_point_at_tables_and_columns_that_exist(path):
+def test_relationships_point_at_tables_and_columns_that_exist():
     """A relationship naming a column that was dropped from the curated set deploys fine and then
     breaks every query that crosses it."""
-    m = json.loads(_raw(path))
+    m = json.loads(_raw(DL))
     cols = {t["name"]: {c["name"] for c in t["columns"]} for t in m["model"]["tables"]}
     for r in m["model"]["relationships"]:
         assert r["fromColumn"] in cols[r["fromTable"]], f"{r['name']}: bad fromColumn"
         assert r["toColumn"] in cols[r["toTable"]], f"{r['name']}: bad toColumn"
 
 
-@pytest.mark.parametrize("path", [DL, DQ])
-def test_only_fct_summary_relies_on_referential_integrity(path):
+def test_only_fct_summary_relies_on_referential_integrity():
     """`relyOnReferentialIntegrity` lets the engine use an INNER join, which SILENTLY DROPS rows whose
     key is missing from the dimension. fct_summary is built with an INNER JOIN to dim_duid so its RI
     holds by construction — the RAW facts carry retired units absent from the current AEMO
     registration list, which is exactly what stats.py's `duid_probe` exists to diagnose. Asserting RI
     there would make the benchmark quietly measure fewer rows on the very tables it is comparing."""
-    m = json.loads(_raw(path))
+    m = json.loads(_raw(DL))
     ri = {r["name"] for r in m["model"]["relationships"]
           if r.get("relyOnReferentialIntegrity")}
     assert ri == {"fct_summary_to_dim_duid", "fct_summary_to_dim_calendar"}
@@ -181,8 +115,7 @@ def test_only_fct_summary_relies_on_referential_integrity(path):
 
 # ------------------------------------------------------------------ the DAX suite resolves
 
-@pytest.mark.parametrize("path", [DL, DQ])
-def test_every_dax_reference_exists_in_the_model(path):
+def test_every_dax_reference_exists_in_the_model():
     """The suite is text until it reaches XMLA, so a mistyped `Table[Column]` or `[Measure]` is not
     caught by anything else until the benchmark is already running on paid capacity — and then it
     fails one query mid-flight, after the model has been deployed and warmed.
@@ -191,7 +124,7 @@ def test_every_dax_reference_exists_in_the_model(path):
     against this template."""
     import xmla_compare as xc
 
-    m = json.loads(_raw(path))
+    m = json.loads(_raw(DL))
     cols = {t["name"]: {c["name"] for c in t["columns"]} for t in m["model"]["tables"]}
     measures = {x["name"] for t in m["model"]["tables"] for x in t.get("measures", [])}
 
@@ -206,3 +139,53 @@ def test_every_dax_reference_exists_in_the_model(path):
         local = set(re.findall(r'"([^"]+)"', dax))
         for meas in re.findall(r"(?<![\w\]])\[([^\]]+)\]", dax):
             assert meas in measures or meas in local, f"{name}: unknown measure [{meas}]"
+
+
+# ------------------------------------------------------------------ storage mode (duckrun 0.4.36)
+
+def test_every_engine_mode_is_a_spelling_duckrun_accepts():
+    """`engines.DEPLOY_MODE` translates the TMSL spelling in `MODE` into the one `deploy(mode=)`
+    takes. A typo here raises inside duckrun partway through a paid run, after ADOMD.NET is
+    installed and the first models are already deployed."""
+    import engines as E
+
+    for engine, mode in E.MODE.items():
+        assert mode in E.DEPLOY_MODE, f"{engine}: MODE {mode!r} has no DEPLOY_MODE spelling"
+        assert _normalize_mode(E.DEPLOY_MODE[mode]) == mode
+
+
+def test_all_four_engines_are_read_the_same_way():
+    """The benchmark compares physical LAYOUTS. While every engine is Direct Lake, a timing
+    difference is a layout difference; the moment one is DirectQuery its numbers are pushdown to a
+    different engine and are not the same kind of number (which is why `mode` is carried on every
+    verdict). dwh was the exception until duckrun 0.4.36 made `mode=` independent of item kind.
+
+    This is a policy pin, not a law — flipping an engine back is a deliberate one-line change in
+    engines.MODE, and this test is the place that makes it deliberate."""
+    import engines as E
+
+    assert set(E.MODE.values()) == {"directLake"}
+
+
+def test_deploy_passes_warehouse_for_a_warehouse_and_lakehouse_otherwise():
+    """WHICH item vs HOW it is read are independent now. Passing `lakehouse=` for the warehouse
+    item raises in duckrun — a deploy failure partway through a run that has already spent
+    capacity on the engines before it."""
+    import deploy_models as D
+
+    lake = D.deploy_kwargs({"item": "dbt_delta", "kind": "lakehouses", "mode": "directLake"})
+    assert lake == {"lakehouse": "dbt_delta", "mode": "direct_lake"}
+
+    wh = D.deploy_kwargs({"item": "dbt_dwh", "kind": "warehouses", "mode": "directLake"})
+    assert wh == {"warehouse": "dbt_dwh", "mode": "direct_lake"}
+
+    # The same item, read the other way — one template, mode decides.
+    dq = D.deploy_kwargs({"item": "dbt_dwh", "kind": "warehouses", "mode": "directQuery"})
+    assert dq == {"warehouse": "dbt_dwh", "mode": "direct_query"}
+
+
+def test_there_is_exactly_one_template():
+    """The DirectQuery copy is gone; `mode=` reproduces it from this one file. A second .bim
+    reintroduces the lockstep problem that made the DAX suite silently non-comparable."""
+    bims = sorted(pathlib.Path(HERE).glob("*.SemanticModel/model.bim"))
+    assert [b.parent.name for b in bims] == ["fct_summary.SemanticModel"]

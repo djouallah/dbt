@@ -24,7 +24,10 @@ import render_summary as rs         # noqa: E402
 
 REF = "aemo_duckrun"                # the reference engine in these fixtures
 CHAL = "aemo_spark"                 # a Direct Lake challenger
-DQ = "aemo_dwh"                     # the DirectQuery engine
+DQ = "aemo_dwh"                     # a DirectQuery engine — the MECHANISM, not the current setting.
+                                    # Every engine is Direct Lake now (engines.MODE), so nothing
+                                    # exercises this in production; these fixtures keep the hot-only
+                                    # scoping and mode labelling honest for whenever MODE is flipped.
 
 
 def _cold(median, spread=5.0):

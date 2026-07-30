@@ -62,9 +62,8 @@ the same eight `stats.py` reports on, in the schemas dbt writes them to:
 The wide raw facts are a **column subset**: `fct_price` has ~130 columns and `fct_scada` ~55, nearly
 all AEMO FCAS fields nothing here queries. Keys, timestamps, and the measure-bearing numerics are
 carried; a Direct Lake column costs nothing until a query transcodes it, but it does cost anyone
-reading the model. Both `.bim` files are generated from one spec so their semantic surfaces are
-identical by construction, and [`test_templates.py`](test_templates.py) asserts they stay that way —
-that identity is what lets one DAX suite run against a Direct Lake and a DirectQuery model alike.
+reading the model. There is **one** `.bim`, deployed to all four engines, so one DAX suite runs
+against four identical semantic surfaces by construction rather than by assertion.
 
 Relationships wire each fact to `dim_duid` / `dim_calendar`, but **only `fct_summary`'s two set
 `relyOnReferentialIntegrity`**. That flag lets the engine use an inner join, which silently drops rows
@@ -73,31 +72,40 @@ its RI holds by construction; the raw facts carry retired units absent from the 
 registration list — which is precisely what `stats.py`'s `duid_probe` exists to diagnose. Asserting RI
 there would make the benchmark quietly measure fewer rows on the tables it is comparing.
 
-| mode | engines | template | what the timing means |
-|---|---|---|---|
-| **Direct Lake** | `duckrun`, `iceberg`, `spark` | [fct_summary.SemanticModel](fct_summary.SemanticModel/) | Delta→memory transcode (cold) and in-memory scan (hot). The physical layout *is* what is being measured. |
-| **DirectQuery** | `dwh` | [fct_summary_dq.SemanticModel](fct_summary_dq.SemanticModel/) | SQL endpoint pushdown. A different engine, not a different layout. |
+### Storage mode: all four are Direct Lake
 
-`dwh` being DirectQuery is a deliberate choice for now, not a fallback. It has three consequences the
-code handles explicitly rather than hiding:
+`deploy()` takes two orthogonal knobs, and [`engines.py`](engines.py) is the one place that decides
+both:
 
-- **Hot only.** There is no transcoded column data to evict, so `dehydrate_model` fails and
-  `bench_model` degrades it to hot timing — the expected path, and the log says so.
-- **No refresh at deploy.** duckrun refreshes a Direct Lake model (a reframe) and deliberately does
-  not refresh a DirectQuery one, because it queries live. That is not a partial deploy.
-- **Labelled everywhere it appears.** Its timings are real measured query times, but they are not the
-  same *kind* of number — so every verdict carries its `mode` and the reports tag it, rather than
-  pooling it with the Direct Lake three and letting the reader conclude "dwh has a slow layout".
+| knob | source | what it says |
+|---|---|---|
+| `lakehouse=` / `warehouse=` | `engines.KIND` | **which** Fabric item holds the tables |
+| `mode=` | `engines.MODE` | **how** it is read — `direct_lake` for all four |
 
-Direct Lake over a *warehouse* item is untried. The warehouse's `Tables` do surface Delta over OneLake
-(that is how `stats.py` reads it), so it remains available later.
+So every leg measures the same thing: a Delta→memory transcode (cold) and an in-memory scan (hot),
+shaped by the physical layout. That is the only question this benchmark asks.
+
+**`dwh` was the exception until duckrun 0.4.36.** Before `deploy(mode=)`, a warehouse item could only
+be read by DirectQuery, so the benchmark carried a second hand-authored `fct_summary_dq.SemanticModel`
+and the dwh leg was hot-only, got no reframe at deploy, was scoped out of every COLD table, and had to
+be labelled everywhere so a pushdown timing was never read as "dwh has a slow layout". A warehouse's
+`Tables` are Delta in OneLake like any other item's — which is how `stats.py` has always read it — and
+`mode=` is what finally let the semantic model do the same. The second template is deleted;
+`mode="direct_query"` on the one remaining `.bim` reproduces it exactly.
+
+The DirectQuery *machinery* is all still here and still driven by `engines.MODE`, not by engine name:
+the hot-only degradation in `bench_model`, the cold-tier scoping in `render_report._totals`, the
+`_(DirectQuery)_` tag on a verdict. Flipping one engine back is a one-line change in `MODE` — which
+is exactly what you would do to ask "is Direct Lake over the warehouse actually faster than
+DirectQuery over it?", the one comparison this change gives up by default.
+[`test_templates.py`](test_templates.py) pins the current setting so the flip stays deliberate.
 
 ## Pipeline
 
 | step | script | notes |
 |---|---|---|
 | 1 | [`resolve_env.py`](resolve_env.py) | `WS_ID` + [`engines.py`](engines.py) → each engine's item GUID. Emits `PBI_WORKSPACE` (the workspace **display name** — XMLA addresses by name) and `BENCH_ITEMS`. |
-| 2 | [`deploy_models.py`](deploy_models.py) | One model per engine via duckrun's `workspace.deploy()`, which rewrites the GUIDs / SQL endpoint baked into the template. Narrows `BENCH_ENGINES` to what deployed. |
+| 2 | [`deploy_models.py`](deploy_models.py) | One model per engine from one template via duckrun's `workspace.deploy()`: `lakehouse=`/`warehouse=` rewrites the baked-in GUIDs, `mode=` forces the storage mode. All four are Direct Lake, so all four reframe. Narrows `BENCH_ENGINES` to what deployed. |
 | 3 | [`xmla_compare.py`](xmla_compare.py) | The payload: tiered DAX over ADOMD.NET, dehydrating per query for true cold timing. |
 | 4 | [`render_report.py`](render_report.py) | Job summary + the derived `analysis` block, merged back into the one JSON. |
 | 5 | [`render_summary.py`](render_summary.py) | Specialist findings. **Exits 1 on a verdict-direction inversion** — the only thing here that fails the job. |
@@ -177,13 +185,19 @@ RUN_REPORT=some_run_report.json python benchmark/render_report.py   # re-render 
 
 [`test_verdicts.py`](test_verdicts.py) pins the verdict layer: ratio orientation, fastest-wins (a
 1ms win is a win, and the `best` column names an engine rather than `tie`), explicit reference
-selection, DirectQuery scoping, and comparable totals.
-[`test_templates.py`](test_templates.py) checks the two `.bim` files against duckrun's *own* repoint
-regexes — everything it asserts would otherwise fail at deploy time, after ADOMD.NET is installed and
-the workspace resolved. It also pins the sharpest trap here: `_is_directlake_bim()` greps the raw
-bytes for the camelCase Direct-Lake token, so **a description string naming the mode is enough** to
-flip the DirectQuery template and make deploy attempt a reframe it cannot serve. Prose counts. (That
-one was caught for real, in this template, by that test.)
+selection, DirectQuery scoping (the machinery, which no engine currently exercises), and comparable
+totals. [`test_templates.py`](test_templates.py) checks the `.bim` against duckrun's *own* repoint
+regexes and pins the storage-mode wiring: that every `engines.MODE` value round-trips through
+duckrun's own `_normalize_mode`, that `deploy_kwargs` pairs `warehouse=` with the warehouse item and
+`lakehouse=` with a lakehouse, and that exactly one template exists. Everything it asserts would
+otherwise fail at deploy time, after ADOMD.NET is installed and the workspace resolved — partway
+through a run that has already spent capacity on the engines before it.
+
+One trap worth keeping in mind if anyone reintroduces a hand-authored DirectQuery `.bim` instead of
+using `mode=`: `_is_directlake_bim()` greps the raw bytes for the camelCase Direct-Lake token, so
+**a description string naming the mode is enough** to flip it and make deploy attempt a reframe the
+model cannot serve. Prose counts. (That one was caught for real, by that test, in the template that
+has since been deleted.)
 
 **Checking the premise still holds** — the tables are at parity and each engine wrote them
 differently — is `ci.yml`'s `summary` job, or the same read from a laptop

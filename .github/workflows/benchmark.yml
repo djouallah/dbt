@@ -73,7 +73,7 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
-      - run: pip install pytest "duckrun>=0.4.35"
+      - run: pip install pytest "duckrun>=0.4.36"
       - name: pytest benchmark/
         run: python -m pytest benchmark/ -q
 
@@ -107,10 +107,12 @@ jobs:
         with:
           python-version: "3.11"
 
-      # >=0.4.35 is the floor this repo already requires (CLAUDE.md). The benchmark additionally
-      # needs Workspace.deploy()'s Direct Lake + DirectQuery repoints and auth.get_powerbi_token().
+      # >=0.4.36 for Workspace.deploy(mode=), which is what lets the WAREHOUSE be read by Direct
+      # Lake like the three lakehouses instead of DirectQuery — so all four legs measure a Delta
+      # layout rather than three layouts and one pushdown. (The repo's dbt floor is 0.4.35; this
+      # job needs the higher one, plus the OneLake repoints and auth.get_powerbi_token().)
       - name: Install deps
-        run: pip install "duckrun>=0.4.35" pythonnet requests
+        run: pip install "duckrun>=0.4.36" pythonnet requests
 
       - name: Init run report
         run: |
@@ -138,10 +140,11 @@ jobs:
       - name: Resolve workspace + per-engine items
         run: python benchmark/resolve_env.py
 
-      # One semantic model per engine over that engine's own mart.fct_summary. Direct Lake for the
-      # lakehouses (deploy refreshes them, so this returns only once live); DirectQuery for the
-      # warehouse (no refresh — it queries live). Rewrites BENCH_ENGINES to the engines that actually
-      # deployed, so a failed deploy can't make xmla_compare wait out 16 warm-up retries.
+      # One semantic model per engine over that engine's own mart.fct_summary, from ONE template:
+      # lakehouse=/warehouse= says which item holds the tables, mode= says how it is read. All four
+      # are Direct Lake, so every deploy reframes and returns only once the model is live. Rewrites
+      # BENCH_ENGINES to the engines that actually deployed, so a failed deploy can't make
+      # xmla_compare wait out 16 warm-up retries.
       - name: Deploy semantic models
         run: python benchmark/deploy_models.py
 

@@ -1,16 +1,26 @@
 """Deploy one semantic model per engine over that engine's own `mart.fct_summary`.
 
-Two templates, picked by the engine's mode (benchmark/engines.py):
+ONE template for every engine, with two orthogonal knobs on `ws.deploy()`:
 
-  directLake  — fct_summary.SemanticModel/model.bim, deployed with `lakehouse=<item>`. duckrun
-                rewrites the workspace/lakehouse GUIDs baked into the M expression and then
-                REFRESHES the model, so deploy() returns only once the reframe succeeded.
-  directQuery — fct_summary_dq.SemanticModel/model.bim, deployed with `warehouse=<item>`. duckrun
-                resolves this workspace's SQL endpoint and rewrites both halves of the
-                Sql.Database(...) reference. There is deliberately NO refresh: a DirectQuery model
-                has nothing to reframe, it queries live. That is not a partial deploy.
+  `lakehouse=` / `warehouse=`  — WHICH item holds the tables. Chosen by the item's kind
+                                 (engines.KIND), and duckrun raises rather than silently pointing
+                                 elsewhere if the wrong one is passed.
+  `mode=`                      — HOW that item is read. From engines.MODE, which is directLake for
+                                 all four. duckrun rewrites every table to an entity partition over
+                                 one AzureStorage.DataLake expression on the item's OneLake root and
+                                 sets directLakeBehavior=directLakeOnly, so a query Direct Lake
+                                 cannot serve FAILS instead of quietly falling back to DirectQuery
+                                 and logging a pushdown time that reads as a bad layout.
 
-Nothing is written to any lakehouse — the models read tables the dbt run already produced.
+Requires duckrun >= 0.4.36 for `mode=`. Before it, a warehouse could only be read by DirectQuery, so
+this file carried a second `fct_summary_dq.SemanticModel` template and dwh was the odd leg out —
+hot-only, no reframe, scoped out of every COLD table. That template is gone: `mode="direct_query"`
+on this same .bim reproduces it exactly, so flipping an engine back is a one-line change in
+engines.MODE rather than a second file to keep in lockstep.
+
+Every model is Direct Lake, so every deploy REFRESHES (a reframe onto the latest Delta) and returns
+only once the model is live. Nothing is written to any lakehouse — the models read tables the dbt run
+already produced.
 
 Env in: WS_ID, BENCH_ITEMS (from resolve_env.py), BENCH_ENGINES, BENCH_FOLDER (optional).
 """
@@ -29,8 +39,7 @@ import report  # noqa: E402
 FAB = "https://api.fabric.microsoft.com/v1"
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-TEMPLATE = {"directLake": os.path.join(HERE, "fct_summary.SemanticModel", "model.bim"),
-            "directQuery": os.path.join(HERE, "fct_summary_dq.SemanticModel", "model.bim")}
+TEMPLATE = os.path.join(HERE, "fct_summary.SemanticModel", "model.bim")
 
 # Workspace folder the models are grouped under, so a benchmark dispatch does not scatter four items
 # across the workspace root next to the lakehouses. duckrun creates it if absent (and raises if an
@@ -40,6 +49,20 @@ TEMPLATE = {"directLake": os.path.join(HERE, "fct_summary.SemanticModel", "model
 # definition in place and leaves it wherever it already lives — so models deployed before this was
 # set stay at the workspace root until they are deleted once and recreated.
 FOLDER = os.environ.get("BENCH_FOLDER", "benchmark")
+
+
+def deploy_kwargs(meta):
+    """The `ws.deploy()` kwargs for one engine's BENCH_ITEMS entry — the two orthogonal knobs.
+
+    WHICH item holds the tables follows the item's KIND, never the storage mode: those became
+    independent in duckrun 0.4.36, and passing `lakehouse=` for a warehouse (or the reverse) raises
+    rather than deploying something that points elsewhere. HOW it is read follows engines.MODE.
+
+    Extracted from main() so the pairing is testable without Fabric — getting it wrong costs a
+    deploy failure partway through a paid run."""
+    kw = {"warehouse": meta["item"]} if meta["kind"] == "warehouses" else {"lakehouse": meta["item"]}
+    kw["mode"] = E.DEPLOY_MODE[meta["mode"]]
+    return kw
 
 
 def _reparent(ws, item_id, name):
@@ -83,17 +106,14 @@ def main():
     deployed, failed = {}, {}
     for e in picked:
         meta = items[e]
-        mode, item = meta["mode"], meta["item"]
+        mode, item, kind = meta["mode"], meta["item"], meta["kind"]
         name = E.model_name(e)
-        bim = TEMPLATE[mode]
-        # lakehouse= drives the Direct Lake OneLake-GUID rewrite; warehouse= drives the DirectQuery
-        # Sql.Database rewrite. Passing the wrong one raises in duckrun rather than deploying
-        # something that silently points elsewhere, which is why the mode picks both at once.
-        kwargs = {"lakehouse": item} if mode == "directLake" else {"warehouse": item}
-        print(f"deploying {name} -> {item} ({mode}) into folder {FOLDER!r} ...", flush=True)
+        kwargs = deploy_kwargs(meta)
+        print(f"deploying {name} -> {item} ({kind[:-1]}, {mode}) into folder {FOLDER!r} ...",
+              flush=True)
         t0 = time.perf_counter()
         try:
-            item_id = ws.deploy(bim, name=name, overwrite=True, folder=FOLDER, **kwargs)
+            item_id = ws.deploy(TEMPLATE, name=name, overwrite=True, folder=FOLDER, **kwargs)
         except Exception as ex:
             # One engine failing to deploy must not cost the others their run: record it and carry
             # on. xmla_compare.py benchmarks whatever actually deployed.

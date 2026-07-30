@@ -4,11 +4,22 @@ Deliberately mirrors `.github/scripts/stats.py`'s `ENGINES` / `WRITER`: that scr
 dashboard over the same four items, and the two must never disagree about which Fabric item belongs
 to which engine. If an item is renamed, both change together.
 
-`MODE` is the one thing stats.py has no opinion about and this does: the three lakehouses are read
-by a **Direct Lake** semantic model (in-memory transcode from the Delta files, so the physical layout
-is what shapes the timing), and the warehouse by a **DirectQuery** model (pushdown to the SQL
-endpoint — a different engine, not a different layout). A DirectQuery model has no transcoded data to
-evict, so it yields hot numbers only and is labelled distinctly wherever it appears.
+`MODE` is the one thing stats.py has no opinion about and this does: how each engine's tables are
+READ by the semantic model. All four are now **Direct Lake** — an in-memory transcode from the Delta
+files, so the physical layout is what shapes the timing, which is the only question this benchmark
+asks.
+
+The warehouse used to be the exception, read by a **DirectQuery** model (pushdown to the SQL
+endpoint — a different engine, not a different layout), because that was the only way duckrun could
+deploy a model over a warehouse. `deploy(mode=)` (duckrun 0.4.36) removed the constraint: a
+warehouse's tables are Delta in OneLake like any other, so it can be read by Direct Lake too, and
+one authored .bim now serves either mode. That makes the four legs directly comparable for the first
+time — dwh has a cold tier now, so it appears in the COLD tables instead of being scoped out of them.
+
+MODE is still per-engine and still consulted everywhere, so flipping one engine back to
+`"directQuery"` is a one-line change here — the same template deploys either way. Everything
+downstream (cold-tier scoping in `render_report._totals`, the `_(DirectQuery)_` label on a verdict,
+the hot-only note) reads this and keeps working; it just has nothing to report while all four match.
 """
 import json
 import os
@@ -26,9 +37,14 @@ KIND = {e: kind for e, _, kind in ENGINES}
 WRITER = {"duckrun": "delta-rs", "iceberg": "duckdb (iceberg)",
           "spark": "spark", "dwh": "warehouse"}
 
-# How the semantic model reads it. A lakehouse item is reachable by Direct Lake on OneLake; a
-# warehouse item is served here as DirectQuery over the workspace SQL endpoint.
-MODE = {e: ("directQuery" if kind == "warehouses" else "directLake") for e, _, kind in ENGINES}
+# How the semantic model READS it — independent of the item kind since duckrun 0.4.36. A warehouse's
+# tables are Delta in OneLake exactly like a lakehouse's, so all four are read the same way and the
+# comparison is layout-vs-layout rather than layout-vs-pushdown. Set an engine to "directQuery" to
+# put it back on the SQL endpoint; the same .bim deploys either way via deploy(mode=).
+MODE = {e: "directLake" for e, _, _ in ENGINES}
+
+# The TMSL spellings above, in the spelling duckrun's deploy(mode=) takes.
+DEPLOY_MODE = {"directLake": "direct_lake", "directQuery": "direct_query"}
 
 ALL = [e for e, _, _ in ENGINES]
 
