@@ -18,6 +18,10 @@
 -- Write strategy stays each target's proven one; only the source changed:
 --   duckrun -> merge (update matched + insert new) on the grain. delta_rs prunes target
 --     files from the source's own stats, so a ~3-date batch touches only those files.
+--     This is the ONE model here that is not incremental_strategy='insert': the facts can be
+--     insert-only because a stored row is final, but a re-emitted summary row may carry
+--     REVISED mw/price and must overwrite what is stored. Insert-only would keep the stale
+--     value, which is exactly the fossilization this header is about.
 --     NOT delete+insert: this adapter implements that as a fenced FULL-TABLE overwrite
 --     (it materializes every surviving target row plus the batch into a DuckDB temp
 --     table, then overwrites), which would rewrite all 143M rows on every run.

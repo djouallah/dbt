@@ -3,6 +3,46 @@
 A running record of things that took real time to work out. Facts and measurements, not
 recommendations — the rules that follow from them live in [CLAUDE.md](CLAUDE.md).
 
+## What actually OOM-killed the duckrun facts: a MERGE reads the whole target, not the batch
+
+The duckrun facts went `append` → keyed write → `append` again → keyed write over a handful of
+commits. The middle detour cost the most time, and the reason is one property of delta-rs MERGE:
+even an **insert-only** merge plans a join against the whole pinned target, so its cost scales
+with the target's *partition span* rather than the size of the batch, and its join state is not
+fully spillable. It also splits the memory budget with DuckDB (a 30% merge share).
+
+`fct_scada` is 369,205,022 rows. The first symptom was a OneLake GET that sat 212s and failed;
+after a pruning predicate was added, the next run died mid-merge with **no dbt error line at
+all** — just a leaked-semaphore warning, which means the process was killed rather than a query
+failing. Neither symptom names memory, which is why this took two CI runs to read correctly.
+
+duckrun 0.4.34 removed the cause: `incremental_strategy='insert'` no longer calls delta-rs MERGE.
+It anti-joins the batch against the target's key columns **in DuckDB** (projection pushdown,
+spills like any other DuckDB query) and hands delta-rs a commit carrying `add` actions only.
+Measured on 20M rows × 14 columns over 12 monthly partitions, inserting 200k rows of which 100k
+keys are new, post-write maintenance excluded from both:
+
+| | wall | process RSS growth |
+|---|---:|---:|
+| DuckDB anti-join + append | **0.9s** | **+84 MB** |
+| delta-rs insert-only MERGE | 6.7s | +8,397 MB |
+
+Identical rows out of both. The memory column is the finding: +8.4 GB to insert 100k rows into a
+20M-row table, and that growth tracks the *target*, not the batch.
+
+Two things that were true only of the detour, and are worth not re-deriving:
+
+- The interim `append` was fenced only because the adapter found the relation name in the
+  **rendered** model SQL (`reads_self`). At one point the only occurrence was a passing mention
+  of `{{ this }}` inside a prose comment — dbt renders comments, so the fence was real but one
+  rewording away from silently becoming a last-writer-wins append. `insert`'s append is fenced
+  unconditionally, on the version its anti-join read.
+- `incremental_predicates=['target.month_key = source.month_key']` prunes nothing in a delta-rs
+  merge (measured: 60/60 files scanned, partitioned or not) but **does** prune on the anti-join
+  path, because `engine.probe_filters` reads the batch and folds *literal* partition values into
+  the probe. Identical predicate text, opposite behaviour — the difference is which component
+  computes the literals. Hence the file-literal macro is now iceberg's alone.
+
 ## Reading CSV with an explicit schema in Spark SQL
 
 This was the single biggest time sink. The data needs an explicit schema because AEMO rows are

@@ -4,25 +4,32 @@
 -- of double-inserting.
 --
 -- Two spellings for the same semantics, because the adapters expose it differently:
---   duckrun -> incremental_strategy='insert'. delta-rs insert-only merge, and the commit
---     is OCC-fenced on the version the model read, so a concurrent writer loses the race
---     with CommitFailedError instead of appending a duplicate. NOT merge_clauses
---     do_nothing: duckrun's clause translator accepts only 'update'/'delete' for
---     when_matched and raises on 'do_nothing' (delta_plugin.py, _specs_from_merge_clauses).
---   iceberg -> merge + when_matched do_nothing, which dbt-duckdb does support. Omitting
---     when_matched would default to update-by-name and draw the REST catalog's 400.
+--   duckrun -> incremental_strategy='insert'. Since 0.4.34 that is NOT a delta-rs merge: the
+--     adapter anti-joins the batch against the target's KEY columns in DuckDB and commits a
+--     plain append (add actions only, no file rewritten), so cost tracks the batch instead of
+--     the target's partition span, and the append is ALWAYS fenced to the version the anti-join
+--     read -- a concurrent writer loses with CommitFailedError instead of duplicating. The
+--     delta-rs insert-only merge it replaced measured 6.7s/+8.4GB RSS against 0.9s/+84MB on a
+--     20M-row table; the memory is why it OOM-killed fct_scada (369M rows) outright, and why
+--     this file briefly carried 'append' plus a reads_self fence instead. Both are gone.
+--     NOT merge_clauses do_nothing: duckrun's clause translator accepts only 'update'/'delete'
+--     for when_matched and raises on 'do_nothing' (delta_plugin.py, _specs_from_merge_clauses),
+--     which is the one thing keeping the two targets from sharing a single config.
+--   iceberg -> merge + when_matched do_nothing, which dbt-duckdb does support (it has no
+--     'insert' strategy at all). Omitting when_matched would default to update-by-name and
+--     draw the REST catalog's 400.
 --
--- This is NOT append. The pre_hook file list already excludes ingested files, but it is
--- computed before the write, so two overlapping runs both see a file as new and both
--- append it. The key match is the guard underneath that; the file list stays as the thing
--- that keeps the merge source small.
+-- Neither is plain 'append'. The pre_hook file list already excludes ingested files, but it is
+-- computed before the write, so two overlapping runs both see a file as new and both append it.
+-- The key match is the guard underneath that; the file list stays as the thing that keeps the
+-- source small.
 --
 -- The pending-file probe below runs BEFORE config() on purpose: it feeds both the has_files
--- no-op gate and incremental_predicates, and config() needs the latter. It is the same single
--- query that used to return only COUNT(*), so this costs no extra read of {{ this }}.
--- See macros/pending_file_predicate.sql for why the predicate has to carry literal file names
--- rather than a target.x = source.x comparison -- without it this merge scans the whole
--- 143M-row table on every run, which is what failed the duckrun leg.
+-- no-op gate and iceberg's incremental_predicates, and config() needs the latter. It is the same
+-- single query that used to return only COUNT(*), so this costs no extra read of this table.
+-- See macros/pending_file_predicate.sql for why an ICEBERG predicate has to carry literal file
+-- names rather than a target.x = source.x comparison -- without it that merge scans the whole
+-- 143M-row table every run. duckrun builds the equivalent itself, from the batch.
 {%- set pending_files_query -%}
 SELECT csv_filename FROM {{ ref('stg_csv_archive_log') }}
 WHERE source_type = 'daily'
@@ -40,34 +47,23 @@ AND csv_filename NOT IN (SELECT DISTINCT file FROM {{ this }})
 {%- endif -%}
 {%- set has_files = pending_files is none or pending_files | length > 0 -%}
 
-{#-- duckrun gets BOTH predicates. The literal file predicate is the only thing that prunes
-    target FILES: a column-to-column predicate scans 60/60 even when the table is partitioned
-    (measured -- see macros/pending_file_predicate.sql), so month_key alone "reads like the lever
-    but is not the thing doing the work". Shipping it alone is what got fct_scada OOM-killed on a
-    122 GiB notebook. month_key stays because it selects the partitions the write lands in.
-    Safe to AND them: every key match shares SETTLEMENTDATE, hence month_key, and the file name
-    leads the unique_key -- so both are implied by the ON clause and remove no match it would make.
-    The macro emits DBT_INTERNAL_DEST and duckrun rewrites that to `target` itself, so one
-    spelling serves both adapters. --#}
+{#-- ICEBERG ONLY: the literal file predicate. Its merge prunes target FILES only from literal
+    values -- a column-to-column predicate scans 60/60 even on a partitioned table (measured --
+    see macros/pending_file_predicate.sql). duckrun needs none of it: engine.probe_filters builds
+    the equivalent from the batch itself (an exact `IN` list for the declared partition equality,
+    min/max bounds for every other join key, so `file` gets its range for free). Both predicates
+    are implied by the ON clause -- `file` leads the unique_key and every key match shares
+    SETTLEMENTDATE, hence month_key -- so neither removes a match the key would have made. --#}
 {%- set file_predicate = pending_file_predicate(pending_files) -%}
-{%- set duckrun_predicates = (file_predicate if file_predicate else []) + ['target.month_key = source.month_key'] %}
-
-{#-- OCC FENCE -- DO NOT DELETE. duckrun writes this model with `append`, which is only
-     fenced when the adapter sees the relation name in the RENDERED MODEL SQL:
-       reads_self = dbt_believes_exists and ... and (this | string) in model_sql
-     (_delta_core.sql). When true it commits via append_if_unchanged(read_version=vB), so a
-     concurrent writer fails loudly with CommitFailedError instead of appending a duplicate;
-     when false it degrades SILENTLY to an unfenced last-writer-wins append. The token below
-     is what makes that true, on purpose -- it was previously true only by accident, via a
-     passing mention of {{ this }} in a prose comment. A comment counts: dbt renders it. --#}
 
 {{ config(
     materialized='incremental',
-    incremental_strategy='append' if target.name == 'duckrun' else 'merge',
+    incremental_strategy='insert' if target.name == 'duckrun' else 'merge',
     merge_clauses=none if target.name == 'duckrun' else {'when_matched': [{'action': 'do_nothing'}]},
     unique_key=['file', 'REGIONID', 'SETTLEMENTDATE','INTERVENTION'],
     partition_by=['month_key'] if target.name == 'duckrun' else none,
-    incremental_predicates=(none if target.name == 'duckrun' else file_predicate),
+    incremental_predicates=(['target.month_key = source.month_key']
+                            if target.name == 'duckrun' else file_predicate),
     pre_hook="SET VARIABLE price_daily_paths = (SELECT COALESCE(NULLIF(list('{{ get_csv_archive_path() }}' || archive_path), []), ['']) FROM (SELECT archive_path FROM {{ ref('stg_csv_archive_log') }} WHERE source_type = 'daily'{% if is_incremental() %} AND csv_filename NOT IN (SELECT DISTINCT file FROM {{ this }}){% endif %} ORDER BY archive_path))"
 ) }}
 

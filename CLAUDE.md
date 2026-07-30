@@ -93,14 +93,20 @@ write-time key check, so the only thing preventing duplicate rows was the *file 
 `new_source_files` on dwh, `spark_new_files` on spark, the `SET VARIABLE` pre-hook on duckdb.
 That list is computed **before** the write. Two overlapping runs (a re-dispatch, a `dbt retry`
 racing a scheduled run) both see a file as new and both append it. The file lists all stay —
-they are what keeps the merge source small — but the key match is now the guard underneath.
+they are what keeps the write's source small — but the key match is now the guard underneath.
+
+The duckrun facts did spend one commit on `append` plus a hand-built OCC fence, because the
+`insert` of the day was a delta-rs merge that OOM-killed `fct_scada`. Do not resurrect that
+shape: the fence depended on the adapter spotting `{{ this }}` in the *rendered* SQL, so a
+reworded comment silently downgraded it to a last-writer-wins append. duckrun 0.4.34 removed the
+reason it existed.
 
 Every fact model is **insert-only** where the adapter can express it: the data is append-only,
 so a matched row never needs updating.
 
 | target | strategy | why not something else |
 |---|---|---|
-| `duckrun` | `insert` on the facts, `merge` on `fct_summary` | `insert` *is* delta-rs insert-only merge (`insert_only=True`), OCC-fenced on the version the model read — a concurrent commit fails with `CommitFailedError` rather than duplicating. Not `merge` + `when_matched do_nothing`: duckrun's clause translator accepts only `update`/`delete` and **raises** on `do_nothing` (`_specs_from_merge_clauses`). Not `delete+insert`: in this adapter that is a fenced **full-table overwrite** — every surviving target row plus the batch into a DuckDB temp table, then overwrite. On a 143M-row table that is a full rewrite *every run*. |
+| `duckrun` | `insert` on the facts, `merge` on `fct_summary` | Since **0.4.34** `insert` is *not* a delta-rs merge: the adapter anti-joins the batch against the target's key columns **in DuckDB** and commits a plain append (add actions only, nothing rewritten), so cost tracks the batch instead of the target's partition span, and the append is **always** fenced to the version the anti-join read — no dependence on the `reads_self` heuristic. Measured 0.9s/+84MB against 6.7s/+8,397MB for the delta-rs equivalent on a 20M-row table. Not `merge` + `when_matched do_nothing`: duckrun's clause translator accepts only `update`/`delete` and **raises** on `do_nothing` (`_specs_from_merge_clauses`) — the one thing keeping duckrun and iceberg from sharing a single config, filed as a feature request. Not `delete+insert`: in this adapter that is a fenced **full-table overwrite** — every surviving target row plus the batch into a DuckDB temp table, then overwrite. On a 143M-row table that is a full rewrite *every run*. |
 | `iceberg` | `merge` + `when_matched: do_nothing` | The OneLake Iceberg REST catalog rejects a matched-UPDATE branch: `BadRequest 400`, one add-snapshot update per commit. Omitting `when_matched` is not the same as insert-only — dbt-duckdb defaults it to update-by-name and draws the 400. |
 | `spark` | `merge` + `skip_matched_step=true` | dbt-fabricspark honours `skip_matched_step`, which omits the WHEN MATCHED branch entirely — genuinely insert-only, and it cannot hit a multiple-source-row match error because there is no matched clause. Requires `file_format='delta'`. `merge` and `append` take the identical path in that materialization (persistent `__dbt_tmp` view, then one DML), so switching strategy does not disturb the CSV read. |
 | `dwh` | `merge` on the facts, `delete+insert` on `fct_summary` | Insert-only is **not expressible** here: dbt-fabric merge is `default__get_merge_sql`, which always emits `WHEN MATCHED THEN UPDATE SET <every column>` (`merge_update_columns=[]` is falsy and falls through to all columns). For append-only data that branch is a semantic no-op — a matched row is rewritten with its own values — so it is correct, just not free. If the leg gets slow, fall back to `delete+insert` on `unique_key=['[file]']`. Bracket every key column: dbt interpolates them raw into the ON clause and `file`/`date` are reserved words. Never `--full-refresh` here: on dbt-fabric that DROPs and recreates, which deadlocks Fabric's background stats maintenance, loses grants, and rebinds Direct Lake. Use `REBUILD_SUMMARY=1` instead. |
@@ -118,14 +124,17 @@ Before changing a strategy, read the adapter's own source rather than assuming t
 what it does elsewhere. duckrun's lives in `dbt/adapters/duckrun/delta_plugin.py`; the Fabric ones
 in `dbt/include/fabric{,spark}/macros/materializations/models/incremental/`.
 
-### A keyed merge reads the target, and on duckrun that means the table must be PARTITIONED
+### A keyed write reads the target, and on duckrun that means the table must be PARTITIONED
 
 Moving the facts off `append` made every run scan the target looking for key collisions. The
 other three engines absorbed it (dwh 48s, iceberg 49s, spark 95s on `fct_scada`). duckrun did
 not, twice: first a OneLake GET that sat 212s and failed, then — after adding a pruning
 predicate — a run that died mid-merge with **no dbt error at all**, just a leaked-semaphore
 warning. No error line means the process was killed, not a query that failed. `fct_scada` is
-369,205,022 rows and duckrun's merge is memory bound.
+369,205,022 rows and a **delta-rs merge** is memory bound: it plans a join against the whole
+pinned target and its join state is not fully spillable. duckrun 0.4.34's `insert` sidesteps that
+entirely — the anti-join runs in DuckDB and spills like any other query — but the target read is
+still a read, so the partitioning below is what keeps it bounded rather than optional.
 
 **The fix is `partition_by`, not a cleverer predicate.** Both duckrun AEMO reference models
 (`tests/integration_tests/aemo/models/marts/fct_{price,scada}.sql`) carry:
@@ -143,13 +152,20 @@ Two things that cost real time here, worth not rediscovering:
 - **Partitioning is set at table creation.** `_store_overwrite` passes `partition_by` through
   (`delta_plugin.py` 253→301); `_store_merge` does not, because a merge writes into whatever
   partitioning already exists. Adding `partition_by` to a live table does nothing — the table
-  has to be dropped and rebuilt. All four duckrun facts were dropped for this.
-- **A column-to-column predicate does not prune target FILES.** Measured against delta-rs on a
-  60-file table merging one new file: key only, `target.DATE = source.DATE`,
+  has to be dropped and rebuilt. All four duckrun facts were dropped for this. `_store_insert`
+  **does** forward it (`delta_plugin.py:598,662`), because that path commits an append and its
+  probe filters need to know which column is the partition — so the existing layout is preserved
+  and no rebuild was needed to move back onto `insert`.
+- **A column-to-column predicate does not prune target FILES — in a MERGE.** Measured against
+  delta-rs on a 60-file table merging one new file: key only, `target.DATE = source.DATE`,
   `target.month_key = source.month_key`, and even the same with the table partitioned, all
-  scanned 60/60; only a *literal* filter reached 0/60. So do not reach for
-  `incremental_predicates` expecting file skipping — on duckrun its job is partition selection,
-  which is a different mechanism and is what bounds the memory.
+  scanned 60/60; only a *literal* filter reached 0/60. That is why the **iceberg** leg needs
+  `macros/pending_file_predicate.sql`. It is **not** true of duckrun's `insert`: `engine.probe_filters`
+  reads the batch and folds *literal* values into the probe — an exact `"month_key" IN (202601, …)`
+  for a **declared** partition equality, min/max bounds for every other join key (so `file` gets its
+  range for free). Same predicate text, opposite outcome, because a different component computes
+  the literals. Declaring the equality is required: without it duckrun will not prune that column,
+  since only a declared equality makes the filter result-neutral.
 
 `macros/pending_file_predicate.sql` is the literal-value version, built from the pending file
 names known at compile time (`IN (...)` up to 200 files, else `BETWEEN min AND max`). It now
