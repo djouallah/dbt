@@ -639,9 +639,21 @@ detail.
   duckrun — `requests` is the whole dependency list. It is speculative tooling, so it is built to be
   deleted by removing one directory and one workflow file. Do not "DRY it up" against
   `benchmark/xmla_compare.py`; the duplication is what keeps that deletion free.
-- **It correlates nothing.** CU per model over a wall-clock window. It cannot say which query, run
-  or engine produced a number — `benchmark/` records durations but no absolute timestamps, and
-  adding them is the coupling this avoids.
+- **It correlates nothing with a GitHub run, and that is still true after the per-run split.** It
+  cannot say which *query* produced a number. It can now say which *run* and which *engine*, and
+  neither needed coupling to `benchmark/`: an engine has its own semantic model, so it is already its
+  own row, and a run is inferred as a **cluster of active hours** split on more than
+  `CU_RUN_GAP_HOURS` (default 2) idle hours, identified by its own time window. `benchmark/` still
+  records durations but no absolute timestamps, and adding them is the coupling this avoids.
+- **The per-run split costs zero extra requests, and the hour bucket is its hard floor.** The hour
+  column was always projected — it has to be, or `since` cannot be verified to bind — and was simply
+  discarded after that check; the split is post-processing of rows already in hand, so it is still one
+  request per capacity. What it cannot do is separate two dispatches inside the same hour:
+  `Metrics By Item Operation And Hour` is bucketed hourly, and the finer instrument is the timepoint
+  detail table this deliberately does not use. Do not reach for that table to sharpen the split — the
+  dedup trap below is why, and the benchmark's own inter-engine gaps already create the idle hours the
+  clustering keys off. When everything lands in one cluster the report says so rather than printing a
+  one-row "runs" table that repeats the aggregate.
 - **Deduplication by operation id is load-bearing.** `'Timepoint Interactive Detail'` is gated by a
   single 30-second `TimePoint` MPARAMETER, so the window is walked one bucket at a time — but an
   interactive operation is smoothed across 10–128 buckets and **reappears in every one carrying its

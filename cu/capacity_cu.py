@@ -93,7 +93,33 @@ DEBUG = os.environ.get("CU_DEBUG", "").strip().lower() in ("1", "true", "yes")
 # range of hours it actually saw, so one dispatch tells you what to set this to.
 SINCE = os.environ.get("CU_SINCE", "2026-07-30T22:00:00").strip()
 
-# Item x operation x hour. The hour axis exists only to support SINCE; nothing here reports by hour.
+# Run separation. The hour axis is already in every row (it has to be, to make `since` bind), so
+# splitting the report per RUN costs nothing extra: no more requests, no new query, pure
+# post-processing of rows already in hand.
+#
+# A "run" is a maximal cluster of active hours: a new one starts when the gap since the previous hour
+# that had any activity exceeds CU_RUN_GAP_HOURS. Sized from what the benchmark actually is — with one
+# job per engine and a 600s inter-engine gap, a full pass is ~2h of essentially continuous activity,
+# and two dispatches are hours apart. 0 disables segmentation and prints only the aggregate.
+#
+# THE RESOLUTION LIMIT IS HARD AND IT IS THE APP'S, not this code's: 'Metrics By Item Operation And
+# Hour' is bucketed at ONE HOUR. So two dispatches inside the same hour are one run here and there is
+# no way to tell them apart from this table — the timepoint detail table is the only instrument with
+# finer resolution, and cu/README.md says why this does not use it. Two things make the hour bucket
+# enough anyway: per-ENGINE separation does not depend on time at all (each engine has its own
+# semantic model, so it is already its own row), and the benchmark's own gaps are what create the
+# idle hours the split keys off.
+#
+# What this deliberately does NOT do is correlate a run with a GitHub run id. `benchmark/` records
+# durations but no absolute timestamps, and adding them is the coupling cu/ exists without. A run
+# here is identified by its own time window and nothing else.
+RUN_GAP_HOURS = int(os.environ.get("CU_RUN_GAP_HOURS", "2") or 0)
+
+# Per-run breakdown BY OPERATION as well as by model. Off by default: with several runs it is a wall
+# of tables, and the aggregate operation table below already answers "what kind of work cost the CU".
+RUN_OPS = os.environ.get("CU_RUN_OPS", "").strip().lower() in ("1", "true", "yes")
+
+# Item x operation x hour. The hour axis supports SINCE and the per-run split below.
 # Mind the spelling: the model also has 'Metrics By Item And Operation' (no time axis) and 'Metrics
 # By Item And Hour' (no operation split). This is the one with both.
 TABLE = "Metrics By Item Operation And Hour"
@@ -270,30 +296,27 @@ EVALUATE
 """.strip(), fatal=False))
 
 
-def render(cells, since, asof):
-    """cells is {(model, operation): cu}. Rendered as models x operation types."""
-    span = (f"since {since:%Y-%m-%d %H:%M} (model clock)" if since else "everything retained")
-    print(f"## Semantic model CU — {span}, as of {asof:%Y-%m-%d %H:%MZ}\n")
-    if not cells:
-        print(f"No semantic model activity {span}. Operations land **~6 minutes** after they run, "
-              f"so a benchmark that just finished is not in here yet"
-              + " — and `since` is in the MODEL's clock, so check the hour range in the log.")
-        return
+def _model_rows(cells):
+    """[(display name, total cu)] in report order.
 
-    # When specific models were asked for, print every one of them in the order given, including
-    # the ones with no activity. A model that silently vanishes from the table is indistinguishable
-    # from one that was never deployed; a 0.0 row says which.
+    When specific models were asked for, every one of them appears in the order given, including the
+    ones with no activity: a model that silently vanishes from the table is indistinguishable from one
+    that was never deployed, and a 0.0 row says which."""
     per_model = {}
     for (m, _op), cu in cells.items():
         per_model[m] = per_model.get(m, 0.0) + cu
-    models = ([(m, per_model.get(m.lower(), 0.0)) for m in MODELS] if MODELS
-              else sorted(per_model.items(), key=lambda kv: -kv[1]))
+    return ([(m, per_model.get(m.lower(), 0.0)) for m in MODELS] if MODELS
+            else sorted(per_model.items(), key=lambda kv: -kv[1]))
 
-    # Operation columns ordered by total CU, so the expensive one is the first thing read.
+
+def _op_table(cells):
+    """models x operation types, printed. Operation columns ordered by total CU, so the expensive one
+    is the first thing read."""
     per_op = {}
     for (_m, op), cu in cells.items():
         per_op[op] = per_op.get(op, 0.0) + cu
     ops = [op for op, _ in sorted(per_op.items(), key=lambda kv: -kv[1])]
+    models = _model_rows(cells)
 
     print("| semantic model | " + " | ".join(ops) + " | total |")
     print("|---|" + "---:|" * (len(ops) + 1))
@@ -304,6 +327,90 @@ def render(cells, since, asof):
     print("| **total** | "
           + " | ".join(f"**{per_op[op]:,.1f}**" for op in ops)
           + f" | **{grand:,.1f}** |")
+
+
+def sessionize(hours, gap_hours=RUN_GAP_HOURS):
+    """Cluster active hours into runs. `hours` is an iterable of datetimes; returns a list of sorted
+    hour lists, oldest run first.
+
+    A new run starts when the gap since the previous ACTIVE hour exceeds `gap_hours`. Nothing here
+    assumes how long a run is or how many there should be — an idle gap is the only signal, which is
+    why it survives a dispatch with different `engines`, `runs` or `gap_seconds` inputs.
+    """
+    uniq = sorted(set(hours))
+    if not uniq or gap_hours <= 0:
+        return [uniq] if uniq else []
+    runs = [[uniq[0]]]
+    for h in uniq[1:]:
+        if (h - runs[-1][-1]).total_seconds() > gap_hours * 3600:
+            runs.append([])
+        runs[-1].append(h)
+    return runs
+
+
+def render_runs(hourly, runs):
+    """One row per detected run: its window, and the CU each model spent inside it.
+
+    This is the whole point of the per-run split — the aggregate table sums every dispatch since the
+    floor, so a model's number there is "all the benchmarking we have done", not "what one pass
+    costs". A row here is one pass.
+    """
+    if len(runs) < 2:
+        # One cluster is not a separation, and printing a one-row "runs" table beside an identical
+        # aggregate reads as two findings where there is one. Say why instead.
+        span = "" if not runs else f" ({runs[0][0]:%Y-%m-%d %H:%M} .. {runs[0][-1]:%H:%M})"
+        print(f"\n<sub>All activity sits in a single ≤{RUN_GAP_HOURS}h-contiguous cluster{span}, so "
+              f"there is nothing to separate — the table above IS that run. Raise `since` or lower "
+              f"`run_gap_hours` to split more finely; the app's hour bucket is the floor on how fine "
+              f"that can get.</sub>")
+        return
+    names = [m for m, _ in _model_rows({(k[0], k[1]): v for k, v in hourly.items()})]
+    print(f"\n### Runs detected: {len(runs)}\n")
+    print("| run | window (model clock) | hours | " + " | ".join(names) + " | total |")
+    print("|---|:--|--:|" + "---:|" * (len(names) + 1))
+    for i, hrs in enumerate(runs, start=1):
+        window = (f"{hrs[0]:%Y-%m-%d %H:%M} → {hrs[-1]:%H:%M}" if hrs[0].date() == hrs[-1].date()
+                  else f"{hrs[0]:%Y-%m-%d %H:%M} → {hrs[-1]:%m-%d %H:%M}")
+        inside = set(hrs)
+        per = {}
+        for (m, op, h), cu in hourly.items():
+            if h in inside:
+                per[m] = per.get(m, 0.0) + cu
+        vals = [per.get(n.lower(), 0.0) for n in names]
+        print(f"| {i} | {window} | {len(hrs)} | "
+              + " | ".join(f"{v:,.1f}" for v in vals)
+              + f" | **{sum(vals):,.1f}** |")
+    print(f"\n<sub>A run is a cluster of active hours separated from the next by more than "
+          f"{RUN_GAP_HOURS}h idle. The metrics table is bucketed at ONE HOUR, so two dispatches "
+          f"inside the same hour are one row here and cannot be told apart from this table. Per-"
+          f"ENGINE separation does not depend on time — each engine has its own semantic model, so it "
+          f"is already its own column.</sub>")
+
+    if RUN_OPS:
+        for i, hrs in enumerate(runs, start=1):
+            inside = set(hrs)
+            cells = {}
+            for (m, op, h), cu in hourly.items():
+                if h in inside:
+                    cells[(m, op)] = cells.get((m, op), 0.0) + cu
+            print(f"\n#### Run {i} — {hrs[0]:%Y-%m-%d %H:%M} → {hrs[-1]:%H:%M}, by operation\n")
+            _op_table(cells)
+
+
+def render(cells, hourly, since, asof):
+    """cells is {(model, operation): cu}; hourly is {(model, operation, hour): cu}."""
+    span = (f"since {since:%Y-%m-%d %H:%M} (model clock)" if since else "everything retained")
+    print(f"## Semantic model CU — {span}, as of {asof:%Y-%m-%d %H:%MZ}\n")
+    if not cells:
+        print(f"No semantic model activity {span}. Operations land **~6 minutes** after they run, "
+              f"so a benchmark that just finished is not in here yet"
+              + " — and `since` is in the MODEL's clock, so check the hour range in the log.")
+        return
+
+    print(f"Every dispatch since the floor, summed:\n")
+    _op_table(cells)
+    if RUN_GAP_HOURS > 0 and hourly:
+        render_runs(hourly, sessionize(h for (_m, _o, h) in hourly))
 
 
 def main():
@@ -328,7 +435,8 @@ def main():
         f"workspace={WS_FILTER or '(all)'} models={MODELS or '(every semantic model)'}")
 
     wanted = {m.lower() for m in MODELS}
-    cells, unknown, seen_hours = {}, 0, []
+    cells, hourly, unknown, seen_hours = {}, {}, 0, []
+    unparsed = 0
     for cap in caps:
         items = items_for(cap, cols[ITEMS])
         rows = cu_for(cap, since_local, cols[TABLE])
@@ -360,9 +468,21 @@ def main():
             if stamp:
                 seen_hours.append(stamp)
             cells[(key, op)] = cells.get((key, op), 0.0) + float(cu)
+            # Keep the hour too — the per-run split is pure post-processing of this. An unparseable
+            # stamp costs only the segmentation, never the CU: it still lands in `cells` above.
+            try:
+                hour = datetime.fromisoformat(stamp[:19])
+            except ValueError:
+                unparsed += 1
+                continue
+            hkey = (key, op, hour)
+            hourly[hkey] = hourly.get(hkey, 0.0) + float(cu)
 
     if unknown:
         log(f"  {unknown} item ids had no entry in '{ITEMS}' — shown as raw GUIDs")
+    if unparsed:
+        log(f"  {unparsed} rows had an unparseable timestamp — counted in the totals, excluded "
+            f"from the per-run split")
 
     # Verify the floor actually bound. A DAX filter that is accepted and then ignored produces a
     # plausible wrong number, which is the worst failure this tool can have: it already happened
@@ -379,7 +499,12 @@ def main():
     for (name, op), cu in sorted(cells.items(), key=lambda kv: -kv[1]):
         log(f"  {name} / {op}: {cu:,.1f} CU")
 
-    render({k: round(v, 1) for k, v in cells.items()}, since, asof)
+    runs = sessionize(h for (_m, _o, h) in hourly) if RUN_GAP_HOURS > 0 else []
+    for i, hrs in enumerate(runs, start=1):
+        log(f"  run {i}: {hrs[0]:%Y-%m-%d %H:%M} .. {hrs[-1]:%H:%M} ({len(hrs)} active hours)")
+
+    render({k: round(v, 1) for k, v in cells.items()},
+           {k: round(v, 1) for k, v in hourly.items()}, since, asof)
 
 
 if __name__ == "__main__":

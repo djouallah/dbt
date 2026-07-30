@@ -7,8 +7,12 @@ name: Capacity CU
 # the Capacity Metrics app's own semantic model, read by DAX.
 #
 # It shares NOTHING with benchmark.yml — no needs:, no artifact, no concurrency group, no code. It
-# does not know what a benchmark run is. It reports CU per semantic model from a pinned `since`
-# floor onward, and stops there. See cu/README.md.
+# reports CU per semantic model from a pinned `since` floor onward. See cu/README.md.
+#
+# It DOES now separate runs, and note carefully what that is: a run here is a cluster of active hours
+# in the metrics model, inferred from idle gaps and identified by its own time window. It is still not
+# correlated with a GitHub run id — `benchmark/` records durations but no absolute timestamps, and
+# adding them is the coupling this directory exists without.
 #
 # Run it ~10 minutes AFTER whatever you want to measure: operations land in the metrics model with
 # a ~6 minute lag and are smoothed over 5-64 minutes.
@@ -39,6 +43,14 @@ on:
         description: "capacity GUID (blank = every capacity the metrics model can see)"
         type: string
         default: ""
+      run_gap_hours:
+        description: "split the report per RUN: a new run starts after this many idle hours. The metrics table is bucketed at one HOUR, so two dispatches inside the same hour cannot be separated. 0 = aggregate only."
+        type: string
+        default: "2"
+      run_ops:
+        description: "also break each run down by operation type (off by default — with several runs it is a wall of tables)"
+        type: boolean
+        default: false
       debug:
         description: "log the discovered schema and per-timepoint progress to stderr"
         type: boolean
@@ -69,6 +81,8 @@ jobs:
       CU_WORKSPACE_FILTER: ${{ inputs.workspace }}
       CU_MODELS: ${{ inputs.models }}
       CU_SINCE: ${{ inputs.since }}
+      CU_RUN_GAP_HOURS: ${{ inputs.run_gap_hours }}
+      CU_RUN_OPS: ${{ inputs.run_ops }}
       CU_DEBUG: ${{ inputs.debug }}
       PYTHONIOENCODING: utf-8
     steps:

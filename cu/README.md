@@ -26,6 +26,45 @@ summed with the rest (see `benchmark/README.md`). Bump `since` whenever you want
 blank means everything retained. Operation columns are discovered from the data and ordered by
 total CU, so the expensive one reads first.
 
+## Runs are separated, and it costs nothing extra
+
+The floor means the aggregate above answers *"what has all our benchmarking cost since then"*, which
+is not the question you usually have — you want **what one pass cost**. So the report also splits per
+run:
+
+```
+### Runs detected: 3
+
+| run | window (model clock) | hours | aemo_duckrun | aemo_iceberg | aemo_spark | aemo_dwh |   total |
+|-----|:---------------------|------:|-------------:|-------------:|-----------:|---------:|--------:|
+| 1   | 2026-07-30 12:00 → 15:00 |   4 |        160.0 |        170.0 |      180.0 |    300.0 |   810.0 |
+| 2   | 2026-07-31 09:00 → 12:00 |   4 |        160.0 |        170.0 |      180.0 |    300.0 |   810.0 |
+| 3   | 2026-07-31 20:00 → 20:00 |   1 |          0.0 |          0.0 |        0.0 |    275.0 |   275.0 |
+```
+
+Row 3 is a dwh-only dispatch, and it separates itself — nothing had to be told that it happened.
+
+**No extra requests.** The hour column was always in every row (it has to be, or `since` cannot
+bind); it was simply discarded after the floor check. The split is pure post-processing of rows
+already in hand, so the request count is unchanged: one per capacity.
+
+**How a run is decided:** a maximal cluster of active hours, split wherever more than
+`run_gap_hours` (default 2) idle hours sit between them. Nothing assumes how long a pass takes or how
+many engines it covered — an idle gap is the only signal, which is why the same rule survives a
+dispatch with different `engines`, `runs` or `gap_seconds`.
+
+**The resolution limit is the app's, and it is one hour.** `Metrics By Item Operation And Hour` is
+bucketed hourly, so two dispatches inside the same hour are one row and cannot be told apart from
+this table. Two things make that enough: the benchmark's own inter-engine gaps create the idle hours
+the split keys off, and **per-engine separation does not depend on time at all** — each engine has its
+own semantic model, so it is already its own column. The timepoint detail table has finer resolution
+and this deliberately does not use it (see below).
+
+**It is still not correlated with a GitHub run.** A run here is identified by its own time window.
+`benchmark/` records durations but no absolute timestamps, and adding them is the coupling this
+directory exists without. If the split shows one cluster where you expected two, the report says so
+rather than printing a one-row "runs" table that repeats the aggregate.
+
 That is the whole output and the whole scope.
 
 ## What it deliberately is not
