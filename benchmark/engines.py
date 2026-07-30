@@ -59,8 +59,12 @@ def engine_of(model):
 
 
 def selected(default=None):
-    """The engines this run covers, from BENCH_ENGINES (comma-separated). Order is significant:
-    the FIRST one is the reference every ratio is taken against."""
+    """The engines this run covers, from BENCH_ENGINES (comma-separated).
+
+    Order decides only the ORDER THEY ARE MEASURED IN — it is the bench matrix's order, and index 0
+    is simply the job that skips the idle gap. It used to also name the reference every ratio was
+    taken against; there is no reference any more (see render_report's docstring), so no number in
+    the report depends on how the dispatch happened to list the engines."""
     raw = (os.environ.get("BENCH_ENGINES") or "").strip()
     if not raw:
         return list(default if default is not None else ALL)
@@ -76,16 +80,6 @@ def selected(default=None):
     if not out:
         raise SystemExit("BENCH_ENGINES was set but named no engine")
     return out
-
-
-def reference(candidates=None):
-    """The engine every comparison is measured against — BENCH_REFERENCE if it is one of the
-    candidates, else the first candidate. Never guesses by name length."""
-    cands = list(candidates) if candidates else selected()
-    want = (os.environ.get("BENCH_REFERENCE") or "").strip().lower()
-    if want and want in cands:
-        return want
-    return cands[0] if cands else None
 
 
 def items():

@@ -135,14 +135,11 @@ def main():
 
     report.merge({"deploy": {"deployed": deployed, "failed": failed}})
 
+    # A deploy failure fails THIS engine's job and nothing else: the matrix is not fail-fast, the
+    # other engines' jobs are unaffected, and the report names whoever is missing. There is no
+    # reference engine whose absence would invalidate the run.
     if not deployed:
         sys.exit("no semantic model deployed — nothing to benchmark")
-    # The reference engine is the one every ratio is taken against; without it there is no
-    # comparison to draw, only a column of absolute numbers.
-    ref = E.reference(picked)
-    if ref not in deployed:
-        sys.exit(f"reference engine {ref!r} failed to deploy ({failed.get(ref, 'unknown')}) — "
-                 "every comparison is measured against it, so there is nothing to report")
     print(f"\ndeployed {len(deployed)}/{len(picked)}: {', '.join(deployed)}"
           + (f" (failed: {', '.join(failed)})" if failed else ""))
     # Hand the survivors on, so a failed deploy can't make xmla_compare wait 16 retries on a model

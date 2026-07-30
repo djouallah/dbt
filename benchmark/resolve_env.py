@@ -11,7 +11,7 @@ Emits, for $GITHUB_ENV:
   PBI_WORKSPACE  — the workspace DISPLAY name; the XMLA endpoint addresses by name, not GUID
   BENCH_ITEMS    — one JSON line, {engine: {item, kind, guid, writer}}
 
-And the same three plus `matrix` and `reference` to $GITHUB_OUTPUT, because the workflow runs ONE JOB
+And the same three plus `matrix` to $GITHUB_OUTPUT, because the workflow runs ONE JOB
 PER ENGINE — this file is the single job that resolves the workspace, so it also emits the engine
 matrix those jobs fan out over. `matrix` carries an `index` per engine: the idle gap between models
 is a step in each job that skips itself at index 0.
@@ -60,11 +60,6 @@ def main():
         out[e] = {"item": item, "kind": kind, "guid": guid, "writer": E.WRITER[e]}
         sys.stderr.write(f"  {e:8s} -> {item} ({kind[:-1]}, wrote by {E.WRITER[e]}) {guid}\n")
 
-    # BENCH_REFERENCE wins outright, and that is load-bearing for the per-engine workflow: each bench
-    # job would otherwise be its own reference (`E.reference(['spark'])` is `spark`), so every
-    # fragment would claim the role. The workflow sets it once, from the first of the engine list.
-    ref = (os.environ.get("BENCH_REFERENCE") or "").strip().lower() or E.reference(picked)
-
     env = {"WS_ID": ws.id,
            "PBI_WORKSPACE": ws.display_name,
            "BENCH_ITEMS": json.dumps(out, separators=(",", ":"))}
@@ -76,7 +71,9 @@ def main():
         print(f"{k}={v}")
 
     # Job outputs: the same values, plus the per-engine matrix the bench jobs fan out over. Order is
-    # preserved from BENCH_ENGINES, so index 0 IS the reference and the gap step keys off it.
+    # preserved from BENCH_ENGINES, and it decides only the order they are MEASURED in: index 0 is
+    # the job that skips the idle gap. No number in the report depends on it — there is no reference
+    # engine, so a different order gives the same report with the jobs in a different sequence.
     matrix = {"include": [{"engine": e, "item": out[e]["item"], "writer": out[e]["writer"],
                            "index": i} for i, e in enumerate(picked)]}
     gho = os.environ.get("GITHUB_OUTPUT")
@@ -84,16 +81,13 @@ def main():
         with open(gho, "a", encoding="utf-8") as f:
             for k, v in env.items():
                 f.write(f"{k.lower()}={v}\n")
-            f.write(f"reference={ref}\n")
             f.write(f"matrix={json.dumps(matrix, separators=(',', ':'))}\n")
-    sys.stderr.write(f"  matrix: {', '.join(m['engine'] for m in matrix['include'])} "
-                     f"(reference {ref})\n")
+    sys.stderr.write(f"  matrix: {', '.join(m['engine'] for m in matrix['include'])}\n")
 
     # The engine metadata belongs in the report too — the render layer reads `writer` from there,
     # which is the axis under test: the same DAX over four identical semantic models, and the only
     # thing that differs is which adapter wrote the parquet underneath.
-    report.merge({"engines": out,
-                  "run": {"reference": ref, "workspace": ws.display_name}})
+    report.merge({"engines": out, "run": {"workspace": ws.display_name}})
 
 
 if __name__ == "__main__":

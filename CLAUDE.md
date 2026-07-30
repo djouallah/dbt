@@ -544,11 +544,14 @@ takes to **query** them. Ported from `djouallah/duckrun`'s `parquet_layout.yml`.
   Each job mints its own and retires it with the job. Consequences to hold onto: nothing computes a
   ratio during the measurement any more — each job uploads a report **fragment** and the free
   `report` job merges (`merge_reports.py`, **basename order**, meta fragment named to sort first so a
-  per-engine fragment cannot overwrite the shared `run` block) and renders; `BENCH_REFERENCE` must be
-  passed to every bench job, because `E.reference(['spark'])` is `spark` and every fragment would
-  otherwise claim the role; and each job resolves the hot-only ladder's DUID itself, which is
-  recorded per model and warned about on disagreement rather than assumed. Do not collapse it back
-  into one job to "save runner minutes" — the runner is free and the capacity is not.
+  per-engine fragment cannot overwrite the shared `run` block) and renders; and each job resolves the
+  hot-only ladder's DUID itself, which is recorded per model and warned about on disagreement rather
+  than assumed. Do not collapse it back into one job to "save runner minutes" — the runner is free and
+  the capacity is not. **`xmla_compare.py` now refuses more than one engine outright.** It used to
+  fall back to an in-process walk of every model, for running this from a laptop; that path is deleted
+  — the laptop is not a supported way to spend this capacity, and a second orchestration shape kept
+  alive to serve it meant two implementations answering the same question. `dbt`-style scouting is
+  still a dispatch, just with `engines=duckrun,spark runs=1 cold=false`.
 - **It shares `ci.yml`'s concurrency group (`onelake-<ref>`) deliberately.** Not for correctness, but
   because a concurrent dbt build contends for the same capacity, and capacity contention is the one
   thing a wall-clock benchmark cannot absorb. So a benchmark dispatch queues behind a `dbt` dispatch
@@ -593,16 +596,27 @@ takes to **query** them. Ported from `djouallah/duckrun`'s `parquet_layout.yml`.
   `best` was computed best-vs-*second*-best, so on a four-engine run iceberg beating spark by 2ms
   printed `tie` on a row where dwh was 4× slower than both — and every row read `tie`, i.e. "all
   four are equal", the opposite of what the row showed. `best` is now argmin, full stop. Spread is
-  still measured and reported per query; it just no longer decides who won.
-  `render_summary.verify_verdicts` had always compared strictly, so the band was also a divergence
-  between the verdict and its own fatal orientation guard. One thing that survives and still
-  surprises: the aggregate verdict follows the **summed totals**, not the win count, so
-  "duckrun 1.00× faster (duckrun wins 5, spark wins 14)" is possible and correct — it lost most
-  queries and won the expensive one.
-- **The reference engine is `BENCH_ENGINES[0]`, explicitly.** Upstream picked the base by name
-  (`endswith('_auto_sort')`, else the shortest). With one model per engine the shortest name is
-  `aemo_dwh`, so inheriting that heuristic would silently make the DirectQuery leg the thing every
-  ratio is measured against. `test_verdicts.py` pins this.
+  still measured and reported per query; it just no longer decides who won. One thing that survives
+  and still surprises: the **rank follows the summed totals, not the win count**, so "spark fastest
+  (5 query wins)" beside "duckrun 1.02× (14 query wins)" is possible and correct — duckrun won most
+  queries and lost the expensive one. Both numbers are printed and neither is corrected against the
+  other.
+- **There is no reference engine and no baseline, and do not reintroduce one.** Upstream had a real
+  one — it built a candidate layout and compared it against the existing one — and this repo inherited
+  the shape: `BENCH_ENGINES[0]` was the reference and every ratio read `base ÷ challenger`. Here the
+  four engines are **peers**, so a baseline made every number in the report depend on the order the
+  dispatch happened to list the engines in, and made "iceberg 1.30× faster" unreadable without
+  remembering which engine the reference was. Engines are now **ranked**, with `× fastest` stated
+  against the fastest total of the metric — a property of the measurement, not of the input list.
+  Consequences: `engines.reference()` and `BENCH_REFERENCE` are gone (a test asserts neither comes
+  back); side-by-side column order is **alphabetical**, which is the only order that is both neutral
+  between peers and stable enough to read two runs side by side; a failed engine is now just a missing
+  column, named in the findings, instead of a run-invalidating event when it happened to be the
+  reference; and `render_summary.verify_ranking` replaced `verify_verdicts` — a ratio orientation
+  inversion is no longer expressible, so what it guards is that the printed ranking agrees with the
+  totals it came from (ordered by total, rank 1 lowest, `× fastest` ≥ 1). Still fatal, same reason: a
+  table naming the slower engine the winner is worse than no table. `BENCH_ENGINES` order now decides
+  only the order the jobs RUN in — index 0 is simply the one that skips the idle gap.
 - **`benchmark/`'s pytest suite is the only CI check in this repo that touches no Fabric.** It is a
   `needs:` gate on the paid job. Run it before pushing anything under `benchmark/`:
   `python -m pytest benchmark/ -q`. Everything `test_templates.py` asserts would otherwise fail at

@@ -7,7 +7,7 @@ be computed where they used to be. They are computed by the render layer instead
 
 Nothing here is engine-aware: each fragment is a `report.merge`-shaped dict and they are deep-merged
 in FILENAME ORDER, which is why the resolve job's fragment is named to sort first — it carries the
-`run` block (inputs, sha, reference) that a per-engine fragment must not be allowed to overwrite.
+`run` block (inputs, sha, workspace) that a per-engine fragment must not be allowed to overwrite.
 The engine fragments only ever add their own key under `engines`, `deploy`, `timings`, `top_duid`.
 
 Usage: python benchmark/merge_reports.py <dir-or-file> [...]   (writes $RUN_REPORT)
@@ -52,8 +52,7 @@ def main():
     with open(dest, encoding="utf-8") as f:
         rep = json.load(f)
     print(f"\n{dest}: {len(rep.get('timings', {}))} engine(s) with timings "
-          f"({', '.join(sorted(rep.get('timings', {}))) or 'none'}), "
-          f"reference {rep.get('run', {}).get('reference')!r}")
+          f"({', '.join(sorted(rep.get('timings', {}))) or 'none'})")
 
 
 if __name__ == "__main__":

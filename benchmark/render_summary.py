@@ -1,13 +1,15 @@
 """Specialist findings for the query benchmark. Reads ONLY run_report.json and recomputes every
 number from it (nothing hardcoded); appends to the CI job summary ($GITHUB_STEP_SUMMARY) and prints
-to stdout — no file artifact. Medians only — never a mean in any comparison or verdict; ties render
-as `=`.
+to stdout — no file artifact. Medians only — never a mean in any comparison.
+
+**No baseline.** Engines are ranked and the fastest is named; nothing is stated as a ratio against a
+privileged engine (see render_report's module docstring for why the reference was removed).
 
 Timing only, by design: physical layout per engine is `.github/scripts/stats.py` in ci.yml's
 `summary` job, and is not re-derived here.
 
-Exits 1 on a verdict-direction inversion — the one thing here that can fail the job, and
-deliberately so: a report that names the slower engine the winner is worse than no report.
+Exits 1 on a ranking inconsistency — the one thing here that can fail the job, and deliberately so:
+a report that names the slower engine the winner is worse than no report.
 
 Env in: RUN_REPORT (the one JSON), GITHUB_STEP_SUMMARY (optional).
 """
@@ -17,7 +19,7 @@ import statistics
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-import render_report as rr  # noqa: E402  (pure helpers: compute_analysis, reference, consts)
+import render_report as rr  # noqa: E402  (pure helpers: compute_analysis, rank, consts)
 
 try:
     sys.stdout.reconfigure(encoding="utf-8")
@@ -48,22 +50,6 @@ def _noisy_cols(rep, thresh=25.0):
     return noisy
 
 
-def _verdict_line(v):
-    """One metric's verdict, stated with explicit engine names — shared with render_report so the
-    two documents can never phrase the same verdict differently."""
-    return rr.verdict_sentence(v)
-
-
-def _verdict_row(by, base_lbl, m):
-    chal = lbl(m)
-    mv = by.get(chal, {})
-    c, h = mv.get("COLD"), mv.get("HOT")
-    cr = "=" if (c and c["verdict"] == "tie") else (_ratio(c["ratio"]) if c else "—")
-    hr = "=" if (h and h["verdict"] == "tie") else (_ratio(h["ratio"]) if h else "—")
-    parts = [p for p in (_verdict_line(c), _verdict_line(h)) if p]
-    w(f"| {chal} vs {base_lbl} | {cr} | {hr} | {'; '.join(parts)} |")
-
-
 def _ms(v):
     return "—" if v is None else f"{v:,.0f}"
 
@@ -81,23 +67,19 @@ def s1_header(rep):
     w("# Specialist findings — engine query benchmark")
     w()
     w(f"- run `{run.get('run_id')}` · sha `{run.get('sha')}` · {run.get('date')}")
-    w(f"- duckrun `{run.get('duckrun_version')}` · workspace `{run.get('workspace')}` · "
-      f"reference `{run.get('reference')}`")
+    w(f"- duckrun `{run.get('duckrun_version')}` · workspace `{run.get('workspace')}`")
     w(f"- inputs: engines={inp.get('engines')} · cold_repeats={inp.get('cold_repeats')} · "
       f"runs={inp.get('runs')} · gap_seconds={inp.get('gap_seconds')}")
     w()
     # The experiment in one sentence: identical DAX, identical semantic models, N dbt adapters. The
     # adapter that wrote the parquet is the only variable, which is why no engine is described here
-    # as being read differently from the others.
+    # as being read differently from the others — or as the one the others are measured against.
     w(f"Identical DAX over XMLA against {len(tim)} semantic models, one per dbt adapter, each over "
       f"that adapter's own copy of the same `mart.fct_summary` at row-count parity. All Direct Lake, "
       f"so every timing is a Delta→memory transcode and an in-memory scan shaped by the physical "
-      f"layout — {inp.get('cold_repeats')} cold cycles per query, medians reported.")
+      f"layout — {inp.get('cold_repeats')} cold cycles per query, medians reported. No baseline: the "
+      f"engines are peers and are ranked against each other.")
     w()
-    # Each engine is measured in its OWN CI job (one fresh token per engine), so each resolves the
-    # hot_only ladder's DUID independently. Same rows everywhere means the same answer — but that is
-    # an expectation, and an unnoticed disagreement would make `sel_1duid*` compare two different
-    # filters across engines. Say so rather than assume it.
     # One job per engine and none of them fail-fast, so an engine can be missing entirely. Name it:
     # a report with three columns where the dispatch asked for four otherwise reads as a four-engine
     # result, and the missing one is exactly the interesting case.
@@ -107,51 +89,46 @@ def s1_header(rep):
     if missing:
         w(f"- ⚠ **no timings for {', '.join(missing)}** — its benchmark job did not report "
           f"(deploy or XMLA failure; see that job's log). Everything below covers "
-          f"{', '.join(e for e in asked if e in got)} only.")
+          f"{', '.join(e for e in asked if e in got) or 'nothing'} only.")
         w()
+    # Each engine is measured in its OWN CI job, so each resolves the hot_only ladder's DUID
+    # independently. Same rows everywhere means the same answer — but that is an expectation, and an
+    # unnoticed disagreement would make `sel_1duid*` compare two different filters across engines.
     tds = {k: v for k, v in (rep.get("top_duid") or {}).items() if v}
     if len(set(tds.values())) > 1:
         w("- ⚠ **the hot-only ladder filtered a DIFFERENT DUID per engine** — "
           + ", ".join(f"`{lbl(m)}`→`{d}`" for m, d in sorted(tds.items()))
-          + ". The `sel_1duid*` rows below are not comparable; pin `BENCH_TOP_DUID` and re-run.")
+          + ". The `sel_1duid*` rows are not comparable; pin `BENCH_TOP_DUID` and re-run.")
         w()
 
 
-def s2_verdicts(rep, analysis, base, models):
-    by = {}
-    for v in analysis.get("verdicts", []):
-        by.setdefault(v["model"], {})[v["metric"]] = v
-    base_lbl = lbl(base)
-    headline = [m for m in models if m != base]
+def s2_ranking(rep, analysis):
+    ranking = analysis.get("ranking", {})
+    if not ranking:
+        return
+    w("## 1. Headline ranking (medians; fastest wins, no tie band, no baseline)")
+    w()
+    w("<sub>`× fastest` is the engine's total over the fastest total of the same metric. Query wins "
+      "count the rows it was strictly fastest on — an engine can win most queries and lose the "
+      "total by losing the expensive one, and neither number is corrected against the other.</sub>")
+    w()
+    w("| metric | rank | engine | total ms | × fastest | query wins |")
+    w("|:--|--:|:--|--:|--:|--:|")
+    for metric, _k, _s in rr.METRICS:
+        for r in ranking.get(metric, []):
+            w(f"| {metric} | {r['rank']} | {r['engine']} | {_ms(r['total_ms'])} | "
+              f"{_ratio(r['x_fastest'])} | {r['query_wins']} |")
+    w()
+    for metric, _k, _s in rr.METRICS:
+        s = rr.rank_sentence(metric, ranking.get(metric), bold=True)
+        if s:
+            w(f"- {s}")
+    w()
     noisy = sorted(_noisy_cols(rep))
-
-    w("## 1. Headline verdict (medians; fastest wins, no tie band)")
-    w()
-    w(f"Ratio column is `{base_lbl} ÷ challenger` (< 1 ⇒ {base_lbl} faster).")
-    w()
-    w(f"| pair | COLD {base_lbl}÷chal | HOT {base_lbl}÷chal | verdict |")
-    w("|:--|--:|--:|:--|")
-    for m in headline:
-        _verdict_row(by, base_lbl, m)
-    w()
     if noisy:
         cr = rep.get("run", {}).get("inputs", {}).get("cold_repeats")
-        agg = []
-        for m in headline:
-            c = by.get(lbl(m), {}).get("COLD")
-            if c and c["verdict"] != "tie":
-                tot = c["wins"] + c["losses"] + c["ties"]
-                base_won = c["verdict"] == "base"
-                # The loser is the OTHER party. Reading `lbl(m)` for both sides printed
-                # "spark wins 12/15 vs spark" whenever the CHALLENGER won — which upstream never hit,
-                # because there the reference was the layout under test and it won.
-                who = base_lbl if base_won else lbl(m)
-                against = lbl(m) if base_won else base_lbl
-                cnt = c["losses"] if base_won else c["wins"]
-                agg.append(f"{who} wins {cnt}/{tot} vs {against}")
         w(f"- ⚠ {len(noisy)} probe columns exceed 25% cold spread (n={cr}, shared capacity; see §2). "
-          f"The headline rests on the aggregate, not any single column: "
-          f"{'; '.join(agg) or 'see table'} (per-query cold median, fastest wins).")
+          f"The headline rests on the aggregate totals above, not on any single column.")
         w()
 
 
@@ -208,7 +185,7 @@ def s3_cold_decomp(rep, analysis, models):
         if cheap_noisy:
             w(f"- irreducible floor: not measurable at this n — the cheapest columns "
               f"({', '.join(cheap_noisy)}) are non-quotable; anchor conclusions on the aggregate "
-              "cold win (§1), not per-column costs.")
+              "cold ranking (§1), not per-column costs.")
         elif cheap:
             w(f"- irreducible floor (stable): {cheap[0]} (~{floor[cheap[0]]:,.0f} ms across engines).")
         w()
@@ -233,8 +210,9 @@ def s4_spread(rep, models):
         return
     w("## 3. Measurement spread")
     w()
-    w("<sub>A per-query difference smaller than the larger of the two spreads is scored a **tie**, "
-      "not a win. High spread here is why a verdict can read 'no measurable difference'.</sub>")
+    w("<sub>Spread does not decide a winner — the faster time wins by any margin — but a rank gap "
+      "smaller than the spread beside it is not a result worth quoting. This is where a default "
+      "run (cold_repeats=1, runs=3, so every spread is 0) shows itself as a smoke test.</sub>")
     w()
     w("| engine | queries | cold spread median % | cold max % | hot spread median % | hot max % |")
     w("|:--|--:|--:|--:|--:|--:|")
@@ -246,66 +224,69 @@ def s4_spread(rep, models):
 def s5_pointers(rep):
     w("## 4. Raw")
     w()
-    w("- artifact `run-report`: `run_report.json` (these findings are in the CI job summary).")
+    w("- artifact `run-report`: `run_report.json` (these findings are in the CI job summary); "
+      "one `report-fragment-<engine>` per engine, as each job wrote it.")
     w("- every number above recomputes from run_report.json (`timings.*`, `analysis.*`) — "
       "`RUN_REPORT=<file> python benchmark/render_report.py`, no credentials.")
     w("- physical layout per engine, and row-count parity: the `summary` job of `ci.yml`.")
     w()
 
 
-def verify_verdicts(rep, analysis):
-    """Orientation guard: the verdict winner must agree with the per-query cold-median majority
-    over the SAME queries the verdict aggregates — a disagreement there is a true ratio inversion
-    and is fatal. The summed marginal PROBE cost is a second view over a DIFFERENT (probe-only)
-    query subset; probes and composites can legitimately point different ways, so a disagreement
-    there is a non-fatal note, not a build failure. Returns (errors, notes)."""
-    tim = rep.get("timings", {})
-    cc = analysis.get("cold_column_cost", {})
-    base = rr.reference(rep, list(tim))
-    # Per-engine jobs each resolve the ladder's DUID themselves; a disagreement means `sel_1duid*`
-    # compared different filters. Advisory, not fatal — every other query is unaffected.
+def verify_ranking(rep, analysis):
+    """Consistency guard over the numbers about to be printed. Returns (errors, notes).
+
+    The old guard checked a base-vs-model verdict against the per-query median majority, because the
+    ratio could be stated with the wrong orientation and name the slower engine the winner. With no
+    baseline that inversion is not expressible — a rank is an argmin over the totals — so what is
+    left to check is that the ranking really agrees with the timings it was derived from:
+
+      * rank 1 must hold the LOWEST total of its metric, and ranks must ascend by total;
+      * `x_fastest` must be ≥ 1, and exactly 1 at rank 1.
+
+    Cheap, and it fails loudly rather than printing a table that contradicts itself. The
+    probe-vs-aggregate divergence stays a NOTE: the marginal probe cost is a different (probe-only)
+    query subset, and probes and composites can legitimately point different ways.
+    """
+    errs, notes = [], []
+
     tds = {k: v for k, v in (rep.get("top_duid") or {}).items() if v}
-    pre = ([f"the hot-only ladder used different DUIDs per engine ("
-            + ", ".join(f"{lbl(m)}={d}" for m, d in sorted(tds.items()))
-            + ") — sel_1duid* is not comparable; pin BENCH_TOP_DUID"]
-           if len(set(tds.values())) > 1 else [])
-    if not base or base not in cc:
-        return [], pre
+    if len(set(tds.values())) > 1:
+        notes.append("the hot-only ladder used different DUIDs per engine ("
+                     + ", ".join(f"{lbl(m)}={d}" for m, d in sorted(tds.items()))
+                     + ") — sel_1duid* is not comparable; pin BENCH_TOP_DUID")
 
-    def _cost(m):
-        cols = cc.get(m, {}).get("columns")
-        return (sum(cols.values()) + cc[m]["rowcount_overhead_ms"]) if cols else None
+    for metric, key, _sk in rr.METRICS:
+        ranking = analysis.get("ranking", {}).get(metric) or []
+        if not ranking:
+            continue
+        totals = [r["total_ms"] for r in ranking]
+        if totals != sorted(totals):
+            shown = ", ".join("{}={:,.0f}".format(r["engine"], r["total_ms"]) for r in ranking)
+            errs.append(f"{metric}: ranking is not ordered by total ({shown})")
+            continue
+        fastest = ranking[0]
+        if fastest["x_fastest"] not in (None, 1.0):
+            errs.append(f"{metric}: rank 1 ({fastest['engine']}) has "
+                        f"x_fastest={fastest['x_fastest']}, must be 1.0")
+        for r in ranking[1:]:
+            if r["x_fastest"] is not None and r["x_fastest"] < 1.0:
+                errs.append(f"{metric}: {r['engine']} is ranked behind {fastest['engine']} but "
+                            f"x_fastest={r['x_fastest']} < 1")
 
-    base_cost = _cost(base)
-    vmap = {v["model"]: v for v in analysis.get("verdicts", []) if v["metric"] == "COLD"}
-    errs, notes = [], list(pre)
-    for m in tim:
-        if m == base or m not in cc:
-            continue
-        v = vmap.get(rr._short(m))
-        if not v or v["verdict"] == "tie":
-            continue
-        verdict_winner = base if v["verdict"] == "base" else m
-        # per-query cold-median majority — same query set as the verdict; the orientation invariant.
-        bw = mw = 0
-        for q, d in tim[m].items():
-            b, x = tim[base].get(q, {}).get("cold_median_ms"), d.get("cold_median_ms")
-            if b is None or x is None:
-                continue
-            bw += b < x
-            mw += x < b
-        median_winner = base if bw > mw else (m if mw > bw else None)
-        if median_winner and verdict_winner != median_winner:      # FATAL: real inversion
-            errs.append(f"{lbl(m)}: verdict says {lbl(verdict_winner)} but per-query cold-median "
-                        f"majority says {lbl(median_winner)}")
-            continue
-        # summed marginal probe cost — different subset, advisory only.
-        mcost = _cost(m)
-        cost_winner = (base if base_cost < mcost else m) if (base_cost and mcost) else None
-        if cost_winner and verdict_winner != cost_winner:
-            notes.append(f"{lbl(m)}: full-query verdict favours {lbl(verdict_winner)} while the "
-                         f"probe-only marginal cost favours {lbl(cost_winner)} — probes and "
-                         f"composites diverge (not an inversion)")
+    # summed marginal PROBE cost vs the aggregate COLD ranking — advisory only.
+    cc = analysis.get("cold_column_cost", {})
+    cold = analysis.get("ranking", {}).get("COLD") or []
+    if cc and cold:
+        def _cost(m):
+            cols = cc.get(m, {}).get("columns")
+            return (sum(cols.values()) + cc[m]["rowcount_overhead_ms"]) if cols else None
+        costs = {lbl(m): _cost(m) for m in cc if _cost(m) is not None}
+        if len(costs) > 1:
+            cheapest = min(costs, key=costs.get)
+            if cheapest != cold[0]["engine"]:
+                notes.append(f"the aggregate COLD ranking puts {cold[0]['engine']} first while the "
+                             f"probe-only marginal cost is lowest for {cheapest} — probes and "
+                             f"composites diverge (not an inversion)")
     return errs, notes
 
 
@@ -318,12 +299,10 @@ def main():
         rep = json.load(f)
 
     analysis = rep.get("analysis") or rr.compute_analysis(rep)
-    models = rr._order(rep, list(rep.get("timings", {})))
-    base = rr.reference(rep, models)
+    models = rr._order(list(rep.get("timings", {})))
 
     s1_header(rep)
-    if base:
-        s2_verdicts(rep, analysis, base, models)
+    s2_ranking(rep, analysis)
     s3_cold_decomp(rep, analysis, models)
     s4_spread(rep, models)
     s5_pointers(rep)
@@ -335,15 +314,14 @@ def main():
             f.write(text)
     print(text)
 
-    # Direction guard — the findings are already in the job summary. A genuine verdict inversion
-    # (verdict disagrees with the same-query median majority) is fatal; a probe-vs-composite
-    # divergence is only a warning.
-    errs, notes = verify_verdicts(rep, analysis)
+    # Consistency guard — the findings are already in the job summary. A ranking that disagrees with
+    # its own totals is fatal; a probe-vs-composite divergence is only a warning.
+    errs, notes = verify_ranking(rep, analysis)
     for n in notes:
         print(f"::warning::{n}")
     if errs:
         for e in errs:
-            print(f"::error::verdict direction inversion — {e}")
+            print(f"::error::ranking inconsistency — {e}")
         sys.exit(1)
 
 

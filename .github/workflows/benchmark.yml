@@ -36,7 +36,7 @@ on:
         type: string
         default: "ea575278-bd81-459c-9680-47829898c902"
       engines:
-        description: "engines to benchmark, comma-separated. The FIRST is the reference every ratio is taken against."
+        description: "engines to benchmark, comma-separated. Order is the order they are MEASURED in — no reference engine, no number in the report depends on it."
         type: string
         default: "duckrun,iceberg,spark,dwh"
       runs:
@@ -84,13 +84,13 @@ env:
 
 jobs:
   # The free gate: no Fabric, no capacity, no network at run time. It buys two things a paid job
-  # cannot — a broken verdict layer never reaches a report that might name the slower engine the
+  # cannot — a broken ranking layer never reaches a report that might name the slower engine the
   # winner, and a malformed .bim never reaches a deploy that fails after ADOMD.NET is installed.
   # duckrun is installed because test_templates.py asserts the templates against duckrun's OWN
   # repoint regexes; a local copy of them could drift from the thing that actually parses the file.
   # This is the only check in the repo that touches no Fabric at all.
   checks:
-    name: verdict + template checks (free)
+    name: ranking + template checks (free)
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -105,7 +105,7 @@ jobs:
   # Resolve the workspace and EVERY engine's item once, and emit the matrix the bench jobs fan out
   # over. Two reasons this is its own job rather than a step in each: a renamed item fails here,
   # before any capacity is spent, instead of on the third job of a serialized matrix; and the `run`
-  # block (inputs, sha, reference) is written once, by one job, so no per-engine fragment can
+  # block (inputs, sha, workspace) is written once, by one job, so no per-engine fragment can
   # overwrite it with its own single-engine view.
   resolve:
     name: resolve workspace + engine matrix
@@ -122,7 +122,6 @@ jobs:
       pbi_workspace: ${{ steps.resolve.outputs.pbi_workspace }}
       bench_items: ${{ steps.resolve.outputs.bench_items }}
       ws_id: ${{ steps.resolve.outputs.ws_id }}
-      reference: ${{ steps.resolve.outputs.reference }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -173,7 +172,6 @@ jobs:
       WS_ID: ${{ needs.resolve.outputs.ws_id }}
       PBI_WORKSPACE: ${{ needs.resolve.outputs.pbi_workspace }}
       BENCH_ITEMS: ${{ needs.resolve.outputs.bench_items }}
-      BENCH_REFERENCE: ${{ needs.resolve.outputs.reference }}
       # Narrowed to this engine: deploy_models.py deploys only it, and xmla_compare.py takes its
       # per-engine path — measure one model, write its timings, compute no ratios.
       BENCH_ENGINES: ${{ matrix.engine }}

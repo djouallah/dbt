@@ -144,10 +144,10 @@ Two consequences worth knowing:
 | 1 | `checks` | [`test_verdicts.py`](test_verdicts.py) / [`test_templates.py`](test_templates.py) | Free gate, no Fabric. `needs:` on everything paid. |
 | 2 | `resolve` | [`resolve_env.py`](resolve_env.py) | `WS_ID` + [`engines.py`](engines.py) → each engine's item GUID. Emits `PBI_WORKSPACE` (the workspace **display name** — XMLA addresses by name), `BENCH_ITEMS`, and the **engine matrix** the bench jobs fan out over. Resolving all engines here is the cheap early failure: a renamed item raises before any capacity is spent. Writes the `run` block as `report-00-meta.json`. |
 | 3 | `bench (<engine>)` | [`deploy_models.py`](deploy_models.py) | This engine's model only, from the one template via duckrun's `workspace.deploy()`: `lakehouse=`/`warehouse=` rewrites the baked-in GUIDs, `mode=` forces the storage mode. Direct Lake, so it reframes. |
-| 4 | `bench (<engine>)` | [`xmla_compare.py`](xmla_compare.py) | The payload: tiered DAX over ADOMD.NET, dehydrating per query for true cold timing. With one engine named it measures and writes timings and computes **no** ratios; with two or more it still walks them in one process and prints the comparison tables — the by-hand scouting path. |
+| 4 | `bench (<engine>)` | [`xmla_compare.py`](xmla_compare.py) | The payload: tiered DAX over ADOMD.NET, dehydrating per query for true cold timing. Measures **one** engine and computes **no** ratios — it refuses more than one, so there is only ever one orchestration shape. |
 | 5 | `report` | [`merge_reports.py`](merge_reports.py) | Deep-merges every fragment in **basename order**, which is why the meta fragment is named to sort first: a per-engine fragment must not overwrite the shared `run` block. |
 | 6 | `report` | [`render_report.py`](render_report.py) | Job summary + the derived `analysis` block — every ratio in the run is computed here. |
-| 7 | `report` | [`render_summary.py`](render_summary.py) | Specialist findings. **Exits 1 on a verdict-direction inversion** — the only thing here that fails the job. |
+| 7 | `report` | [`render_summary.py`](render_summary.py) | Specialist findings. **Exits 1 if the printed ranking disagrees with the totals it came from** — the only thing here that fails the job. |
 
 Everything lands in one `run_report.json` (uploaded as the `run-report` artifact); every number in
 both reports recomputes from it offline. The per-engine fragments are uploaded too
@@ -179,7 +179,7 @@ column data, then a `full` reframes (metadata only on Direct Lake) — so the ne
 cold cost. Per query, not once, because the queries share the big fact columns. `COLD_REPEATS` cycles
 give a median and a spread instead of an n=1 point.
 
-Verdicts use **medians, never means** (one capacity spike among 110ms runs blows up a mean and
+Rankings use **medians, never means** (one capacity spike among 110ms runs blows up a mean and
 fabricates a winner), and hot runs 1 and 2 are dropped as the warm transition.
 
 **The fastest engine wins a row, by any margin — there is no tie band.** There used to be one: a
@@ -190,13 +190,33 @@ either — and **every** row came out `tie`, which reads as "all four engines ar
 times are right there in the row; a reader can judge whether 2ms matters far better than a rule
 that erases the winner and says nothing about the engine that lost by 300ms. Spread is still
 measured and still reported per query (§2 of the specialist findings), it just no longer decides
-who won. `render_summary.verify_verdicts` had always compared strictly, so this also removed a
-divergence between the verdict and its own orientation guard.
+who won.
 
-Note the aggregate verdict follows the **summed totals**, not the per-query win count, so the two
-can disagree — "duckrun 1.00× faster (duckrun wins 5, spark wins 14)" is a real line from a real
-run, and it means duckrun lost most queries but won the one expensive one. That is the ratio doing
-its job; read the W/L alongside it.
+Note the **rank follows the summed totals**, not the per-query win count, so the two can disagree —
+"spark fastest (5 query wins)" beside "duckrun 1.02× (14 query wins)" means duckrun won most queries
+and lost the one expensive one. Both are printed and neither is corrected against the other.
+
+## No baseline
+
+There is **no reference engine**. Upstream had a real one — it built a candidate layout and compared
+it against the existing one — and this repo inherited the shape: `BENCH_ENGINES[0]` was the reference
+and every ratio read `base ÷ challenger`. But these four engines are *peers*. A baseline made every
+number in the report depend on the order the dispatch happened to list them in, and made
+"iceberg 1.30× faster" unreadable without remembering which engine the reference had been.
+
+So the engines are **ranked**, and every ratio is stated as `× fastest` — against the fastest total
+of that metric, which is a property of the measurement rather than of the input list. Follow-on
+effects worth knowing:
+
+- side-by-side column order is **alphabetical**: the only order that is both neutral between peers
+  and stable enough to read two runs against each other (ordering by result moves the columns
+  whenever the winner changes);
+- an engine whose job failed is just a **missing column**, named in the findings — it used to be a
+  run-invalidating event when it happened to be the reference;
+- the fatal guard is `render_summary.verify_ranking`. A ratio *orientation* inversion is no longer
+  expressible, so what it checks is that the printed ranking agrees with the totals it was derived
+  from: ordered by total, rank 1 the lowest, `× fastest` ≥ 1. Still fatal, for the original reason —
+  a table naming the slower engine the winner is worse than no table.
 
 **The defaults trade statistical strength for capacity cost, deliberately.** At `cold_repeats=1`
 and `runs=3` there is exactly one measured sample per query per tier, so "median" is that sample
@@ -206,12 +226,14 @@ nothing. Read a default-inputs run as a *smoke test with timings*, not as a defe
 
 ## Running it
 
-**CI:** dispatch *Direct Lake benchmark*. Inputs: `workspace`, `engines` (**order matters** — the
-first is the reference every ratio is taken against, and it is job 1 of the matrix), `runs`, `cold`,
-`cold_repeats`, `gap_seconds` (applied *before* each engine after the first), `top_duid` (optional
-pin for the hot-only ladder).
+**CI, and only CI.** Dispatch *Direct Lake benchmark*. Inputs: `workspace`, `engines` (order is the
+order they are **measured** in — index 0 is simply the job that skips the idle gap; no number in the
+report depends on it), `runs`, `cold`, `cold_repeats`, `gap_seconds` (applied *before* each engine
+after the first), `top_duid` (optional pin for the hot-only ladder).
 
-A cheap scouting run — end to end in minutes instead of an hour of capacity:
+There is no supported way to run the paid part from a laptop: `xmla_compare.py` measures one engine
+per process and the workflow is what fans it out. A cheap scouting **dispatch** — end to end in
+minutes instead of an hour of capacity:
 
 ```
 engines=duckrun,spark  runs=1  cold=false  cold_repeats=1  gap_seconds=0
@@ -221,13 +243,15 @@ engines=duckrun,spark  runs=1  cold=false  cold_repeats=1  gap_seconds=0
 a `needs:` on the paid job):
 
 ```bash
-python -m pytest benchmark/ -q                                     # verdict + template checks
+python -m pytest benchmark/ -q                                     # ranking + template checks
 RUN_REPORT=some_run_report.json python benchmark/render_report.py   # re-render any past artifact
 ```
 
-[`test_verdicts.py`](test_verdicts.py) pins the verdict layer: ratio orientation, fastest-wins (a
-1ms win is a win, and the `best` column names an engine rather than `tie`), explicit reference
-selection, hot-only scoping (an engine whose dehydrate could not run), and comparable totals.
+[`test_verdicts.py`](test_verdicts.py) pins the ranking layer: rank direction (ordered by total,
+rank 1 lowest, `× fastest` ≥ 1), fastest-wins (a 1ms win is a win, and the `best` column names an
+engine rather than `tie`), that no result depends on the engine order given and that no `reference()`
+helper comes back, hot-only scoping (an engine whose dehydrate could not run), and comparable
+totals.
 [`test_templates.py`](test_templates.py) checks the `.bim` against duckrun's *own* repoint regexes and
 pins the deploy wiring: that `DEPLOY_MODE` is one constant duckrun's own `_normalize_mode` accepts and
 that no per-engine `MODE` has crept back, that `deploy_kwargs` pairs `warehouse=` with the warehouse

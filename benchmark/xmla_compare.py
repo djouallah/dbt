@@ -1,5 +1,5 @@
-"""Benchmark one semantic model per engine by running the SAME heavy DAX queries against each
-over the XMLA endpoint and timing them.
+"""Benchmark ONE engine's semantic model by running the heavy DAX suite against it over the XMLA
+endpoint and timing every query. One process, one engine, no comparison of any kind.
 
 Every model exposes identical tables, columns and measures over the SAME 143M-row `mart.fct_summary`
 — one copy per engine, at row-count parity. So this is NOT a correctness check: the numbers are
@@ -28,16 +28,17 @@ cannot refresh cannot dehydrate.
 Uses the XMLA endpoint (ADOMD.NET), NOT the throttled /executeQueries REST endpoint.
 Run headless — see .github/workflows/benchmark.yml.
 
-TWO MODES, and CI only uses the first. When `BENCH_ENGINES` names exactly ONE engine this measures
-that engine and writes its timings, computing no ratios at all — the workflow runs one job per engine
-so that each mints its own token minutes before using it (an XMLA/refresh token lasts about an hour;
-a four-model pass with two 600s gaps does not fit in one). The render layer computes every ratio from
-the merged report, which is where they belonged anyway. With two or more engines named it still walks
-the models in one process and prints the comparison tables — the by-hand scouting path.
+**`BENCH_ENGINES` must name exactly one engine, and this script refuses more.** The workflow runs one
+job per engine, because a Fabric/XMLA token lives about an hour and a four-model pass with two 600s
+gaps in it does not fit inside one — the expiry would land mid-measurement on whichever engine went
+last. So each job mints its own token minutes before using it, writes its own report fragment, and
+COMPUTES NOTHING: every number that involves more than one engine is produced by the render layer from
+the merged fragments. There is no in-process comparison path here any more (there was one, for running
+this from a laptop; the laptop is not a supported way to spend this capacity, and keeping a second
+orchestration shape alive to serve it meant two answers to the same question).
 
 Env in:
-  BENCH_ENGINES  — comma-separated engines; the FIRST is the reference every ratio is taken against.
-                   ONE engine selects the per-engine mode described above.
+  BENCH_ENGINES  — exactly ONE engine label. More than one is an error, not a comparison.
   BENCH_TOP_DUID — optional; pins the DUID the hot_only ladder filters on instead of resolving it.
                    Unset is fine: every engine holds the same rows, so each job resolves the same
                    DUID, and the value is recorded per model for the render layer to check.
@@ -298,35 +299,11 @@ def run_scalar(conn, dax):
 
 def top_duid(conn):
     """The DUID with the largest Total MWh — used to fill the hot_only selectivity ladder.
-    Same underlying data across engines, so resolve once on the reference model and reuse."""
+    Same underlying data in every engine, so every job resolves the same DUID."""
     v = run_scalar(conn,
                    'EVALUATE TOPN(1, SUMMARIZECOLUMNS(fct_summary[DUID], "m", [Total MWh]), '
                    '[m], DESC)')
     return None if v is None else str(v)
-
-
-def tie(b, m, b_spread_pct=None, m_spread_pct=None):
-    """Per-query winner: the FASTER time wins, by any margin. Returns "base", "model", or "tie",
-    where "tie" now means only that the two times are exactly equal.
-
-    There was a noise band here — a gap smaller than the larger of the two spreads was called a
-    tie. It was removed because it answered a question nobody reading the table was asking. With
-    four engines the report labels the best of the row, and that label was computed as best vs
-    SECOND-best, so iceberg beating spark by 2ms printed "tie" on a row where dwh was 4x slower —
-    which reads as "all four tied". Naming the fastest is unambiguous and needs no footnote.
-
-    The spread arguments are accepted and ignored so callers (and their `spread_key` plumbing)
-    keep working. Spread is still measured and still reported per query — it is just no longer
-    allowed to erase a winner. Note the cold_repeats=1 / runs=3 defaults make every spread 0
-    anyway, so the band was already inert on a default run; this makes the behaviour the same at
-    every setting instead of silently changing with the inputs.
-
-    render_summary.verify_verdicts has always compared strictly (`b < x`), so removing the band
-    makes the verdict layer agree with its own orientation guard rather than diverging from it.
-    """
-    if b is None or m is None or not b or not m:
-        return "tie" if b == m else ("model" if (m or 0) < (b or 0) else "base")
-    return "model" if m < b else ("base" if m > b else "tie")
 
 
 def bench_model(workspace, model, token, runs, want_cold, cold_repeats, queries):
@@ -395,19 +372,6 @@ def bench_model(workspace, model, token, runs, want_cold, cold_repeats, queries)
     return results, can_cold
 
 
-def discover_models():
-    """(reference, [challengers]) as deployed semantic-model names.
-
-    Taken from BENCH_ENGINES, where order is significant: the FIRST engine is the reference every
-    ratio is measured against, so `base/<engine>` reads the same way in every table and across runs.
-    Upstream picked the base by name (`endswith('_auto_sort')`, else shortest) — with one model per
-    engine there is no name to key off, and an implicit choice here silently reorients every ratio."""
-    picked = E.selected()
-    if len(picked) < 2:
-        sys.exit(f"need at least 2 engines to compare, got {picked} — "
-                 "set BENCH_ENGINES to e.g. 'duckrun,spark'")
-    ref = E.reference(picked)
-    return E.model_name(ref), [E.model_name(e) for e in picked if e != ref]
 
 
 def _write_timings(model, res):
@@ -416,79 +380,12 @@ def _write_timings(model, res):
     report.merge({"timings": {model: res}})
 
 
-def _render_console(title, headers, rows, aligns, sep_before_last=False):
-    """A boxed, aligned unicode table to stdout."""
-    widths = [len(h) for h in headers]
-    for r in rows:
-        for i, c in enumerate(r):
-            widths[i] = max(widths[i], len(str(c)))
-    line = lambda l, m, rt: l + m.join("─" * (w + 2) for w in widths) + rt
-    def frow(cells):
-        parts = []
-        for i, c in enumerate(cells):
-            c = str(c)
-            parts.append(" " + (c.rjust(widths[i]) if aligns[i] == "r" else c.ljust(widths[i])) + " ")
-        return "│" + "│".join(parts) + "│"
-    print(f"\n{title}")
-    print(line("┌", "┬", "┐"))
-    print(frow(headers))
-    print(line("├", "┼", "┤"))
-    body = rows[:-1] if sep_before_last else rows
-    for r in body:
-        print(frow(r))
-    if sep_before_last:
-        print(line("├", "┼", "┤"))
-        print(frow(rows[-1]))
-    print(line("└", "┴", "┘"))
-
-
-def compare_table(title, base, model, base_res, opt_res, key, spread_key=None):
-    base_tot = opt_tot = 0.0
-    wins = 0
-    counted = 0
-    rows = []
-    for name in base_res:  # base_res preserves query order; only queries present in BOTH, with key
-        if name not in opt_res:
-            continue
-        b = base_res[name].get(key)
-        o = opt_res[name].get(key)
-        if b is None or o is None:
-            continue
-        bs = base_res[name].get(spread_key) if spread_key else None
-        os_ = opt_res[name].get(spread_key) if spread_key else None
-        w = tie(b, o, bs, os_)                 # "base" / "model" / "tie"
-        base_tot += b
-        opt_tot += o
-        counted += 1
-        wins += 1 if w == "model" else 0
-        speedup = (b / o) if o else float("inf")
-        rows.append((name, b, o, speedup, w))
-    if not counted:
-        return
-    overall = (base_tot / opt_tot) if opt_tot else float("inf")
-    total_w = "model" if opt_tot < base_tot else ("base" if opt_tot > base_tot else "tie")
-    mshort = E.engine_of(model)
-    bshort = E.engine_of(base)
-    winner_lbl = {"model": model, "base": base, "tie": "tie"}
-    factor = overall if overall >= 1 else (1.0 / overall if overall else 0.0)
-    headline = (f"{winner_lbl[total_w]} is {factor:.2f}× faster overall"
-                f" — {mshort} wins {wins}/{counted}")
-
-    # ---- boxed console table ----
-    mark = {"model": f"{mshort} ✔", "base": f"{bshort} ✔", "tie": "tie"}
-    disp = [(n, f"{b:,.1f}", f"{o:,.1f}", f"{s:.2f}×", mark[w]) for (n, b, o, s, w) in rows]
-    disp.append(("TOTAL", f"{base_tot:,.1f}", f"{opt_tot:,.1f}", f"{overall:.2f}×", mark[total_w]))
-    _render_console(title, ("query", f"{base} (ms)", f"{model} (ms)", f"{bshort}/{mshort}", "winner"),
-                    disp, ("l", "r", "r", "r", "l"), sep_before_last=True)
-    print(f"  → {headline}")
-
-
 def _resolve_top_duid(workspace, model, token):
     """The DUID the hot_only ladder filters on.
 
-    BENCH_TOP_DUID pins it, which is what the per-engine workflow does NOT do: every engine holds
-    the same rows, so each job resolving it independently gets the same answer, and the value is
-    recorded per model so the render layer can say so instead of assuming it."""
+    BENCH_TOP_DUID pins it. Unpinned, every job resolves it against its own model — the engines hold
+    the same rows, so they get the same answer, and the value is recorded per model so the render
+    layer can say so instead of assuming it."""
     pinned = (os.environ.get("BENCH_TOP_DUID") or "").strip()
     if pinned:
         return pinned
@@ -502,28 +399,18 @@ def _resolve_top_duid(workspace, model, token):
         return None
 
 
-def bench_one(workspace, engine, token, runs, want_cold, cold_repeats):
-    """Benchmark ONE engine's model and write its timings. No comparison — with one engine per CI
-    job there is nothing in this process to compare against, and every ratio is computed by the
-    render layer from the merged report. This is the path the workflow takes.
-
-    The point of the split is the token: an XMLA/refresh token is valid for about an hour, and a
-    four-model pass over 21 queries with two 600s gaps runs far past that. One engine per job means
-    the token is minted minutes before it is used and retired with the job."""
-    model = E.model_name(engine)
-    td = _resolve_top_duid(workspace, model, token)
-    print(f"[{engine}] top DUID  : {td}")
-    queries = resolve_queries(td)
-    res, can_cold = bench_model(workspace, model, token, runs, want_cold, cold_repeats, queries)
-    if res is None:
-        sys.exit(f"[{engine}] model {model!r} never became queryable — nothing measured.")
-    _write_timings(model, res)
-    report.merge({"top_duid": {model: td}, "cold_measured": {model: bool(can_cold)}})
-    print(f"\n[{engine}] measured {len(res)} queries (cold={'yes' if can_cold else 'no'}) "
-          f"-> {os.environ.get('RUN_REPORT', 'run_report.json')}")
-
-
 def main():
+    # Engine selection FIRST, before a token is minted or the workspace is read: a misconfigured
+    # dispatch should fail in a second, not after an auth round trip.
+    picked = E.selected()
+    if len(picked) != 1:
+        sys.exit(f"BENCH_ENGINES must name exactly ONE engine, got {picked}. This script measures "
+                 "one model per process by design — the workflow runs one job per engine so that "
+                 "each mints its own token, and every comparison is made by the render layer from "
+                 "the merged report.")
+    engine = picked[0]
+    model = E.model_name(engine)
+
     workspace = os.environ["PBI_WORKSPACE"].strip()
     from duckrun import auth
     token = os.environ.get("PBI_TOKEN") or auth.get_powerbi_token()  # self-acquire the XMLA token
@@ -531,60 +418,22 @@ def main():
     runs = int(os.environ.get("BENCH_RUNS", "3"))
     cold_repeats = int(os.environ.get("COLD_REPEATS", "1"))
     want_cold = (os.environ.get("BENCH_COLD", "true").strip().lower() != "false")
-    gap = int(os.environ.get("BENCH_GAP_SECONDS", "600"))  # idle gap between models (>CU smoothing)
 
     _load_adomd(adomd_dir)
-
-    # One engine => the per-engine job path. The multi-engine path below still works unchanged for a
-    # by-hand run from a laptop, where one token comfortably covers a two-engine scouting pass.
-    picked = E.selected()
-    if len(picked) == 1:
-        print(f"Workspace : {workspace}")
-        return bench_one(workspace, picked[0], token, runs, want_cold, cold_repeats)
-
-    base, others = discover_models()
     print(f"Workspace : {workspace}")
-    # Label by WRITER, the axis under test — the adapter that produced the parquet each model reads.
-    print(f"Reference : {base} (written by {E.WRITER.get(E.engine_of(base), '?')})")
-    print(f"Compare   : " + ", ".join(f"{m} ({E.WRITER.get(E.engine_of(m), '?')})" for m in others))
-    print(f"Runs (hot): {runs}   Cold repeats: {cold_repeats}")
+    print(f"Engine    : {engine} -> {model} (written by {E.WRITER.get(engine, '?')})")
+    print(f"Runs (hot): {runs}   Cold repeats: {cold_repeats}   Cold: {want_cold}")
 
-    # Resolve the top DUID once on the reference model (same data across engines) to fill the ladder.
-    td = _resolve_top_duid(workspace, base, token)
+    td = _resolve_top_duid(workspace, model, token)
     print(f"Top DUID  : {td}")
-    queries = resolve_queries(td)
-    report.merge({"top_duid": {m: td for m in [base] + others}})
-
-    base_res, base_cold = bench_model(workspace, base, token, runs, want_cold, cold_repeats, queries)
-    if base_res is None:
-        sys.exit(f"Reference model {base!r} never became queryable — cannot benchmark.")
-    _write_timings(base, base_res)
-
-    for model in others:
-        if gap:
-            print(f"\n⏳ Idle gap: sleeping {gap}s before {model} so the Fabric capacity chart "
-                  f"shows a clean separation between models...", flush=True)
-            time.sleep(gap)
-        try:
-            opt_res, opt_cold = bench_model(workspace, model, token, runs, want_cold,
-                                            cold_repeats, queries)
-        except Exception as e:
-            print(f"  {model}: benchmark failed ({str(e).splitlines()[0][:120]}) — skipping.",
-                  flush=True)
-            continue
-        if opt_res is None:
-            print(f"  {model} never became queryable — skipping its comparison.", flush=True)
-            continue
-        _write_timings(model, opt_res)
-        if base_cold and opt_cold:
-            compare_table(f"{model} vs {base}  —  COLD (median of {cold_repeats} dehydrate cycles)",
-                          base, model, base_res, opt_res, "cold_median_ms", "cold_spread_pct")
-        elif want_cold:
-            # Naming why is the point, so a missing cold table reads as a measurement that could not
-            # be taken rather than a gap in the run.
-            print(f"\n(no COLD table for {model}: dehydrate was unavailable)")
-        compare_table(f"{model} vs {base}  —  HOT (median of hot runs, dropping run1/run2 warm)",
-                      base, model, base_res, opt_res, "hot_median_ms", "hot_spread_pct")
+    res, can_cold = bench_model(workspace, model, token, runs, want_cold, cold_repeats,
+                               resolve_queries(td))
+    if res is None:
+        sys.exit(f"[{engine}] {model!r} never became queryable — nothing measured.")
+    _write_timings(model, res)
+    report.merge({"top_duid": {model: td}, "cold_measured": {model: bool(can_cold)}})
+    print(f"\n[{engine}] measured {len(res)} queries (cold={'yes' if can_cold else 'no'}) "
+          f"-> {os.environ.get('RUN_REPORT', 'run_report.json')}")
 
 
 if __name__ == "__main__":
