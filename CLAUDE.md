@@ -675,6 +675,17 @@ detail.
   each role from candidate lists — `REQUIRED` roles fail with the actual column list printed,
   `OPTIONAL` ones degrade to "not filtering on it". This caught a real miss on the first dispatch:
   the candidates said `Item Name`, the app says `Item`.
+- **A deploy mints a NEW item GUID, and `'Items'` is a lagging snapshot — this made the whole report
+  read empty.** The metrics tables hold item GUIDs; a semantic model that was just created (or deleted
+  and recreated — `overwrite=True` keeps its id, a recreate does not) has a GUID `'Items'` has not seen
+  yet, so it resolves to no name, fails the `CU_MODELS` name filter, and its CU vanishes while the
+  report prints "No semantic model activity" — indistinguishable from an idle capacity. Names are now
+  resolved **live** from `GET /groups/{ws}/datasets` first (one request, same host and token as
+  `executeQueries`, so no new dependency), `'Items'` only as fallback. Do not "simplify" that back to
+  the Items join alone. Related and equally load-bearing: an empty result now prints its own
+  diagnosis — rows returned after the floor, which filter dropped them and how many, any item whose
+  name matched but whose workspace did not (with the real id), and the top spenders it did see. A bare
+  GUID in that last table IS this trap.
 - **`'Timepoint Interactive Detail'[Item]` is a GUID, and the table has no name or kind column** —
   the real columns are `Item`, `Operation`, `Operation Id`, `Total CU (s)`, `Workspace Id`, `User`,
   `Billing type`, `Status`, `Duration (s)`, `Timepoint CU (s)`. So `discover_items()` joins to

@@ -255,6 +255,41 @@ def discover_capacities():
         "set CU_CAPACITY_ID explicitly")
 
 
+def datasets_in_workspace(ws):
+    """{dataset GUID: name} straight from the Power BI REST API, for the workspace we deploy to.
+
+    This exists because `'Items'` in the Capacity Metrics model is a LAGGING SNAPSHOT and the item it
+    is most likely to be missing is the one we care about: **every deploy mints a new semantic model
+    GUID**. `overwrite=True` updates a definition in place, but a model that was deleted and recreated
+    — or deployed for the first time — is a new item id, and until the app's snapshot catches up that
+    id resolves to no name, fails the name filter, and its CU vanishes from this report while the
+    report says "no activity". That is not a hypothetical: it is what an empty run turned out to be.
+
+    The REST API is authoritative and current, needs no new dependency (same host, same token as
+    executeQueries), and costs one request. The 'Items' join stays as the fallback for everything
+    outside our workspace.
+
+    Best-effort: a 401/403 here (the SP lacking workspace read) leaves the old behaviour rather than
+    failing the run, and says so.
+    """
+    if not ws:
+        return {}
+    try:
+        r = requests.get(f"{PBI}/groups/{ws}/datasets",
+                         headers={"Authorization": f"Bearer {TOKEN}"}, timeout=60)
+    except Exception as ex:
+        log(f"  could not list datasets in {ws} ({type(ex).__name__}) — falling back to '{ITEMS}'")
+        return {}
+    if r.status_code != 200:
+        log(f"  GET /groups/{ws}/datasets returned {r.status_code} — falling back to '{ITEMS}' "
+            f"(a new deploy's GUID may not be in its snapshot yet)")
+        return {}
+    out = {str(d["id"]).upper(): d.get("name") or "" for d in r.json().get("value", [])
+           if d.get("id")}
+    log(f"  {len(out)} datasets resolved live from workspace {ws}")
+    return out
+
+
 def items_for(cap, c):
     """Map item GUID -> (name, kind).
 
@@ -467,14 +502,54 @@ def render_chart(hourly, runs):
     print("```")
 
 
-def render(cells, hourly, since, asof):
+def render_empty(span, seen, dropped, active, near):
+    """Explain an empty report instead of asserting an idle capacity.
+
+    The failure that produced this: the query succeeded, the floor bound, 1,202 rows came back, and
+    every one of them failed the workspace/name filter — which printed as "No semantic model
+    activity", i.e. exactly what an idle capacity prints. Two opposite conclusions, one sentence. So
+    when nothing matches, say how many rows were seen, which filter rejected them, and what WAS
+    spending the CU."""
+    print(f"**No CU matched the filters** {span}.\n")
+    if not seen:
+        print("And no rows came back at all, so this is about the time filter, not the item filter: "
+              "operations land **~6 minutes** after they run and are smoothed over 5–64 minutes, so a "
+              "benchmark that just finished is not in here yet. `since` is in the **model's clock** "
+              "(the app's own offset, not UTC) — a floor set in the future reads as silence.")
+        return
+    print(f"{seen:,} rows came back **after** the floor, so the time filter is not the problem — "
+          f"every one of them was rejected by an item filter:\n")
+    print("| filter | rows dropped |")
+    print("|:--|--:|")
+    print(f"| workspace id ≠ `{WS_FILTER or '(none)'}` | {dropped['workspace']:,}"
+          + (f" (of which **{dropped['workspace_blank']:,} had a blank workspace id**)"
+             if dropped["workspace_blank"] else "") + " |")
+    print(f"| name not in `{','.join(MODELS) or '(any)'}` | {dropped['name']:,} |")
+    if dropped["kind"]:
+        print(f"| item kind not a semantic model | {dropped['kind']:,} |")
+    if near:
+        print(f"\n⚠ **{len(near)} item(s) matched the NAME but not the workspace** — almost certainly "
+              f"the cause. Their actual workspace ids:\n")
+        print("| item | kind | workspace id | CU |")
+        print("|:--|:--|:--|--:|")
+        for (nm, kd, ws), cu in sorted(near.items(), key=lambda kv: -kv[1])[:10]:
+            print(f"| {nm} | {kd or '—'} | `{ws}` | {cu:,.1f} |")
+        print(f"\nEither set `workspace` to that id, or blank it to stop filtering by workspace.")
+    if active:
+        print(f"\nWhat did spend CU {span} (top 10, any item):\n")
+        print("| item | kind | workspace id | CU |")
+        print("|:--|:--|:--|--:|")
+        for (nm, kd, ws), cu in sorted(active.items(), key=lambda kv: -kv[1])[:10]:
+            print(f"| {nm} | {kd or '—'} | `{ws}` | {cu:,.1f} |")
+
+
+def render(cells, hourly, since, asof, seen=0, dropped=None, active=None, near=None):
     """cells is {(model, operation): cu}; hourly is {(model, operation, hour): cu}."""
-    span = (f"since {since:%Y-%m-%d %H:%M} (model clock)" if since else "everything retained")
+    span = (f"since {since:%Y-%m-%d %H:%M} (model clock)" if since else "over everything retained")
     print(f"## Semantic model CU — {span}, as of {asof:%Y-%m-%d %H:%MZ}\n")
     if not cells:
-        print(f"No semantic model activity {span}. Operations land **~6 minutes** after they run, "
-              f"so a benchmark that just finished is not in here yet"
-              + " — and `since` is in the MODEL's clock, so check the hour range in the log.")
+        render_empty(span, seen, dropped or {"workspace": 0, "workspace_blank": 0, "name": 0,
+                                            "kind": 0}, active or {}, near or {})
         return
 
     print(f"Every dispatch since the floor, summed:\n")
@@ -507,9 +582,25 @@ def main():
     log(f"capacities={caps} since={SINCE or '(everything retained)'} "
         f"workspace={WS_FILTER or '(all)'} models={MODELS or '(every semantic model)'}")
 
+    # One request, before the per-capacity loop: the workspace is the same for every capacity.
+    live_names = datasets_in_workspace(WS_FILTER)
+    missing = [m for m in MODELS if m.lower() not in {n.lower() for n in live_names.values()}]
+    if MODELS and live_names and missing:
+        log(f"  note: {', '.join(missing)} do not exist as datasets in {WS_FILTER} right now — "
+            f"expect 0.0 rows for them")
+
     wanted = {m.lower() for m in MODELS}
     cells, hourly, unknown, seen_hours = {}, {}, 0, []
     unparsed = 0
+    # Why rows were DROPPED, and what was active instead. An empty report is the one outcome this
+    # tool cannot explain from its own output otherwise: the query succeeded, the floor bound, rows
+    # came back, and every one of them failed a filter — that reads identically to "the capacity was
+    # idle", which is the opposite conclusion. Counted per reason, and the biggest spenders kept, so
+    # one dispatch says which filter to fix instead of the next three guessing.
+    dropped = {"workspace": 0, "workspace_blank": 0, "name": 0, "kind": 0}
+    active = {}     # (name-or-guid, kind, workspace id) -> cu, over rows that failed a filter
+    near = {}       # rows whose NAME matched but whose workspace did not -> the likeliest cause
+    seen = 0        # rows the metrics table returned, before any local filter
     for cap in caps:
         items = items_for(cap, cols[ITEMS])
         rows = cu_for(cap, since_local, cols[TABLE])
@@ -517,20 +608,40 @@ def main():
             log(f"  capacity {cap}: refused the query — skipping it")
             continue
         log(f"  capacity {cap}: {len(rows)} item-rows, {len(items)} items resolved")
+        seen += len(rows)
         for r in rows:
             iid = str(r.get(cols[TABLE]["item_id"]) or "").upper()
             wsid = str(r.get(cols[TABLE]["workspace_id"]) or "").upper()
             cu = r.get("CU")
             if cu is None or not iid:
                 continue
-            if WS_FILTER and wsid != WS_FILTER:
-                continue
+            # Live REST names win over the metrics app's 'Items' snapshot: a just-deployed semantic
+            # model has a GUID the snapshot has not seen yet, and resolving it from the snapshot alone
+            # is what made a redeploy read as an idle capacity.
+            live = live_names.get(iid)
             name, kind = items.get(iid, ("", ""))
+            if live:
+                name, kind = live, (kind or "SemanticModel")
             key = (name or iid).lower()
+            # Resolve the name BEFORE the workspace test, purely so a rejection can be described.
+            # The tests themselves are unchanged and still stack — see cu/README.md on why both are
+            # needed — they just now say what they threw away.
+            if WS_FILTER and wsid != WS_FILTER:
+                dropped["workspace"] += 1
+                if not wsid:
+                    dropped["workspace_blank"] += 1
+                bucket = near if (wanted and key in wanted) else active
+                k = (name or iid, kind, wsid or "(blank)")
+                bucket[k] = bucket.get(k, 0.0) + float(cu)
+                continue
             if wanted:
                 if key not in wanted:
+                    dropped["name"] += 1
+                    k = (name or iid, kind, wsid or "(blank)")
+                    active[k] = active.get(k, 0.0) + float(cu)
                     continue
             elif kind and kind.strip().lower() not in MODEL_KINDS:
+                dropped["kind"] += 1
                 continue
             if not name:
                 # Keep it under its GUID rather than drop it: losing CU silently is worse than an
@@ -576,8 +687,14 @@ def main():
     for i, hrs in enumerate(runs, start=1):
         log(f"  run {i}: {hrs[0]:%Y-%m-%d %H:%M} .. {hrs[-1]:%H:%M} ({len(hrs)} active hours)")
 
+    if not cells and seen:
+        log(f"  dropped: {dropped['workspace']} on workspace "
+            f"({dropped['workspace_blank']} blank), {dropped['name']} on name, "
+            f"{dropped['kind']} on kind")
+
     render({k: round(v, 1) for k, v in cells.items()},
-           {k: round(v, 1) for k, v in hourly.items()}, since, asof)
+           {k: round(v, 1) for k, v in hourly.items()}, since, asof,
+           seen=seen, dropped=dropped, active=active, near=near)
 
 
 if __name__ == "__main__":

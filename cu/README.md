@@ -143,6 +143,22 @@ capacity**, already summed, with no double-counting to guard against. Summing *i
 table precisely because it is already an aggregate. The detail table remains the right tool for
 drilling into one timepoint's individual operations — which is not what this does.
 
+**Every deploy mints a NEW item GUID, and `'Items'` is a lagging snapshot.** This is what an empty
+report turned out to be, not an idle capacity: the metrics tables hold item **GUIDs**, the join to
+`'Items'` is the only route to a name, and a semantic model that was just created — or deleted and
+recreated — has a GUID that snapshot has not seen. It resolves to no name, fails the `models` filter,
+and its CU disappears while the report says "no activity". So names are resolved **live** from
+`GET /groups/{workspace}/datasets` first (one request, same host and token as `executeQueries`, no new
+dependency), with `'Items'` as the fallback for everything outside the workspace. If that call is
+refused the run still works, logs why, and the diagnostic below names the unresolved GUIDs.
+
+**An empty report explains itself.** "No semantic model activity" and "1,202 rows came back and every
+one failed a filter" are opposite conclusions that used to print the same sentence. Now an empty
+result prints how many rows the table returned after the floor, which filter rejected them and how
+many, any item whose **name matched but workspace did not** (with its real workspace id), and the top
+CU spenders it did see — so one dispatch says which knob is wrong instead of the next three guessing.
+A bare GUID in that last table is the snapshot-lag trap above.
+
 **Both filters are needed, and they stack.** Display names are not unique across a tenant, so a
 stale `aemo_spark` in some other workspace would otherwise be silently added to this one's CU.
 `models` selects by name, `workspace` restricts to the workspace the benchmark deploys to, and both
