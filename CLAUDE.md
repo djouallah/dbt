@@ -564,12 +564,18 @@ detail.
   each role from candidate lists — `REQUIRED` roles fail with the actual column list printed,
   `OPTIONAL` ones degrade to "not filtering on it". This caught a real miss on the first dispatch:
   the candidates said `Item Name`, the app says `Item`.
-- **The installed app has NO item-kind column on that table**, so "semantic model" is not enforced —
+- **`'Timepoint Interactive Detail'[Item]` is a GUID, and the table has no name or kind column** —
   the real columns are `Item`, `Operation`, `Operation Id`, `Total CU (s)`, `Workspace Id`, `User`,
-  `Billing type`, `Status`, `Duration (s)`, `Timepoint CU (s)`. The table is interactive-only, which
-  on this capacity means Power BI model reads, and every operation name counted is logged to stderr
-  so a warehouse row cannot hide inside a total labelled "semantic model CU". `workspace_filter` is
-  the only narrowing available. Do not re-add a kind filter without checking the schema first.
+  `Billing type`, `Status`, `Duration (s)`, `Timepoint CU (s)`. So `discover_items()` joins to
+  `'Items'` (`Item Id`, `Item name`, `Item kind`) and that join is load-bearing twice over: without
+  it the report is GUIDs against CU, and it is the only route to a semantic-model filter. An id
+  missing from `'Items'` is kept under its raw GUID — dropping it would lose CU silently.
+- **One capacity per query.** The detail table is DirectQuery and resolves one data location per
+  query, so `CapacitiesList` takes exactly one capacity; several fails with an opaque
+  `Internal Error: Error obtaining data location` naming neither cause nor capacity. This tenant has
+  two, so `usable_capacities()` probes each before spending ~60 requests on it. Casing was *not* the
+  cause (both work uppercase), but the probe tries other spellings anyway — one request, and the
+  parameter is undocumented.
 - **The service principal works against that model.** The community consensus says it does not, and
   this was built expecting a 401 — measured otherwise on run 30536137179, which read it on the OIDC
   SP. The `PBI_TOKEN` secret path stays as a free fallback (the workflow prefers a secret when one

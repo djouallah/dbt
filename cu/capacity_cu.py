@@ -200,6 +200,37 @@ def discover_capacities():
         "set CU_CAPACITY_ID explicitly")
 
 
+def discover_items(cap_ids):
+    """Map item GUID -> (name, kind), from the model's 'Items' table.
+
+    Necessary, not decorative: `'Timepoint Interactive Detail'[Item]` holds the item **GUID**, not
+    a display name, so without this the report is a list of GUIDs and CU — which answers nothing.
+    'Items' is also where the item kind lives, so this is what makes filtering to semantic models
+    possible at all; the detail table itself carries no kind column.
+
+    Queried per capacity for the same reason the detail table is: one data location per query.
+    """
+    out = {}
+    for cap in cap_ids:
+        rows = execute_dax(f"""
+DEFINE
+    MPARAMETER 'CapacitiesList' = {{ "{cap}" }}
+EVALUATE
+    SELECTCOLUMNS (
+        'Items',
+        "Id",   'Items'[Item Id],
+        "Name", 'Items'[Item name],
+        "Kind", 'Items'[Item kind]
+    )
+""".strip(), fatal=False)
+        for r in strip_prefix(rows or []):
+            if r.get("Id"):
+                out[str(r["Id"]).upper()] = (r.get("Name") or "", r.get("Kind") or "")
+    if not out:
+        log("note: 'Items' returned nothing — falling back to raw item GUIDs, unfiltered")
+    return out
+
+
 def timepoints(end, minutes):
     """The 30-second boundaries covering [end - minutes, end], oldest first.
 
@@ -236,16 +267,19 @@ EVALUATE
 """.strip()
 
 
-def collect(tps, cap_ids, cols):
+def collect(tps, cap_ids, cols, items):
     """Query every timepoint and return {operation_id: (item_name, operation, total_cu)}.
 
     Keyed by operation id, NOT summed across timepoints. An interactive operation is smoothed over
     10 to 128 timepoints and reappears in each one carrying its FULL Total CU — so adding the rows
     up would multiply every operation by the number of buckets it happens to span. Deduplicating
     on operation id is the difference between a number and a fiction.
+
+    `items` resolves the detail table's item GUID to a name and kind, and is what makes the
+    semantic-model filter possible. An unknown GUID is kept under its raw id rather than dropped —
+    losing CU silently is worse than an ugly row.
     """
-    seen = {}
-    has_kind = "item_kind" in cols
+    seen, dropped = {}, {}
 
     def one(job):
         cap, tp = job
@@ -259,21 +293,26 @@ def collect(tps, cap_ids, cols):
     with ThreadPoolExecutor(max_workers=4) as pool:
         for i, (tp, rows) in enumerate(pool.map(one, jobs), 1):
             for r in rows:
-                if has_kind and str(r.get("ItemKind", "")).strip().lower() not in MODEL_KINDS:
-                    continue
                 if WS_FILTER and str(r.get("WorkspaceId", "")).strip().lower() != WS_FILTER:
                     continue
                 oid = r.get("OperationId")
                 cu = r.get("TotalCU")
                 if oid is None or cu is None:
                     continue
+                raw = str(r.get("ItemName") or "").strip()
+                name, kind = items.get(raw.upper(), ("", ""))
+                if items and kind and kind.strip().lower() not in MODEL_KINDS:
+                    dropped[kind] = dropped.get(kind, 0) + 1
+                    continue
                 prev = seen.get(oid)
                 cu = float(cu)
                 # Max, not first: a partially-smoothed slice can appear before the final total.
                 if prev is None or cu > prev[2]:
-                    seen[oid] = (r.get("ItemName") or "(unnamed)", r.get("Operation") or "", cu)
+                    seen[oid] = (name or raw or "(unnamed)", r.get("Operation") or "", cu)
             if DEBUG and i % 20 == 0:
                 log(f"  {i}/{len(jobs)} queries, {len(seen)} operations so far")
+    for kind, n in sorted(dropped.items(), key=lambda kv: -kv[1]):
+        log(f"  dropped {n:>4} operations on {kind} items (not a semantic model)")
     return seen
 
 
@@ -351,7 +390,10 @@ def main():
     # Probe once against the newest timepoint before spending 60 requests per capacity.
     cap_ids = usable_capacities(cap_ids, tps[-1], cols)
 
-    seen = collect(tps, cap_ids, cols)
+    items = discover_items(cap_ids)
+    log(f"{len(items)} items resolved for id -> name/kind")
+
+    seen = collect(tps, cap_ids, cols, items)
     log(f"{len(seen)} distinct operations across {len(tps)} timepoints")
 
     # With no item-kind column there is no way to prove every row is a semantic model, so name what

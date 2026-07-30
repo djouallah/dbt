@@ -70,15 +70,27 @@ no 401/403. The `PBI_TOKEN` secret path is kept as the fallback anyway, because 
 a secret over the SP when one is set and that costs nothing to leave in place. A user token expires
 in about an hour, so it is a per-investigation thing, not a standing secret.
 
-**There is no item-kind column, so "semantic model" is not enforced.** The installed app's
+**`[Item]` is a GUID, not a name — the `Items` join is load-bearing.** The installed app's
 `'Timepoint Interactive Detail'` carries `Item`, `Operation`, `Operation Id`, `Total CU (s)`,
-`Workspace Id`, `User`, `Billing type`, `Status`, `Duration (s)`, `Timepoint CU (s)` — and no item
-kind of any spelling. So nothing can filter the table down to semantic models. Two things make that
-tolerable: the table holds **interactive** operations only, which on this capacity are Power BI
-model reads; and the script logs every operation name it counted to stderr, so a warehouse or
-GraphQL row inflating the total is visible rather than hidden inside a number labelled "semantic
-model CU". `workspace_filter` is the one narrowing actually available — pass the dbt workspace GUID
-to exclude everything else on the capacity.
+`Workspace Id`, `User`, `Billing type`, `Status`, `Duration (s)`, `Timepoint CU (s)` — no item name
+and no item kind. `[Item]` holds the item **id**, so without `discover_items()` the report is a
+list of GUIDs against CU, which answers nothing. That join to `'Items'` (`Item Id`, `Item name`,
+`Item kind`) is also the only thing that makes filtering to semantic models possible; the detail
+table cannot do it alone.
+
+An item id missing from `'Items'` is **kept** under its raw GUID rather than dropped — losing CU
+silently is worse than an ugly row. Operations on non-model items are dropped with a count logged
+per kind, and every operation name counted is logged too, so nothing inflates a total labelled
+"semantic model CU" without saying so. `workspace_filter` narrows further if the capacity carries
+other workspaces.
+
+**One capacity per query.** `'Timepoint Interactive Detail'` is DirectQuery and resolves one data
+location per query, so `CapacitiesList` must carry exactly one capacity. Passing several fails with
+an opaque `Internal Error: Error obtaining data location` that names neither the cause nor the
+capacity. This tenant has two, so `usable_capacities()` probes each one before committing ~60
+requests to it, and drops any the model refuses. (Id casing turned out *not* to be the problem —
+both were accepted uppercase — but the probe tries the other spellings anyway, since it costs one
+request and the parameter's expectations are undocumented.)
 
 **Column names move between app versions.** Microsoft's own fabric-toolbox accelerator ships four
 DAX variants (v53/v47/v40/v37) for this reason, and the miss above is exactly the failure mode —
