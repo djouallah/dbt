@@ -645,14 +645,7 @@ detail.
   own row, and a run is inferred as a **cluster of active hours** split on more than
   `CU_RUN_GAP_HOURS` (default 2) idle hours, identified by its own time window. `benchmark/` still
   records durations but no absolute timestamps, and adding them is the coupling this avoids.
-- **The bar chart is one bar per HOUR, and going finer costs capacity — so it is not done.** The chart
-  is free: the same rows the tables are built from, drawn instead of tabulated, scaled against the
-  largest single (engine, hour) cell. A 30-second chart like the app's own would mean
-  `Timepoint Interactive Detail` at **120 requests per hour per capacity**, and its rows carry no
-  timestamp column (the MPARAMETER *is* the timestamp), so a batched parameter could not be attributed
-  back to buckets even if it were accepted. Spending real capacity to redraw numbers already in hand
-  was considered and rejected; if it is ever proposed again, the `Total CU` smoothing-duplication trap
-  below applies to that table too — sum `Timepoint CU (s)`, never `Total CU (s)`.
+- **There is no chart, and that was tried.** A per-hour bar chart of the same rows was built and removed: at the hour bucket a real run is two or three bars per engine, which reads as noise next to the numbers it was drawn from. The app's own chart is drawn at 30 seconds, and that resolution lives only in `'Timepoint Interactive Detail'` — one request per bucket, **120 per hour per capacity**, rows carrying no timestamp column (the MPARAMETER *is* the timestamp) so a batch could not be attributed even if the parameter took a list. Real capacity to redraw numbers already in hand, so it stays tables. If it comes up again: sum `Timepoint CU (s)`, never `Total CU (s)` — the smoothing-duplication trap below applies to that table too.
 - **The per-run split costs zero extra requests, and the hour bucket is its hard floor.** The hour
   column was always projected — it has to be, or `since` cannot be verified to bind — and was simply
   discarded after that check; the split is post-processing of rows already in hand, so it is still one
