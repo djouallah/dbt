@@ -234,22 +234,29 @@ def cu_for(cap, since, c):
     `Internal Error: Error obtaining data location` that names neither the cause nor the capacity.
     """
     when = c["when"]
-    flt = ""
+    inner = f"""SUMMARIZECOLUMNS (
+        '{TABLE}'[{c['item_id']}],
+        '{TABLE}'[{c['workspace_id']}],
+        '{TABLE}'[{c['operation']}],
+        '{TABLE}'[{when}],
+        "CU", SUM ( '{TABLE}'[{c['cu']}] )
+    )"""
+    # CALCULATETABLE with a plain boolean predicate, NOT a FILTER(VALUES(...)) argument inside
+    # SUMMARIZECOLUMNS. The latter was accepted without error and silently changed nothing — every
+    # window produced byte-identical totals, which is why the hour column is now projected and the
+    # caller checks the range it actually got back. A filter that fails loudly is fine; one that
+    # returns a plausible wrong number is not.
     if since:
         lit = (f"DATE({since.year}, {since.month}, {since.day}) + "
                f"TIME({since.hour}, {since.minute}, 0)")
-        flt = (f"\n        FILTER ( VALUES ( '{TABLE}'[{when}] ), "
-               f"'{TABLE}'[{when}] >= {lit} ),")
+        body = f"CALCULATETABLE (\n        {inner},\n        '{TABLE}'[{when}] >= {lit}\n    )"
+    else:
+        body = inner
     return strip_prefix(execute_dax(f"""
 DEFINE
     MPARAMETER 'CapacitiesList' = {{ "{cap}" }}
 EVALUATE
-    SUMMARIZECOLUMNS (
-        '{TABLE}'[{c['item_id']}],
-        '{TABLE}'[{c['workspace_id']}],
-        '{TABLE}'[{c['operation']}],{flt}
-        "CU", SUM ( '{TABLE}'[{c['cu']}] )
-    )
+    {body}
 """.strip(), fatal=False))
 
 
@@ -312,7 +319,7 @@ def main():
         f"workspace={WS_FILTER or '(all)'} models={MODELS or '(every semantic model)'}")
 
     wanted = {m.lower() for m in MODELS}
-    cells, unknown = {}, 0
+    cells, unknown, seen_hours = {}, 0, []
     for cap in caps:
         items = items_for(cap, cols[ITEMS])
         rows = cu_for(cap, since, cols[TABLE])
@@ -340,10 +347,26 @@ def main():
                 # ugly row. Counted so the log can say how much of the table is opaque.
                 unknown += 1
             op = str(r.get(cols[TABLE]["operation"]) or "(unnamed)").strip()
+            stamp = str(r.get(cols[TABLE]["when"]) or "")
+            if stamp:
+                seen_hours.append(stamp)
             cells[(key, op)] = cells.get((key, op), 0.0) + float(cu)
 
     if unknown:
         log(f"  {unknown} item ids had no entry in '{ITEMS}' — shown as raw GUIDs")
+
+    # Verify the floor actually bound. A DAX filter that is accepted and then ignored produces a
+    # plausible wrong number, which is the worst failure this tool can have: it already happened
+    # once, with FILTER(VALUES(...)) inside SUMMARIZECOLUMNS, and three different windows returned
+    # byte-identical totals before anyone noticed. So check the hours that came back.
+    if seen_hours:
+        lo, hi = min(seen_hours), max(seen_hours)
+        log(f"  hours returned: {lo} .. {hi}")
+        if since:
+            floor = since.strftime("%Y-%m-%dT%H:%M:%S")
+            if lo[:19] < floor:
+                die(f"the `since` filter did NOT bind: asked for >= {floor}, but rows came back "
+                    f"from {lo}. Refusing to print a total that silently includes excluded time.")
     for (name, op), cu in sorted(cells.items(), key=lambda kv: -kv[1]):
         log(f"  {name} / {op}: {cu:,.1f} CU")
 
