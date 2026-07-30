@@ -6,7 +6,7 @@ Fabric has no per-operation CU REST API. The Capacity Metrics app's own semantic
 authoritative source, so this reads it by DAX and prints one table.
 
 ```
-## Semantic model CU — everything retained, as of 2026-07-30 11:45Z
+## Semantic model CU — since 2026-07-30 12:00Z, as of 2026-07-30 14:10Z
 
 | semantic model | XMLA Read Operation | Semantic model refresh | Query |    total |
 |----------------|--------------------:|-----------------------:|------:|---------:|
@@ -17,10 +17,14 @@ authoritative source, so this reads it by DAX and prints one table.
 | **total**      |            14,000.0 |                  500.0 |  75.0 | 14,575.0 |
 ```
 
-**No time filter.** The four models are queried equally by the same DAX suite, so a window buys
-nothing and can mislead — slice a benchmark in half and one engine looks cheap. This reports
-everything the metrics app still holds, which is its full ~14-day retention. Operation columns are
-discovered from the data and ordered by total CU, so the expensive one reads first.
+**Time is a pinned floor, not a rolling window.** A window ("last 3h") moves with every dispatch
+and can slice one benchmark in half, making an engine look cheap for no reason but where the
+boundary fell. `since` stays put, everything after it accumulates, and two dispatches a day apart
+are comparable. Its specific purpose: the app's ~14 days of retention still contains the run where
+dwh was **DirectQuery** rather than Direct Lake — not the same experiment, and its CU must not be
+summed with the rest (see `benchmark/README.md`). Bump `since` whenever you want to start fresh;
+blank means everything retained. Operation columns are discovered from the data and ordered by
+total CU, so the expensive one reads first.
 
 That is the whole output and the whole scope.
 
@@ -42,6 +46,7 @@ after the activity you want to measure** — see the lag note below.
 
 | input | default | notes |
 |---|---|---|
+| `since` | `2026-07-30T12:00:00Z` | ISO-8601 UTC floor. Blank = everything retained |
 | `models` | the four `aemo_*` | comma-separated, in report order. Blank = every semantic model |
 | `workspace` | `ea575278-…` | the workspace ci.yml and benchmark.yml deploy to. Blank = all |
 | `metrics_workspace_id` | `7f7f5d92-…` | where the Capacity Metrics app is installed |
@@ -56,15 +61,15 @@ export PBI_TOKEN=$(az account get-access-token \
   --resource https://analysis.windows.net/powerbi/api --query accessToken -o tsv)
 export CU_METRICS_WORKSPACE_ID=7f7f5d92-1603-4a02-a46a-0d90fe1ed119
 export CU_METRICS_MODEL_ID=0fdedd3b-1451-4499-9ed4-aa3658100ec1
-CU_DEBUG=1 python cu/capacity_cu.py
+CU_SINCE=2026-07-30T12:00:00Z CU_DEBUG=1 python cu/capacity_cu.py
 ```
 
 ## The things that will bite
 
-**It reads `Metrics By Item And Operation`, not `Timepoint Interactive Detail`.** Mind the
-spelling — the model also carries `Metrics By Item Operation And Hour` (hour buckets) and `Metrics
-By Item And Hour` (no operation split). This is the "And Operation" one, and its lack of a time
-axis is exactly why it fits. The detail table was
+**It reads `Metrics By Item Operation And Hour`, not `Timepoint Interactive Detail`.** Mind the
+spelling — the model also carries `Metrics By Item And Operation` (no time axis) and `Metrics By
+Item And Hour` (no operation split). This is the one with both; the hour axis exists only to
+support `since`, and nothing here reports by hour. The detail table was
 tried first and is the wrong instrument. It is bucketed at 30 seconds and gated by a
 single-timepoint `MPARAMETER`, so even a 3-hour window costs 360 requests per capacity; and because an
 interactive operation is smoothed across 10–128 buckets it reappears in every one carrying its full
@@ -85,7 +90,7 @@ so `CapacitiesList` must carry exactly one capacity. Passing several fails with 
 `Internal Error: Error obtaining data location` that names neither the cause nor the capacity. This
 tenant has two, so each is queried separately and the results merged.
 
-**Item columns hold GUIDs, not names.** `Metrics By Item And Operation[Item Id]` is an id, so
+**Item columns hold GUIDs, not names.** `Metrics By Item Operation And Hour[Item Id]` is an id, so
 `items_for()` joins to `'Items'` (`Item Id`, `Item name`, `Item kind`) to resolve it. An id missing
 from `'Items'` is kept under its raw GUID rather than dropped — losing CU silently is worse than an
 ugly row.
@@ -104,9 +109,9 @@ candidate list, failing with the actual column list printed. `debug: true` dumps
 columns — when a name moves, the replacement is usually next door.
 
 **~14-day retention, ~6 minute lag, 5–64 minute smoothing.** A dispatch immediately after a
-benchmark does not yet include it. Retention is also the report's only boundary now that there is
-no window: CU from a benchmark older than that has simply aged out, so a total can fall between two
-runs. `CU (s)` is a smoothed attribution, not an instantaneous measurement.
+benchmark does not yet include it. Retention is the outer boundary and `since` the inner one:
+CU from a benchmark older than ~14 days ages out regardless of `since`, so a total can fall between
+two dispatches without anything being wrong. `CU (s)` is a smoothed attribution, not an instantaneous measurement.
 
 ## Never auto-trigger it
 

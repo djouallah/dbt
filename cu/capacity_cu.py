@@ -4,9 +4,11 @@ Fabric exposes no per-operation CU REST API. The Capacity Metrics app's model is
 authoritative source, so this queries it by DAX over the Power BI `executeQueries` endpoint and
 prints one table: the benchmark's semantic models against the operation types they spent CU on.
 
-No time filter, deliberately. The four models are queried equally by the same DAX suite, so a
-window buys nothing and can mislead — slice a benchmark in half and one engine looks cheap. This
-reports everything the app still holds, which is its full ~14-day retention.
+Time is a pinned FLOOR (`since`), not a rolling window. A window moves with every dispatch and can
+slice one benchmark in half, making an engine look cheap for no reason but where the boundary fell;
+a floor stays put and everything after it accumulates. Its purpose is to exclude the run in which
+dwh was DirectQuery rather than Direct Lake — still inside the app's ~14-day retention, and not the
+same experiment.
 
 Deliberately scoped to the semantic models. Widening it to every item in the workspace was tried
 and reverted: the lakehouses' OneLake read AND write operations bring a dozen operation types each,
@@ -17,7 +19,7 @@ them in one table served neither.
 Standalone on purpose. It shares NOTHING with benchmark/ — no imports, no run_report.json, no
 artifact, no ADOMD, no .NET. `requests` is the only dependency.
 
-Reads 'Metrics By Item And Operation', NOT 'Timepoint Interactive Detail'. The detail table was
+Reads 'Metrics By Item Operation And Hour', NOT 'Timepoint Interactive Detail'. The detail table was
 tried first and is the wrong instrument: it is bucketed at 30 seconds and gated by a
 single-timepoint MPARAMETER, so even a 3-hour window costs 360 requests per capacity, and because
 an interactive operation is smoothed across 10-128 buckets it reappears in each one at full value
@@ -70,14 +72,21 @@ WS_FILTER = os.environ.get(
 
 DEBUG = os.environ.get("CU_DEBUG", "").strip().lower() in ("1", "true", "yes")
 
-# Item x operation, with NO time axis — which is the point. The four models are queried equally by
-# the same DAX suite, so windowing the report only risks slicing a benchmark in half and making one
-# engine look cheap. This reports everything the app still holds, which is its full ~14-day
-# retention.
+# A FLOOR, not a rolling window, and the difference matters. A window ("last 3h") moves with every
+# dispatch and can slice one benchmark in half, making an engine look cheap for no reason but where
+# the boundary fell. A pinned floor stays put: everything after it accumulates, and two dispatches a
+# day apart are comparable.
 #
-# Mind the spelling: the model also has 'Metrics By Item Operation And Hour' (hour buckets) and
-# 'Metrics By Item And Hour' (no operation split). This is the "And Operation" one.
-TABLE = "Metrics By Item And Operation"
+# What it is for: the app retains ~14 days, which still contains the run where dwh was DirectQuery
+# rather than Direct Lake. Those two are not the same experiment and their CU must not be summed —
+# see benchmark/README.md on the DirectQuery leg. Set this past that run and the report starts
+# clean. Bump it again whenever you want to start fresh; blank means everything retained.
+SINCE = os.environ.get("CU_SINCE", "2026-07-30T12:00:00Z").strip()
+
+# Item x operation x hour. The hour axis exists only to support SINCE; nothing here reports by hour.
+# Mind the spelling: the model also has 'Metrics By Item And Operation' (no time axis) and 'Metrics
+# By Item And Hour' (no operation split). This is the one with both.
+TABLE = "Metrics By Item Operation And Hour"
 ITEMS = "Items"
 
 # Column names move between Capacity Metrics app versions — Microsoft's own fabric-toolbox
@@ -91,6 +100,7 @@ REQUIRED = {
         "workspace_id": ["Workspace Id", "WorkspaceId"],
         "operation":    ["Operation name", "Operation Name", "Operation"],
         "cu":           ["CU (s)", "CU(s)", "CU", "Total CU (s)"],
+        "when":         ["Datetime", "DateTime", "Date"],
     },
     ITEMS: {
         "id":   ["Item Id", "ItemId"],
@@ -213,16 +223,23 @@ EVALUATE
             for r in strip_prefix(rows) if r.get("Id")}
 
 
-def cu_for(cap, c):
-    """CU per (item, operation) for one capacity, summed server-side. No time filter at all.
+def cu_for(cap, since, c):
+    """CU per (item, operation) for one capacity, summed server-side, from `since` onward.
 
     Summing IS correct here, unlike on the timepoint detail table: these rows are already an
-    aggregate, so there is no smoothing duplication to deduplicate away.
+    aggregate per (item, operation, hour), so there is no smoothing duplication to deduplicate away.
 
     One capacity per query, deliberately. These tables are DirectQuery and resolve one data
     location per query; passing several capacities fails with an opaque
     `Internal Error: Error obtaining data location` that names neither the cause nor the capacity.
     """
+    when = c["when"]
+    flt = ""
+    if since:
+        lit = (f"DATE({since.year}, {since.month}, {since.day}) + "
+               f"TIME({since.hour}, {since.minute}, 0)")
+        flt = (f"\n        FILTER ( VALUES ( '{TABLE}'[{when}] ), "
+               f"'{TABLE}'[{when}] >= {lit} ),")
     return strip_prefix(execute_dax(f"""
 DEFINE
     MPARAMETER 'CapacitiesList' = {{ "{cap}" }}
@@ -230,18 +247,20 @@ EVALUATE
     SUMMARIZECOLUMNS (
         '{TABLE}'[{c['item_id']}],
         '{TABLE}'[{c['workspace_id']}],
-        '{TABLE}'[{c['operation']}],
+        '{TABLE}'[{c['operation']}],{flt}
         "CU", SUM ( '{TABLE}'[{c['cu']}] )
     )
 """.strip(), fatal=False))
 
 
-def render(cells, asof):
+def render(cells, since, asof):
     """cells is {(model, operation): cu}. Rendered as models x operation types."""
-    print(f"## Semantic model CU — everything retained, as of {asof:%Y-%m-%d %H:%MZ}\n")
+    span = (f"since {since:%Y-%m-%d %H:%MZ}" if since else "everything retained")
+    print(f"## Semantic model CU — {span}, as of {asof:%Y-%m-%d %H:%MZ}\n")
     if not cells:
-        print("No semantic model activity at all. The app holds **~14 days**, operations land "
-              "**~6 minutes** after they run, and `workspace` may be excluding them.")
+        print(f"No semantic model activity {span}. Operations land **~6 minutes** after they run, "
+              f"so a benchmark that just finished is not in here yet"
+              + (" — and `since` may simply be in the future." if since and since > asof else "."))
         return
 
     # When specific models were asked for, print every one of them in the order given, including
@@ -277,16 +296,26 @@ def main():
     if not (WS and MODEL):
         die("CU_METRICS_WORKSPACE_ID and CU_METRICS_MODEL_ID must both be set.")
     asof = datetime.now(timezone.utc)
+    since = None
+    if SINCE:
+        try:
+            since = datetime.fromisoformat(SINCE.replace("Z", "+00:00")).astimezone(timezone.utc)
+        except ValueError:
+            die(f"CU_SINCE={SINCE!r} is not ISO-8601 (e.g. 2026-07-30T12:00:00Z)")
+        if (asof - since).days > 14:
+            log(f"note: since={SINCE} predates the app's ~14-day retention — the report starts "
+                f"wherever the data actually does, not there")
+
     cols = discover_columns()
     caps = [CAPACITY] if CAPACITY else discover_capacities()
-    log(f"capacities={caps} no time filter "
+    log(f"capacities={caps} since={SINCE or '(everything retained)'} "
         f"workspace={WS_FILTER or '(all)'} models={MODELS or '(every semantic model)'}")
 
     wanted = {m.lower() for m in MODELS}
     cells, unknown = {}, 0
     for cap in caps:
         items = items_for(cap, cols[ITEMS])
-        rows = cu_for(cap, cols[TABLE])
+        rows = cu_for(cap, since, cols[TABLE])
         if rows is None:
             log(f"  capacity {cap}: refused the query — skipping it")
             continue
@@ -318,7 +347,7 @@ def main():
     for (name, op), cu in sorted(cells.items(), key=lambda kv: -kv[1]):
         log(f"  {name} / {op}: {cu:,.1f} CU")
 
-    render({k: round(v, 1) for k, v in cells.items()}, asof)
+    render({k: round(v, 1) for k, v in cells.items()}, since, asof)
 
 
 if __name__ == "__main__":
