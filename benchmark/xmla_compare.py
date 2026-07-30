@@ -287,16 +287,27 @@ def top_duid(conn):
     return None if v is None else str(v)
 
 
-def tie(b, m, b_spread_pct, m_spread_pct):
-    """A per-query winner is a TIE when the relative gap between the two times is smaller than
-    the larger of their cold spreads — i.e. the difference is inside the measurement noise.
-    Returns "base", "model", or "tie". b_spread_pct/m_spread_pct may be None (hot: no spread)."""
-    if not b or not m:
+def tie(b, m, b_spread_pct=None, m_spread_pct=None):
+    """Per-query winner: the FASTER time wins, by any margin. Returns "base", "model", or "tie",
+    where "tie" now means only that the two times are exactly equal.
+
+    There was a noise band here — a gap smaller than the larger of the two spreads was called a
+    tie. It was removed because it answered a question nobody reading the table was asking. With
+    four engines the report labels the best of the row, and that label was computed as best vs
+    SECOND-best, so iceberg beating spark by 2ms printed "tie" on a row where dwh was 4x slower —
+    which reads as "all four tied". Naming the fastest is unambiguous and needs no footnote.
+
+    The spread arguments are accepted and ignored so callers (and their `spread_key` plumbing)
+    keep working. Spread is still measured and still reported per query — it is just no longer
+    allowed to erase a winner. Note the cold_repeats=1 / runs=3 defaults make every spread 0
+    anyway, so the band was already inert on a default run; this makes the behaviour the same at
+    every setting instead of silently changing with the inputs.
+
+    render_summary.verify_verdicts has always compared strictly (`b < x`), so removing the band
+    makes the verdict layer agree with its own orientation guard rather than diverging from it.
+    """
+    if b is None or m is None or not b or not m:
         return "tie" if b == m else ("model" if (m or 0) < (b or 0) else "base")
-    rel = abs(b - m) / max(b, m)
-    noise = max((b_spread_pct or 0.0), (m_spread_pct or 0.0)) / 100.0
-    if rel < noise:
-        return "tie"
     return "model" if m < b else ("base" if m > b else "tie")
 
 

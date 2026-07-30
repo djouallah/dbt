@@ -132,15 +132,29 @@ cold cost. Per query, not once, because the queries share the big fact columns. 
 give a median and a spread instead of an n=1 point.
 
 Verdicts use **medians, never means** (one capacity spike among 110ms runs blows up a mean and
-fabricates a winner), hot runs 1 and 2 are dropped as the warm transition, and a per-query result
-inside the larger of the two spreads is a **tie**, not a win.
+fabricates a winner), and hot runs 1 and 2 are dropped as the warm transition.
+
+**The fastest engine wins a row, by any margin — there is no tie band.** There used to be one: a
+per-query gap smaller than the larger of the two spreads was called a tie. It was removed because
+of what it did to the side-by-side table. `best` was computed as best-vs-*second*-best, so on a
+four-engine run iceberg beating spark by 2ms printed `tie` on a row where dwh was 4× slower than
+either — and **every** row came out `tie`, which reads as "all four engines are equal". The exact
+times are right there in the row; a reader can judge whether 2ms matters far better than a rule
+that erases the winner and says nothing about the engine that lost by 300ms. Spread is still
+measured and still reported per query (§2 of the specialist findings), it just no longer decides
+who won. `render_summary.verify_verdicts` had always compared strictly, so this also removed a
+divergence between the verdict and its own orientation guard.
+
+Note the aggregate verdict follows the **summed totals**, not the per-query win count, so the two
+can disagree — "duckrun 1.00× faster (duckrun wins 5, spark wins 14)" is a real line from a real
+run, and it means duckrun lost most queries but won the one expensive one. That is the ratio doing
+its job; read the W/L alongside it.
 
 **The defaults trade statistical strength for capacity cost, deliberately.** At `cold_repeats=1`
 and `runs=3` there is exactly one measured sample per query per tier, so "median" is that sample
-and both spreads are 0 — which in turn means the tie rule never fires and `render_summary`'s
->25%-cold-spread noise filter flags nothing. Read a default-inputs run as a *smoke test with
-timings*, not as a defensible ranking. `cold_repeats=3 runs=5` (the previous defaults) is what a
-result worth quoting costs.
+and both spreads are 0 — which means `render_summary`'s >25%-cold-spread noise filter flags
+nothing. Read a default-inputs run as a *smoke test with timings*, not as a defensible ranking.
+`cold_repeats=3 runs=5` (the previous defaults) is what a result worth quoting costs.
 
 ## Running it
 
@@ -161,8 +175,9 @@ python -m pytest benchmark/ -q                                     # verdict + t
 RUN_REPORT=some_run_report.json python benchmark/render_report.py   # re-render any past artifact
 ```
 
-[`test_verdicts.py`](test_verdicts.py) pins the verdict layer: ratio orientation, the tie rule,
-explicit reference selection, DirectQuery scoping, and comparable totals.
+[`test_verdicts.py`](test_verdicts.py) pins the verdict layer: ratio orientation, fastest-wins (a
+1ms win is a win, and the `best` column names an engine rather than `tie`), explicit reference
+selection, DirectQuery scoping, and comparable totals.
 [`test_templates.py`](test_templates.py) checks the two `.bim` files against duckrun's *own* repoint
 regexes — everything it asserts would otherwise fail at deploy time, after ADOMD.NET is installed and
 the workspace resolved. It also pins the sharpest trap here: `_is_directlake_bim()` greps the raw

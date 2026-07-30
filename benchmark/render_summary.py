@@ -105,7 +105,7 @@ def s2_verdicts(rep, analysis, base, models):
     headline = [m for m in models if m != base]
     noisy = sorted(_noisy_cols(rep))
 
-    w("## 1. Headline verdict (medians, tie rule)")
+    w("## 1. Headline verdict (medians; fastest wins, no tie band)")
     w()
     w(f"Ratio column is `{base_lbl} ÷ challenger` (< 1 ⇒ {base_lbl} faster).")
     w()
@@ -131,7 +131,7 @@ def s2_verdicts(rep, analysis, base, models):
                 agg.append(f"{who} wins {cnt}/{tot} vs {against}")
         w(f"- ⚠ {len(noisy)} probe columns exceed 25% cold spread (n={cr}, shared capacity; see §2). "
           f"The headline rests on the aggregate, not any single column: "
-          f"{'; '.join(agg) or 'see table'} (per-query cold median, tie rule).")
+          f"{'; '.join(agg) or 'see table'} (per-query cold median, fastest wins).")
         w()
 
 

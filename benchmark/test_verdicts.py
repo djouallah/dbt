@@ -63,12 +63,48 @@ def test_ratio_orientation_base_faster_wins():
     assert v["ratio"] == pytest.approx(0.5)            # base/model = 100/200 < 1 => base faster
 
 
-def test_within_spread_is_a_tie_not_a_win():
-    base_t = {"q1": _cold(100, spread=30)}             # 30% spread
-    model_t = {"q1": _cold(104, spread=30)}            # 4% apart << 30% noise
+def test_within_spread_still_picks_the_faster_engine():
+    """The noise band is GONE: a gap inside the measured spread is still a win for the faster
+    engine. There used to be a tie rule here, and on a real four-engine run it labelled every
+    single row of the side-by-side table "tie" — because the label was computed best-vs-second
+    and the top two are usually close, even when a third engine is 4x slower. Fastest wins."""
+    base_t = {"q1": _cold(100, spread=30)}             # 30% spread — irrelevant now
+    model_t = {"q1": _cold(104, spread=30)}            # 4% slower => base wins by 4ms
     v = rr._agg_verdict(base_t, model_t, "cold_median_ms", "cold_spread_pct")
-    assert v["ties"] == 1 and v["wins"] == 0 and v["losses"] == 0
-    assert v["verdict"] == "tie"
+    assert v["ties"] == 0 and v["wins"] == 0 and v["losses"] == 1
+    assert v["verdict"] == "base"
+
+
+def test_a_one_millisecond_win_is_a_win():
+    base_t = {"q1": _cold(101, spread=50)}             # huge spread, 1ms apart
+    model_t = {"q1": _cold(100, spread=50)}
+    v = rr._agg_verdict(base_t, model_t, "cold_median_ms", "cold_spread_pct")
+    assert v["verdict"] == "model" and v["wins"] == 1 and v["ties"] == 0
+
+
+def test_exactly_equal_is_the_only_tie_left():
+    base_t = {"q1": _cold(100)}
+    model_t = {"q1": _cold(100)}
+    v = rr._agg_verdict(base_t, model_t, "cold_median_ms", "cold_spread_pct")
+    assert v["ties"] == 1 and v["verdict"] == "tie"
+
+
+def test_sidebyside_best_column_names_the_fastest_not_tie(capsys):
+    """The `best` column is argmin over the row, full stop.
+
+    Regression for a real report: with four engines the label was computed as best-vs-SECOND-best
+    through the tie rule, so iceberg beating spark by 2ms printed "tie" — on a row where dwh was
+    4x slower than both. Every row of the HOT table came out "tie", which reads as "all four
+    engines are equal" and is the opposite of what the numbers showed."""
+    ICE = "aemo_iceberg"
+    tim = {REF: {"probe_mw": _hot(110.1, spread=30)},   # the actual numbers from that run
+           DQ: {"probe_mw": _hot(383.8, spread=30)},
+           ICE: {"probe_mw": _hot(106.4, spread=30)},   # fastest, by 2ms over spark
+           CHAL: {"probe_mw": _hot(108.4, spread=30)}}
+    rr._sidebyside("HOT", tim, REF, [DQ, ICE, CHAL], "hot_median_ms", "hot_spread_pct")
+    row = [ln for ln in capsys.readouterr().out.splitlines() if "probe_mw" in ln][0]
+    assert row.rstrip().endswith("| iceberg |"), row
+    assert "tie" not in row
 
 
 # ----------------------------------------------------------------- direction guard (upstream)

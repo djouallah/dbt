@@ -110,21 +110,18 @@ def _totals(timings, models, key):
 
 # ---------------------------------------------------------------------------- derived analysis
 
-def _tie(b, m, b_spread_pct, m_spread_pct):
-    """Winner of base vs model with the noise/tie rule (same logic as xmla_compare.tie)."""
-    if not b or not m:
+def _tie(b, m, b_spread_pct=None, m_spread_pct=None):
+    """Winner of base vs model: the FASTER time wins, by any margin (same rule as
+    xmla_compare.tie — see there for why the noise band was removed). "tie" now means exactly
+    equal, which in practice never happens. Spreads are accepted and ignored."""
+    if b is None or m is None or not b or not m:
         return "tie" if b == m else ("model" if (m or 0) < (b or 0) else "base")
-    rel = abs(b - m) / max(b, m)
-    noise = max((b_spread_pct or 0.0), (m_spread_pct or 0.0)) / 100.0
-    if rel < noise:
-        return "tie"
     return "model" if m < b else ("base" if m > b else "tie")
 
 
-def _agg_verdict(base_t, model_t, key, spread_key):
-    """Aggregate base-vs-model verdict for one metric, tie rule applied per query. If no query
-    separates the two outside its spread, the verdict is 'no measurable difference' — that is a
-    finding, not a win."""
+def _agg_verdict(base_t, model_t, key, spread_key=None):
+    """Aggregate base-vs-model verdict for one metric: per query the faster time wins, and the
+    overall verdict follows the summed totals. No tie band — a 1ms win is a win."""
     bt = mt = 0.0
     per = []
     for q, mv in model_t.items():
@@ -141,7 +138,10 @@ def _agg_verdict(base_t, model_t, key, spread_key):
     wins, losses, ties = per.count("model"), per.count("base"), per.count("tie")
     ratio = (bt / mt) if mt else float("inf")
     if wins == 0 and losses == 0:
-        verdict, text = "tie", "no measurable difference (all deltas within spread)"
+        # Only reachable when EVERY comparable query came back exactly equal to the millisecond.
+        # Kept as a degenerate guard, not as a noise verdict — the old version reached this
+        # whenever the deltas sat inside the spread, which is the behaviour that was removed.
+        verdict, text = "tie", "identical timings on every query"
     else:
         verdict = "model" if mt < bt else "base"
         fac = ratio if ratio >= 1 else (1 / ratio if ratio else 0)
@@ -169,7 +169,7 @@ def compute_analysis(rep):
                 row[col] = round(v - base, 1)
         analysis["cold_column_cost"][m] = {"rowcount_overhead_ms": round(base, 1), "columns": row}
 
-    # verdicts: structured, reference vs each challenger, medians + tie rule (never a mean).
+    # verdicts: structured, reference vs each challenger, medians, fastest wins (never a mean).
     # Every model participates: a DirectQuery timing is a real measured query time, it just isn't
     # the same kind of number. `mode` on each verdict says which kind it is.
     base = reference(rep, models)
@@ -198,7 +198,7 @@ def verdict_sentence(v, bold=False):
     if not v:
         return None
     if v["verdict"] == "tie":
-        return f"{v['metric']}: no measurable difference (all deltas within spread)"
+        return f"{v['metric']}: identical timings on every query"
     fac = v["ratio"] if v["ratio"] >= 1 else (1 / v["ratio"] if v["ratio"] else 0)
     if v["verdict"] == "base":
         win, lose, wc, lc = v["base"], v["model"], v["losses"], v["wins"]
@@ -262,8 +262,14 @@ def _summary_table(rep):
     _write("\n".join(out) + "\n")
 
 
-def _sidebyside(title, timings, base, others, key, spread_key):
-    """One table: rows = queries, columns = base + each challenger, best model per row (tie rule).
+def _sidebyside(title, timings, base, others, key, spread_key=None):
+    """One table: rows = queries, columns = base + each challenger, `best` = the fastest engine.
+
+    `best` is simply argmin over the row. It used to be computed as best-vs-second-best through
+    the tie rule, which printed "tie" on a row where the top two were within noise of each other
+    — even when a THIRD engine was several times slower. Every row of a real four-engine run came
+    out "tie", which reads as "all four are equal" and is the opposite of what the row showed.
+    A 1ms win is a win; the exact times are in the row for anyone who wants to judge the margin.
 
     Participation is per metric, for the same reason `_totals` scopes it: a row is dropped when any
     COLUMN lacks the metric, so admitting a DirectQuery engine (no cold tier at all) to the COLD
@@ -282,11 +288,7 @@ def _sidebyside(title, timings, base, others, key, spread_key):
         if any(vals[m] is None for m in models):
             continue
         any_row = True
-        spreads = {m: (timings[m].get(q, {}).get(spread_key) if spread_key else None) for m in models}
-        ranked = sorted(models, key=lambda m: vals[m])
-        best, second = ranked[0], ranked[1] if len(ranked) > 1 else ranked[0]
-        w = _tie(vals[second], vals[best], spreads[second], spreads[best])
-        best_lbl = "tie" if w == "tie" else _short(best)
+        best_lbl = _short(min(models, key=lambda m: vals[m]))
         cells = " | ".join(f"{vals[m]:,.1f}" for m in models)
         out.append(f"| `{q}` | {cells} | {best_lbl} |")
     if any_row:
@@ -315,7 +317,7 @@ def _verdicts(vs):
     for v in vs:
         tag = "" if v.get("model_mode", "directLake") == "directLake" else " _(DirectQuery)_"
         lines.append(f"- {v['model']} vs {v['base']} — {verdict_sentence(v, bold=True)}{tag}")
-    _write("### Verdicts (medians, tie rule applied)\n\n" + "\n".join(lines) + "\n")
+    _write("### Verdicts (medians; fastest wins, no tie band)\n\n" + "\n".join(lines) + "\n")
 
 
 def main():

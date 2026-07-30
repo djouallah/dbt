@@ -426,7 +426,7 @@ takes to **query** them. Ported from `djouallah/duckrun`'s `parquet_layout.yml`.
   it, or it does not run.
 - **The dispatch defaults are tuned for capacity cost, not statistical strength**: `cold_repeats=1`,
   `runs=3`, `gap_seconds=600`. That is one measured sample per query per tier, so both spreads are
-  0, the tie rule never fires and `render_summary`'s >25%-cold-spread noise filter flags nothing —
+  0 and `render_summary`'s >25%-cold-spread noise filter flags nothing —
   a default run is a smoke test with timings, not a defensible ranking. `cold_repeats=3 runs=5` (the
   previous defaults) is what a quotable result costs; raise them per dispatch, don't raise the
   defaults back.
@@ -461,6 +461,17 @@ takes to **query** them. Ported from `djouallah/duckrun`'s `parquet_layout.yml`.
   permits an inner join, and the raw facts genuinely carry DUIDs missing from `dim_duid` (that is what
   `duid_probe` exists for), so asserting it there would make the benchmark measure fewer rows on the
   tables it is comparing. The wide facts are a deliberate column subset; `fct_price` alone has ~130.
+- **The fastest engine wins a row, by any margin — there is no tie band, and do not re-add one.**
+  A per-query gap inside the measured spread used to be called a tie. In the side-by-side table
+  `best` was computed best-vs-*second*-best, so on a four-engine run iceberg beating spark by 2ms
+  printed `tie` on a row where dwh was 4× slower than both — and every row read `tie`, i.e. "all
+  four are equal", the opposite of what the row showed. `best` is now argmin, full stop. Spread is
+  still measured and reported per query; it just no longer decides who won.
+  `render_summary.verify_verdicts` had always compared strictly, so the band was also a divergence
+  between the verdict and its own fatal orientation guard. One thing that survives and still
+  surprises: the aggregate verdict follows the **summed totals**, not the win count, so
+  "duckrun 1.00× faster (duckrun wins 5, spark wins 14)" is possible and correct — it lost most
+  queries and won the expensive one.
 - **The reference engine is `BENCH_ENGINES[0]`, explicitly.** Upstream picked the base by name
   (`endswith('_auto_sort')`, else the shortest). With one model per engine the shortest name is
   `aemo_dwh`, so inheriting that heuristic would silently make the DirectQuery leg the thing every
