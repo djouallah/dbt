@@ -6,6 +6,13 @@ name: dbt
 on:
   push:
     branches: [main]
+    # A prose-only commit changes no model, macro, script or workflow, so running the four
+    # Fabric legs for it buys nothing. paths-ignore is per-PUSH, not per-file: a commit that
+    # touches a doc AND anything else still runs, which is what we want. Dispatch ignores this
+    # entirely, so `gh workflow run` is still the way to force a build after a docs-only push.
+    paths-ignore:
+      - '**.md'
+      - 'LICENSE'
   workflow_dispatch:
     inputs:
       workspace:
