@@ -6,10 +6,14 @@
 -- refresh -- for exactly the dates whose stored content could still be stale, and the write
 -- reconciles that batch key by key. A partial top-up would fossilize gaps forever.
 --
--- The one model here that is NOT insert-only: a re-emitted row may carry REVISED mw/price and
--- must overwrite. duckrun merges (update matched); iceberg cannot (its catalog 400s on a
--- matched UPDATE) and so only fills craters. Not delete+insert on duckrun: that adapter
--- implements it as a fenced full-table overwrite, i.e. 143M rows every run.
+-- Insert-only on BOTH targets, which is a real limitation and not a preference: the OneLake
+-- Iceberg REST catalog rejects a matched-UPDATE branch (BadRequest 400), and the duckdb tree runs
+-- one config for both, so duckrun gives up the update it could do. Consequence: a re-emitted row
+-- carrying REVISED mw/price does NOT overwrite what is stored -- craters (missing keys) are
+-- repaired, changed values are not. spark and dwh do update, so a revision would show up as a
+-- value difference between the engine pairs; the repair lever on this side is a full rebuild.
+-- Not delete+insert on duckrun: that adapter implements it as a fenced full-table overwrite,
+-- i.e. 143M rows every run.
 --
 -- No merge path DELETES a row the recomputation stops producing, which is why dispatch_duids
 -- below gates the intraday branch to units the daily branch can reproduce.
@@ -20,7 +24,7 @@
     materialized='incremental',
     incremental_strategy='merge',
     unique_key=['date', 'time', 'DUID'],
-    merge_clauses=none if target.name == 'duckrun' else {'when_matched': [{'action': 'do_nothing'}]},
+    merge_clauses={'when_matched': [{'action': 'do_nothing'}]},
     schema='mart'
 ) }}
 

@@ -109,7 +109,7 @@ duckrun's own `insert`, which is the same operation and would keep the full memo
 
 | target | strategy | why not something else |
 |---|---|---|
-| `duckrun` **and** `iceberg` | `merge` + `when_matched: do_nothing` on the facts — **one config, no `target.name` branch**. `merge` on duckrun's `fct_summary`. | The models/duckdb tree renders for both, so it is written in dbt-duckdb's spelling, which **duckrun accepts verbatim since 0.4.35** (before that it raised on `do_nothing`, `_specs_from_merge_clauses` — that raise was this project's reason to branch, and it is gone). Requires duckrun ≥ 0.4.35. On duckrun that clause list is *routed* — an insert-only shape never removes a row, so `engine.merge_delta_clauses` diverts it to a DuckDB anti-join over the key columns plus an add-only append, always fenced to the version the anti-join read. Cost tracks the batch, not the target's partition span: 0.9s/+84MB against 6.7s/+8,397MB for the delta-rs merge on a 20M-row table, which is what OOM-killed `fct_scada`. One accepted cost versus spelling it `insert`: the merge path has already called `set_merge_memory_limit`, so the routed anti-join computes under DuckDB's 0.3 merge share instead of the full write share — correct, just more spill-prone (`_store_merge` docstring). On iceberg it is a real delta-rs-free MERGE, and it must stay insert-only: the OneLake REST catalog rejects a matched-UPDATE branch with `BadRequest 400`, and *omitting* `when_matched` is not the same thing — dbt-duckdb defaults it to update-by-name and draws that 400. Not `delete+insert`: on duckrun that is a fenced **full-table overwrite** (every surviving row plus the batch into a DuckDB temp table, then overwrite) — a full rewrite of 143M rows *every run*. |
+| `duckrun` **and** `iceberg` | `merge` + `when_matched: do_nothing` on the facts **and on `fct_summary`** — **one config, zero `target.name` in the whole tree**. | The models/duckdb tree renders for both, so it is written in dbt-duckdb's spelling, which **duckrun accepts verbatim since 0.4.35** (before that it raised on `do_nothing`, `_specs_from_merge_clauses` — that raise was this project's reason to branch, and it is gone). Requires duckrun ≥ 0.4.35. On duckrun that clause list is *routed* — an insert-only shape never removes a row, so `engine.merge_delta_clauses` diverts it to a DuckDB anti-join over the key columns plus an add-only append, always fenced to the version the anti-join read. Cost tracks the batch, not the target's partition span: 0.9s/+84MB against 6.7s/+8,397MB for the delta-rs merge on a 20M-row table, which is what OOM-killed `fct_scada`. One accepted cost versus spelling it `insert`: the merge path has already called `set_merge_memory_limit`, so the routed anti-join computes under DuckDB's 0.3 merge share instead of the full write share — correct, just more spill-prone (`_store_merge` docstring). On iceberg it is a real delta-rs-free MERGE, and it must stay insert-only: the OneLake REST catalog rejects a matched-UPDATE branch with `BadRequest 400`, and *omitting* `when_matched` is not the same thing — dbt-duckdb defaults it to update-by-name and draws that 400. Not `delete+insert`: on duckrun that is a fenced **full-table overwrite** (every surviving row plus the batch into a DuckDB temp table, then overwrite) — a full rewrite of 143M rows *every run*. The price of one config on `fct_summary`: duckrun **gives up the matched UPDATE it is capable of**, so a re-emitted row with a revised `mw`/`price` no longer overwrites on either duckdb target — craters are filled, changed values are not. spark and dwh do update, so a revision shows up as a value gap between the pairs, not a row-count gap. |
 | `spark` | `merge` + `skip_matched_step=true` | dbt-fabricspark honours `skip_matched_step`, which omits the WHEN MATCHED branch entirely — genuinely insert-only, and it cannot hit a multiple-source-row match error because there is no matched clause. Requires `file_format='delta'`. `merge` and `append` take the identical path in that materialization (persistent `__dbt_tmp` view, then one DML), so switching strategy does not disturb the CSV read. |
 | `dwh` | `merge` on the facts **and** on `fct_summary` | Insert-only is **not expressible** here — the opposite limitation from iceberg: dbt-fabric merge is `default__get_merge_sql`, which always emits `WHEN MATCHED THEN UPDATE SET <every column>` (`merge_update_columns=[]` is falsy and falls through to all columns). For append-only facts that branch is a semantic no-op — a matched row is rewritten with its own values — so it is correct, just not free. On `fct_summary` that forced update is exactly what is wanted, and matches duckrun/spark. It was `delete+insert` on `['[date]']`, which replaced whole dates and therefore **retracted** rows the recomputation no longer produced — the one write path here that could, which is why dwh's row count could differ from the other three on identical inputs and why it silently passed the intraday-unit bug. Repair is `REBUILD_SUMMARY=1`, not a per-date wipe. If the leg gets slow, fall back to `delete+insert` on `unique_key=['[file]']`. Bracket every key column: dbt interpolates them raw into the ON clause and `file`/`date` are reserved words. Never `--full-refresh` here: on dbt-fabric that DROPs and recreates, which deadlocks Fabric's background stats maintenance, loses grants, and rebinds Direct Lake. Use `REBUILD_SUMMARY=1` instead. |
 
@@ -126,28 +126,32 @@ Before changing a strategy, read the adapter's own source rather than assuming t
 what it does elsewhere. duckrun's lives in `dbt/adapters/duckrun/delta_plugin.py`; the Fabric ones
 in `dbt/include/fabric{,spark}/macros/materializations/models/incremental/`.
 
-### A keyed write reads the target, and on duckrun that means the table must be PARTITIONED
+### A keyed write reads the target — the literal file predicate is what bounds it
 
-Moving the facts off `append` made every run scan the target looking for key collisions. The
-other three engines absorbed it (dwh 48s, iceberg 49s, spark 95s on `fct_scada`). duckrun did
-not, twice: first a OneLake GET that sat 212s and failed, then — after adding a pruning
-predicate — a run that died mid-merge with **no dbt error at all**, just a leaked-semaphore
-warning. No error line means the process was killed, not a query that failed. `fct_scada` is
-369,205,022 rows and a **delta-rs merge** is memory bound: it plans a join against the whole
-pinned target and its join state is not fully spillable. duckrun 0.4.34's `insert` sidesteps that
-entirely — the anti-join runs in DuckDB and spills like any other query — but the target read is
-still a read, so the partitioning below is what keeps it bounded rather than optional.
+**Current state first, history second:** the duckdb facts declare **no `partition_by` and carry no
+`month_key`**. Both were duckrun-only, and the one-body rule retired them. What bounds the target
+read is `macros/pending_file_predicate.sql` — a literal `file IN (…)`, measured at **0 of 60 files
+scanned** where every column-to-column predicate scanned all 60. Read the rest of this section as
+*why partitioning was tried and what it cost*, not as a description of the models.
 
-**The fix is `partition_by`, not a cleverer predicate.** Both duckrun AEMO reference models
-(`tests/integration_tests/aemo/models/marts/fct_{price,scada}.sql`) carry:
+**Removing the partition column requires a table rebuild.** A Delta table's partitioning is
+metadata: a batch that no longer produces `month_key` cannot be appended to a table partitioned on
+it. So the four duckrun fact tables must be `DROP TABLE`d (never a folder delete) and rebuilt on
+the first run after this change. That rebuild is the whole cost of the rule, and `fct_scada` is
+369M rows of it.
 
-```jinja
-partition_by=['month_key'],
-incremental_predicates=['target.month_key = source.month_key'],
-```
-
-with `month_key = YEAR*100 + MONTH` in the SELECT. All four `models/duckdb/marts/fct_*` models
-now do the same on the duckrun branch.
+Why partitioning was introduced at all: moving the facts off `append` made every run scan the
+target looking for key collisions. The other three engines absorbed it (dwh 48s, iceberg 49s,
+spark 95s on `fct_scada`). duckrun did not, twice: first a OneLake GET that sat 212s and failed,
+then — after adding a pruning predicate — a run that died mid-merge with **no dbt error at all**,
+just a leaked-semaphore warning. No error line means the process was killed, not a query that
+failed. `fct_scada` is 369,205,022 rows and a **delta-rs merge** is memory bound: it plans a join
+against the whole pinned target and its join state is not fully spillable. The routed anti-join
+(duckrun ≥ 0.4.34) sidesteps that — it runs in DuckDB and spills like any other query — which is
+what made the partitioning droppable rather than load-bearing. The duckrun AEMO reference models
+(`tests/integration_tests/aemo/models/marts/fct_{price,scada}.sql`) still carry
+`partition_by=['month_key']` plus `incremental_predicates=['target.month_key = source.month_key']`,
+and that remains the right shape for a **single-target** duckrun project — just not for this one.
 
 Two things that cost real time here, worth not rediscovering:
 
@@ -161,24 +165,23 @@ Two things that cost real time here, worth not rediscovering:
 - **A column-to-column predicate does not prune target FILES — in a MERGE.** Measured against
   delta-rs on a 60-file table merging one new file: key only, `target.DATE = source.DATE`,
   `target.month_key = source.month_key`, and even the same with the table partitioned, all
-  scanned 60/60; only a *literal* filter reached 0/60. That is why the **iceberg** leg needs
-  `macros/pending_file_predicate.sql`. It is **not** true of duckrun's `insert`: `engine.probe_filters`
-  reads the batch and folds *literal* values into the probe — an exact `"month_key" IN (202601, …)`
-  for a **declared** partition equality, min/max bounds for every other join key (so `file` gets its
-  range for free). Same predicate text, opposite outcome, because a different component computes
-  the literals. Declaring the equality is required: without it duckrun will not prune that column,
-  since only a declared equality makes the filter result-neutral.
+  scanned 60/60; only a *literal* filter reached 0/60. This is why the predicate carries file
+  **names** and not a comparison. duckrun's routed anti-join additionally folds its own literals in
+  (`engine.probe_filters`: an exact `IN` list for a **declared** partition equality, min/max bounds
+  for every other join key, so `file` gets its range for free) — so on that side the pruning is
+  belt-and-braces, and it is the reason dropping the partition column was affordable.
 
 `macros/pending_file_predicate.sql` is the literal-value version, built from the pending file
-names known at compile time (`IN (...)` up to 200 files, else `BETWEEN min AND max`). It now
-serves the **iceberg** branch only. Because `file` leads every fact's `unique_key` the predicate
-is *implied* by the merge ON clause, so it removes no match the key would have made; on a
-deliberate duplicate it still scanned the 1 file that could collide and inserted 0 rows.
+names known at compile time (`IN (...)` up to 200 files, else `BETWEEN min AND max`), and it now
+serves **both** duckdb targets. Because `file` leads every fact's `unique_key` the predicate is
+*implied* by the merge ON clause, so it removes no match the key would have made; on a deliberate
+duplicate it still scanned the 1 file that could collide and inserted 0 rows.
 
-Write that one with dbt's `DBT_INTERNAL_DEST` alias, never `target.` — dbt-duckdb builds its ON
-clause with `DBT_INTERNAL_DEST` and knows no `target` alias, so `target.file` fails the iceberg
-leg outright. duckrun is the opposite: its own aliases *are* `target`/`source`, which is why the
-partition predicate above is written that way and is duckrun-only.
+Write it with dbt's `DBT_INTERNAL_DEST` alias, never `target.` — dbt-duckdb builds its ON clause
+with `DBT_INTERNAL_DEST` and knows no `target` alias, so `target.file` fails the iceberg leg
+outright. duckrun accepts the same text because `_merge_predicates` rewrites
+`DBT_INTERNAL_DEST`/`_SOURCE` to `target`/`source` **before** `_merge_source_keys` parses it, so
+one spelling genuinely serves both. Do not "fix" it to `target.`.
 
 ## `fct_summary` must be a pure function of its inputs
 
@@ -218,6 +221,8 @@ Rules that keep it honest:
   work against that catalog when issued directly. `fabric_build.py` fires the rebuild step for
   duckrun **and** iceberg from one flag, so `REBUILD_SUMMARY=1` breaks the iceberg leg and leaves
   a `fct_summary__dbt_backup` behind. See [LEARNINGS.md](LEARNINGS.md).
+  This lever carries more weight now that both duckdb targets are insert-only on `fct_summary`: a
+  **revised** `mw`/`price` cannot be repaired by any incremental run there, only by a rebuild.
 
 ## Where the DuckDB fold runs
 

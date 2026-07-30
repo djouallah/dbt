@@ -41,7 +41,10 @@ Two things that were true only of the detour, and are worth not re-deriving:
   merge (measured: 60/60 files scanned, partitioned or not) but **does** prune on the anti-join
   path, because `engine.probe_filters` reads the batch and folds *literal* partition values into
   the probe. Identical predicate text, opposite behaviour — the difference is which component
-  computes the literals. Hence the file-literal macro is now iceberg's alone.
+  computes the literals. The project no longer relies on it either way: the duckdb tree runs one
+  body for duckrun and iceberg, so `partition_by`/`month_key` were dropped (a table rebuild) and
+  the file-literal macro serves both targets. That predicate was always the stronger of the two —
+  0/60 files scanned against 60/60 — which is what made the partition column affordable to lose.
 
 ## Reading CSV with an explicit schema in Spark SQL
 

@@ -1,5 +1,7 @@
--- Insert-only. See fct_price.sql for the shared rationale; this is the big one (369M rows), so
--- the pruning predicate and the month_key partitioning below are load-bearing, not decorative.
+-- Insert-only. See fct_price.sql for the shared rationale. This is the big one (369M rows), so
+-- the literal file predicate is load-bearing, not decorative: it is the only thing that stops
+-- the keyed write from scanning the whole target. There is no month_key partitioning any more --
+-- the iceberg table has no such column, and the duckdb tree runs one body for both targets.
 {%- set pending_files_query -%}
 SELECT csv_filename FROM {{ ref('stg_csv_archive_log') }}
 WHERE source_type = 'daily'
@@ -25,7 +27,6 @@ AND csv_filename NOT IN (SELECT DISTINCT file FROM {{ this }})
     incremental_strategy='merge',
     merge_clauses={'when_matched': [{'action': 'do_nothing'}]},
     unique_key=['file', 'DUID', 'SETTLEMENTDATE','INTERVENTION'],
-    partition_by=['month_key'] if target.name == 'duckrun' else none,
     incremental_predicates=file_predicate,
     pre_hook="SET VARIABLE scada_daily_paths = (SELECT COALESCE(NULLIF(list('{{ get_csv_archive_path() }}' || archive_path), []), ['']) FROM (SELECT archive_path FROM {{ ref('stg_csv_archive_log') }} WHERE source_type = 'daily'{% if is_incremental() %} AND csv_filename NOT IN (SELECT DISTINCT file FROM {{ this }}){% endif %} ORDER BY archive_path))"
 ) }}
@@ -81,14 +82,7 @@ SELECT
   {{ parse_filename('filename') }} AS file,
   CAST(SETTLEMENTDATE AS TIMESTAMPTZ) AS SETTLEMENTDATE,
   CAST(SETTLEMENTDATE AS DATE) AS DATE,
-  CAST(YEAR(CAST(SETTLEMENTDATE AS TIMESTAMP)) AS INT) AS YEAR{% if target.name == 'duckrun' %},
-  -- Monthly partition key (YYYYMM), the Delta partition column -- same expression as the duckrun
-  -- AEMO reference model, and the same key dwh already carries. duckrun only: the iceberg table
-  -- was not dropped, so adding a column there would have to schema-evolve through the REST
-  -- catalog, which is where this project has repeatedly hit 400s.
-  CAST(YEAR(CAST(SETTLEMENTDATE AS TIMESTAMP)) AS INT) * 100
-    + CAST(MONTH(CAST(SETTLEMENTDATE AS TIMESTAMP)) AS INT) AS month_key
-{% endif %}
+  CAST(YEAR(CAST(SETTLEMENTDATE AS TIMESTAMP)) AS INT) AS YEAR
 FROM scada_staging
 {% else %}
 SELECT * FROM {{ this }} WHERE FALSE
