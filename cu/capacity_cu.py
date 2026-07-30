@@ -33,7 +33,7 @@ import os
 import re
 import sys
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import requests
 
@@ -82,6 +82,11 @@ DEBUG = os.environ.get("CU_DEBUG", "").strip().lower() in ("1", "true", "yes")
 # see benchmark/README.md on the DirectQuery leg. Set this past that run and the report starts
 # clean. Bump it again whenever you want to start fresh; blank means everything retained.
 SINCE = os.environ.get("CU_SINCE", "2026-07-30T12:00:00Z").strip()
+
+# Hours the model's clock runs ahead of UTC. Blank = detect it (see detect_offset). Set it only to
+# override a wrong detection; the app's offset is a setting inside the app, not a property of the
+# tenant or of you, so hardcoding it here would be a guess.
+OFFSET_ENV = os.environ.get("CU_UTC_OFFSET_HOURS", "").strip()
 
 # Item x operation x hour. The hour axis exists only to support SINCE; nothing here reports by hour.
 # Mind the spelling: the model also has 'Metrics By Item And Operation' (no time axis) and 'Metrics
@@ -201,6 +206,49 @@ def discover_capacities():
         "set CU_CAPACITY_ID explicitly")
 
 
+def detect_offset(cap):
+    """Hours the model's clock runs ahead of UTC.
+
+    The metrics tables stamp everything in the offset configured IN THE APP, not UTC and not
+    yours — measured here as +10, with a benchmark that ran at 05:15Z appearing under hour 15:00.
+    A `since` supplied in UTC and compared raw against those stamps is silently wrong by the
+    offset, which is a filter that binds and still excludes the wrong things.
+
+    Probed from 'Timepoints', not from the fact table: the app generates timepoints up to the
+    present whether or not the capacity was busy, so an idle few hours cannot skew the answer the
+    way MAX() over activity would.
+    """
+    if OFFSET_ENV:
+        try:
+            return float(OFFSET_ENV)
+        except ValueError:
+            die(f"CU_UTC_OFFSET_HOURS={OFFSET_ENV!r} is not a number")
+    for col in ("Timepoint", "Time-point"):
+        rows = execute_dax(f"""
+DEFINE
+    MPARAMETER 'CapacitiesList' = {{ "{cap}" }}
+EVALUATE
+    ROW ( "mx", MAX ( 'Timepoints'[{col}] ) )
+""".strip(), fatal=False)
+        vals = [v for r in strip_prefix(rows or []) for v in r.values() if v]
+        if not vals:
+            continue
+        try:
+            mx = datetime.fromisoformat(str(vals[0]).replace("Z", "")).replace(tzinfo=timezone.utc)
+        except ValueError:
+            continue
+        # Nearest half hour, not whole: real offsets include :30 (India, parts of Australia), and
+        # rounding those to the hour would shift the floor by 30 minutes.
+        off = round((mx - datetime.now(timezone.utc)).total_seconds() / 1800) / 2
+        if -12 <= off <= 14:
+            log(f"  model clock is UTC{off:+g} (max timepoint {mx:%Y-%m-%d %H:%MZ})")
+            return off
+        log(f"  ignoring an implausible detected offset of {off:+g}h — assuming UTC")
+        return 0.0
+    log("  could not read 'Timepoints' to detect the model's clock — assuming UTC")
+    return 0.0
+
+
 def items_for(cap, c):
     """Map item GUID -> (name, kind).
 
@@ -315,6 +363,11 @@ def main():
 
     cols = discover_columns()
     caps = [CAPACITY] if CAPACITY else discover_capacities()
+    # The floor must be expressed in the model's clock, not yours.
+    offset = detect_offset(caps[0]) if since else 0.0
+    since_local = since + timedelta(hours=offset) if since else None
+    if since_local:
+        log(f"  since {since:%Y-%m-%d %H:%MZ} UTC = {since_local:%Y-%m-%d %H:%M} model-local")
     log(f"capacities={caps} since={SINCE or '(everything retained)'} "
         f"workspace={WS_FILTER or '(all)'} models={MODELS or '(every semantic model)'}")
 
@@ -322,7 +375,7 @@ def main():
     cells, unknown, seen_hours = {}, 0, []
     for cap in caps:
         items = items_for(cap, cols[ITEMS])
-        rows = cu_for(cap, since, cols[TABLE])
+        rows = cu_for(cap, since_local, cols[TABLE])
         if rows is None:
             log(f"  capacity {cap}: refused the query — skipping it")
             continue
@@ -362,8 +415,8 @@ def main():
     if seen_hours:
         lo, hi = min(seen_hours), max(seen_hours)
         log(f"  hours returned: {lo} .. {hi}")
-        if since:
-            floor = since.strftime("%Y-%m-%dT%H:%M:%S")
+        if since_local:
+            floor = since_local.strftime("%Y-%m-%dT%H:%M:%S")
             if lo[:19] < floor:
                 die(f"the `since` filter did NOT bind: asked for >= {floor}, but rows came back "
                     f"from {lo}. Refusing to print a total that silently includes excluded time.")

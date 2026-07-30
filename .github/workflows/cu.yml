@@ -19,6 +19,10 @@ on:
         description: "count only from this ISO-8601 UTC instant. A pinned floor, not a rolling window — set past the DirectQuery-era run. Blank = everything retained (~14 days)."
         type: string
         default: "2026-07-30T12:00:00Z"
+      utc_offset_hours:
+        description: "override the model's UTC offset (blank = detect it from 'Timepoints'). The metrics tables stamp local time, not UTC."
+        type: string
+        default: ""
       models:
         description: "semantic models to report, comma-separated and in this order. Blank = every semantic model in the workspace."
         type: string
@@ -69,6 +73,7 @@ jobs:
       CU_WORKSPACE_FILTER: ${{ inputs.workspace }}
       CU_MODELS: ${{ inputs.models }}
       CU_SINCE: ${{ inputs.since }}
+      CU_UTC_OFFSET_HOURS: ${{ inputs.utc_offset_hours }}
       CU_DEBUG: ${{ inputs.debug }}
       PYTHONIOENCODING: utf-8
     steps:
