@@ -33,7 +33,7 @@ import os
 import re
 import sys
 import time
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 
 import requests
 
@@ -81,12 +81,17 @@ DEBUG = os.environ.get("CU_DEBUG", "").strip().lower() in ("1", "true", "yes")
 # rather than Direct Lake. Those two are not the same experiment and their CU must not be summed —
 # see benchmark/README.md on the DirectQuery leg. Set this past that run and the report starts
 # clean. Bump it again whenever you want to start fresh; blank means everything retained.
-SINCE = os.environ.get("CU_SINCE", "2026-07-30T12:00:00Z").strip()
-
-# Hours the model's clock runs ahead of UTC. Blank = detect it (see detect_offset). Set it only to
-# override a wrong detection; the app's offset is a setting inside the app, not a property of the
-# tenant or of you, so hardcoding it here would be a guess.
-OFFSET_ENV = os.environ.get("CU_UTC_OFFSET_HOURS", "").strip()
+#
+# EXPRESSED IN THE MODEL'S OWN CLOCK, not UTC. The Capacity Metrics tables stamp everything in the
+# offset configured inside the app — +10 here, so a benchmark that ran at 05:15Z sits under hour
+# 15:00 — and that is also what the app's UI shows you. Taking `since` in the same clock means
+# there is nothing to convert and nothing to get wrong.
+#
+# Detecting that offset was tried twice and abandoned. 'Timepoints' is a generated calendar running
+# ~9 days into the FUTURE (it returned +227.5h), MAX() over activity lags by however long the
+# capacity has been idle, and there is no offset column anywhere in the model. Every run logs the
+# range of hours it actually saw, so one dispatch tells you what to set this to.
+SINCE = os.environ.get("CU_SINCE", "2026-07-30T22:00:00").strip()
 
 # Item x operation x hour. The hour axis exists only to support SINCE; nothing here reports by hour.
 # Mind the spelling: the model also has 'Metrics By Item And Operation' (no time axis) and 'Metrics
@@ -206,49 +211,6 @@ def discover_capacities():
         "set CU_CAPACITY_ID explicitly")
 
 
-def detect_offset(cap):
-    """Hours the model's clock runs ahead of UTC.
-
-    The metrics tables stamp everything in the offset configured IN THE APP, not UTC and not
-    yours — measured here as +10, with a benchmark that ran at 05:15Z appearing under hour 15:00.
-    A `since` supplied in UTC and compared raw against those stamps is silently wrong by the
-    offset, which is a filter that binds and still excludes the wrong things.
-
-    Probed from 'Timepoints', not from the fact table: the app generates timepoints up to the
-    present whether or not the capacity was busy, so an idle few hours cannot skew the answer the
-    way MAX() over activity would.
-    """
-    if OFFSET_ENV:
-        try:
-            return float(OFFSET_ENV)
-        except ValueError:
-            die(f"CU_UTC_OFFSET_HOURS={OFFSET_ENV!r} is not a number")
-    for col in ("Timepoint", "Time-point"):
-        rows = execute_dax(f"""
-DEFINE
-    MPARAMETER 'CapacitiesList' = {{ "{cap}" }}
-EVALUATE
-    ROW ( "mx", MAX ( 'Timepoints'[{col}] ) )
-""".strip(), fatal=False)
-        vals = [v for r in strip_prefix(rows or []) for v in r.values() if v]
-        if not vals:
-            continue
-        try:
-            mx = datetime.fromisoformat(str(vals[0]).replace("Z", "")).replace(tzinfo=timezone.utc)
-        except ValueError:
-            continue
-        # Nearest half hour, not whole: real offsets include :30 (India, parts of Australia), and
-        # rounding those to the hour would shift the floor by 30 minutes.
-        off = round((mx - datetime.now(timezone.utc)).total_seconds() / 1800) / 2
-        if -12 <= off <= 14:
-            log(f"  model clock is UTC{off:+g} (max timepoint {mx:%Y-%m-%d %H:%MZ})")
-            return off
-        log(f"  ignoring an implausible detected offset of {off:+g}h — assuming UTC")
-        return 0.0
-    log("  could not read 'Timepoints' to detect the model's clock — assuming UTC")
-    return 0.0
-
-
 def items_for(cap, c):
     """Map item GUID -> (name, kind).
 
@@ -310,12 +272,12 @@ EVALUATE
 
 def render(cells, since, asof):
     """cells is {(model, operation): cu}. Rendered as models x operation types."""
-    span = (f"since {since:%Y-%m-%d %H:%MZ}" if since else "everything retained")
+    span = (f"since {since:%Y-%m-%d %H:%M} (model clock)" if since else "everything retained")
     print(f"## Semantic model CU — {span}, as of {asof:%Y-%m-%d %H:%MZ}\n")
     if not cells:
         print(f"No semantic model activity {span}. Operations land **~6 minutes** after they run, "
               f"so a benchmark that just finished is not in here yet"
-              + (" — and `since` may simply be in the future." if since and since > asof else "."))
+              + " — and `since` is in the MODEL's clock, so check the hour range in the log.")
         return
 
     # When specific models were asked for, print every one of them in the order given, including
@@ -354,20 +316,14 @@ def main():
     since = None
     if SINCE:
         try:
-            since = datetime.fromisoformat(SINCE.replace("Z", "+00:00")).astimezone(timezone.utc)
+            since = datetime.fromisoformat(SINCE.replace("Z", "").strip())
         except ValueError:
-            die(f"CU_SINCE={SINCE!r} is not ISO-8601 (e.g. 2026-07-30T12:00:00Z)")
-        if (asof - since).days > 14:
-            log(f"note: since={SINCE} predates the app's ~14-day retention — the report starts "
-                f"wherever the data actually does, not there")
+            die(f"CU_SINCE={SINCE!r} is not ISO-8601 (e.g. 2026-07-30T22:00:00). It is in the "
+                f"MODEL's clock, not UTC — a trailing Z is ignored rather than honoured.")
 
     cols = discover_columns()
     caps = [CAPACITY] if CAPACITY else discover_capacities()
-    # The floor must be expressed in the model's clock, not yours.
-    offset = detect_offset(caps[0]) if since else 0.0
-    since_local = since + timedelta(hours=offset) if since else None
-    if since_local:
-        log(f"  since {since:%Y-%m-%d %H:%MZ} UTC = {since_local:%Y-%m-%d %H:%M} model-local")
+    since_local = since
     log(f"capacities={caps} since={SINCE or '(everything retained)'} "
         f"workspace={WS_FILTER or '(all)'} models={MODELS or '(every semantic model)'}")
 

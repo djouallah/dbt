@@ -6,7 +6,7 @@ Fabric has no per-operation CU REST API. The Capacity Metrics app's own semantic
 authoritative source, so this reads it by DAX and prints one table.
 
 ```
-## Semantic model CU — since 2026-07-30 12:00Z, as of 2026-07-30 14:10Z
+## Semantic model CU — since 2026-07-30 22:00 (model clock), as of 2026-07-30 14:10Z
 
 | semantic model | XMLA Read Operation | Semantic model refresh | Query |    total |
 |----------------|--------------------:|-----------------------:|------:|---------:|
@@ -46,8 +46,7 @@ after the activity you want to measure** — see the lag note below.
 
 | input | default | notes |
 |---|---|---|
-| `since` | `2026-07-30T12:00:00Z` | ISO-8601 **UTC** floor. Blank = everything retained |
-| `utc_offset_hours` | detect | override the model's clock. See below |
+| `since` | `2026-07-30T22:00:00` | floor, **in the model's clock** (see below). Blank = everything retained |
 | `models` | the four `aemo_*` | comma-separated, in report order. Blank = every semantic model |
 | `workspace` | `ea575278-…` | the workspace ci.yml and benchmark.yml deploy to. Blank = all |
 | `metrics_workspace_id` | `7f7f5d92-…` | where the Capacity Metrics app is installed |
@@ -62,7 +61,7 @@ export PBI_TOKEN=$(az account get-access-token \
   --resource https://analysis.windows.net/powerbi/api --query accessToken -o tsv)
 export CU_METRICS_WORKSPACE_ID=7f7f5d92-1603-4a02-a46a-0d90fe1ed119
 export CU_METRICS_MODEL_ID=0fdedd3b-1451-4499-9ed4-aa3658100ec1
-CU_SINCE=2026-07-30T12:00:00Z CU_DEBUG=1 python cu/capacity_cu.py
+CU_SINCE=2026-07-30T22:00:00 CU_DEBUG=1 python cu/capacity_cu.py
 ```
 
 ## The things that will bite
@@ -86,14 +85,15 @@ stale `aemo_spark` in some other workspace would otherwise be silently added to 
 apply. Every requested model is printed even with no activity — a `0.0` row distinguishes "ran and
 cost nothing" from "vanished", which a missing row would not.
 
-**The metrics tables stamp the app's LOCAL time, and `since` is UTC.** This tenant's app runs at
-UTC+10, so a `since` of `12:00Z` compared raw against those stamps is really an 02:00Z floor —
-a filter that binds and still excludes the wrong things. `detect_offset()` probes
-`MAX('Timepoints'[Timepoint])` against the wall clock and converts the floor before building the
-DAX literal. `Timepoints` rather than the fact table on purpose: the app generates timepoints up to
-the present whether or not the capacity was busy, so an idle few hours cannot skew it the way a
-MAX() over activity would. Override with `utc_offset_hours` if the detection ever looks wrong — the
-run logs what it detected and the local floor it derived.
+**`since` is in the model's clock, NOT UTC.** The metrics tables stamp everything in the offset
+configured inside the Capacity Metrics app — +10 here, so a benchmark that ran at 05:15Z sits under
+hour 15:00 — and that is also what the app's UI shows you, so there is nothing to convert. Every
+run logs `hours returned: … .. …`; read that once and you know what to set.
+
+Detecting the offset automatically was tried twice and abandoned, which is worth not repeating:
+`Timepoints` is a generated calendar running ~9 days into the **future** (it reported +227.5h),
+`MAX()` over activity lags by however long the capacity has been idle, and no table in the model
+carries the offset as a value.
 
 **The `since` filter is verified, not trusted.** `FILTER(VALUES(...))` as a `SUMMARIZECOLUMNS`
 argument was accepted without error and silently changed nothing: a 3-hour window, no filter, and a
