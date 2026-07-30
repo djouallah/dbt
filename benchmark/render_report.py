@@ -71,17 +71,6 @@ def reference(rep, models):
     return models[0]
 
 
-def _mode(rep, model):
-    """directLake / directQuery for a model, from the report (resolve_env.py) or the registry."""
-    lbl = _short(model)
-    meta = (rep.get("engines", {}) or {}).get(lbl) or {}
-    return meta.get("mode") or E.MODE.get(lbl, "directLake")
-
-
-def _is_lake(rep, model):
-    return _mode(rep, model) == "directLake"
-
-
 def _order(rep, models):
     """Reference first, then the rest by name — a stable reading order across runs."""
     base = reference(rep, models)
@@ -95,8 +84,10 @@ def _totals(timings, models, key):
     more than one challenger those totals are not mutually comparable and cannot be read as a
     column. This restricts to the common query set instead.
 
-    Participation is per metric: a DirectQuery model has no cold numbers at all, and letting it into
-    the COLD intersection would empty the column for the engines that do have them."""
+    Participation is per metric, because an engine can be missing one: `BENCH_COLD=false` skips cold
+    for everyone, and a dehydrate that fails (a token that cannot refresh) drops that engine to hot
+    only. Letting a hot-only engine into the COLD intersection would empty the column for the engines
+    that do have cold numbers."""
     have = [m for m in models
             if any((d or {}).get(key) is not None for d in timings.get(m, {}).values())]
     if not have:
@@ -170,8 +161,8 @@ def compute_analysis(rep):
         analysis["cold_column_cost"][m] = {"rowcount_overhead_ms": round(base, 1), "columns": row}
 
     # verdicts: structured, reference vs each challenger, medians, fastest wins (never a mean).
-    # Every model participates: a DirectQuery timing is a real measured query time, it just isn't
-    # the same kind of number. `mode` on each verdict says which kind it is.
+    # Every model participates and every timing is the same kind of number — same DAX, same
+    # semantic model, Direct Lake throughout. Only the adapter underneath differs.
     base = reference(rep, models)
     if base:
         for m in models:
@@ -181,8 +172,7 @@ def compute_analysis(rep):
                                     ("HOT", "hot_median_ms", "hot_spread_pct")):
                 agg = _agg_verdict(timings[base], timings[m], key, sk)
                 if agg:
-                    agg.update({"metric": metric, "base": _short(base), "model": _short(m),
-                                "base_mode": _mode(rep, base), "model_mode": _mode(rep, m)})
+                    agg.update({"metric": metric, "base": _short(base), "model": _short(m)})
                     analysis["verdicts"].append(agg)
     return analysis
 
@@ -225,8 +215,8 @@ def _summary_table(rep):
     hot_tot = _totals(timings, models, "hot_median_ms")
 
     def _winner(tot):
-        # Needs something to beat: with one participant (e.g. COLD when the only other engine is
-        # DirectQuery) a ✔ would decorate an uncontested number.
+        # Needs something to beat: with one participant (e.g. COLD when every other engine dropped
+        # to hot-only) a ✔ would decorate an uncontested number.
         return min(tot, key=tot.get) if len(tot) > 1 else None
 
     cold_w, hot_w = _winner(cold_tot), _winner(hot_tot)
@@ -239,24 +229,18 @@ def _summary_table(rep):
         c, h = cold_tot.get(name), hot_tot.get(name)
         cc = f"{_int(c)} ✔" if name == cold_w else _int(c)
         hc = f"{_int(h)} ✔" if name == hot_w else _int(h)
-        body.append([name, f"`{writer}`", _mode(rep, m), meta.get("item") or "—", cc, hc])
+        body.append([name, f"`{writer}`", meta.get("item") or "—", cc, hc])
     if not body:
         return
     out = ["## Summary", "",
            f"Reference: **{_short(base)}**. Every ratio below reads `{_short(base)} ÷ engine`. "
            f"Totals are over the queries every participating engine answered.", "",
-           "| engine | writer | mode | item | cold total (ms) | hot total (ms) |",
-           "|:--|:--|:--|:--|--:|--:|"]
+           "| engine | writer | item | cold total (ms) | hot total (ms) |",
+           "|:--|:--|:--|--:|--:|"]
     for r in body:
         out.append("| " + " | ".join(r) + " |")
-    dq = [_short(m) for m in models if not _is_lake(rep, m)]
-    if dq:
-        one = len(dq) == 1
-        out += ["", f"<sub>{', '.join(dq)} {'reads' if one else 'read'} through **DirectQuery** "
-                    f"(SQL endpoint pushdown), not Direct Lake, so "
-                    f"{'it has' if one else 'they have'} no cold tier to evict and "
-                    f"{'its' if one else 'their'} numbers are not the same kind as the "
-                    f"others'.</sub>"]
+    # No `mode` column: every model is Direct Lake, which is the premise rather than a variable —
+    # four adapters, one way of reading what they wrote. `writer` is the axis under test.
     out += ["", "<sub>Physical layout per engine — files, row groups, size, v-order, compression — "
                 "is the `summary` job of `ci.yml`, not this run.</sub>"]
     _write("\n".join(out) + "\n")
@@ -272,8 +256,9 @@ def _sidebyside(title, timings, base, others, key, spread_key=None):
     A 1ms win is a win; the exact times are in the row for anyone who wants to judge the margin.
 
     Participation is per metric, for the same reason `_totals` scopes it: a row is dropped when any
-    COLUMN lacks the metric, so admitting a DirectQuery engine (no cold tier at all) to the COLD
-    table would drop every row and render nothing."""
+    COLUMN lacks the metric, so admitting a hot-only engine (one whose dehydrate failed, or any
+    engine at all when BENCH_COLD=false) to the COLD table would drop every row and render
+    nothing."""
     models = [m for m in [base] + others
               if any((d or {}).get(key) is not None for d in timings.get(m, {}).values())]
     if len(models) < 2 or base not in models:
@@ -315,8 +300,7 @@ def _verdicts(vs):
         return
     lines = []
     for v in vs:
-        tag = "" if v.get("model_mode", "directLake") == "directLake" else " _(DirectQuery)_"
-        lines.append(f"- {v['model']} vs {v['base']} — {verdict_sentence(v, bold=True)}{tag}")
+        lines.append(f"- {v['model']} vs {v['base']} — {verdict_sentence(v, bold=True)}")
     _write("### Verdicts (medians; fastest wins, no tie band)\n\n" + "\n".join(lines) + "\n")
 
 

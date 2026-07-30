@@ -61,9 +61,7 @@ def _verdict_row(by, base_lbl, m):
     cr = "=" if (c and c["verdict"] == "tie") else (_ratio(c["ratio"]) if c else "—")
     hr = "=" if (h and h["verdict"] == "tie") else (_ratio(h["ratio"]) if h else "—")
     parts = [p for p in (_verdict_line(c), _verdict_line(h)) if p]
-    mode = (h or c or {}).get("model_mode", "directLake")
-    tag = "" if mode == "directLake" else " (DirectQuery)"
-    w(f"| {chal}{tag} vs {base_lbl} | {cr} | {hr} | {'; '.join(parts)} |")
+    w(f"| {chal} vs {base_lbl} | {cr} | {hr} | {'; '.join(parts)} |")
 
 
 def _ms(v):
@@ -80,8 +78,6 @@ def s1_header(rep):
     run = rep.get("run", {})
     inp = run.get("inputs", {})
     tim = rep.get("timings", {})
-    lake = [m for m in tim if rr._is_lake(rep, m)]
-    dq = [m for m in tim if not rr._is_lake(rep, m)]
     w("# Specialist findings — engine query benchmark")
     w()
     w(f"- run `{run.get('run_id')}` · sha `{run.get('sha')}` · {run.get('date')}")
@@ -90,10 +86,13 @@ def s1_header(rep):
     w(f"- inputs: engines={inp.get('engines')} · cold_repeats={inp.get('cold_repeats')} · "
       f"runs={inp.get('runs')} · gap_seconds={inp.get('gap_seconds')}")
     w()
-    w(f"{len(tim)} engines' own copy of the same `mart.fct_summary`, at row-count parity; identical "
-      f"DAX over XMLA against each. {len(lake)} read by Direct Lake"
-      + (f" ({inp.get('cold_repeats')} cold cycles per query, medians reported)" if lake else "")
-      + (f"; {len(dq)} by DirectQuery (hot only — no transcoded data to evict)" if dq else "") + ".")
+    # The experiment in one sentence: identical DAX, identical semantic models, N dbt adapters. The
+    # adapter that wrote the parquet is the only variable, which is why no engine is described here
+    # as being read differently from the others.
+    w(f"Identical DAX over XMLA against {len(tim)} semantic models, one per dbt adapter, each over "
+      f"that adapter's own copy of the same `mart.fct_summary` at row-count parity. All Direct Lake, "
+      f"so every timing is a Delta→memory transcode and an in-memory scan shaped by the physical "
+      f"layout — {inp.get('cold_repeats')} cold cycles per query, medians reported.")
     w()
 
 

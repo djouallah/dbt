@@ -441,32 +441,32 @@ takes to **query** them. Ported from `djouallah/duckrun`'s `parquet_layout.yml`.
   because a concurrent dbt build contends for the same capacity, and capacity contention is the one
   thing a wall-clock benchmark cannot absorb. So a benchmark dispatch queues behind a `dbt` dispatch
   rather than racing it. Do not give it its own group to make it start sooner.
-- **All four engines are Direct Lake, `dwh` included, and there is ONE `.bim`.** Requires
-  duckrun ≥ 0.4.36 — the benchmark job pins that floor, above the repo's dbt floor of 0.4.35.
-  `deploy()` now takes two independent knobs and `benchmark/engines.py` decides both:
-  `lakehouse=`/`warehouse=` (from `KIND`) says **which** item holds the tables, `mode=` (from `MODE`,
-  via `DEPLOY_MODE`) says **how** it is read. `mode="direct_lake"` rewrites every table to an entity
-  partition over the item's OneLake root and stamps `directLakeBehavior: directLakeOnly`, so a query
-  Direct Lake cannot serve **fails** instead of silently falling back to DirectQuery and logging a
-  pushdown time that reads as a bad layout.
-  **This reverses what used to be written here.** `dwh` was DirectQuery because before `mode=` a
-  warehouse item could only be read that way, which forced a second hand-authored
-  `fct_summary_dq.SemanticModel` kept in lockstep with the first, and made the dwh leg hot-only, gave
-  it no reframe at deploy, and scoped it out of every COLD table. A warehouse's `Tables` are Delta in
-  OneLake like any other item's — `stats.py` has always read them that way — so none of that was ever
-  about the storage. The second template is **deleted**: `mode="direct_query"` on the remaining bim
-  reproduces it exactly.
-  The DirectQuery machinery all survives and is driven by `MODE`, never by engine name — the hot-only
-  degradation in `bench_model`, the cold-tier scoping in `render_report._totals`, the
-  `_(DirectQuery)_` verdict tag. Flipping an engine back is a one-line change in `MODE`, and
-  `test_templates.py` pins the current setting so that stays deliberate. What the default gives up:
-  the only DirectQuery data point, i.e. "is Direct Lake over the warehouse faster than DirectQuery
-  over it?" — flip `MODE["dwh"]` for one run to ask it.
-  If anyone reintroduces a hand-authored DirectQuery bim rather than using `mode=`, the old trap is
-  still live: such a file must contain neither the camelCase Direct-Lake mode token nor a
-  `onelake.dfs` URL **anywhere, prose included** — `_is_directlake_bim()` greps the raw bytes, so a
-  `description` string naming the mode flips the model and makes deploy attempt a reframe it cannot
-  serve. That mistake was made, and caught by a test, once already.
+- **The test is: identical DAX, identical semantic models, four dbt adapters.** The adapter that
+  wrote the parquet is the only variable, so everything above it is held constant — ONE `.bim`, ONE
+  storage mode, one query suite. `deploy()` takes exactly one per-engine argument,
+  `lakehouse=`/`warehouse=` (from `engines.KIND`); `mode=` is `engines.DEPLOY_MODE`, a single constant
+  `"direct_lake"`, and **there is deliberately no per-engine `MODE` dict** — `test_templates.py`
+  asserts one has not crept back. Requires duckrun ≥ 0.4.36 (the benchmark job pins that floor, above
+  the repo's dbt floor of 0.4.35). Direct Lake is what makes a timing an answer about layout, and
+  `directLakeOnly` means a query it cannot serve fails instead of falling back to the SQL endpoint and
+  logging a pushdown time.
+  **This reverses what used to be written here** ("`dwh` is DirectQuery and that asymmetry is
+  load-bearing"). The asymmetry was never about storage — a warehouse's `Tables` are Delta in OneLake,
+  which is how `stats.py` has always read them — and the labelling that was supposed to make it safe
+  did not work. Measured, from the last DirectQuery run: cold ÷ hot was 15.9× / 47.1× / 17.4× on the
+  three Direct Lake engines and **0.96× on dwh**, because a DirectQuery model has nothing to evict, so
+  its dehydrate is a **no-op that SUCCEEDS** rather than the failure the hot-only degradation watches
+  for. Fifteen bogus "cold" samples were recorded, dwh entered the COLD totals, and the summary printed
+  it the **cold winner** — 27,622 ms against duckrun's 63,437 — for never doing the work being measured.
+  Two kinds of number in one table will find a way into one comparison; the fix is to not produce both.
+  So: don't reintroduce a DirectQuery leg, and don't re-add a per-engine mode to make one possible. If
+  a pushdown-vs-Direct-Lake question ever needs answering, it is a different experiment and belongs in
+  its own run, not as a fourth column beside three layouts.
+  If anyone hand-authors a DirectQuery bim anyway rather than passing `mode=`, the old trap is still
+  live: such a file must contain neither the camelCase Direct-Lake mode token nor a `onelake.dfs` URL
+  **anywhere, prose included** — `_is_directlake_bim()` greps the raw bytes, so a `description` string
+  naming the mode flips the model and makes deploy attempt a reframe it cannot serve. That mistake was
+  made, and caught by a test, once already.
 - **The models carry every shared table, not just the mart three** — the same eight `stats.py`
   reports on, in the schemas dbt writes them to (`mart` for `fct_summary`/`dim_duid`/`dim_calendar`,
   `landing` for the raw facts and the archive log), with one `raw`-tier query per raw table so none of

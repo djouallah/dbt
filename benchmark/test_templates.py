@@ -4,15 +4,20 @@ Every assertion here fails at *deploy* time otherwise — after the job has alre
 ADOMD.NET and resolved the workspace — or worse, deploys something that quietly points at the wrong
 item or the wrong query mode. All of it is a JSON read; no Fabric, no network.
 
-There is ONE template now. There were two — this one plus `fct_summary_dq.SemanticModel`, a
-hand-authored DirectQuery copy — because before duckrun 0.4.36 a warehouse could only be read by
-DirectQuery, and the two files had to be kept in lockstep or the single DAX suite silently stopped
-being comparable. `deploy(mode=)` replaced that: one authored .bim ships as either mode, so the
-copy is gone and `engines.MODE` decides. The old file's sharpest trap is worth remembering if
-anyone reintroduces a DirectQuery bim rather than using `mode=`: `_is_directlake_bim()` greps the
-model.bim's RAW BYTES for the camelCase Direct-Lake token, so a *description string* mentioning the
-mode was enough to flip it and make deploy attempt a reframe the model could not serve. Prose
-counts. It caught that for real, once.
+There is ONE template, deployed to every engine, and that is the experiment: identical DAX over
+identical semantic models, with the dbt adapter that wrote the parquet as the only variable. A second
+template, or a per-engine storage mode, would put a second variable in the comparison.
+
+There were two, briefly — this one plus a hand-authored `fct_summary_dq.SemanticModel` — because
+before duckrun 0.4.36 a warehouse could only be read by DirectQuery. They had to be kept in lockstep
+or the one DAX suite silently stopped being comparable, and the dwh timings measured SQL-endpoint
+pushdown rather than a layout. `deploy(mode=)` made the mode independent of the item kind, so the copy
+is gone and every engine is Direct Lake.
+
+The deleted file's sharpest trap, worth remembering if anyone ever hand-authors a DirectQuery bim
+instead of passing `mode=`: `_is_directlake_bim()` greps the model.bim's RAW BYTES for the camelCase
+Direct-Lake token, so a *description string* mentioning the mode was enough to flip it and make deploy
+attempt a reframe the model could not serve. Prose counts. It caught that for real, once.
 """
 import json
 import os
@@ -141,51 +146,35 @@ def test_every_dax_reference_exists_in_the_model():
             assert meas in measures or meas in local, f"{name}: unknown measure [{meas}]"
 
 
-# ------------------------------------------------------------------ storage mode (duckrun 0.4.36)
+# ------------------------------------------------------------------ storage mode is a premise
 
-def test_every_engine_mode_is_a_spelling_duckrun_accepts():
-    """`engines.DEPLOY_MODE` translates the TMSL spelling in `MODE` into the one `deploy(mode=)`
-    takes. A typo here raises inside duckrun partway through a paid run, after ADOMD.NET is
-    installed and the first models are already deployed."""
+def test_the_deploy_mode_is_one_constant_duckrun_accepts():
+    """`engines.DEPLOY_MODE` is a single string, not a per-engine dict: comparing physical layouts
+    requires that all four models be read the same way, so this is the premise of the benchmark
+    rather than a knob. Checked against duckrun's OWN normaliser — a typo raises inside duckrun
+    partway through a paid run, after ADOMD.NET is installed and the first models are deployed."""
     import engines as E
 
-    for engine, mode in E.MODE.items():
-        assert mode in E.DEPLOY_MODE, f"{engine}: MODE {mode!r} has no DEPLOY_MODE spelling"
-        assert _normalize_mode(E.DEPLOY_MODE[mode]) == mode
-
-
-def test_all_four_engines_are_read_the_same_way():
-    """The benchmark compares physical LAYOUTS. While every engine is Direct Lake, a timing
-    difference is a layout difference; the moment one is DirectQuery its numbers are pushdown to a
-    different engine and are not the same kind of number (which is why `mode` is carried on every
-    verdict). dwh was the exception until duckrun 0.4.36 made `mode=` independent of item kind.
-
-    This is a policy pin, not a law — flipping an engine back is a deliberate one-line change in
-    engines.MODE, and this test is the place that makes it deliberate."""
-    import engines as E
-
-    assert set(E.MODE.values()) == {"directLake"}
+    assert isinstance(E.DEPLOY_MODE, str), "DEPLOY_MODE must be one mode for every engine"
+    assert _normalize_mode(E.DEPLOY_MODE) == "direct" + "Lake"
+    assert not hasattr(E, "MODE"), "per-engine MODE is gone: the mode is not a variable under test"
 
 
 def test_deploy_passes_warehouse_for_a_warehouse_and_lakehouse_otherwise():
-    """WHICH item vs HOW it is read are independent now. Passing `lakehouse=` for the warehouse
-    item raises in duckrun — a deploy failure partway through a run that has already spent
-    capacity on the engines before it."""
+    """The only per-engine deploy argument. It follows the item's KIND, independent of the storage
+    mode since duckrun 0.4.36 — and passing `lakehouse=` for the warehouse item raises, which costs
+    a deploy failure partway through a run that has already spent capacity on the engines before it."""
     import deploy_models as D
 
-    lake = D.deploy_kwargs({"item": "dbt_delta", "kind": "lakehouses", "mode": "directLake"})
-    assert lake == {"lakehouse": "dbt_delta", "mode": "direct_lake"}
-
-    wh = D.deploy_kwargs({"item": "dbt_dwh", "kind": "warehouses", "mode": "directLake"})
-    assert wh == {"warehouse": "dbt_dwh", "mode": "direct_lake"}
-
-    # The same item, read the other way — one template, mode decides.
-    dq = D.deploy_kwargs({"item": "dbt_dwh", "kind": "warehouses", "mode": "directQuery"})
-    assert dq == {"warehouse": "dbt_dwh", "mode": "direct_query"}
+    assert D.deploy_kwargs({"item": "dbt_delta", "kind": "lakehouses"}) == {
+        "lakehouse": "dbt_delta", "mode": "direct_lake"}
+    assert D.deploy_kwargs({"item": "dbt_dwh", "kind": "warehouses"}) == {
+        "warehouse": "dbt_dwh", "mode": "direct_lake"}
 
 
 def test_there_is_exactly_one_template():
-    """The DirectQuery copy is gone; `mode=` reproduces it from this one file. A second .bim
-    reintroduces the lockstep problem that made the DAX suite silently non-comparable."""
+    """One `.bim` for four engines. Four adapters is the variable; the semantic model is not. A
+    second template reintroduces the lockstep problem that made the one DAX suite silently
+    non-comparable across engines."""
     bims = sorted(pathlib.Path(HERE).glob("*.SemanticModel/model.bim"))
     assert [b.parent.name for b in bims] == ["fct_summary.SemanticModel"]

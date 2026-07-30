@@ -4,22 +4,21 @@ Deliberately mirrors `.github/scripts/stats.py`'s `ENGINES` / `WRITER`: that scr
 dashboard over the same four items, and the two must never disagree about which Fabric item belongs
 to which engine. If an item is renamed, both change together.
 
-`MODE` is the one thing stats.py has no opinion about and this does: how each engine's tables are
-READ by the semantic model. All four are now **Direct Lake** — an in-memory transcode from the Delta
-files, so the physical layout is what shapes the timing, which is the only question this benchmark
-asks.
+The one thing stats.py has no opinion about and this does: `DEPLOY_MODE`. Every engine is read by a
+**Direct Lake** semantic model — an in-memory transcode straight from the Delta files — because that
+is the only reading in which the answer is about the *physical layout*. Four engines write the same
+rows in four different shapes; how long each shape takes to transcode and scan is the whole question.
 
-The warehouse used to be the exception, read by a **DirectQuery** model (pushdown to the SQL
-endpoint — a different engine, not a different layout), because that was the only way duckrun could
-deploy a model over a warehouse. `deploy(mode=)` (duckrun 0.4.36) removed the constraint: a
-warehouse's tables are Delta in OneLake like any other, so it can be read by Direct Lake too, and
-one authored .bim now serves either mode. That makes the four legs directly comparable for the first
-time — dwh has a cold tier now, so it appears in the COLD tables instead of being scoped out of them.
+So the mode is a **premise, not a per-engine setting**. It is one constant, and the item's KIND
+(lakehouse vs warehouse) is independent of it: duckrun 0.4.36's `deploy(mode=)` reads a warehouse's
+Tables as the Delta they are, so `dwh` measures a layout like the other three rather than SQL-endpoint
+pushdown to a different engine. Nothing here carries a DirectQuery alternative any more — a pushdown
+timing is not a slow layout, and a report that mixed the two kinds of number invited exactly that
+misreading.
 
-MODE is still per-engine and still consulted everywhere, so flipping one engine back to
-`"directQuery"` is a one-line change here — the same template deploys either way. Everything
-downstream (cold-tier scoping in `render_report._totals`, the `_(DirectQuery)_` label on a verdict,
-the hot-only note) reads this and keeps working; it just has nothing to report while all four match.
+The hot-only path downstream survives and is no longer about DirectQuery: `BENCH_COLD=false` skips
+cold deliberately, and a dehydrate can fail when the token cannot refresh. Either way an engine
+reports hot numbers only, and `render_report._totals` scopes each metric to the engines that have it.
 """
 import json
 import os
@@ -37,14 +36,11 @@ KIND = {e: kind for e, _, kind in ENGINES}
 WRITER = {"duckrun": "delta-rs", "iceberg": "duckdb (iceberg)",
           "spark": "spark", "dwh": "warehouse"}
 
-# How the semantic model READS it — independent of the item kind since duckrun 0.4.36. A warehouse's
-# tables are Delta in OneLake exactly like a lakehouse's, so all four are read the same way and the
-# comparison is layout-vs-layout rather than layout-vs-pushdown. Set an engine to "directQuery" to
-# put it back on the SQL endpoint; the same .bim deploys either way via deploy(mode=).
-MODE = {e: "directLake" for e, _, _ in ENGINES}
-
-# The TMSL spellings above, in the spelling duckrun's deploy(mode=) takes.
-DEPLOY_MODE = {"directLake": "direct_lake", "directQuery": "direct_query"}
+# How every engine's tables are read, in the spelling duckrun's deploy(mode=) takes. Not a dict:
+# comparing physical layouts requires that all four be read the same way, so this is the premise of
+# the benchmark rather than a knob. Independent of the item KIND since duckrun 0.4.36 — a warehouse's
+# Tables are Delta in OneLake exactly like a lakehouse's.
+DEPLOY_MODE = "direct_lake"
 
 ALL = [e for e, _, _ in ENGINES]
 
@@ -93,7 +89,7 @@ def reference(candidates=None):
 
 
 def items():
-    """The {engine: {item, kind, guid, mode, writer}} map that resolve_env.py wrote to
+    """The {engine: {item, kind, guid, writer}} map that resolve_env.py wrote to
     BENCH_ITEMS. Raises with a pointer rather than a KeyError, because every consumer of this needs
     resolve_env.py to have run first."""
     raw = os.environ.get("BENCH_ITEMS")

@@ -13,16 +13,17 @@ only — no transcode), so the next query pays the full cold Delta→memory cost
 EACH query because the queries share the big fact columns (mw/price/DUID/date/time) — without a
 per-query dehydrate only the first query would be cold.
 
-All four engines are Direct Lake now, `dwh` included (duckrun 0.4.36's `deploy(mode=)` — a
-warehouse's tables are Delta in OneLake like any other). So all four dehydrate, all four have a cold
-tier, and every timing on every leg measures the same thing: a Delta→memory transcode shaped by the
-physical layout. `dwh` used to be DirectQuery — no transcoded data to evict, dehydrate expected to
-fail, degraded to hot-only, and its numbers were SQL-endpoint pushdown rather than a layout.
+What is under test: **identical DAX, identical semantic models, four dbt adapters.** Every model is
+Direct Lake over its own adapter's copy of the same tables, so every timing is a Delta→memory
+transcode and an in-memory scan — shaped by the physical layout that adapter wrote, which is the only
+thing that differs. `dwh` included: duckrun 0.4.36's `deploy(mode=)` reads a warehouse's Tables as the
+Delta they are, so it is no longer measured as SQL-endpoint pushdown to a different engine. A pushdown
+time is not a slow layout, and mixing the two kinds of number in one table invited exactly that
+misreading.
 
-That degradation path is still here and still generic (`bench_model` catches a failing dehydrate and
-drops to hot-only), driven by `engines.MODE` rather than by the engine's name — so flipping any
-engine back to `"directQuery"` still works and is still labelled. It just has nothing to do while
-all four match.
+`bench_model` still degrades a model to hot-only when its dehydrate fails, but that is about the
+refresh rather than the storage mode: `BENCH_COLD=false` skips cold deliberately, and a token that
+cannot refresh cannot dehydrate.
 
 Uses the XMLA endpoint (ADOMD.NET), NOT the throttled /executeQueries REST endpoint.
 Run headless — see .github/workflows/benchmark.yml.
@@ -79,7 +80,7 @@ import report  # noqa: E402
 #                transcode). "{duid}" is filled at runtime with the top DUID by MWh.
 # Every table, column and measure referenced below exists in BOTH templates — benchmark/
 # test_templates.py asserts the two semantic surfaces are identical, and that identity is what makes
-# one suite portable across the Direct Lake and DirectQuery models.
+# one suite portable across every engine's model — they are structurally identical by construction.
 QUERIES = [
     # --- Tier 1: per-column cold probes ---
     ("probe", "probe_mw",       'EVALUATE ROW("x", SUM(fct_summary[mw]))'),
@@ -219,8 +220,9 @@ def dehydrate_model(conn, model):
     """Evict all column data (clearValues) then reframe (full = metadata only on Direct Lake),
     leaving the model cold — the next query pays the full Delta->memory transcode cost.
 
-    Expected to FAIL on a DirectQuery model: there is no transcoded data to evict. bench_model
-    catches that and degrades the model to hot-only, which is the correct reading."""
+    A FAILURE here is tolerated, not fatal: it means this run cannot measure cold — most likely a
+    token that cannot refresh. bench_model catches it and degrades the model to hot-only, which is
+    the correct reading, since the hot numbers are still real."""
     for kind in ("clearValues", "full"):
         _refresh(conn, model, kind)
 
@@ -231,10 +233,9 @@ def warm_up(conn, model, tries=16, delay=30):
     was denied'. Reframe (full) + probe a trivial query, looping until it actually reads data
     (or we give up). Returns True once queryable.
 
-    The refresh is BEST-EFFORT and its failure is explicitly NOT a readiness signal: a DirectQuery
-    model has nothing to reframe, so its refresh is rejected while the model is perfectly
-    queryable. Only the probe decides. Retrying the pair as one unit spent 16×30s and then skipped
-    the leg entirely."""
+    The refresh is BEST-EFFORT and its failure is explicitly NOT a readiness signal — a model can be
+    perfectly queryable while a refresh against it is rejected. Only the probe decides. Retrying the
+    pair as one unit spent 16×30s and then skipped the leg entirely."""
     probe = 'EVALUATE ROW("n", COUNTROWS(fct_summary))'
     for i in range(1, tries + 1):
         try:
@@ -484,8 +485,9 @@ def main():
     _load_adomd(adomd_dir)
     base, others = discover_models()
     print(f"Workspace : {workspace}")
-    print(f"Reference : {base} ({E.MODE[E.engine_of(base)]})")
-    print(f"Compare   : " + ", ".join(f"{m} ({E.MODE[E.engine_of(m)]})" for m in others))
+    # Label by WRITER, the axis under test — the adapter that produced the parquet each model reads.
+    print(f"Reference : {base} (written by {E.WRITER.get(E.engine_of(base), '?')})")
+    print(f"Compare   : " + ", ".join(f"{m} ({E.WRITER.get(E.engine_of(m), '?')})" for m in others))
     print(f"Runs (hot): {runs}   Cold repeats: {cold_repeats}")
 
     # Resolve the top DUID once on the reference model (same data across engines) to fill the ladder.
@@ -525,10 +527,9 @@ def main():
             compare_table(f"{model} vs {base}  —  COLD (median of {cold_repeats} dehydrate cycles)",
                           base, model, base_res, opt_res, "cold_median_ms", "cold_spread_pct")
         elif want_cold:
-            # Naming why is the point: a missing cold table for the DirectQuery leg is expected,
-            # not a gap in the run.
-            print(f"\n(no COLD table for {model}: "
-                  f"{'it has no transcoded data to evict' if E.MODE[E.engine_of(model)] == 'directQuery' else 'dehydrate was unavailable'})")
+            # Naming why is the point, so a missing cold table reads as a measurement that could not
+            # be taken rather than a gap in the run.
+            print(f"\n(no COLD table for {model}: dehydrate was unavailable)")
         compare_table(f"{model} vs {base}  —  HOT (median of hot runs, dropping run1/run2 warm)",
                       base, model, base_res, opt_res, "hot_median_ms", "hot_spread_pct")
 

@@ -1,22 +1,27 @@
 """Deploy one semantic model per engine over that engine's own `mart.fct_summary`.
 
-ONE template for every engine, with two orthogonal knobs on `ws.deploy()`:
+The experiment is: **one DAX suite, four identical semantic models, four dbt adapters.** The adapter
+that wrote the parquet is the only variable; everything on top of it is held constant on purpose. So
+there is ONE `.bim`, deployed four times, and every knob that could differ per engine has been
+removed rather than left configurable.
 
-  `lakehouse=` / `warehouse=`  — WHICH item holds the tables. Chosen by the item's kind
-                                 (engines.KIND), and duckrun raises rather than silently pointing
-                                 elsewhere if the wrong one is passed.
-  `mode=`                      — HOW that item is read. From engines.MODE, which is directLake for
-                                 all four. duckrun rewrites every table to an entity partition over
-                                 one AzureStorage.DataLake expression on the item's OneLake root and
-                                 sets directLakeBehavior=directLakeOnly, so a query Direct Lake
-                                 cannot serve FAILS instead of quietly falling back to DirectQuery
-                                 and logging a pushdown time that reads as a bad layout.
+`ws.deploy()` takes two arguments here, and only the first varies:
 
-Requires duckrun >= 0.4.36 for `mode=`. Before it, a warehouse could only be read by DirectQuery, so
-this file carried a second `fct_summary_dq.SemanticModel` template and dwh was the odd leg out —
-hot-only, no reframe, scoped out of every COLD table. That template is gone: `mode="direct_query"`
-on this same .bim reproduces it exactly, so flipping an engine back is a one-line change in
-engines.MODE rather than a second file to keep in lockstep.
+  `lakehouse=` / `warehouse=`  — WHICH item holds the tables, from the item's kind (engines.KIND).
+                                 duckrun raises rather than silently pointing elsewhere if the wrong
+                                 one is passed.
+  `mode=`                      — HOW it is read: `engines.DEPLOY_MODE`, one constant, Direct Lake.
+                                 duckrun rewrites every table to an entity partition over one
+                                 AzureStorage.DataLake expression on the item's OneLake root and sets
+                                 directLakeBehavior=directLakeOnly, so a query Direct Lake cannot
+                                 serve FAILS rather than falling back to the SQL endpoint and logging
+                                 a pushdown time that would read as a slow layout.
+
+Requires duckrun >= 0.4.36, which made `mode=` independent of the item kind. Before it a warehouse
+could only be read by DirectQuery, which is why `dwh` used to be measured differently from the other
+three — a second hand-authored template, hot-only, no reframe, scoped out of every COLD table. A
+warehouse's Tables are Delta in OneLake like any other item's, so that asymmetry was never about the
+storage, and it is gone: all four are now the same measurement.
 
 Every model is Direct Lake, so every deploy REFRESHES (a reframe onto the latest Delta) and returns
 only once the model is live. Nothing is written to any lakehouse — the models read tables the dbt run
@@ -52,16 +57,17 @@ FOLDER = os.environ.get("BENCH_FOLDER", "benchmark")
 
 
 def deploy_kwargs(meta):
-    """The `ws.deploy()` kwargs for one engine's BENCH_ITEMS entry — the two orthogonal knobs.
+    """The `ws.deploy()` kwargs for one engine's BENCH_ITEMS entry.
 
-    WHICH item holds the tables follows the item's KIND, never the storage mode: those became
-    independent in duckrun 0.4.36, and passing `lakehouse=` for a warehouse (or the reverse) raises
-    rather than deploying something that points elsewhere. HOW it is read follows engines.MODE.
+    Only the item argument varies, and it follows the item's KIND — independent of the storage mode
+    since duckrun 0.4.36. Passing `lakehouse=` for a warehouse (or the reverse) raises rather than
+    deploying something that points elsewhere. The mode is the same constant for every engine, which
+    is the point: four adapters, one way of reading what they wrote.
 
     Extracted from main() so the pairing is testable without Fabric — getting it wrong costs a
     deploy failure partway through a paid run."""
     kw = {"warehouse": meta["item"]} if meta["kind"] == "warehouses" else {"lakehouse": meta["item"]}
-    kw["mode"] = E.DEPLOY_MODE[meta["mode"]]
+    kw["mode"] = E.DEPLOY_MODE
     return kw
 
 
@@ -106,10 +112,10 @@ def main():
     deployed, failed = {}, {}
     for e in picked:
         meta = items[e]
-        mode, item, kind = meta["mode"], meta["item"], meta["kind"]
+        item, kind = meta["item"], meta["kind"]
         name = E.model_name(e)
         kwargs = deploy_kwargs(meta)
-        print(f"deploying {name} -> {item} ({kind[:-1]}, {mode}) into folder {FOLDER!r} ...",
+        print(f"deploying {name} -> {item} ({kind[:-1]}, {E.DEPLOY_MODE}) into folder {FOLDER!r} ...",
               flush=True)
         t0 = time.perf_counter()
         try:
@@ -122,8 +128,9 @@ def main():
             continue
         secs = round(time.perf_counter() - t0, 1)
         deployed[e] = {"model": name, "item_id": item_id, "seconds": secs, "folder": FOLDER}
-        refreshed = "refreshed" if mode == "directLake" else "no refresh (queries live)"
-        print(f"  ok {name} ({item_id}) in {secs}s — {refreshed}", flush=True)
+        # Direct Lake everywhere, so deploy always reframes onto the latest Delta and returns only
+        # once the model is live.
+        print(f"  ok {name} ({item_id}) in {secs}s — refreshed", flush=True)
         _reparent(ws, item_id, name)
 
     report.merge({"deploy": {"deployed": deployed, "failed": failed}})

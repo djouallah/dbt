@@ -9,7 +9,7 @@ display name, and so does Direct Lake.
 Emits, for $GITHUB_ENV:
   WS_ID          — echoed back so downstream steps need only this file's output
   PBI_WORKSPACE  — the workspace DISPLAY name; the XMLA endpoint addresses by name, not GUID
-  BENCH_ITEMS    — one JSON line, {engine: {item, kind, guid, mode, writer}}
+  BENCH_ITEMS    — one JSON line, {engine: {item, kind, guid, writer}}
 
 Diagnostics go to stderr: CLAUDE.md's rule is that anything writing $GITHUB_ENV keeps stdout clean.
 """
@@ -49,9 +49,8 @@ def main():
             have = ", ".join(sorted(listing[kind])) or "(none)"
             raise SystemExit(f"{kind[:-1]} {item!r} (engine {e}) not found in workspace {ws.id}; "
                              f"have: {have}")
-        out[e] = {"item": item, "kind": kind, "guid": guid, "mode": E.MODE[e],
-                  "writer": E.WRITER[e]}
-        sys.stderr.write(f"  {e:8s} -> {item} ({kind[:-1]}, {E.MODE[e]}) {guid}\n")
+        out[e] = {"item": item, "kind": kind, "guid": guid, "writer": E.WRITER[e]}
+        sys.stderr.write(f"  {e:8s} -> {item} ({kind[:-1]}, wrote by {E.WRITER[e]}) {guid}\n")
 
     env = {"WS_ID": ws.id,
            "PBI_WORKSPACE": ws.display_name,
@@ -63,8 +62,9 @@ def main():
     for k, v in env.items():
         print(f"{k}={v}")
 
-    # The engine metadata belongs in the report too — the render layer reads `mode` from there to
-    # label a DirectQuery timing as such rather than pooling it with the Direct Lake ones.
+    # The engine metadata belongs in the report too — the render layer reads `writer` from there,
+    # which is the axis under test: the same DAX over four identical semantic models, and the only
+    # thing that differs is which adapter wrote the parquet underneath.
     report.merge({"engines": out,
                   "run": {"reference": E.reference(picked), "workspace": ws.display_name}})
 

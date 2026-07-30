@@ -72,33 +72,44 @@ its RI holds by construction; the raw facts carry retired units absent from the 
 registration list — which is precisely what `stats.py`'s `duid_probe` exists to diagnose. Asserting RI
 there would make the benchmark quietly measure fewer rows on the tables it is comparing.
 
-### Storage mode: all four are Direct Lake
+### What is actually under test
 
-`deploy()` takes two orthogonal knobs, and [`engines.py`](engines.py) is the one place that decides
-both:
+**Identical DAX, identical semantic models, four dbt adapters.** The adapter that wrote the parquet
+is the only variable, and everything above it is held constant on purpose: one `.bim`, one storage
+mode, one query suite. `deploy()` therefore takes exactly one per-engine argument:
 
-| knob | source | what it says |
+| knob | source | varies? |
 |---|---|---|
-| `lakehouse=` / `warehouse=` | `engines.KIND` | **which** Fabric item holds the tables |
-| `mode=` | `engines.MODE` | **how** it is read — `direct_lake` for all four |
+| `lakehouse=` / `warehouse=` | `engines.KIND` | yes — which Fabric item holds the tables |
+| `mode=` | `engines.DEPLOY_MODE` | **no** — one constant, `direct_lake`, for every engine |
 
-So every leg measures the same thing: a Delta→memory transcode (cold) and an in-memory scan (hot),
-shaped by the physical layout. That is the only question this benchmark asks.
+Direct Lake is what makes the timing an answer about layout: a Delta→memory transcode (cold) and an
+in-memory scan (hot), both shaped by how the files were written. `mode="direct_lake"` also sets
+`directLakeBehavior: directLakeOnly`, so a query Direct Lake cannot serve **fails** rather than
+falling back to the SQL endpoint and logging a pushdown time that would read as a slow layout.
 
-**`dwh` was the exception until duckrun 0.4.36.** Before `deploy(mode=)`, a warehouse item could only
-be read by DirectQuery, so the benchmark carried a second hand-authored `fct_summary_dq.SemanticModel`
-and the dwh leg was hot-only, got no reframe at deploy, was scoped out of every COLD table, and had to
-be labelled everywhere so a pushdown timing was never read as "dwh has a slow layout". A warehouse's
-`Tables` are Delta in OneLake like any other item's — which is how `stats.py` has always read it — and
-`mode=` is what finally let the semantic model do the same. The second template is deleted;
-`mode="direct_query"` on the one remaining `.bim` reproduces it exactly.
+**Why the mode is a premise and not a knob.** `dwh` was DirectQuery until duckrun 0.4.36, because
+before `deploy(mode=)` a warehouse item could only be read that way. The intent was to label those
+timings so nobody read them as a layout. It did not work, and the last DirectQuery run shows why:
 
-The DirectQuery *machinery* is all still here and still driven by `engines.MODE`, not by engine name:
-the hot-only degradation in `bench_model`, the cold-tier scoping in `render_report._totals`, the
-`_(DirectQuery)_` tag on a verdict. Flipping one engine back is a one-line change in `MODE` — which
-is exactly what you would do to ask "is Direct Lake over the warehouse actually faster than
-DirectQuery over it?", the one comparison this change gives up by default.
-[`test_templates.py`](test_templates.py) pins the current setting so the flip stays deliberate.
+| engine | mode | cold total (ms) | hot total (ms) | cold ÷ hot |
+|---|---|--:|--:|--:|
+| duckrun | Direct Lake | 63,437 | 3,990 | 15.9× |
+| iceberg | Direct Lake | 180,298 | 3,829 | 47.1× |
+| spark | Direct Lake | 69,449 | 4,000 | 17.4× |
+| dwh | DirectQuery | 27,622 | 28,696 | **0.96×** |
+
+A DirectQuery model has no transcoded data to evict, so its dehydrate is a **no-op that succeeds** —
+not the failure the hot-only degradation was watching for. Fifteen "cold" samples got recorded that
+were really just more pushdown queries, `dwh` entered the COLD totals, and the summary named it the
+**cold winner** — 27,622 against duckrun's 63,437 — for the sole reason that it had no cold tier to
+pay for. The ✔ went to the engine that never did the work being measured.
+
+A warehouse's `Tables` are Delta in OneLake like any other item's — that is how `stats.py` has always
+read them — so the asymmetry was never about the storage, and it is gone. All four are Direct Lake,
+the second hand-authored template is deleted, and there is no per-engine `MODE` left to set: a
+pushdown timing and a transcode timing are not the same measurement, and the only reliable way to
+keep them out of one table is to not produce both.
 
 ## Pipeline
 
@@ -185,12 +196,12 @@ RUN_REPORT=some_run_report.json python benchmark/render_report.py   # re-render 
 
 [`test_verdicts.py`](test_verdicts.py) pins the verdict layer: ratio orientation, fastest-wins (a
 1ms win is a win, and the `best` column names an engine rather than `tie`), explicit reference
-selection, DirectQuery scoping (the machinery, which no engine currently exercises), and comparable
-totals. [`test_templates.py`](test_templates.py) checks the `.bim` against duckrun's *own* repoint
-regexes and pins the storage-mode wiring: that every `engines.MODE` value round-trips through
-duckrun's own `_normalize_mode`, that `deploy_kwargs` pairs `warehouse=` with the warehouse item and
-`lakehouse=` with a lakehouse, and that exactly one template exists. Everything it asserts would
-otherwise fail at deploy time, after ADOMD.NET is installed and the workspace resolved — partway
+selection, hot-only scoping (an engine whose dehydrate could not run), and comparable totals.
+[`test_templates.py`](test_templates.py) checks the `.bim` against duckrun's *own* repoint regexes and
+pins the deploy wiring: that `DEPLOY_MODE` is one constant duckrun's own `_normalize_mode` accepts and
+that no per-engine `MODE` has crept back, that `deploy_kwargs` pairs `warehouse=` with the warehouse
+item and `lakehouse=` with a lakehouse, and that exactly one template exists. Everything it asserts
+would otherwise fail at deploy time, after ADOMD.NET is installed and the workspace resolved — partway
 through a run that has already spent capacity on the engines before it.
 
 One trap worth keeping in mind if anyone reintroduces a hand-authored DirectQuery `.bim` instead of

@@ -6,8 +6,8 @@ as the loser. These tests pin the direction so it can't recur: the winner is alw
 engine, ratios are oriented base÷model, and the summed-cost winner must equal the verdict winner.
 
 The port added its own risks, so they are pinned here too: reference selection is now explicit
-(no name-length heuristic), the analysis must stay timing-only, DirectQuery must be labelled, and a
-column of totals must be summed over a query set every participating engine answered.
+(no name-length heuristic), the analysis must stay timing-only, and a column of totals must be
+summed over a query set every participating engine answered.
 
 Pure functions only — no Fabric, no XMLA, no network. This is the free CI gate that runs before any
 paid capacity is spent.
@@ -24,10 +24,10 @@ import render_summary as rs         # noqa: E402
 
 REF = "aemo_duckrun"                # the reference engine in these fixtures
 CHAL = "aemo_spark"                 # a Direct Lake challenger
-DQ = "aemo_dwh"                     # a DirectQuery engine — the MECHANISM, not the current setting.
-                                    # Every engine is Direct Lake now (engines.MODE), so nothing
-                                    # exercises this in production; these fixtures keep the hot-only
-                                    # scoping and mode labelling honest for whenever MODE is flipped.
+WH = "aemo_dwh"                     # the warehouse engine — a Direct Lake model like the other
+                                    # three. Used below as a HOT-ONLY fixture, which is now about a
+                                    # dehydrate that could not run (BENCH_COLD=false, or a token that
+                                    # cannot refresh), not about a storage mode.
 
 
 def _cold(median, spread=5.0):
@@ -36,7 +36,8 @@ def _cold(median, spread=5.0):
 
 
 def _hot(median, spread=5.0):
-    """Hot-only, as a DirectQuery engine reports: no cold keys at all."""
+    """An engine that reported HOT ONLY — no cold keys at all, as happens when its dehydrate could
+    not run."""
     return {"tier": "composite", "hot_median_ms": median, "hot_spread_pct": spread}
 
 
@@ -101,10 +102,10 @@ def test_sidebyside_best_column_names_the_fastest_not_tie(capsys):
     engines are equal" and is the opposite of what the numbers showed."""
     ICE = "aemo_iceberg"
     tim = {REF: {"probe_mw": _hot(110.1, spread=30)},   # the actual numbers from that run
-           DQ: {"probe_mw": _hot(383.8, spread=30)},
+           WH: {"probe_mw": _hot(383.8, spread=30)},
            ICE: {"probe_mw": _hot(106.4, spread=30)},   # fastest, by 2ms over spark
            CHAL: {"probe_mw": _hot(108.4, spread=30)}}
-    rr._sidebyside("HOT", tim, REF, [DQ, ICE, CHAL], "hot_median_ms", "hot_spread_pct")
+    rr._sidebyside("HOT", tim, REF, [WH, ICE, CHAL], "hot_median_ms", "hot_spread_pct")
     row = [ln for ln in capsys.readouterr().out.splitlines() if "probe_mw" in ln][0]
     assert row.rstrip().endswith("| iceberg |"), row
     assert "tie" not in row
@@ -165,9 +166,9 @@ def test_reference_comes_from_the_report_not_name_length():
     """Upstream picked the base by name (`endswith('_auto_sort')`, else SHORTEST name). With one
     model per engine that heuristic would silently make `aemo_dwh` the reference — it is the
     shortest — and reorient every ratio in the report."""
-    rep = _rep({DQ: _hot(100), REF: {"q1": _cold(100)}, CHAL: {"q1": _cold(100)}})
-    assert rr.reference(rep, [DQ, REF, CHAL]) == REF
-    assert min([DQ, REF, CHAL], key=len) == DQ          # the trap the explicit reference avoids
+    rep = _rep({WH: _hot(100), REF: {"q1": _cold(100)}, CHAL: {"q1": _cold(100)}})
+    assert rr.reference(rep, [WH, REF, CHAL]) == REF
+    assert min([WH, REF, CHAL], key=len) == WH          # the trap the explicit reference avoids
 
 
 def test_reference_falls_back_to_first_model_when_unrecorded():
@@ -177,13 +178,13 @@ def test_reference_falls_back_to_first_model_when_unrecorded():
 
 
 def test_verdicts_are_all_taken_against_the_one_reference():
-    rep = _rep({REF: {"q1": _cold(100)}, CHAL: {"q1": _cold(200)}, DQ: {"q1": _hot(300)}})
+    rep = _rep({REF: {"q1": _cold(100)}, CHAL: {"q1": _cold(200)}, WH: {"q1": _hot(300)}})
     analysis = rr.compute_analysis(rep)
     assert {v["base"] for v in analysis["verdicts"]} == {"duckrun"}
     assert {v["model"] for v in analysis["verdicts"]} == {"spark", "dwh"}
 
 
-# ----------------------------------------------------------------- DirectQuery handling (port)
+# ----------------------------------------------------------------- hot-only engines (port)
 
 def test_analysis_is_timing_only():
     """No parquet/geometry analysis: physical layout is `.github/scripts/stats.py` in ci.yml's
@@ -193,17 +194,6 @@ def test_analysis_is_timing_only():
                 CHAL: {"probe_rowcount": _cold(100), "q1": _cold(200)}})
     a = rr.compute_analysis(rep)
     assert set(a) == {"cold_column_cost", "verdicts"}
-
-
-def test_directquery_verdict_carries_its_mode():
-    """The report must be able to label a DirectQuery number as such — otherwise the summary reads
-    as 'dwh has a slow layout' about a query that never touched the files."""
-    rep = _rep({REF: {"q1": _cold(100)}, DQ: {"q1": _hot(400)}},
-               engines={"duckrun": {"mode": "directLake"}, "dwh": {"mode": "directQuery"}})
-    a = rr.compute_analysis(rep)
-    dq = [v for v in a["verdicts"] if v["model"] == "dwh"]
-    assert dq and all(v["model_mode"] == "directQuery" for v in dq)
-    assert all(v["base_mode"] == "directLake" for v in dq)
 
 
 # ----------------------------------------------------------------- comparable totals (port)
@@ -217,11 +207,11 @@ def test_totals_use_the_common_query_set():
     assert tot == {"duckrun": 100, "spark": 200}        # q2 excluded: spark has no q2
 
 
-def test_cold_totals_ignore_engines_with_no_cold_tier():
-    """A DirectQuery engine has no cold numbers. Letting it into the COLD intersection would empty
-    the column for the engines that DO have them."""
-    tim = {REF: {"q1": _cold(100)}, CHAL: {"q1": _cold(300)}, DQ: {"q1": _hot(50)}}
-    cold = rr._totals(tim, [REF, CHAL, DQ], "cold_median_ms")
+def test_cold_totals_ignore_engines_that_reported_hot_only():
+    """An engine whose dehydrate could not run has no cold numbers at all. Letting it into the COLD
+    intersection would empty the column for the engines that DO have them."""
+    tim = {REF: {"q1": _cold(100)}, CHAL: {"q1": _cold(300)}, WH: {"q1": _hot(50)}}
+    cold = rr._totals(tim, [REF, CHAL, WH], "cold_median_ms")
     assert cold == {"duckrun": 100, "spark": 300}       # dwh absent, others intact
-    hot = rr._totals(tim, [REF, CHAL, DQ], "hot_median_ms")
+    hot = rr._totals(tim, [REF, CHAL, WH], "hot_median_ms")
     assert set(hot) == {"duckrun", "spark", "dwh"}      # hot: everyone participates
