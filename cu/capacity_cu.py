@@ -29,6 +29,7 @@ the right tool for drilling into one timepoint's individual operations — not w
 
 Stdout is the markdown table and nothing else; diagnostics go to stderr.
 """
+import json
 import os
 import re
 import sys
@@ -118,6 +119,28 @@ RUN_GAP_HOURS = int(os.environ.get("CU_RUN_GAP_HOURS", "2") or 0)
 # Per-run breakdown BY OPERATION as well as by model. Off by default: with several runs it is a wall
 # of tables, and the aggregate operation table below already answers "what kind of work cost the CU".
 RUN_OPS = os.environ.get("CU_RUN_OPS", "").strip().lower() in ("1", "true", "yes")
+
+# Physical layout, printed beside the CU. CU on its own says which engine cost more; it does not say
+# WHY, and the answer is almost always the layout — 37,227 CU next to "386 files, 122k avg row group"
+# is a finding, while either number alone is trivia.
+#
+# The numbers are NOT read here. They come from `stats.py` in the *Parity dashboard* workflow, which already
+# reads all four Delta logs, via the `stats` artifact of the latest successful `dbt` run — the workflow
+# downloads it and points STATS_JSON at it. That keeps this directory's one hard property intact:
+# `requests` is still the whole dependency list, there is no duckrun, no storage token, no OneLake
+# read, and `rm -rf cu/ .github/workflows/cu.yml` still removes every trace. The coupling is a JSON
+# file produced by a job that runs anyway, not code.
+#
+# It is a JSON data contract, so it fails QUIETLY if stats.py renames a key: the layout table is
+# skipped with a note and the CU report is unaffected. That is the right trade here (a CU report is
+# still useful without layout) but it means a rename over there shows up as a missing table over here,
+# not as an error. stats.py's docstring carries the same warning from its side.
+STATS_JSON = os.environ.get("STATS_JSON", "").strip()
+
+# Which table's layout to show. One table, not all eight: this is the mart the benchmark queries and
+# the CU was spent on. `dim_duid`/`dim_calendar` are a few hundred rows and their layout explains
+# nothing about a 143M-row scan.
+LAYOUT_TABLE = os.environ.get("CU_LAYOUT_TABLE", "fct_summary").strip()
 
 # Item x operation x hour. The hour axis supports SINCE and the per-run split below.
 # Mind the spelling: the model also has 'Metrics By Item And Operation' (no time axis) and 'Metrics
@@ -432,6 +455,66 @@ def render_runs(hourly, runs):
             _op_table(cells)
 
 
+def load_layout(path=None):
+    """`stats.py`'s JSON, or {} — never an exception. See STATS_JSON above for where it comes from."""
+    path = path or STATS_JSON
+    if not path:
+        return {}
+    try:
+        with open(path, encoding="utf-8") as f:
+            doc = json.load(f)
+    except Exception as ex:
+        log(f"  no layout: {path} unreadable ({type(ex).__name__}: {ex})")
+        return {}
+    if not doc.get("stats"):
+        log(f"  no layout: {path} carries no stats block")
+        return {}
+    return doc
+
+
+def render_layout(doc, cu_by_model, table=LAYOUT_TABLE):
+    """The layout of `table` per engine, with that engine's CU beside it.
+
+    One table, so cost and shape are read together rather than in two browser tabs. The CU column is
+    the engine's total from this run's report; the rest is `stats.py`'s reading of the Delta log. They
+    come from different runs at different times — hence the provenance line, which is not decoration:
+    quoting a layout from a dbt run three days older than the CU beside it is the way this misleads.
+    """
+    stats = doc.get("stats") or {}
+    engines = [e for e in (doc.get("engines") or stats) if (stats.get(e) or {}).get(table)]
+    if not engines:
+        log(f"  no layout: no engine in the artifact carries '{table}'")
+        return
+    run = doc.get("run") or {}
+    meta = doc.get("engines") or {}
+
+    # Only the columns that say something about a scan. `schema` and `compression` are in the artifact
+    # and deliberately not here — this is a cost table, not a duplicate of the parity dashboard.
+    cols = [("total_rows", "rows", 0), ("num_files", "files", 0),
+            ("num_row_groups", "row groups", 0), ("avg_row_group", "avg RG rows", 0),
+            ("size_mb", "size MB", 1)]
+    print(f"\n### Layout of `{table}` — what the CU was spent scanning\n")
+    print("| engine | writer | CU | " + " | ".join(h for _k, h, _d in cols) + " | vorder |")
+    print("|:--|:--|--:|" + "--:|" * len(cols) + ":--|")
+    for e in engines:
+        d = stats[e][table]
+        cu = cu_by_model.get(f"aemo_{e}".lower())
+        cells = []
+        for key, _h, dp in cols:
+            v = d.get(key)
+            cells.append("—" if v is None else f"{float(v):,.{dp}f}")
+        vo = d.get("vorder")
+        writer = (meta.get(e) or {}).get("writer") or "—"
+        print(f"| {e} | `{writer}` | {'—' if cu is None else f'{cu:,.1f}'} | "
+              + " | ".join(cells) + f" | {'yes' if vo else 'no'} |")
+    print(f"\n<sub>Layout from the **Parity dashboard** run `{run.get('id') or '?'}` "
+          f"(sha `{(run.get('sha') or '?')[:7]}`), written {run.get('written') or '?'} — **a different "
+          f"run from the CU above**, so read it as \"the layout as of that dispatch\", and dispatch "
+          f"*Parity dashboard* again if the tables have been rewritten since. The CU column is this "
+          f"report's own total per engine. Nothing here re-read a Delta log; the full eight-table "
+          f"dashboard is that run's own summary.</sub>")
+
+
 def render(cells, hourly, since, asof, seen=0, dropped=None, active=None, near=None):
     """cells is {(model, operation): cu}; hourly is {(model, operation, hour): cu}."""
     span = (f"since {since:%Y-%m-%d %H:%M} (model clock)" if since else "over everything retained")
@@ -446,6 +529,9 @@ def render(cells, hourly, since, asof, seen=0, dropped=None, active=None, near=N
     runs = sessionize(h for (_m, _o, h) in hourly) if (RUN_GAP_HOURS > 0 and hourly) else []
     if runs:
         render_runs(hourly, runs)
+    doc = load_layout()
+    if doc:
+        render_layout(doc, {m.lower(): t for m, t in _model_rows(cells)})
 
 
 def main():

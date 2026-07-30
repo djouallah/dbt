@@ -8,8 +8,10 @@ name: dbt
 # run later. All four legs run the same six assertions — the singular suite is written per dialect
 # (tests/duckdb, tests/dwh, tests/spark) and gated per folder in dbt_project.yml, the same way
 # models/ is. What is gone is the neutral reader: no test compares one engine to another, so a
-# green leg means that engine is self-consistent and nothing more. The mart parity table in
-# `summary` is the only cross-engine signal.
+# green leg means that engine is self-consistent and nothing more. The mart parity table is the only
+# cross-engine signal there is — and it is no longer produced here: it moved to the dispatch-only
+# `Parity dashboard` workflow (.github/workflows/stats.yml), so a green run of THIS workflow says
+# nothing about whether the four engines agree. Dispatch that after a build you care about.
 #
 # This comment used to say dwh and spark were "graded by their generic column tests alone". They
 # were graded by nothing: the gate sat on the project key, which also matches generic tests (their
@@ -186,25 +188,3 @@ jobs:
         with:
           name: dbt-target-${{ matrix.engine }}
           path: target/
-
-  # The workflow's ONLY step summary. No `if: always()`: it reports on all four engines side by
-  # side, so a partial run would publish a table with holes in it and read as real drift. If a
-  # leg failed, that leg's own job is where to look — fix it, then the summary means something.
-  #
-  # Mart-only. stats.py reads every table each item holds, but the parity question is asked of the
-  # three tables that are actually consumed downstream (fct_summary, dim_duid, dim_calendar); the
-  # staging view and the raw facts differ in physical layout by design and their rows are already
-  # implied by the summary's.
-  summary:
-    name: summary
-    needs: [fabric, server]
-    runs-on: ubuntu-latest
-    # get_stats() over OneLake is slow on the iceberg item (12m+ observed for that one engine);
-    # 15 minutes was cancelling stats.py mid-table and turning slowness into a red run.
-    timeout-minutes: 40
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with: {python-version: "3.11"}
-      - run: pip install duckrun requests
-      - run: python .github/scripts/stats.py >> "$GITHUB_STEP_SUMMARY"

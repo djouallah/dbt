@@ -5,8 +5,8 @@ to stdout — no file artifact. Medians only — never a mean in any comparison.
 **No baseline.** Engines are ranked and the fastest is named; nothing is stated as a ratio against a
 privileged engine (see render_report's module docstring for why the reference was removed).
 
-Timing only, by design: physical layout per engine is `.github/scripts/stats.py` in ci.yml's
-`summary` job, and is not re-derived here.
+Timing only, by design: physical layout per engine is `.github/scripts/stats.py` in the *Parity
+dashboard* workflow, and is not re-derived here.
 
 Exits 1 on a ranking inconsistency — the one thing here that can fail the job, and deliberately so:
 a report that names the slower engine the winner is worse than no report.
@@ -228,7 +228,7 @@ def s5_pointers(rep):
       "one `report-fragment-<engine>` per engine, as each job wrote it.")
     w("- every number above recomputes from run_report.json (`timings.*`, `analysis.*`) — "
       "`RUN_REPORT=<file> python benchmark/render_report.py`, no credentials.")
-    w("- physical layout per engine, and row-count parity: the `summary` job of `ci.yml`.")
+    w("- physical layout per engine, and row-count parity: the *Parity dashboard* workflow.")
     w()
 
 

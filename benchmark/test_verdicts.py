@@ -215,8 +215,8 @@ def test_floor_uses_only_quotable_columns():
 # ----------------------------------------------------------------- scoping (port)
 
 def test_analysis_is_timing_only():
-    """No parquet/geometry analysis: physical layout is `.github/scripts/stats.py` in ci.yml's
-    `summary` job. Re-deriving it here would be a second, slower reader of the same Delta logs
+    """No parquet/geometry analysis: physical layout is `.github/scripts/stats.py` in the
+    *Parity dashboard* workflow. Re-deriving it here would be a second, slower reader of the same Delta logs
     saying the same thing — and it is the reason this run reads nothing but the XMLA endpoint."""
     rep = _rep({FAST: {"probe_rowcount": _cold(100), "q1": _cold(100)},
                 MID: {"probe_rowcount": _cold(100), "q1": _cold(200)}})

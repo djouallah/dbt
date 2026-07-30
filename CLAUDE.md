@@ -466,8 +466,14 @@ still run it by hand to reproduce a CI failure. That is a debugging affordance, 
   its own conclusion, so `gh run view <id> --json jobs` reads straight: `failure` means that
   leg failed. Cancelling never saved the Fabric compute anyway — the notebook or Livy session
   keeps running workspace-side after the GitHub job dies — it only erased the evidence.
-- `summary` has no `if: always()`. It compares all four engines side by side, so it runs only
-  when every leg is green; a summary with holes in it reads as drift that isn't there.
+- **The parity dashboard is not part of this workflow any more** — it is the dispatch-only
+  `Parity dashboard` workflow, so a green `dbt` run reports nothing about cross-engine agreement, and
+  nobody sees drift until someone dispatches it. It used to be the `summary` job here, with no
+  `if: always()`, so that a partial run could not publish a table with holes in it that reads as drift
+  that isn't there. The same hazard now takes a different shape: dispatched by hand it can read four
+  lakehouses mid-build. It shares `onelake-<ref>` so it queues behind a build rather than racing one,
+  which covers the GitHub-side case but not a Fabric notebook still finishing after its job went
+  green.
 - Every leg is `dbt build` — the engine tests its own output, in the same DAG walk that wrote it.
   This replaced a separate test job that graded all four items with one neutral duckrun reader.
   What was bought: a failure stops at the node that broke, and four jobs disappeared. What was
@@ -501,7 +507,20 @@ still run it by hand to reproduce a CI failure. That is a debugging affordance, 
   `fabric_build.py`). The retry ladder is for transient OneLake commit conflicts, which are a
   property of the write; a failed assertion is deterministic and would just re-scan on Fabric
   compute to reach the same verdict.
-- `summary` runs `stats.py` and nothing else, over **every shared table** in pipeline order —
+- **The parity dashboard is its OWN workflow now (`Parity dashboard`, `.github/workflows/stats.yml`),
+  dispatch-only, and `dbt` therefore ends with no cross-engine check at all.** It was the `summary` job
+  of `ci.yml`. Two things wanted from it were impossible inside a build: asking "do the four engines
+  hold the same rows, in what shape" *without* first spending four Fabric legs, and letting another
+  workflow **reuse** the answer — a step summary is readable by a human on the run page and by nothing
+  else, since stdout is redirected away from the job log and GitHub exposes no REST endpoint for it.
+  So `stats.py` also writes `STATS_JSON`, the workflow uploads it as the `stats` artifact, and `cu/`
+  downloads it to print the layout beside the CU. Hold onto the costs: no test compares one engine to
+  another, so **nothing notices drift until someone dispatches this**; and being manual it can be fired
+  mid-build, reading half-written tables and reporting drift that is a build in flight — which is why
+  it shares `onelake-<ref>` with `ci.yml` so a dispatch queues rather than races. The JSON is a data
+  contract with `cu/`: renaming a `DETAIL_KEYS` entry makes the layout table disappear over there with
+  a note, not an error, so change both together.
+- It runs `stats.py` and nothing else, over **every shared table** in pipeline order —
   the staging view, the four facts, then `dim_calendar`/`dim_duid`/`fct_summary`. It was briefly
   cut to the three mart tables on the argument that the facts are inputs whose rows are implied by
   the summary's; that was wrong in the one situation the dashboard exists for. When `fct_summary`
@@ -534,7 +553,7 @@ takes to **query** them. Ported from `djouallah/duckrun`'s `parquet_layout.yml`.
 - **Deploy models, run queries, report timings — that is the whole scope.** Upstream had to *build*
   the layouts it compared; here the four engines' own `mart.fct_summary` already are four layouts, at
   row-count parity. So there is no build phase, and deliberately **no stats phase either**: physical
-  layout is `stats.py`'s job in `summary`, and re-deriving it here would be a second, slower reader of
+  layout is `stats.py`'s job in the *Parity dashboard* workflow, and re-deriving it here would be a second, slower reader of
   the same Delta logs. The only endpoints touched are the Fabric control plane and XMLA. Keep it that
   way — the moment this writes a table into a lakehouse, `stats.py`'s unscoped `get_stats()` starts
   counting it and the parity dashboard reads it as drift.

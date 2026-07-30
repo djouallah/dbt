@@ -67,10 +67,47 @@ rather than printing a one-row "runs" table that repeats the aggregate.
 
 That is the whole output and the whole scope.
 
+## The layout beside the CU
+
+CU alone says which engine cost more, not why — and the answer is nearly always the physical layout.
+So the report ends with one table putting them together:
+
+```
+### Layout of `fct_summary` — what the CU was spent scanning
+
+| engine  | writer             |       CU |        rows | files | row groups | avg RG rows | size MB | vorder |
+|:--------|:-------------------|---------:|------------:|------:|-----------:|------------:|--------:|:-------|
+| duckrun | `delta-rs`         | 18,000.0 | 143,844,166 |     7 |         94 |   1,530,257 | 1,035.0 | no     |
+| iceberg | `duckdb (iceberg)` | 37,227.3 | 143,844,166 |   386 |      1,175 |     122,420 | 1,107.0 | no     |
+| spark   | `spark`            |  9,000.0 | 143,844,166 |    20 |         20 |   7,192,208 | 1,217.0 | yes    |
+| dwh     | `warehouse`        | 12,000.0 | 143,844,166 |    79 |         79 |   1,820,812 | 1,567.0 | no     |
+```
+
+**No Delta log is read here.** The numbers come from the `stats` artifact of the latest successful
+**Parity dashboard** run (`.github/workflows/stats.yml` — `stats.py` writing `STATS_JSON`), which the
+workflow downloads with `gh run download`. That keeps this directory's one hard property: `requests` is
+still the whole dependency list, there is no duckrun, no storage token, no OneLake read, and
+`rm -rf cu/ .github/workflows/cu.yml` still removes every trace. The coupling is a JSON file produced
+by a workflow that exists anyway, not code.
+
+**The two halves come from different runs**, so the table prints which dashboard run the layout is from
+and when it was written. Dispatch *Parity dashboard* again if the tables have been rewritten since, or
+the CU will sit beside a layout that no longer exists.
+
+**Failure is silent by design**: no dashboard run, an expired artifact (90 days), a renamed
+`DETAIL_KEYS` entry — any of them drop the layout table and log why. A CU report is useful without it;
+it is not useful if a missing artifact fails the job. The flip side is that a `stats.py` rename shows up
+here as a *missing table*, so change both together.
+
+`layout=false` skips the download. `layout_table` picks the table (default `fct_summary` — the mart the
+benchmark queries; `dim_duid` at a few hundred rows explains nothing about a 143M-row scan).
+
 ## What it deliberately is not
 
-**It shares nothing with `benchmark/`.** No imports, no `run_report.json`, no artifact, no
-`needs:`, no concurrency group, no ADOMD, no .NET, no duckrun. `requests` is the only dependency.
+**It shares nothing with `benchmark/`.** No imports, no `run_report.json`, no `needs:`, no
+concurrency group, no ADOMD, no .NET, no duckrun. `requests` is the only dependency. It does read ONE
+artifact — `stats` from the *Parity dashboard* workflow, for the layout table above — and that is a
+JSON file, not code: nothing is imported, and losing it costs one table.
 Deleting `cu/` and `.github/workflows/cu.yml` removes it completely and nothing else in the repo
 notices — which is the point, because this may not turn out to be useful. The four model names are
 spelled out here rather than imported from `benchmark/engines.py` for the same reason.
@@ -91,6 +128,10 @@ after the activity you want to measure** — see the lag note below.
 | `metrics_workspace_id` | `7f7f5d92-…` | where the Capacity Metrics app is installed |
 | `metrics_model_id` | `0fdedd3b-…` | the app's semantic model |
 | `capacity_id` | all | blank = every capacity the metrics model can see |
+| `run_gap_hours` | `2` | idle hours that separate one run from the next. 0 = aggregate only |
+| `run_ops` | false | per-run breakdown by operation type as well |
+| `layout` | true | fetch the layout from the latest *Parity dashboard* run |
+| `layout_table` | `fct_summary` | which table's layout to show |
 | `debug` | false | dumps every table's columns to stderr |
 
 Locally, with `PBI_TOKEN` set:

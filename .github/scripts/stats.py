@@ -4,11 +4,28 @@ The project's thesis is: same raw data -> four engines (duckrun/Delta, iceberg, 
 Spark) -> identical output. So the final row counts should line up column-for-column. get_stats reads
 each item's Delta log, and OneLake surfaces every item (including the native Iceberg lakehouse and the
 Warehouse) with a Delta representation, so ONE reader covers all four. Diagnostics -> stderr.
+
+**`STATS_JSON` makes this step's result reusable, and that is the point of it existing.** The markdown
+goes to stdout and, in ci.yml, straight into `$GITHUB_STEP_SUMMARY` — where it is readable by a human
+on the run page and by NOTHING else. It is not in the job log (stdout is redirected), there is no REST
+endpoint for a step summary, so the layout numbers this reads off four Delta logs were unreachable
+from any other workflow. Set `STATS_JSON=<path>` and the same numbers are also written as JSON, which
+ci.yml uploads as the `stats` artifact; `cu/` downloads it from the latest successful `dbt` run so a CU
+report can sit next to the layout that produced it, WITHOUT a second reader of the same Delta logs and
+without duckrun or a storage token anywhere near `cu/`.
+
+That JSON is a data contract with a consumer outside this file. Its shape is
+`{"run": {...}, "engines": {...}, "tables": [...], "stats": {engine: {table: {detail}}}}` and the
+detail keys are DETAIL_KEYS below. Adding a key is safe; renaming or removing one breaks `cu/`'s layout
+table, which degrades to a note rather than an error — so a rename fails QUIETLY over there. Change
+both together.
 """
+import json
 import os
 import sys
 import subprocess
 from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime, timezone
 
 import requests
 import duckrun
@@ -173,6 +190,33 @@ def detail_tables(per_engine, engines):
     # Per-engine totals now live as the last two rows of the parity table above.
 
 
+def write_json(per_engine, engines):
+    """Write the same numbers as JSON when STATS_JSON names a path. No-op otherwise.
+
+    Carries the run stamp too: a consumer reading this out of an artifact needs to know WHICH dbt run
+    it came from and when, or it will quote a layout from a run three days older than the CU it sits
+    beside. `cu/` prints that provenance line for exactly that reason.
+    """
+    path = os.environ.get("STATS_JSON", "").strip()
+    if not path:
+        return
+    doc = {
+        "run": {"id": os.environ.get("GITHUB_RUN_ID"),
+                "sha": os.environ.get("GITHUB_SHA"),
+                "workspace": WS,
+                "written": datetime.now(timezone.utc).isoformat()},
+        "engines": {e: {"item": item, "kind": kind, "writer": WRITER.get(e, e)}
+                    for e, item, kind in ENGINES},
+        "tables": list(TABLES),
+        "detail_keys": list(DETAIL_KEYS),
+        "stats": {e: per_engine.get(e) or {} for e in engines},
+    }
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(doc, f, indent=2, default=str)
+    have = sum(len(v) for v in doc["stats"].values())
+    sys.stderr.write(f"  wrote {path}: {have} (engine, table) rows for {len(engines)} engines\n")
+
+
 def one_engine(item, kind):
     """(guid, stats) for one Fabric item; exceptions propagate to the caller."""
     guid = find_guid(kind, item)
@@ -198,6 +242,7 @@ def main():
     engines = [e for e, _, _ in ENGINES]
     parity_table(per_engine, engines)
     detail_tables(per_engine, engines)
+    write_json(per_engine, engines)
 
 
 if __name__ == "__main__":
