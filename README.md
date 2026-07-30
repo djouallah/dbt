@@ -97,8 +97,10 @@ OneLake**. It's a matrix job (one per engine) that, in the `testing` workspace:
    duckrun/iceberg/spark, a lakehouse + warehouse for dwh (`.github/scripts/provision.py`);
 2. lands the raw AEMO files into that lakehouse's `Files` with the shared notebook;
 3. `dbt build` against OneLake for that target — each engine writes and tests its own output in
-   one DAG walk. A final `summary` job then reads all four items back through Delta and puts the
-   three mart tables (`dim_calendar`, `dim_duid`, `fct_summary`) side by side; that parity table
+   one DAG walk. A final `summary` job then reads all four items back through Delta and puts
+   every shared table side by side — the staging view, the four facts, then `dim_calendar` /
+   `dim_duid` / `fct_summary`, so a disagreement in the summary can be traced to its inputs on
+   the rows above; that parity table
    is the only thing comparing engines to each other. Note the singular tests in `tests/` are
    DuckDB SQL and enabled on the duckdb-family targets only, so `dwh` and `spark` run just the
    generic key tests on the two dimensions.

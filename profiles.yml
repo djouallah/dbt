@@ -94,5 +94,15 @@ aemo_electricity:
       # WORKSPACE Spark pool settings (the observed "initial executors = 1" launch is the
       # pool's dynamic-allocation floor). To change launch size, change the workspace pool
       # (e.g. disable dynamic allocation / raise the executor count), not this file.
+      # `conf` is forwarded verbatim into the Livy session payload (the adapter copies
+      # name/conf/driverMemory/... into both the singleton POST and the high-concurrency
+      # acquire — concurrent_livy.py `_build_acquire_payload`), so a session-level Spark
+      # setting belongs here and nowhere else. V-Order is the one that matters: it is a
+      # WRITE-time parquet layout (sorted + encoded for Direct Lake / VertiPaq), so it can
+      # only be set before the session writes — a model-level config cannot retrofit it, and
+      # tables already written stay un-V-Ordered until they are rewritten. `stats.py`'s
+      # `vorder` column is the check: spark should flip to ✅ while the other three stay `·`.
       spark_config:
-        name: dbt_aemo
+        name: dl_vorder_build
+        conf:
+          spark.sql.parquet.vorder.default: "true"

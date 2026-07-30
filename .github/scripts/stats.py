@@ -1,4 +1,4 @@
-"""Mart parity dashboard: duckrun.get_stats() over EVERY engine's output, pivoted to $GITHUB_STEP_SUMMARY.
+"""Parity dashboard: duckrun.get_stats() over EVERY engine's output, pivoted to $GITHUB_STEP_SUMMARY.
 
 The project's thesis is: same raw data -> four engines (duckrun/Delta, iceberg, Fabric Warehouse,
 Spark) -> identical output. So the final row counts should line up column-for-column. get_stats reads
@@ -23,19 +23,19 @@ ENGINES = [("duckrun", "dbt_delta", "lakehouses"),
            ("spark", "dbt_spark", "lakehouses"),
            ("dwh", "dbt_dwh", "warehouses")]
 
-# The mart tables the dashboard reports on — the three things actually consumed downstream.
+# Every shared table each engine emits, in pipeline order — inputs first, mart last.
 #
-# Deliberately NOT every table each engine holds. The raw facts (fct_price, fct_scada and their
-# _today pairs) and the staging view are inputs: their rows are already implied by fct_summary's,
-# and the four engines write them in genuinely different physical layouts by design, so a
-# per-engine file/row-group row for them is noise in a parity table. get_stats() still reads
-# everything — this list only decides what gets rendered.
+# It was briefly cut to the three mart tables on the argument that the facts are inputs whose rows
+# are implied by fct_summary's. They are not, diagnostically: when fct_summary disagrees across
+# engines, the ONLY way to tell an input difference from a summary-logic difference is to read the
+# fact counts on the row above it. A mart-only table shows the symptom and hides the cause.
 #
 # This table IS the cross-engine check. The only assertion left in the dbt suite is a grain test
 # that reads fct_summary and nothing else, so a disagreement between engines shows up here or
 # nowhere: a ⚠️ on a row means the four outputs are not the same, and it is the one signal that
 # can say so.
-TABLES = ["dim_calendar", "dim_duid", "fct_summary"]
+TABLES = ["stg_csv_archive_log", "dim_calendar", "dim_duid",
+          "fct_price", "fct_scada", "fct_price_today", "fct_scada_today", "fct_summary"]
 
 # The get_stats() detail carried per table (see stats_for) and how each column is rendered.
 DETAIL_KEYS = ("schema", "total_rows", "num_files", "num_row_groups",
@@ -110,8 +110,8 @@ def parity_table(per_engine, engines):
     The last two rows fold in what used to be a separate per-engine totals table:
     total rows carries the parity ⚠️ (counts must line up); total MB doesn't (physical
     size legitimately differs by writer/compression)."""
-    print("## 🧮 Mart row-count parity\n")
-    print("<sub>The three mart tables consumed downstream. ⚠️ = differs or missing "
+    print("## 🧮 Row-count parity\n")
+    print("<sub>Every shared table, in pipeline order. ⚠️ = differs or missing "
           "across engines.</sub>\n")
     print("| table | " + " | ".join(engines) + " |")
     print("| --- | " + " | ".join("--:" for _ in engines) + " |")
@@ -124,20 +124,20 @@ def parity_table(per_engine, engines):
 
     def total(e, key):
         # An engine whose stats fetch failed has an empty dict: render "—", not 0.
-        # Summed over TABLES only, so the total is the sum of the rows above it and not of the
-        # raw facts the dashboard no longer shows — a total that outran its own column would
-        # read as a missing row rather than as a different scope.
+        # Summed over EVERYTHING the item holds, not just TABLES: the total is the item's size,
+        # and a table present on one engine only would otherwise be invisible in both the rows
+        # above and the total.
         if not per_engine[e]:
             return None
-        return sum(d.get(key) or 0 for t, d in per_engine[e].items() if t in TABLES)
+        return sum(d.get(key) or 0 for d in per_engine[e].values())
 
     rows = [total(e, "total_rows") for e in engines]
     present = [v for v in rows if v is not None]
     match = len(present) == len(engines) and len(set(present)) == 1
-    print(f"| **mart total rows**{'' if match else ' ⚠️'} | "
+    print(f"| **total rows**{'' if match else ' ⚠️'} | "
           + " | ".join(fmt(v, "num") for v in rows) + " |")
     mbs = [total(e, "size_mb") for e in engines]
-    print("| **mart total MB** | "
+    print("| **total MB** | "
           + " | ".join(fmt(None if v is None else round(v, 1), "num") for v in mbs) + " |")
     print()
 
@@ -154,7 +154,7 @@ def detail_tables(per_engine, engines):
     The parity table above only proves the row counts agree, not that the engines wrote comparable
     physical layouts — this is the "why is my table slow / full of small files" view.
     """
-    print("## 🔬 Mart physical layout\n")
+    print("## 🔬 Physical layout\n")
     heads = ["table", "engine", "writer"] + [h for _, h, _ in DETAIL_COLS]
     aligns = ["---", "---", "---"] + ["--:" if k == "num" else "---" for _, _, k in DETAIL_COLS]
     print("| " + " | ".join(heads) + " |")

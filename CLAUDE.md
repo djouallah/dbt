@@ -5,7 +5,7 @@ data. The thesis is *the engine doesn't matter, the output does* — so the mode
 per dialect (`models/duckdb`, `models/dwh`, `models/spark`, gated by `+enabled` in
 `dbt_project.yml`) and every leg runs `dbt build`, so each engine writes and tests its own output
 in one DAG walk. CI's final word is `stats.py`, which reads all four items through Delta on
-OneLake and puts the three mart tables side by side.
+OneLake and puts every shared table side by side.
 
 **The test suite covers the mart and nothing else** — `fct_summary`, `dim_duid`, `dim_calendar`.
 The facts and the staging view carry descriptions, no assertions: the grain and
@@ -339,6 +339,17 @@ still run it by hand to reproduce a CI failure. That is a debugging affordance, 
 - **Query the lakehouses directly before instrumenting CI.** `duckrun.connect(<abfss Tables
   path>, read_only=True)` works from a laptop against any of the four items and answers
   schema/row/value questions in minutes. Several CI round trips were spent not doing this.
+- **V-Order is set once, in the session, and only affects files written after it.** The spark
+  target now carries `spark.sql.parquet.vorder.default: "true"` under `spark_config.conf` in
+  `profiles.yml`; the adapter copies `conf` verbatim into both the singleton and the
+  high-concurrency Livy payload (`concurrent_livy.py` `_build_acquire_payload`), so that is the
+  only place it belongs — there is no model-level equivalent and no way to retrofit it. Parquet
+  already on disk stays un-V-Ordered until the rows are rewritten, so an incremental leg flips
+  over slowly: `stats.py`'s `vorder` column is the only honest report of where it actually got to,
+  and `benchmark/README.md`'s snapshot table predates the change. A `·` on the other three is
+  correct rather than a regression, but for two different reasons: delta-rs and DuckDB have no
+  V-Order encoder at all, whereas Fabric Warehouse does — it is off by default on new warehouses
+  and toggled at the warehouse level (`ALTER DATABASE`), not from anything in this repo.
 - **`threads` on the spark target must stay ≤ 4.** dbt-fabricspark defaults to high concurrency
   and opens one Spark REPL per thread; Fabric packs at most five REPLs per Livy session, so more
   threads means a second Spark application, separately billed, for one `dbt run`.
@@ -385,8 +396,55 @@ still run it by hand to reproduce a CI failure. That is a debugging affordance, 
   `fabric_build.py`). The retry ladder is for transient OneLake commit conflicts, which are a
   property of the write; a failed assertion is deterministic and would just re-scan on Fabric
   compute to reach the same verdict.
-- `summary` runs `stats.py` and nothing else, over three tables: `dim_calendar`, `dim_duid`,
-  `fct_summary`. The raw facts are inputs whose rows are implied by the summary's and whose
-  physical layout legitimately differs per writer, so listing them added noise to a parity table.
+- `summary` runs `stats.py` and nothing else, over **every shared table** in pipeline order —
+  the staging view, the four facts, then `dim_calendar`/`dim_duid`/`fct_summary`. It was briefly
+  cut to the three mart tables on the argument that the facts are inputs whose rows are implied by
+  the summary's; that was wrong in the one situation the dashboard exists for. When `fct_summary`
+  disagrees across engines, the fact counts on the rows above it are what separate "an input
+  differs" from "the summary logic differs", and a mart-only table shows the symptom while hiding
+  the cause. Totals are unscoped again, so they cover anything an item holds beyond this list.
   `summary.py` (the four-engine test dashboard) is deleted — its input was the `rr-<engine>.json`
   artifacts the test matrix uploaded, and there is no test matrix.
+
+## The query benchmark is a second workflow, and it only reads
+
+`benchmark/` + `.github/workflows/benchmark.yml` ("Direct Lake benchmark") ask the question `ci.yml`
+does not: the parity table says the four engines hold the *same rows*, this measures how long Power BI
+takes to **query** them. Ported from `djouallah/duckrun`'s `parquet_layout.yml`.
+[benchmark/README.md](benchmark/README.md) has the detail; what matters when touching this repo:
+
+- **`workflow_dispatch` only, and nothing depends on it.** Never triggered by a push, never a gate.
+- **Deploy models, run queries, report timings — that is the whole scope.** Upstream had to *build*
+  the layouts it compared; here the four engines' own `mart.fct_summary` already are four layouts, at
+  row-count parity. So there is no build phase, and deliberately **no stats phase either**: physical
+  layout is `stats.py`'s job in `summary`, and re-deriving it here would be a second, slower reader of
+  the same Delta logs. The only endpoints touched are the Fabric control plane and XMLA. Keep it that
+  way — the moment this writes a table into a lakehouse, `stats.py`'s unscoped `get_stats()` starts
+  counting it and the parity dashboard reads it as drift.
+- **It shares `ci.yml`'s concurrency group (`onelake-<ref>`) deliberately.** Not for correctness, but
+  because a concurrent dbt build contends for the same capacity, and capacity contention is the one
+  thing a wall-clock benchmark cannot absorb. A dispatch queues behind a push run rather than racing
+  it. Do not give it its own group to make it start sooner.
+- **`dwh` is DirectQuery, not Direct Lake, and that asymmetry is load-bearing.** duckrun's
+  `deploy(warehouse=…)` rewrites `Sql.Database(...)` for a DirectQuery bim; `deploy(lakehouse=…)`
+  rewrites the OneLake GUIDs for a Direct Lake one — they are different templates, hence
+  `fct_summary_dq.SemanticModel` alongside `fct_summary.SemanticModel`. Consequences already handled,
+  so don't "fix" them: the DQ leg is **hot only** (no transcoded data to evict, so `dehydrate` is
+  *expected* to fail), it gets **no refresh at deploy** (nothing to reframe), and every verdict
+  carries its `mode` so a pushdown timing is never read as "dwh has a slow layout".
+  A DirectQuery bim must contain neither the camelCase Direct-Lake mode token nor a `onelake.dfs`
+  URL **anywhere in the file, prose included** — `_is_directlake_bim()` greps the raw bytes, so a
+  `description` string naming the mode flips the model and makes deploy attempt a reframe it cannot
+  serve. `benchmark/test_templates.py` asserts this; it caught exactly that mistake once already.
+- **The reference engine is `BENCH_ENGINES[0]`, explicitly.** Upstream picked the base by name
+  (`endswith('_auto_sort')`, else the shortest). With one model per engine the shortest name is
+  `aemo_dwh`, so inheriting that heuristic would silently make the DirectQuery leg the thing every
+  ratio is measured against. `test_verdicts.py` pins this.
+- **`benchmark/`'s pytest suite is the only CI check in this repo that touches no Fabric.** It is a
+  `needs:` gate on the paid job. Run it before pushing anything under `benchmark/`:
+  `python -m pytest benchmark/ -q`. Everything `test_templates.py` asserts would otherwise fail at
+  *deploy* time, after ADOMD.NET is installed and the workspace resolved. The render layer is pure
+  JSON → markdown, so a past run's `run-report` artifact re-renders offline with
+  `RUN_REPORT=<file> python benchmark/render_report.py` — no credentials.
+- Scout with `engines=duckrun,spark runs=1 cold=false cold_repeats=1 gap_seconds=0` before spending a
+  full run: it exercises deploy → XMLA → render end to end in minutes rather than an hour of capacity.
