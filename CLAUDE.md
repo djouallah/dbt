@@ -534,3 +534,44 @@ takes to **query** them. Ported from `djouallah/duckrun`'s `parquet_layout.yml`.
   `RUN_REPORT=<file> python benchmark/render_report.py` — no credentials.
 - Scout with `engines=duckrun,spark runs=1 cold=false cold_repeats=1 gap_seconds=0` before spending a
   full run: it exercises deploy → XMLA → render end to end in minutes rather than an hour of capacity.
+
+## `cu/` is a third workflow, and it shares nothing with the other two
+
+`cu/` + `.github/workflows/cu.yml` ("Capacity CU") answer what the querying *cost*: CU per semantic
+model, read from the Fabric Capacity Metrics app's own semantic model by DAX over the Power BI
+`executeQueries` REST endpoint. Fabric exposes **no per-operation CU REST API** — that model is the
+only authoritative source, which is why this exists at all. [cu/README.md](cu/README.md) has the
+detail.
+
+- **The isolation is the design, not an accident.** No imports from `benchmark/`, no
+  `run_report.json`, no artifact, no `needs:`, no shared concurrency group, no ADOMD, no .NET, no
+  duckrun — `requests` is the whole dependency list. It is speculative tooling, so it is built to be
+  deleted by removing one directory and one workflow file. Do not "DRY it up" against
+  `benchmark/xmla_compare.py`; the duplication is what keeps that deletion free.
+- **It correlates nothing.** CU per model over a wall-clock window. It cannot say which query, run
+  or engine produced a number — `benchmark/` records durations but no absolute timestamps, and
+  adding them is the coupling this avoids.
+- **Deduplication by operation id is load-bearing.** `'Timepoint Interactive Detail'` is gated by a
+  single 30-second `TimePoint` MPARAMETER, so the window is walked one bucket at a time — but an
+  interactive operation is smoothed across 10–128 buckets and **reappears in every one carrying its
+  full `Total CU`**. Summing the rows multiplies each operation by the buckets it spans. A five-minute
+  window over one operation reports 140 CU deduplicated and 1,540 summed. Anyone replacing
+  `collect()`'s keyed dict with a `SUM` produces numbers wrong by one to two orders of magnitude that
+  still look plausible.
+- **Column names are version-pinned; nothing hardcodes them.** Microsoft's own fabric-toolbox
+  accelerator ships four DAX variants (v53/v47/v40/v37) because the schema moves between app
+  versions. `discover_columns()` reads the real schema with `INFO.VIEW.COLUMNS()` first and resolves
+  each role from the `WANTED` candidate lists, so a bump fails with the actual column list printed
+  rather than returning empty.
+- **Service principals probably do not work against that model** — it is widely reported to reject
+  them, and this is CI-only, so that is the likeliest failure. The script reads `PBI_TOKEN` and
+  nothing else; the workflow prefers a `PBI_TOKEN` secret over the OIDC SP when one is set, so the
+  fallback is a user token. Those expire in ~1 hour: per-investigation, not a standing secret.
+- **`workflow_dispatch` only, same standing rule as the benchmark.** No `schedule`, no `push`, no
+  `workflow_run`, no `needs:` from another workflow. Interactive reads against shared capacity are
+  what a capacity admin notices. Its **own** concurrency group though, not `onelake-<ref>` — it
+  measures nothing timing-sensitive, and queueing it behind a five-hour benchmark would push it
+  toward the app's 14-day retention edge for no benefit.
+- 14-day retention, ~6 minute lag, 5–64 minute smoothing: dispatch it ~10 minutes *after* whatever
+  you want to measure. And timepoints are stamped in the offset configured **in the app**, not
+  yours — a wrong `utc_offset_hours` reads as "no activity" rather than an error.

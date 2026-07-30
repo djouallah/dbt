@@ -1,0 +1,119 @@
+name: Capacity CU
+
+# MANUAL ONLY, non-gating, read-only. The third workflow in this repo, and the most disposable.
+#
+# ci.yml builds the data; benchmark.yml measures how fast it is to QUERY; this asks what that
+# querying COST. Fabric exposes no per-operation CU REST API, so the only authoritative source is
+# the Capacity Metrics app's own semantic model, read by DAX.
+#
+# It shares NOTHING with benchmark.yml — no needs:, no artifact, no concurrency group, no code. It
+# does not know what a benchmark run is. It reports CU per semantic model over a wall-clock window
+# and stops there. See cu/README.md.
+#
+# Run it ~10 minutes AFTER whatever you want to measure: operations land in the metrics model with
+# a ~6 minute lag and are smoothed over 5-64 minutes.
+on:
+  workflow_dispatch:
+    inputs:
+      window_minutes:
+        description: "minutes back from now (or from end_utc). Costs 2 API calls per minute of window; 120/min is the cap."
+        type: string
+        default: "30"
+      end_utc:
+        description: "end of the window, ISO-8601 UTC (blank = now). Max 14 days back — the app's retention."
+        type: string
+        default: ""
+      metrics_workspace_id:
+        description: "workspace holding the Fabric Capacity Metrics app"
+        type: string
+        default: "7f7f5d92-1603-4a02-a46a-0d90fe1ed119"
+      metrics_model_id:
+        description: "the app's semantic model GUID"
+        type: string
+        default: "0fdedd3b-1451-4499-9ed4-aa3658100ec1"
+      capacity_id:
+        description: "capacity GUID (blank = every capacity the metrics model can see)"
+        type: string
+        default: ""
+      utc_offset_hours:
+        description: "the UTC offset configured IN the Capacity Metrics model (default install: 0)"
+        type: string
+        default: "0"
+      debug:
+        description: "log the discovered schema and per-timepoint progress to stderr"
+        type: boolean
+        default: false
+
+# Its OWN group, deliberately not ci.yml/benchmark.yml's `onelake-<ref>`. Those two share one
+# because a wall-clock benchmark cannot absorb capacity contention from a concurrent dbt build.
+# This measures nothing timing-sensitive — it reads a semantic model — so making it queue behind a
+# five-hour benchmark would only guarantee it runs after the 14-day retention question gets
+# interesting. cancel-in-progress: a superseded dispatch has nothing worth finishing.
+concurrency:
+  group: capacity-cu-${{ github.ref_name }}
+  cancel-in-progress: true
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  cu:
+    name: semantic model CU
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      CU_METRICS_WORKSPACE_ID: ${{ inputs.metrics_workspace_id }}
+      CU_METRICS_MODEL_ID: ${{ inputs.metrics_model_id }}
+      CU_CAPACITY_ID: ${{ inputs.capacity_id }}
+      CU_WINDOW_MINUTES: ${{ inputs.window_minutes }}
+      CU_END_UTC: ${{ inputs.end_utc }}
+      CU_UTC_OFFSET_HOURS: ${{ inputs.utc_offset_hours }}
+      CU_DEBUG: ${{ inputs.debug }}
+      PYTHONIOENCODING: utf-8
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      # The whole dependency list. No duckrun, no pythonnet, no ADOMD, no `dotnet publish` — this
+      # talks to the Power BI executeQueries REST endpoint, which takes DAX as a JSON string.
+      - run: pip install requests
+
+      # Same OIDC federated identity as ci.yml and benchmark.yml. allow-no-subscriptions because
+      # the fabric-github-deploy app is a workspace principal, not an Azure RBAC one.
+      - uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          allow-no-subscriptions: true
+
+      # The script only ever reads PBI_TOKEN, so there is one code path whether the token came
+      # from the service principal or from a human.
+      #
+      # Service principals are widely reported NOT to work against the Capacity Metrics semantic
+      # model specifically. If the SP draws a 401/403, set a PBI_TOKEN repo secret to a user token
+      # (`az account get-access-token --resource https://analysis.windows.net/powerbi/api
+      # --query accessToken -o tsv`) and it takes precedence here. Such a token expires in ~1 hour,
+      # so it is a per-investigation thing, not a standing secret.
+      - name: Acquire a Power BI token
+        run: |
+          set -euo pipefail
+          if [ -n "${{ secrets.PBI_TOKEN }}" ]; then
+            echo "using the PBI_TOKEN secret (user token)" >&2
+            TOKEN='${{ secrets.PBI_TOKEN }}'
+          else
+            echo "using the OIDC service principal" >&2
+            TOKEN=$(az account get-access-token \
+              --resource https://analysis.windows.net/powerbi/api \
+              --query accessToken -o tsv)
+          fi
+          echo "::add-mask::$TOKEN"
+          echo "PBI_TOKEN=$TOKEN" >> "$GITHUB_ENV"
+
+      # stdout is the markdown table and nothing else; diagnostics are on stderr and stay in the
+      # job log.
+      - name: Read CU from the Capacity Metrics model
+        run: python cu/capacity_cu.py >> "$GITHUB_STEP_SUMMARY"
