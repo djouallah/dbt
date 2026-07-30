@@ -561,12 +561,19 @@ detail.
 - **Column names are version-pinned; nothing hardcodes them.** Microsoft's own fabric-toolbox
   accelerator ships four DAX variants (v53/v47/v40/v37) because the schema moves between app
   versions. `discover_columns()` reads the real schema with `INFO.VIEW.COLUMNS()` first and resolves
-  each role from the `WANTED` candidate lists, so a bump fails with the actual column list printed
-  rather than returning empty.
-- **Service principals probably do not work against that model** — it is widely reported to reject
-  them, and this is CI-only, so that is the likeliest failure. The script reads `PBI_TOKEN` and
-  nothing else; the workflow prefers a `PBI_TOKEN` secret over the OIDC SP when one is set, so the
-  fallback is a user token. Those expire in ~1 hour: per-investigation, not a standing secret.
+  each role from candidate lists — `REQUIRED` roles fail with the actual column list printed,
+  `OPTIONAL` ones degrade to "not filtering on it". This caught a real miss on the first dispatch:
+  the candidates said `Item Name`, the app says `Item`.
+- **The installed app has NO item-kind column on that table**, so "semantic model" is not enforced —
+  the real columns are `Item`, `Operation`, `Operation Id`, `Total CU (s)`, `Workspace Id`, `User`,
+  `Billing type`, `Status`, `Duration (s)`, `Timepoint CU (s)`. The table is interactive-only, which
+  on this capacity means Power BI model reads, and every operation name counted is logged to stderr
+  so a warehouse row cannot hide inside a total labelled "semantic model CU". `workspace_filter` is
+  the only narrowing available. Do not re-add a kind filter without checking the schema first.
+- **The service principal works against that model.** The community consensus says it does not, and
+  this was built expecting a 401 — measured otherwise on run 30536137179, which read it on the OIDC
+  SP. The `PBI_TOKEN` secret path stays as a free fallback (the workflow prefers a secret when one
+  is set); a user token expires in ~1 hour, so per-investigation, not a standing secret.
 - **`workflow_dispatch` only, same standing rule as the benchmark.** No `schedule`, no `push`, no
   `workflow_run`, no `needs:` from another workflow. Interactive reads against shared capacity are
   what a capacity admin notices. Its **own** concurrency group though, not `onelake-<ref>` — it

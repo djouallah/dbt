@@ -61,16 +61,33 @@ TABLE = "Timepoint Interactive Detail"
 # accelerator carries four DAX variants (v53/v47/v40/v37) for exactly this reason. So nothing here
 # hardcodes a name: the schema is discovered first and each role resolved from candidates, in
 # order of preference.
-WANTED = {
+#
+# Verified against the installed app on 2026-07-30, which spells them:
+#   Item, Operation, Operation Id, Total CU (s), Workspace Id, User, Billing type, Status
+REQUIRED = {
     "operation_id": ["Operation Id", "OperationId", "Operation ID"],
-    "item_name":    ["Item Name", "ItemName", "Item"],
-    "item_kind":    ["Item Kind", "ItemKind", "Item Type", "ItemType"],
+    "item_name":    ["Item", "Item Name", "ItemName"],
     "operation":    ["Operation", "Operation Name", "OperationName"],
-    "total_cu":     ["Total CU", "Total CU (s)", "TotalCU", "CU (s)", "Total CUs"],
+    "total_cu":     ["Total CU (s)", "Total CU", "TotalCU", "CU (s)", "Total CUs"],
 }
 
-# What counts as a semantic model in the Items/detail schema. Compared case-insensitively.
+# Enrichment, not requirement — resolved if present, silently skipped if not.
+#
+# The installed app carries NO item-kind column on this table, so there is nothing to filter
+# semantic models on. That is less of a loss than it sounds: 'Timepoint Interactive Detail' holds
+# INTERACTIVE operations only, and on this capacity those are Power BI semantic model reads. The
+# operations actually counted are logged to stderr so a warehouse or GraphQL row can't hide in the
+# total unnoticed.
+OPTIONAL = {
+    "item_kind":    ["Item Kind", "ItemKind", "Item Type", "ItemType"],
+    "workspace_id": ["Workspace Id", "WorkspaceId", "Workspace ID"],
+}
+
+# What counts as a semantic model, when a kind column does exist. Case-insensitive.
 MODEL_KINDS = {"semanticmodel", "dataset", "semantic model"}
+
+# Optional: restrict to one workspace, when the detail table exposes a workspace id.
+WS_FILTER = os.environ.get("CU_WORKSPACE_FILTER", "").strip().lower()
 
 
 def log(*a):
@@ -132,17 +149,22 @@ def discover_columns():
     INFO.VIEW.COLUMNS() is a DAX INFO function, so it goes down the same executeQueries path as
     everything else — no DMV, no XMLA endpoint, no extra permission.
     """
-    rows = strip_prefix(execute_dax(
-        f'EVALUATE FILTER(INFO.VIEW.COLUMNS(), [Table] = "{TABLE}")'))
-    cols = {r.get("Name") for r in rows if r.get("Name")}
+    rows = strip_prefix(execute_dax("EVALUATE INFO.VIEW.COLUMNS()"))
+    by_table = {}
+    for r in rows:
+        by_table.setdefault(r.get("Table"), set()).add(r.get("Name"))
+    cols = by_table.get(TABLE, set())
     if not cols:
         die(f"the semantic model at {WS}/{MODEL} has no table named '{TABLE}'. Either that is not "
-            f"the Fabric Capacity Metrics model, or this app version renamed it.")
+            f"the Fabric Capacity Metrics model, or this app version renamed it. Tables present: "
+            f"{sorted(t for t in by_table if t)}")
     if DEBUG:
-        log(f"  '{TABLE}' columns: {sorted(cols)}")
+        # Every table, not just this one: when a name moves, the replacement is usually next door.
+        for t in sorted(x for x in by_table if x):
+            log(f"  [{t}] {sorted(c for c in by_table[t] if c and not c.startswith('RowNumber-'))}")
 
     resolved, missing = {}, []
-    for role, candidates in WANTED.items():
+    for role, candidates in REQUIRED.items():
         hit = next((c for c in candidates if c in cols), None)
         if hit:
             resolved[role] = hit
@@ -150,7 +172,14 @@ def discover_columns():
             missing.append(f"{role} (tried {candidates})")
     if missing:
         die(f"'{TABLE}' exists but these columns were not found: {'; '.join(missing)}. "
-            f"Present: {sorted(cols)}. Add the actual name to WANTED in this file.")
+            f"Present: {sorted(cols)}. Add the actual name to REQUIRED in this file.")
+
+    for role, candidates in OPTIONAL.items():
+        hit = next((c for c in candidates if c in cols), None)
+        if hit:
+            resolved[role] = hit
+        else:
+            log(f"note: no {role} column on '{TABLE}' (tried {candidates}) — not filtering on it")
     return resolved
 
 
@@ -187,6 +216,14 @@ def detail_dax(tp, cap_ids, c):
     caps = ", ".join(f'"{x}"' for x in cap_ids)
     lit = (f"DATE({tp.year}, {tp.month}, {tp.day}) + "
            f"TIME({tp.hour}, {tp.minute}, {tp.second})")
+    # Only project what the installed app version actually has — the optional roles are absent on
+    # at least one version, and naming a missing column fails the whole query.
+    proj = [("OperationId", c["operation_id"]), ("ItemName", c["item_name"]),
+            ("Operation", c["operation"]), ("TotalCU", c["total_cu"])]
+    for alias, role in (("ItemKind", "item_kind"), ("WorkspaceId", "workspace_id")):
+        if role in c:
+            proj.append((alias, c[role]))
+    cols = ",\n        ".join(f'"{a}", \'{TABLE}\'[{n}]' for a, n in proj)
     return f"""
 DEFINE
     MPARAMETER 'CapacitiesList' = {{ {caps} }}
@@ -194,11 +231,7 @@ DEFINE
 EVALUATE
     SELECTCOLUMNS (
         '{TABLE}',
-        "OperationId", '{TABLE}'[{c['operation_id']}],
-        "ItemName",    '{TABLE}'[{c['item_name']}],
-        "ItemKind",    '{TABLE}'[{c['item_kind']}],
-        "Operation",   '{TABLE}'[{c['operation']}],
-        "TotalCU",     '{TABLE}'[{c['total_cu']}]
+        {cols}
     )
 """.strip()
 
@@ -212,6 +245,7 @@ def collect(tps, cap_ids, cols):
     on operation id is the difference between a number and a fiction.
     """
     seen = {}
+    has_kind = "item_kind" in cols
 
     def one(tp):
         return tp, strip_prefix(execute_dax(detail_dax(tp, cap_ids, cols)))
@@ -221,7 +255,9 @@ def collect(tps, cap_ids, cols):
     with ThreadPoolExecutor(max_workers=4) as pool:
         for i, (tp, rows) in enumerate(pool.map(one, tps), 1):
             for r in rows:
-                if str(r.get("ItemKind", "")).strip().lower() not in MODEL_KINDS:
+                if has_kind and str(r.get("ItemKind", "")).strip().lower() not in MODEL_KINDS:
+                    continue
+                if WS_FILTER and str(r.get("WorkspaceId", "")).strip().lower() != WS_FILTER:
                     continue
                 oid = r.get("OperationId")
                 cu = r.get("TotalCU")
@@ -281,6 +317,16 @@ def main():
 
     seen = collect(tps, cap_ids, cols)
     log(f"{len(seen)} distinct operations across {len(tps)} timepoints")
+
+    # With no item-kind column there is no way to prove every row is a semantic model, so name what
+    # got counted. A warehouse or GraphQL operation inflating the total should be visible here
+    # rather than silently folded into a number labelled "semantic model CU".
+    by_op = {}
+    for _name, op, cu in seen.values():
+        n, tot = by_op.get(op, (0, 0.0))
+        by_op[op] = (n + 1, tot + cu)
+    for op, (n, tot) in sorted(by_op.items(), key=lambda kv: -kv[1][1]):
+        log(f"  counted {n:>4} x {op or '(unnamed)'}  = {tot:,.1f} CU")
     render(seen, end - timedelta(minutes=WINDOW_MIN), end)
 
 

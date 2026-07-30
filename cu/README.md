@@ -63,18 +63,31 @@ carrying its full `Total CU`**. Summing the rows would multiply each operation b
 buckets it happens to span. `collect()` keys on operation id instead. Anyone "simplifying" that
 into a `SUM` produces numbers that are wrong by one to two orders of magnitude and look plausible.
 
-**Service principals probably do not work.** The Capacity Metrics semantic model is widely reported
-to reject them, and this workflow is CI-only, so that is the most likely way it fails. The script
-reads `PBI_TOKEN` and nothing else, and the workflow prefers a `PBI_TOKEN` secret over the OIDC SP
-when one exists — so the fallback is a user token pasted as a secret. Those expire in about an
-hour, so treat it as a per-investigation thing rather than a standing secret. A 401/403 says all
-this in the error message.
+**The service principal works — measured, against the expectation.** The community consensus is
+that the Capacity Metrics semantic model rejects service principals, and this was built assuming
+that would be the first thing to fail. It isn't: run 30536137179 read the model on the OIDC SP with
+no 401/403. The `PBI_TOKEN` secret path is kept as the fallback anyway, because the workflow prefers
+a secret over the SP when one is set and that costs nothing to leave in place. A user token expires
+in about an hour, so it is a per-investigation thing, not a standing secret.
+
+**There is no item-kind column, so "semantic model" is not enforced.** The installed app's
+`'Timepoint Interactive Detail'` carries `Item`, `Operation`, `Operation Id`, `Total CU (s)`,
+`Workspace Id`, `User`, `Billing type`, `Status`, `Duration (s)`, `Timepoint CU (s)` — and no item
+kind of any spelling. So nothing can filter the table down to semantic models. Two things make that
+tolerable: the table holds **interactive** operations only, which on this capacity are Power BI
+model reads; and the script logs every operation name it counted to stderr, so a warehouse or
+GraphQL row inflating the total is visible rather than hidden inside a number labelled "semantic
+model CU". `workspace_filter` is the one narrowing actually available — pass the dbt workspace GUID
+to exclude everything else on the capacity.
 
 **Column names move between app versions.** Microsoft's own fabric-toolbox accelerator ships four
-DAX variants (v53/v47/v40/v37) for this reason. Nothing here hardcodes a name: `discover_columns()`
-reads the real schema via `INFO.VIEW.COLUMNS()` first and resolves each role from a candidate list
-in `WANTED`. A version bump fails with the actual column list printed, not silently empty. Fix it
-by adding the new spelling to `WANTED`.
+DAX variants (v53/v47/v40/v37) for this reason, and the miss above is exactly the failure mode —
+the candidate list said `Item Name`, the app says `Item`. Nothing hardcodes a name:
+`discover_columns()` reads the real schema via `INFO.VIEW.COLUMNS()` first and resolves each role
+from a candidate list. Roles in `REQUIRED` fail loudly with the actual column list printed; roles in
+`OPTIONAL` degrade to "not filtering on it". Fix a miss by adding the new spelling to the list.
+With `debug: true` it prints every table's columns, not just this one — when a name moves, the
+replacement is usually next door.
 
 **14-day retention, ~6 minute lag, 5–64 minute smoothing.** A dispatch immediately after a
 benchmark sees nothing. A window older than 14 days is rejected up front rather than returning an

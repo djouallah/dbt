@@ -35,6 +35,10 @@ on:
         description: "capacity GUID (blank = every capacity the metrics model can see)"
         type: string
         default: ""
+      workspace_filter:
+        description: "restrict to one workspace GUID (blank = all). The detail table has no item-kind column, so this is the only narrowing available."
+        type: string
+        default: ""
       utc_offset_hours:
         description: "the UTC offset configured IN the Capacity Metrics model (default install: 0)"
         type: string
@@ -66,6 +70,7 @@ jobs:
       CU_METRICS_WORKSPACE_ID: ${{ inputs.metrics_workspace_id }}
       CU_METRICS_MODEL_ID: ${{ inputs.metrics_model_id }}
       CU_CAPACITY_ID: ${{ inputs.capacity_id }}
+      CU_WORKSPACE_FILTER: ${{ inputs.workspace_filter }}
       CU_WINDOW_MINUTES: ${{ inputs.window_minutes }}
       CU_END_UTC: ${{ inputs.end_utc }}
       CU_UTC_OFFSET_HOURS: ${{ inputs.utc_offset_hours }}
