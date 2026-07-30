@@ -1,4 +1,4 @@
-"""Parity dashboard: duckrun.get_stats() over EVERY engine's output, pivoted to $GITHUB_STEP_SUMMARY.
+"""Mart parity dashboard: duckrun.get_stats() over EVERY engine's output, pivoted to $GITHUB_STEP_SUMMARY.
 
 The project's thesis is: same raw data -> four engines (duckrun/Delta, iceberg, Fabric Warehouse,
 Spark) -> identical output. So the final row counts should line up column-for-column. get_stats reads
@@ -23,9 +23,19 @@ ENGINES = [("duckrun", "dbt_delta", "lakehouses"),
            ("spark", "dbt_spark", "lakehouses"),
            ("dwh", "dbt_dwh", "warehouses")]
 
-# The shared final tables every engine emits (order = pipeline order).
-TABLES = ["stg_csv_archive_log", "dim_calendar", "dim_duid",
-          "fct_price", "fct_scada", "fct_price_today", "fct_scada_today", "fct_summary"]
+# The mart tables the dashboard reports on — the three things actually consumed downstream.
+#
+# Deliberately NOT every table each engine holds. The raw facts (fct_price, fct_scada and their
+# _today pairs) and the staging view are inputs: their rows are already implied by fct_summary's,
+# and the four engines write them in genuinely different physical layouts by design, so a
+# per-engine file/row-group row for them is noise in a parity table. get_stats() still reads
+# everything — this list only decides what gets rendered.
+#
+# This table IS the cross-engine check. The only assertion left in the dbt suite is a grain test
+# that reads fct_summary and nothing else, so a disagreement between engines shows up here or
+# nowhere: a ⚠️ on a row means the four outputs are not the same, and it is the one signal that
+# can say so.
+TABLES = ["dim_calendar", "dim_duid", "fct_summary"]
 
 # The get_stats() detail carried per table (see stats_for) and how each column is rendered.
 DETAIL_KEYS = ("schema", "total_rows", "num_files", "num_row_groups",
@@ -84,72 +94,6 @@ def stats_for(guid):
             for r in rows}
 
 
-def duid_probe(guid, schemas):
-    """Why does the fct_scada.DUID -> dim_duid relationships test report ~100% orphans?
-
-    Prints the facts needed to tell the three candidate causes apart:
-      - dim_duid is empty            -> dim rows == 0
-      - the join key is dirty        -> exact overlap == 0 but trim/upper overlap > 0
-      - fct_scada.DUID holds the
-        wrong CSV field (misaligned
-        positional read_csv layout)  -> both overlaps 0 and the fct samples don't look like DUIDs
-    Probes fct_scada_today (small) rather than fct_scada (~70M rows).
-    """
-    base = tables_path(guid)
-    con = reader(guid)
-
-    def scan(table):
-        return f"delta_scan('{base}/{schemas[table]}/{table}')"
-
-    def one(sql):
-        return con.con.sql(sql).fetchall()
-
-    dim, fct = scan("dim_duid"), scan("fct_scada_today")
-    d_rows, d_distinct = one(f"SELECT count(*), count(DISTINCT DUID) FROM {dim}")[0]
-    f_rows, f_distinct = one(f"SELECT count(*), count(DISTINCT DUID) FROM {fct}")[0]
-    exact = one(f"SELECT count(*) FROM (SELECT DISTINCT DUID d FROM {fct}) c "
-                f"JOIN (SELECT DISTINCT DUID d FROM {dim}) p USING (d)")[0][0]
-    loose = one(f"SELECT count(*) FROM (SELECT DISTINCT upper(trim(DUID)) d FROM {fct}) c "
-                f"JOIN (SELECT DISTINCT upper(trim(DUID)) d FROM {dim}) p USING (d)")[0][0]
-    d_sample = [r[0] for r in one(f"SELECT DISTINCT DUID FROM {dim} ORDER BY 1 LIMIT 8")]
-    f_sample = [r[0] for r in one(f"SELECT DISTINCT DUID FROM {fct} ORDER BY 1 LIMIT 8")]
-
-    # Mirror to stderr as well: $GITHUB_STEP_SUMMARY is renderable only in the web UI and is NOT
-    # retrievable from the API, so a summary-only diagnostic cannot be read from the job log.
-    sys.stderr.write(
-        f"  [duid_probe] dim_duid={d_rows} rows/{d_distinct} distinct  "
-        f"fct_scada_today={f_rows} rows/{f_distinct} distinct  "
-        f"exact_overlap={exact}  loose_overlap={loose}\n"
-        f"  [duid_probe] dim sample={d_sample}\n"
-        f"  [duid_probe] fct sample={f_sample}\n")
-
-    print("## 🔎 DUID join probe (`fct_scada_today` → `dim_duid`)\n")
-    print("| probe | value |")
-    print("| --- | --- |")
-    print(f"| `dim_duid` rows / distinct DUID | {d_rows:,} / {d_distinct:,} |")
-    print(f"| `fct_scada_today` rows / distinct DUID | {f_rows:,} / {f_distinct:,} |")
-    print(f"| distinct DUIDs matching **exactly** | {exact:,} |")
-    print(f"| distinct DUIDs matching after `upper(trim())` | {loose:,} |")
-    print(f"| `dim_duid` DUID sample | {', '.join(f'`{v}`' for v in d_sample) or '—'} |")
-    print(f"| `fct_scada_today` DUID sample | {', '.join(f'`{v}`' for v in f_sample) or '—'} |")
-    print()
-    if d_rows == 0:
-        print("> **Cause: `dim_duid` is empty.** The facts have nothing to join to — look at the "
-              "`JOIN states ON a.Region = states.RegionID` inner join and the `has_new_duids` "
-              "incremental gate in `dim_duid.sql`.\n")
-    elif exact == 0 and loose > 0:
-        print(f"> **Cause: dirty join key.** {loose:,} DUIDs match once case/whitespace is normalised "
-              "but 0 match exactly — `dim_duid` does not `trim()` DUID (it only trims "
-              "`FuelSourceDescriptor`).\n")
-    elif exact == 0:
-        print("> **Cause: the two columns are not the same field.** Neither exact nor normalised "
-              "matching finds anything, so compare the samples above — a positional `read_csv` "
-              "layout in `fct_scada.sql` that is off by one would put the wrong CSV field in `DUID`.\n")
-    else:
-        print(f"> {exact:,} DUIDs join cleanly; the orphans are a genuine subset "
-              "(e.g. retired units absent from the current AEMO registration list).\n")
-
-
 def fmt(v, kind):
     if v is None:
         return "—"
@@ -166,8 +110,9 @@ def parity_table(per_engine, engines):
     The last two rows fold in what used to be a separate per-engine totals table:
     total rows carries the parity ⚠️ (counts must line up); total MB doesn't (physical
     size legitimately differs by writer/compression)."""
-    print("## 🧮 Row-count parity\n")
-    print("<sub>⚠️ = differs or missing across engines.</sub>\n")
+    print("## 🧮 Mart row-count parity\n")
+    print("<sub>The three mart tables consumed downstream. ⚠️ = differs or missing "
+          "across engines.</sub>\n")
     print("| table | " + " | ".join(engines) + " |")
     print("| --- | " + " | ".join("--:" for _ in engines) + " |")
     for t in TABLES:
@@ -179,17 +124,20 @@ def parity_table(per_engine, engines):
 
     def total(e, key):
         # An engine whose stats fetch failed has an empty dict: render "—", not 0.
+        # Summed over TABLES only, so the total is the sum of the rows above it and not of the
+        # raw facts the dashboard no longer shows — a total that outran its own column would
+        # read as a missing row rather than as a different scope.
         if not per_engine[e]:
             return None
-        return sum(d.get(key) or 0 for d in per_engine[e].values())
+        return sum(d.get(key) or 0 for t, d in per_engine[e].items() if t in TABLES)
 
     rows = [total(e, "total_rows") for e in engines]
     present = [v for v in rows if v is not None]
     match = len(present) == len(engines) and len(set(present)) == 1
-    print(f"| **total rows**{'' if match else ' ⚠️'} | "
+    print(f"| **mart total rows**{'' if match else ' ⚠️'} | "
           + " | ".join(fmt(v, "num") for v in rows) + " |")
     mbs = [total(e, "size_mb") for e in engines]
-    print("| **total MB** | "
+    print("| **mart total MB** | "
           + " | ".join(fmt(None if v is None else round(v, 1), "num") for v in mbs) + " |")
     print()
 
@@ -206,7 +154,7 @@ def detail_tables(per_engine, engines):
     The parity table above only proves the row counts agree, not that the engines wrote comparable
     physical layouts — this is the "why is my table slow / full of small files" view.
     """
-    print("## 🔬 Physical layout\n")
+    print("## 🔬 Mart physical layout\n")
     heads = ["table", "engine", "writer"] + [h for _, h, _ in DETAIL_COLS]
     aligns = ["---", "---", "---"] + ["--:" if k == "num" else "---" for _, _, k in DETAIL_COLS]
     print("| " + " | ".join(heads) + " |")
@@ -232,19 +180,17 @@ def one_engine(item, kind):
 
 
 def main():
-    per_engine, probe = {}, None
+    per_engine = {}
     # The four items are independent and the iceberg one alone can take >10 minutes to read
     # over OneLake, so fetch them concurrently: wall-clock = slowest engine, not the sum.
     with ThreadPoolExecutor(max_workers=len(ENGINES)) as pool:
         futures = {engine: pool.submit(one_engine, item, kind) for engine, item, kind in ENGINES}
     for engine, item, kind in ENGINES:
         try:
-            guid, per_engine[engine] = futures[engine].result()
-            if engine == "duckrun" and {"dim_duid", "fct_scada_today"} <= per_engine[engine].keys():
-                probe = (guid, {t: d["schema"] for t, d in per_engine[engine].items()})
+            _, per_engine[engine] = futures[engine].result()
             sys.stderr.write(f"  {engine} ({item}): "
                              f"{sum(d.get('total_rows') or 0 for d in per_engine[engine].values()):,}"
-                             f" rows total\n")
+                             f" rows total (all tables)\n")
         except Exception as e:
             per_engine[engine] = {}
             sys.stderr.write(f"  {engine} ({item}) FAILED: {e}\n")
@@ -252,13 +198,6 @@ def main():
     engines = [e for e, _, _ in ENGINES]
     parity_table(per_engine, engines)
     detail_tables(per_engine, engines)
-
-    # Diagnostic only — must never fail the parity dashboard.
-    if probe:
-        try:
-            duid_probe(*probe)
-        except Exception as e:
-            sys.stderr.write(f"  duid_probe FAILED: {e}\n")
 
 
 if __name__ == "__main__":

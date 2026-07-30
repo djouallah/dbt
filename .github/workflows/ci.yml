@@ -1,7 +1,14 @@
 name: dbt
 
-# land once -> run the same models on 4 engines in Fabric -> test every output with one
-# neutral reader -> report. Compute is always Fabric; the runner only downloads and drives.
+# land once -> `dbt build` the same models on 4 engines in Fabric -> report. Compute is always
+# Fabric; the runner only downloads and drives.
+#
+# Each leg tests its own output, in the same invocation that wrote it: `dbt build` interleaves
+# model and test, so a test failure stops that leg at the node that broke rather than surfacing a
+# run later. What that costs is the neutral reader: the singular suite in tests/ is DuckDB SQL and
+# `data_tests: +enabled` in dbt_project.yml admits it only on the duckdb-family targets, so dwh and
+# spark are now graded by their generic column tests alone. The separate test job that used to run
+# the reference suite against all four items through one duckrun reader is gone.
 
 on:
   push:
@@ -113,7 +120,7 @@ jobs:
       # notebook's own pip list, not here.
       - run: pip install duckrun
       - run: python .github/scripts/provision.py ${{ matrix.engine }} >> "$GITHUB_ENV"
-      - name: dbt run in Fabric
+      - name: dbt build in Fabric
         run: python .github/scripts/fabric_run.py ${{ matrix.engine }}
 
   # dwh + spark: dbt client on the runner, compute on Fabric's own servers.
@@ -150,77 +157,41 @@ jobs:
             SQL=$(az account get-access-token --resource https://database.windows.net --query accessToken -o tsv)
             echo "::add-mask::$SQL"; echo "FABRIC_ACCESS_TOKEN=$SQL" >> "$GITHUB_ENV"
           fi
-      - name: dbt run --target ${{ matrix.engine }}
+      - name: dbt build --target ${{ matrix.engine }}
         # `|| dbt retry`: a killed Livy session (or any transient failure) fails only the
-        # models it touched; retry re-runs just those in a FRESH session/process instead of
+        # nodes it touched; retry re-runs just those in a FRESH session/process instead of
         # failing the whole leg. retry replays the original flags from target/run_results.
         # retry needs --target too: without it dbt renders the profile's DEFAULT target
         # (duckrun), which demands ONELAKE_TABLES_PATH this job doesn't have.
-        run: dbt run --target ${{ matrix.engine }} --profiles-dir . || dbt retry --target ${{ matrix.engine }} --profiles-dir .
+        #
+        # No `--exclude tag:heavy` any more: nothing carries the tag. It was on the assertions
+        # that scanned fct_summary whole, and those were deleted when the suite was cut back to
+        # one grain check. A selector matching zero nodes is a warning and a lie about what runs.
+        run: dbt build --target ${{ matrix.engine }} --profiles-dir . || dbt retry --target ${{ matrix.engine }} --profiles-dir .
       # spark merges its summary, so its rebuild lever is --full-refresh. dwh needs no step:
-      # REBUILD_SUMMARY is in the env and its model reads it (delete+insert, never a DROP).
+      # REBUILD_SUMMARY is in the env and its model reads it (merge, never a DROP).
+      # `build`, not `run`: the rebuild lands AFTER the main invocation already tested the
+      # pre-rebuild table, so the tests have to be re-run against what replaced it.
       - name: Rebuild fct_summary
         if: matrix.engine == 'spark' && env.REBUILD_SUMMARY == '1'
-        run: dbt run --select fct_summary --full-refresh --target spark --profiles-dir .
+        run: dbt build --select fct_summary --full-refresh --target spark --profiles-dir .
       - if: always()
         uses: actions/upload-artifact@v4
         with:
           name: dbt-target-${{ matrix.engine }}
           path: target/
 
-  # One neutral duckrun reader (DuckDB + delta_scan) grades EVERY engine's output: the thesis is
-  # "engine doesn't matter, output does". Read via Delta, not the iceberg reader — that one chokes
-  # on XTable-generated metadata, but every item is also a Delta table on OneLake.
-  test:
-    name: test ${{ matrix.engine }}
-    needs: [fabric, server]
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
-    strategy:
-      # Grading four outputs is the point — one bad output must not hide the other three.
-      fail-fast: false
-      matrix:
-        include:
-          - {engine: duckrun, item: dbt_delta, kind: lakehouses}
-          - {engine: iceberg, item: dbt_iceberg, kind: lakehouses}
-          - {engine: dwh, item: dbt_dwh, kind: warehouses}
-          - {engine: spark, item: dbt_spark, kind: lakehouses}
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with: {python-version: "3.11"}
-      - run: pip install duckrun pytz
-      - name: Resolve ${{ matrix.item }} -> ONELAKE_TABLES_PATH
-        run: python .github/scripts/item_path.py ${{ matrix.item }} ${{ matrix.kind }} >> "$GITHUB_ENV"
-      - name: dbt test — ${{ matrix.engine }} output
-        run: |
-          rc=0; dbt test --target duckrun --profiles-dir . \
-            --exclude tag:heavy || rc=$?
-          cp target/run_results.json "rr-${{ matrix.engine }}.json" 2>/dev/null || true
-          exit $rc
-      # A failing determinism test reports only a row COUNT, which says the table drifted but not
-      # how. The test body is plain SQL over refs, so `dbt show --inline` re-runs it verbatim and
-      # prints the offending dates with expected vs actual side by side. Read it as: actual >
-      # expected on every date means rows the write path could not remove; expected differing
-      # BETWEEN engines means an input differs, not fct_summary.
-      - name: Show fct_summary diff rows — ${{ matrix.engine }}
-        if: failure()
-        run: |
-          dbt show --target duckrun --profiles-dir . --limit 50 \
-            --inline "$(cat tests/assert_fct_summary_matches_recomputation.sql)" || true
-      - if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: test-results-${{ matrix.engine }}
-          path: rr-${{ matrix.engine }}.json
-          if-no-files-found: warn
-
   # The workflow's ONLY step summary. No `if: always()`: it reports on all four engines side by
   # side, so a partial run would publish a table with holes in it and read as real drift. If a
   # leg failed, that leg's own job is where to look — fix it, then the summary means something.
+  #
+  # Mart-only. stats.py reads every table each item holds, but the parity question is asked of the
+  # three tables that are actually consumed downstream (fct_summary, dim_duid, dim_calendar); the
+  # staging view and the raw facts differ in physical layout by design and their rows are already
+  # implied by the summary's.
   summary:
     name: summary
-    needs: test
+    needs: [fabric, server]
     runs-on: ubuntu-latest
     # get_stats() over OneLake is slow on the iceberg item (12m+ observed for that one engine);
     # 15 minutes was cancelling stats.py mid-table and turning slowness into a red run.
@@ -230,10 +201,4 @@ jobs:
       - uses: actions/setup-python@v5
         with: {python-version: "3.11"}
       - run: pip install duckrun requests
-      - uses: actions/download-artifact@v4
-        with:
-          pattern: test-results-*
-          path: rr
-          merge-multiple: true
-      - run: python .github/scripts/summary.py rr >> "$GITHUB_STEP_SUMMARY"
       - run: python .github/scripts/stats.py >> "$GITHUB_STEP_SUMMARY"

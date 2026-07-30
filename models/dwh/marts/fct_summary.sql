@@ -60,8 +60,8 @@ dispatch_duids AS (
 ),
 {% if scoped %}
 -- Dates whose stored content could differ from a clean recomputation; everything older
--- is settled. The trailing window must stay >= the window
--- assert_fct_summary_matches_recomputation checks (see the duckdb version).
+-- is settled. The window's old floor (>= what assert_fct_summary_matches_recomputation
+-- checked) died with that test -- shrinking it is now silent (see the duckdb version).
 rebuild_dates AS (
   -- Never seen before: archive backfill, or a first build catching up.
   SELECT DISTINCT s.[DATE] AS [date] FROM {{ ref('fct_scada') }} s

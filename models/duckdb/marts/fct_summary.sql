@@ -17,9 +17,11 @@
 --
 -- No merge path DELETES a row the recomputation stops producing, which is why dispatch_duids
 -- below gates the intraday branch to units the daily branch can reproduce.
--- assert_fct_summary_matches_recomputation applies the SAME filter and is the tripwire -- the
--- two must always change together. Full story: LEARNINGS.md, "Two branches of one model, two
--- different unit universes"; CLAUDE.md, "fct_summary must be a pure function of its inputs".
+-- That gate is now UNGUARDED: assert_fct_summary_matches_recomputation mirrored the same filter
+-- and failed by construction if the two drifted apart, and it was deleted when the suite was cut
+-- back to a grain check. Treat any edit to dispatch_duids as load-bearing -- nothing will catch a
+-- mistake in it. Full story: LEARNINGS.md, "Two branches of one model, two different unit
+-- universes"; CLAUDE.md, "fct_summary must be a pure function of its inputs".
 {{ config(
     materialized='incremental',
     incremental_strategy='merge',
@@ -53,8 +55,10 @@ dispatch_duids AS (
 -- is settled: its daily file has landed and been folded in, so recomputing it would
 -- reproduce it exactly.
 --
--- The trailing window must stay >= the window assert_fct_summary_matches_recomputation
--- checks, or CI can go permanently red on drift this model is not allowed to repair.
+-- The window used to have a hard floor: it had to stay >= the window
+-- assert_fct_summary_matches_recomputation checked, or CI went permanently red on drift this
+-- model is not allowed to repair. That test is gone, so the constraint is gone with it -- and so
+-- is the alarm. Shrinking this window now silently reduces what can be repaired.
 rebuild_dates AS (
   -- Never seen before: archive backfill, or a first build catching up.
   SELECT DISTINCT s.DATE AS date FROM {{ ref('fct_scada') }} s

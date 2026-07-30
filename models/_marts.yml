@@ -54,6 +54,11 @@ models:
       - name: file
         description: Source CSV filename the row was ingested from (part of the merge key)
         quote: true
+  # Documented, asserted in exactly one way: tests/assert_fct_summary_grain.sql checks that
+  # (date, time, DUID) is unique, and that is the whole contract. The not_null and
+  # relationships tests that used to sit on these columns were removed on purpose — the
+  # relationships one read dim_duid, and every not_null was a claim about what the source
+  # ought to contain. Neither can be re-added without reversing that decision.
   - name: fct_summary
     description: >
       Power BI-facing summary — one row per (date, time, DUID) merging generation (mw)
@@ -62,35 +67,13 @@ models:
     columns:
       - name: date
         description: Calendar date of the dispatch interval
-        tests:
-          - not_null:
-              config:
-                tags: [heavy]
       - name: time
         description: Dispatch interval time of day encoded as HHMM integer (5-minute grain)
       - name: DUID
         description: Dispatchable Unit Identifier of the generating unit
-        tests:
-          - not_null:
-              config:
-                tags: [heavy]
-          - relationships:
-              arguments:
-                to: ref('dim_duid')
-                field: DUID
-              config:
-                tags: [heavy]
       - name: mw
         description: Generation for the interval (MW)
-        tests:
-          - not_null:
-              config:
-                tags: [heavy]
       - name: price
         description: Regional Reference Price matched via the unit's region ($/MWh)
-        tests:
-          - not_null:
-              config:
-                tags: [heavy]
       - name: cutoff
         description: High-water mark (max SETTLEMENTDATE seen when the batch was written) used by the intraday top-up branch

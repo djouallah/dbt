@@ -5,10 +5,10 @@ pipeline on **four execution engines**. You pick the engine by switching the dbt
 the model DAG, the `ref()` graph, and the tests are identical no matter which one you run.
 
 ```bash
-dbt run --target duckrun    # DuckDB executes, delta-rs writes Delta Lake   (default; runs offline)
-dbt run --target iceberg    # DuckDB + Iceberg REST catalog on OneLake
-dbt run --target dwh        # Fabric Warehouse, pure T-SQL
-dbt run --target spark      # Fabric Spark (Livy), writes Delta
+dbt build --target duckrun  # DuckDB executes, delta-rs writes Delta Lake   (default; runs offline)
+dbt build --target iceberg  # DuckDB + Iceberg REST catalog on OneLake
+dbt build --target dwh      # Fabric Warehouse, pure T-SQL
+dbt build --target spark    # Fabric Spark (Livy), writes Delta
 ```
 
 ## The one idea
@@ -73,13 +73,12 @@ pip install duckrun                 # brings dbt-duckdb, duckdb, deltalake
 export FILES_PATH=./landing         # where the script lands raw CSVs
 export ONELAKE_TABLES_PATH=./warehouse   # where duckrun writes Delta tables
 python download_aemo.py             # land the raw CSVs once, then:
-dbt run  --target duckrun
-dbt test --target duckrun
+dbt build --target duckrun          # models + tests, one DAG walk
 ```
 
 ### The other engines
 
-Install the adapter and set the engine's env vars, then `dbt run --target <name>`:
+Install the adapter and set the engine's env vars, then `dbt build --target <name>`:
 
 | target | adapter | key env vars |
 |---|---|---|
@@ -97,7 +96,12 @@ OneLake**. It's a matrix job (one per engine) that, in the `testing` workspace:
 1. provisions the engine's Fabric item(s) **if missing** — a lakehouse for
    duckrun/iceberg/spark, a lakehouse + warehouse for dwh (`.github/scripts/provision.py`);
 2. lands the raw AEMO files into that lakehouse's `Files` with the shared notebook;
-3. `dbt run` + `dbt test` against OneLake for that target.
+3. `dbt build` against OneLake for that target — each engine writes and tests its own output in
+   one DAG walk. A final `summary` job then reads all four items back through Delta and puts the
+   three mart tables (`dim_calendar`, `dim_duid`, `fct_summary`) side by side; that parity table
+   is the only thing comparing engines to each other. Note the singular tests in `tests/` are
+   DuckDB SQL and enabled on the duckdb-family targets only, so `dwh` and `spark` run just the
+   generic key tests on the two dimensions.
 
 Auth is **OIDC only** (the `fabric-github-deploy` app is Admin in the workspace) — the repo
 needs just `AZURE_CLIENT_ID` / `AZURE_TENANT_ID` secrets and a federated credential trusting
@@ -134,7 +138,26 @@ dbt compile --target duckrun     # renders the DuckDB SQL (writes local Delta if
 
 ## Tests
 
-Generic column tests (`not_null`, `unique`, `relationships`, `accepted_values` in
-`models/_*.yml`) run on **all four** targets — dbt renders them per adapter dialect. The custom
-singular assertions in `tests/` are written in DuckDB SQL and are the **reference suite**,
-enabled only on the DuckDB-family targets (`dbt_project.yml`).
+Six assertions, over three tables, and **no test reads more than the one table it is about**:
+
+| test | table | what it catches |
+|---|---|---|
+| `assert_fct_summary_grain` | `fct_summary` | a duplicate `(date, time, DUID)` — full table, no window |
+| `unique` + `not_null` on `DUID` | `dim_duid` | a duplicate or missing unit key |
+| `assert_duid_has_no_whitespace` | `dim_duid` | a padded `DUID`, which T-SQL matches and DuckDB/Spark don't |
+| `unique` + `not_null` on `date` | `dim_calendar` | a duplicate or missing calendar date |
+
+`fct_summary` is asserted for **uniqueness and nothing else**. It makes no claim about intervals
+per day, unit counts, which dates should exist, or whether `mw`/`price` agree with the facts they
+came from — so it cannot go red because AEMO published a short day or a backlog drained halfway.
+The flip side is that it is the *only* thing watching that table: drift from `f(inputs)`, craters,
+NULL prices and duplicates in the raw facts are all unasserted by design. The fact models and the
+staging view carry descriptions and no tests at all.
+
+Cross-engine agreement is not tested either — every assertion compares a table to itself. The
+row-count parity table in the `summary` job is the one place the four outputs are compared.
+
+Generic column tests run on **all four** targets — dbt renders them per adapter dialect. The
+singular tests in `tests/` are DuckDB SQL and so are enabled only on the DuckDB-family targets
+(`dbt_project.yml`), which means `dwh` — the one engine whose writes can genuinely race — is not
+covered by the grain check. Run it there by hand.

@@ -3,8 +3,23 @@
 One dbt project, four engines (`duckrun`, `iceberg`, `dwh`, `spark`), one landed copy of the
 data. The thesis is *the engine doesn't matter, the output does* — so the models are written
 per dialect (`models/duckdb`, `models/dwh`, `models/spark`, gated by `+enabled` in
-`dbt_project.yml`) and one neutral DuckDB suite grades all four outputs by reading them through
-Delta on OneLake.
+`dbt_project.yml`) and every leg runs `dbt build`, so each engine writes and tests its own output
+in one DAG walk. CI's final word is `stats.py`, which reads all four items through Delta on
+OneLake and puts the three mart tables side by side.
+
+**The test suite covers the mart and nothing else** — `fct_summary`, `dim_duid`, `dim_calendar`.
+The facts and the staging view carry descriptions, no assertions: the grain and
+files-processed tests over `fct_price`/`fct_scada` were deleted deliberately, so an input defect
+is now only visible where it surfaces in the summary. Adding a test on a fact model is a reversal
+of that decision, not an oversight being corrected.
+
+**And the suite in `tests/` runs on the duckdb-family targets only** — `data_tests: +enabled` in
+`dbt_project.yml` gates it, and it is DuckDB SQL, so it cannot render on dwh or spark. Those two
+are graded by their generic column tests plus the mart parity table. That is the trade made when
+the separate neutral-reader test job was removed: the assertions used to run against all four items
+through one duckrun reader. If a determinism question about dwh or spark comes up, the reader still
+exists — point `duckrun.connect(<abfss Tables path>, read_only=True)` at the item from a laptop and
+run the test body by hand.
 
 The traps below have all been hit for real. Each one cost a CI run or worse.
 [LEARNINGS.md](LEARNINGS.md) records the longer investigations behind some of them — measured
@@ -118,9 +133,29 @@ overlap **fails loudly** instead of duplicating. Fabric Warehouse does not: unde
 isolation two transactions overlapping in time can still both insert. Merge shrinks that window
 from *[compile-time file list → write]*, which is unbounded, down to the transaction overlap, and
 T-SQL offers nothing stronger without application locks Fabric DW lacks.
-`assert_fct_price_grain` / `assert_fct_scada_grain` are the detector for the remainder — both are
-scoped to a rolling 30-day window and deliberately **not** tagged `heavy`, because the CI test job
-runs `--exclude tag:heavy` and a tagged tripwire would never fire.
+`assert_fct_summary_grain` is the detector for the remainder, and it is the **only** assertion left
+on `fct_summary` — the fact grain tests, the recomputation test, the crater test and the join test
+were all deleted when the suite was cut back to uniqueness. Three consequences worth holding onto:
+
+- **A duplicate in `fct_scada` / `fct_price` is no longer caught where it enters**, only if it
+  happens to surface as a duplicated `(date, time, DUID)` in the summary. One that lands on a
+  distinct grain key is invisible. Nothing else would have caught it either: the recomputation
+  test recomputed *from* those same facts, so a duplicated source row agreed with itself.
+- **It does not cover dwh**, the one engine whose write path can actually duplicate — under
+  snapshot isolation, without a commit check. It is a singular test, so `data_tests: +enabled`
+  admits it on duckrun and iceberg only. Run it by hand against `dbt_dwh` after any run that could
+  have overlapped (a re-dispatch, a `dbt retry` racing a scheduled run):
+  `duckrun.connect(<dbt_dwh Tables path>, read_only=True)` plus the body of
+  `tests/assert_fct_summary_grain.sql`.
+- **It is deliberately incurious about everything else.** No join to `dim_duid`, no recomputation,
+  no expectation about intervals per day or which dates exist. That is what makes it immune to a
+  short AEMO day or a half-drained backlog — and it is also why a wrong `mw`, a NULL `price` or a
+  missing date now passes silently.
+
+Full table, no date window, no `heavy` tag. A window would encode an assumption about *where*
+duplicates live (recent writes), which is the source knowledge this test is meant to be free of —
+verified against an 8-year-old duplicate, which the earlier 30-day version missed. A tag would
+exclude it from every leg and leave `fct_summary` with no assertion at all.
 
 Before changing a strategy, read the adapter's own source rather than assuming the name means
 what it does elsewhere. duckrun's lives in `dbt/adapters/duckrun/delta_plugin.py`; the Fabric ones
@@ -194,24 +229,31 @@ exact parity. Cause: the incremental source only ever offered dates missing *ent
 date that existed but was incomplete could never be repaired by any write strategy — each
 engine's run history got fossilized into its table.
 
+**Nothing tests this any more.** `assert_fct_summary_matches_recomputation` — which recomputed the
+model's full-refresh logic over a trailing 7-day window and demanded exact equality with the stored
+table — was deleted along with the crater and join tripwires, when the suite was cut back to a
+uniqueness check that reads `fct_summary` alone and assumes nothing about the source. So the rules
+below are now conventions held by code review, not by CI. Every failure mode this section
+describes is one CI used to catch and no longer does; the only surviving signals are the grain
+test and a row-count difference between engines in the `summary` parity table.
+
 Rules that keep it honest:
 
 - The incremental source emits the **complete recomputation** for every date that could still
   be stale — never a partial top-up.
 - The stale set is: dates absent from the target, plus a **trailing 7-day window**, plus dates
   still in the intraday feed. The window is not "the newest daily date": if a run is missed,
-  two daily files land at once and the older one's craters would be unreachable.
-- **The rebuild window must be ≥ the window `assert_fct_summary_matches_recomputation`
-  checks.** A test that inspects a date the model may not repair holds CI red until someone
-  runs `--full-refresh` by hand. Widen both together or neither.
+  two daily files land at once and the older one's craters would be unreachable. There is no
+  longer a test whose window has to be kept ≤ this one; the pairing constraint died with it.
 - **Both branches must cover the same unit universe.** The daily branch reads `fct_scada`
   (DISPATCH_UNIT_SOLUTION, 644 DUIDs); the intraday branch reads `fct_scada_today`
   (DISPATCH_UNIT_SCADA, 406). 28 non-scheduled units appear only in the second — zero rows in
   `fct_scada` across all 369M, ever. Ungated, the intraday branch wrote them, and when the date
   crossed the daily horizon nothing could reproduce them: 11,540 permanent orphans, re-firing
-  daily. The intraday branch is therefore gated on a `dispatch_duids` CTE, and
-  `assert_fct_summary_matches_recomputation` applies the **identical** filter — the two change
-  together or the test fails by construction. Keep that set **unbounded**
+  daily. The intraday branch is therefore gated on a `dispatch_duids` CTE. That gate used to be
+  mirrored by an identical filter in `assert_fct_summary_matches_recomputation`, so changing one
+  without the other failed by construction; the test is gone, so the gate is now unguarded — treat
+  any edit to it as load-bearing. Keep that set **unbounded**
   (`SELECT DISTINCT DUID FROM fct_scada`): the table is append-only so the set only grows and can
   never orphan a row it admitted, whereas a trailing window recreates the bug from the other side.
   Note this class of drift is invisible to "the inputs are append-only" reasoning — no input row
@@ -270,17 +312,25 @@ still run it by hand to reproduce a CI failure. That is a debugging affordance, 
   comparison (`'ERB01' = 'ERB01 '` is TRUE); DuckDB and Spark do not. One trailing space in
   `dim_duid.DUID` put a real unit in `dwh` and in none of the other three, for a year, silently
   — and the row-count gap it produced accused the one engine that was correct.
-  `assert_duid_has_no_whitespace` guards it; any new string key crossing engines needs the same.
-- **The neutral reader cannot grade another engine's rounding.** `DOUBLE → DECIMAL` tie-breaking
+  `assert_duid_has_no_whitespace` guards it — but it is a singular test, so it now runs on the
+  duckdb targets only, and T-SQL padding is a *dwh* pathology. The guard sits on the two engines
+  that cannot exhibit the bug. `dim_duid` is built from the same source everywhere, so a dirty key
+  will still trip it on duckrun; treat that as the alarm for all four. Any new string key crossing
+  engines needs the same.
+- **A DuckDB assertion cannot grade another engine's rounding.** `DOUBLE → DECIMAL` tie-breaking
   differs per dialect — Spark HALF_UP, DuckDB HALF_EVEN, T-SQL a third — so a test asserting a
   DuckDB recomputation *exactly* equals a stored value can only ever pass for `duckrun`. The
-  symptom is ±0.0001 on a few hundred rows and no row-count difference at all. Row counts are
-  dialect-independent; assert those exactly and give the sums a tolerance. See
-  [LEARNINGS.md](LEARNINGS.md).
-- **A green engine is not a reference, and the tests are not cross-engine.**
-  `assert_fct_summary_matches_recomputation` recomputes from *the same item's* inputs and diffs
-  against *that item's* stored table — it asserts self-consistency, never agreement with another
-  engine. So "three red, one green" does not mean the green one is right: dwh passed the
+  symptom is ±0.0001 on a few hundred rows and no row-count difference at all. No test does this
+  any more (the recomputation test is deleted, and the surviving grain check compares a table to
+  itself), so it cannot bite in CI — but it bites anyone who reintroduces a value comparison, or
+  points a DuckDB reader at `dbt_spark` / `dbt_dwh` by hand. Row counts are dialect-independent;
+  assert those exactly and give any sum a tolerance. See [LEARNINGS.md](LEARNINGS.md).
+- **A green engine is not a reference, and no test is cross-engine.** This was already true when
+  `assert_fct_summary_matches_recomputation` existed — it recomputed from *the same item's* inputs
+  and diffed against *that item's* stored table, asserting self-consistency and never agreement
+  with another engine — and it is more true now that the only assertion left compares a table to
+  itself. The `summary` parity table is the sole cross-engine signal in the whole workflow.
+  So "three red, one green" does not mean the green one is right: dwh passed the
   intraday-unit bug purely because `delete+insert` on `[date]` can retract rows, while holding
   5,016 of the very same rows on the still-open date. Read a lone green leg as "this write path
   can retract", not as ground truth, and diff it against the others before believing it. (That
@@ -312,5 +362,31 @@ still run it by hand to reproduce a CI failure. That is a debugging affordance, 
   keeps running workspace-side after the GitHub job dies — it only erased the evidence.
 - `summary` has no `if: always()`. It compares all four engines side by side, so it runs only
   when every leg is green; a summary with holes in it reads as drift that isn't there.
-- Build jobs never run tests — the engine must not grade its own homework. Testing is a
-  separate job with one neutral reader.
+- Every leg is `dbt build` — the engine tests its own output, in the same DAG walk that wrote it.
+  This replaced a separate test job that graded all four items with one neutral duckrun reader.
+  What was bought: a failure stops at the node that broke, and four jobs disappeared. What was
+  paid: the two singular tests in `tests/` are DuckDB SQL gated to the duckdb targets, so dwh and
+  spark run only `unique`/`not_null` on the two dimension keys. Read a green duckrun as "duckrun
+  is self-consistent", never as "all four agree" — the mart parity table in `summary` is the only
+  thing that compares engines to each other.
+- **The suite is two singular tests and four generic ones, on purpose.** `fct_summary` is asserted
+  for grain uniqueness and nothing else; `dim_duid`/`dim_calendar` keep `unique` + `not_null` on
+  their keys, plus the whitespace check. Everything that read an upstream table or encoded an
+  expectation about the source was deleted. A red CI leg now means a duplicate key, a null key or
+  a padded DUID — nothing else. Anything subtler surfaces as a ⚠️ in the parity table or not at all.
+- **The `heavy` tag is gone from the project** — nothing carries it, so `--exclude tag:heavy` was
+  removed from every invocation. It was on the assertions that scanned `fct_summary` whole, and
+  those were deleted; a selector matching zero nodes only emits a warning and misdescribes what
+  ran. Do not re-add the flag without re-adding a tagged test. Related: never pass `--select` or
+  `--exclude` to `dbt retry` — it rejects them and replays the selection from `run_results`, which
+  is why `base` in `fabric_build.py` can be shared between `build` and `retry` only while it holds
+  no selection flag.
+- The DuckDB legs stop retrying once the only failures are data tests (`_only_tests_failed` in
+  `fabric_build.py`). The retry ladder is for transient OneLake commit conflicts, which are a
+  property of the write; a failed assertion is deterministic and would just re-scan on Fabric
+  compute to reach the same verdict.
+- `summary` runs `stats.py` and nothing else, over three tables: `dim_calendar`, `dim_duid`,
+  `fct_summary`. The raw facts are inputs whose rows are implied by the summary's and whose
+  physical layout legitimately differs per writer, so listing them added noise to a parity table.
+  `summary.py` (the four-engine test dashboard) is deleted — its input was the `rr-<engine>.json`
+  artifacts the test matrix uploaded, and there is no test matrix.

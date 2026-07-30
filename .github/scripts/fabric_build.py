@@ -1,5 +1,5 @@
-"""Run `dbt run` for one DuckDB-family engine (argv[1]: `duckrun` = Delta | `iceberg`) against the
-landed data, writing to that engine's OneLake lakehouse.
+"""Run `dbt build` for one DuckDB-family engine (argv[1]: `duckrun` = Delta | `iceberg`) against
+the landed data, writing to that engine's OneLake lakehouse.
 
 CI always runs this inside a throwaway Fabric Python notebook, as the entry script fabric_run.py
 ships via duckrun.run_python — a fresh interpreter whose cwd is the unpacked project root, with
@@ -11,15 +11,34 @@ runnable by hand when you need to reproduce a CI failure. duckrun.auth resolves 
 from whatever is there (the Fabric runtime in a notebook, GitHub OIDC on a runner), so the token
 is never shipped, and config (FILES_PATH, the output path, schema, limits) always arrives via env.
 
-Tests are NOT run here — a separate CI job tests every engine's output with one neutral
-DuckDB/Iceberg reader.
+Tests run HERE, in the same invocation: `dbt build` interleaves model and test, so a broken model
+stops the leg at the node that broke. There is no separate neutral-reader test job any more.
 """
+import json
 import os
 import subprocess
 import sys
 import time
 
 _MAX_ATTEMPTS = 3
+
+
+def _only_tests_failed() -> bool:
+    """True when every failing node of the last invocation was a data test.
+
+    The retry ladder below exists for transient OneLake commit conflicts, which are a property of
+    the WRITE. A data assertion is deterministic — it reads back the table this same invocation
+    just wrote — so replaying it buys a second Fabric-side scan and the identical verdict, and
+    under `dbt build` the downstream nodes it skipped stay skipped. Unreadable or absent
+    run_results means we learned nothing, so fall through to retrying (the old behaviour).
+    """
+    try:
+        with open("target/run_results.json") as fh:
+            results = json.load(fh)["results"]
+    except Exception:
+        return False
+    bad = [r for r in results if r["status"] in ("error", "fail")]
+    return bool(bad) and all(r["unique_id"].startswith("test.") for r in bad)
 
 
 def main() -> int:
@@ -38,8 +57,12 @@ def main() -> int:
     scratch = os.environ.get("TMPDIR") or "/tmp"
     os.environ.setdefault("DUCKDB_TEMP_DIR", os.path.join(scratch, "duckdb_spill"))
 
-    # `dbt run` only — no tests. Testing is a separate CI job: a neutral DuckDB/Iceberg reader runs
-    # the reference suite against every engine's output (the engine must not grade its own homework).
+    # `dbt build`: models and their tests in one DAG walk. The singular tests in tests/ are gated to
+    # the duckdb-family targets by `data_tests: +enabled`, so this is the only place they run.
+    #
+    # No `--exclude tag:heavy`: nothing carries the tag now that the suite is one grain check on
+    # fct_summary plus the dimension keys. Do not re-add the flag without re-adding a heavy test —
+    # a selector matching zero nodes just warns and misdescribes what ran.
     base = ["--target", engine, "--profiles-dir", "."]
 
     # Retry ladder: the OneLake Iceberg REST catalog intermittently rejects a commit with
@@ -51,16 +74,24 @@ def main() -> int:
     # on-run-start `SET GLOBAL temp_directory` on a session whose temp dir is already in use —
     # "Cannot switch temporary directory after the current one has been used" — and every retry
     # is dead on arrival. Retries use `dbt retry` (with --target, else it renders the profile's
-    # default target) so only the failed models re-run, not the whole idempotent build.
+    # default target) so only the failed nodes re-run, not the whole idempotent build. `base` is
+    # safe to pass to retry only because it is now just --target/--profiles-dir; a selection flag
+    # in there would break it, since retry replays the selection recorded in run_results and
+    # rejects --select/--exclude outright.
     ok = False
     for attempt in range(1, _MAX_ATTEMPTS + 1):
         if attempt == 1 or not os.path.exists("target/run_results.json"):
-            cmd = ["dbt", "run", *base]
+            cmd = ["dbt", "build", *base]
         else:
             cmd = ["dbt", "retry", *base]
         print(f"[fabric_build] $ {' '.join(cmd)}", flush=True)
         ok = subprocess.run(cmd).returncode == 0
         if ok:
+            break
+        if _only_tests_failed():
+            print(f"[fabric_build] {engine} attempt {attempt}/{_MAX_ATTEMPTS} failed on data "
+                  f"tests only — deterministic, not a transient commit conflict; not retrying",
+                  flush=True)
             break
         if attempt < _MAX_ATTEMPTS:
             backoff = 15 * attempt
@@ -72,8 +103,10 @@ def main() -> int:
     # is only the handful of dates that can still be stale, so the rebuild lever has to be
     # dbt's own --full-refresh (a streaming overwrite) — a var that made the incremental
     # branch emit all history would hand delta_rs a 143M-row merge source instead.
+    # `build`, not `run`: the invocation above already tested the PRE-rebuild fct_summary, so the
+    # table the leg reports on is not the one that was graded unless the tests run again after.
     if ok and os.environ.get("REBUILD_SUMMARY") == "1":
-        cmd = ["dbt", "run", "--select", "fct_summary", "--full-refresh", *base]
+        cmd = ["dbt", "build", "--select", "fct_summary", "--full-refresh", *base]
         print(f"[fabric_build] $ {' '.join(cmd)}", flush=True)
         ok = subprocess.run(cmd).returncode == 0
 
