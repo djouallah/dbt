@@ -89,48 +89,40 @@ aemo_electricity:
       # deaths anyway — sessions ended at ~35-40 min BUSY, with and without it, so the cap is
       # Fabric-side and not configurable here. The `|| dbt retry` in ci.yml heals the tail:
       # a fresh process gets a fresh session and re-runs only the failed models.
-      # A published Fabric ENVIRONMENT (`dbt_spark_env`) carries the session profile. The adapter
-      # forwards this id as `spark.fabric.environment.id` into both the singleton /sessions POST
-      # and the HC acquire (concurrent_livy.py:222), so every REPL this leg opens inherits it.
-      # What the environment holds — read it with
-      #   GET /v1/workspaces/<ws>/environments/<id>/sparkcompute
-      # rather than trusting this comment:
-      #   runtimeVersion              2.0     Spark 4.x / Delta 4.x, PUBLIC PREVIEW. See below.
-      #   spark.fabric.resourceProfile readHeavyForPBI
-      #   spark.native.enabled        true    Native Execution Engine (Velox)
-      #   spark.sql.parquet.vorder.default true
-      #   optimizeWrite.enabled/binSize true / 1g
-      #   dynamicExecutorAllocation   4-9 executors (the pool floor is 1; this raises the launch)
-      #
-      # THE RESOURCE PROFILE IS THE WHOLE POINT. A Fabric workspace defaults to `writeHeavy`,
-      # and that profile *sets* `spark.sql.parquet.vorder.default = false` — so this leg was
-      # fighting a profile that explicitly disables the thing it was asking for. `readHeavyForPBI`
-      # is the profile whose defaults are V-Order on + optimizeWrite with a 1g bin, which is what
-      # a Direct Lake reader wants. Measured before the change: every small write DID carry
-      # `add.tags {"VORDER":"true"}` from the session conf alone, but `mart/fct_summary` — 19
-      # files, 1.2 GB, the only large write and the only table the benchmark queries — came out
-      # untagged, on the same REPL (Thread-2) that had V-Ordered two tables minutes earlier. So
-      # the session conf alone was not sufficient and the failure was silent.
-      #
-      # RUNTIME 2.0 IS THE RISK IN THIS BLOCK. Delta Lake 4.x table features are experimental and
-      # Microsoft's own guidance is not to enable them on tables read by other Fabric workloads —
-      # which is exactly what `dbt_spark`'s tables are (stats.py reads them through delta-rs, the
-      # benchmark reads them through Direct Lake). Nothing here turns a 4.x feature on, and none
-      # is on by default, but a protocol bump would break both readers, not just this leg. Drop
-      # to "1.3" by PATCHing the environment's staging sparkcompute and re-publishing if either
-      # starts failing; the id below does not change.
-      #
-      # `conf` is forwarded verbatim into the Livy payload and RUNTIME CONF BEATS ENVIRONMENT
-      # CONF, so the two lines below are the belt to the environment's braces: they survive the
-      # environment failing to attach, which fails silently (V-Order simply stops appearing).
       # dbt-fabricspark requires spark_config.name (the Livy session/app name).
-      # NOTE: per-session compute sizing is still NOT settable from this file — the payload's
-      # numExecutors/executorCores are forwarded but a Livy API session takes the WORKSPACE pool
-      # settings. The environment is now the lever that does work (dynamicExecutorAllocation
-      # above); the workspace pool remains the other one.
-      environmentId: "{{ env_var('FABRIC_ENVIRONMENT_ID', '608c844f-2381-4526-b482-ce93245103e3') }}"
+      # NOTE: compute sizing is NOT configurable from here — Livy API sessions take the WORKSPACE
+      # Spark pool settings (the observed "initial executors = 1" launch is the pool's
+      # dynamic-allocation floor). To change launch size, change the workspace pool, not this file.
+      # `conf` is forwarded verbatim into the Livy session payload (the adapter copies
+      # name/conf/driverMemory/... into both the singleton POST and the high-concurrency acquire —
+      # concurrent_livy.py `_build_acquire_payload`), so a session-level Spark setting belongs here.
+      #
+      # V-ORDER: `vorder.default` IS THE LIVE KEY — the DEPRECATED one is spelled differently.
+      # Three near-identical spellings exist and only one is dead:
+      #   spark.sql.parquet.vorder.enable   REMOVED in Fabric runtime 1.3+ (migrate away from it)
+      #   spark.sql.parquet.vorder.default  what this file sets. Session-level, defaults to FALSE
+      #   delta.parquet.vorder.enabled      a TBLPROPERTIES key, table-level, not a session conf
+      # Anything claiming "V-Order config is deprecated" is quoting the first one. It is not this.
+      #
+      # This line is fighting a workspace default, which is why it is load-bearing: a Fabric
+      # workspace defaults to `spark.fabric.resourceProfile = writeHeavy`, and that profile's own
+      # definition includes `spark.sql.parquet.vorder.default: "false"`. So the conf below is not
+      # belt-and-braces on top of a neutral default — it is the only thing turning V-Order on.
+      #
+      # WHAT IT DEMONSTRABLY BUYS, AND WHERE IT LEAKS. Measured from the Delta log after the run
+      # that added it: every SMALL write carried `add.tags {"VORDER": "true"}`
+      # (stg_csv_archive_log, dim_duid, fct_price_today, fct_scada_today), while
+      # `mart/fct_summary` — 19 files, 1.2 GB, the only large write and the only table `benchmark/`
+      # queries — came out with `tags: {}` on all 19. Not a session problem: run_results.json puts
+      # that node on Thread-2, the same HC REPL that had V-Ordered two tables minutes earlier. The
+      # doc says a session-level setting covers "all Parquet writes in that session", so either
+      # that overstates or the large write went through a different writer (optimizeWrite rebalance,
+      # native engine). UNRESOLVED. If it needs fixing, the levers are a table property
+      # (`+tblproperties: {delta.parquet.vorder.enabled: "true"}`, which the docs say INSERT/UPDATE/
+      # MERGE honour, and which is also the key `stats.py` reads) or `OPTIMIZE … VORDER` as a
+      # post_hook on that one table. A Fabric ENVIRONMENT with `resourceProfile = readHeavyForPBI`
+      # was built for this and REVERTED — see CLAUDE.md for why, before rebuilding it.
       spark_config:
         name: dl_vorder_build
         conf:
           spark.sql.parquet.vorder.default: "true"
-          spark.fabric.resourceProfile: "readHeavyForPBI"

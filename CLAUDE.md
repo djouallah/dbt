@@ -323,7 +323,11 @@ still run it by hand to reproduce a CI failure. That is a debugging affordance, 
   HC acquire payload does accept `numExecutors`/`executorCores` and the adapter forwards them
   from `spark_config`, so "cannot" is untested rather than proven — but nothing here sets them,
   and the observed 1-executor launch is the pool's dynamic-allocation floor, not a cap (it
-  scaled to 9 under load).
+  scaled to 9 under load). A Fabric **Environment** is the one lever that was proven to override
+  compute — its `dynamicExecutorAllocation` was accepted at 4-9 even with the workspace's
+  `pool.customizeComputeEnabled` set to `false`, so that flag does not gate environment-level
+  compute despite its name — but nothing here uses an environment any more; see the
+  tried-and-reverted note below before reaching for one.
 - **Deleting a table's folder does not delete the table.** dbt asks the catalog, not storage.
   A `Tables/<schema>/<name>` directory removed by hand leaves the entry behind, `is_incremental()`
   stays true, and the model emits DML against nothing —
@@ -364,17 +368,79 @@ still run it by hand to reproduce a CI failure. That is a debugging affordance, 
 - **Query the lakehouses directly before instrumenting CI.** `duckrun.connect(<abfss Tables
   path>, read_only=True)` works from a laptop against any of the four items and answers
   schema/row/value questions in minutes. Several CI round trips were spent not doing this.
-- **V-Order is set once, in the session, and only affects files written after it.** The spark
-  target now carries `spark.sql.parquet.vorder.default: "true"` under `spark_config.conf` in
-  `profiles.yml`; the adapter copies `conf` verbatim into both the singleton and the
-  high-concurrency Livy payload (`concurrent_livy.py` `_build_acquire_payload`), so that is the
-  only place it belongs — there is no model-level equivalent and no way to retrofit it. Parquet
-  already on disk stays un-V-Ordered until the rows are rewritten, so an incremental leg flips
-  over slowly: `stats.py`'s `vorder` column is the only honest report of where it actually got to,
-  and `benchmark/README.md`'s snapshot table predates the change. A `·` on the other three is
-  correct rather than a regression, but for two different reasons: delta-rs and DuckDB have no
-  V-Order encoder at all, whereas Fabric Warehouse does — it is off by default on new warehouses
-  and toggled at the warehouse level (`ALTER DATABASE`), not from anything in this repo.
+- **A session conf asking for V-Order loses to the workspace's resource profile.** A Fabric
+  workspace defaults to `spark.fabric.resourceProfile = writeHeavy`, and that profile's own
+  defaults include **`spark.sql.parquet.vorder.default = false`**. So the spark leg spent a
+  commit asking for V-Order inside a profile built to disable it. What it bought was partial and
+  the shortfall was silent: from the run that added the conf, every *small* write did carry
+  `add.tags {"VORDER": "true"}` (`stg_csv_archive_log`, `dim_duid`, `fct_price_today`,
+  `fct_scada_today`), while **`mart/fct_summary` — 19 files, 1.2 GB, the only large write and the
+  only table `benchmark/` actually queries — came out with `tags: {}` on all 19**. Not a session
+  problem: `run_results.json` puts that node on Thread-2, the same HC REPL that had V-Ordered two
+  tables minutes earlier. **Root cause of the large-write case is unproven** — no documented size
+  cutoff, V-Order is absent from the NEE limitations list, and the doc claims a session setting
+  covers "all Parquet writes in that session", so either that overstates or the write went through
+  a different writer (optimizeWrite rebalance, native engine). The conf stays because it is the
+  only thing switching V-Order on at all; the hole is known and untreated. Two levers if it needs
+  treating, neither in use: `+tblproperties: {delta.parquet.vorder.enabled: "true"}` — the docs say
+  `INSERT`/`UPDATE`/`MERGE` honour it, dbt-fabricspark emits it from `create_table_as`, and it is
+  also the key `stats.py` reads — or `OPTIMIZE … VORDER` as a post_hook on `fct_summary` alone.
+- **The V-Order key that is deprecated is spelled differently from the one in use.** Three
+  near-identical spellings, one dead: `spark.sql.parquet.vorder.enable` was **removed in runtime
+  1.3+**; `spark.sql.parquet.vorder.default` is the live session conf and is what `profiles.yml`
+  sets; `delta.parquet.vorder.enabled` is a `TBLPROPERTIES` key and not a session conf at all.
+  Community claims that "V-Order config is deprecated" trace back to the first spelling. Check
+  which one a source is quoting before acting on it.
+- **`stats.py`'s `vorder` column cannot see spark's V-Order, and never could.** It comes from
+  duckrun's `get_stats()`, which reads the **table property** `delta.parquet.vorder.enabled` off
+  `dt.metadata().configuration` (`dbt/adapters/duckrun/engine.py:909-913`). Nothing in this repo
+  or in Fabric's writer sets that property — spark records V-Order as a **per-file `add.tags`
+  entry**, and duckrun's own comment there notes `get_add_actions` does not surface tags. So that
+  column reads `·` for spark whatever the files contain, and it is not evidence either way. The
+  honest check is the Delta log: read `_delta_log/*.json` and look for `"VORDER": "true"` in the
+  `add` actions. Two independent sources also warn the property and the file metadata are
+  unrelated — either can be set without the other. Fixing the column means setting
+  `delta.parquet.vorder.enabled` as a real table property (dbt-fabricspark honours
+  `tblproperties`, but only through `create_table_as`, so existing tables need one
+  `ALTER TABLE … SET TBLPROPERTIES`) or teaching duckrun's reader to read tags.
+- **V-Order only affects files written after it, so an incremental leg flips over slowly.** There
+  is no model-level equivalent and no way to retrofit it in place; `OPTIMIZE … VORDER` or a
+  rewrite is what moves parquet already on disk. `benchmark/README.md`'s snapshot table predates
+  all of this. A `·` on the other three engines is correct rather than a regression, but for two
+  different reasons: delta-rs and DuckDB have no V-Order encoder at all, whereas Fabric Warehouse
+  does — it is off by default on new warehouses and toggled at the warehouse level
+  (`ALTER DATABASE`), not from anything in this repo.
+- **A Fabric Environment was built for the V-Order problem and reverted. Nothing here uses one.**
+  Not because it failed — it published fine and its `readHeavyForPBI` profile is the *documented*
+  answer — but because **attaching one gives up the starter pool**. Microsoft's Livy docs say so in
+  the line that carries the conf ("remove this line to use starter pools instead of an
+  environment"), which means a cold on-demand cluster start on every run, the same penalty already
+  recorded above for `session_idle_timeout`. A per-run startup cost to fix a write layout was the
+  wrong trade for this repo. What the attempt established, so it does not have to be paid for
+  twice:
+  - **`spark.fabric.environmentDetails` is the reference key, NOT the adapter's `environmentId:`
+    field.** `environmentId:` is a real dbt-fabricspark credential — documented in its README *and*
+    CHANGELOG, with unit tests — that emits `spark.fabric.environment.id`, a conf key appearing
+    **nowhere in Microsoft's Fabric documentation**. All three Livy API docs, and the adapter's own
+    maintainer in [dbt-fabricspark#243](https://github.com/microsoft/dbt-fabricspark/issues/243),
+    use `spark.fabric.environmentDetails: '{"id": "<guid>"}'` — a JSON string, not a bare guid.
+    This repo spent a commit on `environmentId:` believing the adapter's docs. Treat it as a no-op
+    that reads like working configuration: an unattached environment raises nothing, it just
+    silently leaves `writeHeavy` in force.
+  - A `sparkProperties` PATCH is a **merge, not a replace** — a key omitted from the body survives,
+    so dropping one means sending it explicitly as `null`.
+  - `runtimeVersion: "2.0"` (Spark 4.x, Delta Lake 4.x) **is accepted** by the environment API and
+    publishes fine, so "cannot" is not the objection. The objection is that Microsoft advises
+    against Delta 4.x table features on tables other workloads read, and `dbt_spark`'s tables are
+    read by two — `stats.py` through delta-rs, `benchmark/` through Direct Lake. A protocol bump
+    would break both and neither failure would name the runtime.
+  - The Native Execution Engine (`spark.native.enabled`) was never enabled: an execution-side
+    change with documented divergences (`round()`, `DECIMAL`→`FLOAT`) and no bearing on layout.
+  - **A resource profile can also be set workspace-wide** (Workspace settings → Spark settings →
+    "Optimize for your use case", workspace Admin only), or by making an environment the workspace
+    default. Either would give the spark leg V-Order with **nothing at all in `profiles.yml`** —
+    at the cost of changing behaviour for every notebook and job in the workspace, and of the
+    setting living somewhere this repo cannot see or version.
 - **`threads` on the spark target must stay ≤ 4.** dbt-fabricspark defaults to high concurrency
   and opens one Spark REPL per thread; Fabric packs at most five REPLs per Livy session, so more
   threads means a second Spark application, separately billed, for one `dbt run`.
