@@ -3,9 +3,22 @@
 
 {#-- Determinism contract (see the duckdb version for the full story): every run recomputes,
      with the SAME SQL as a full rebuild, exactly the dates whose stored content could be
-     stale, and replaces them wholesale via delete+insert keyed on [date] — a native keyed
-     DELETE + INSERT, no DROP. Incremental == full-rebuild by construction for every date
-     it touches; no cutoff watermark, no run-history dependence, no runner-decided branch.
+     stale, and reconciles that batch key by key. Incremental == full-rebuild by construction
+     for every date it touches; no cutoff watermark, no run-history dependence, no
+     runner-decided branch.
+
+     STRATEGY: `merge` on the full [date],[time],[DUID] grain — the SAME semantics as duckrun
+     and spark (update matched + insert new). dbt-fabric's merge is default__get_merge_sql,
+     which always emits WHEN MATCHED THEN UPDATE SET <every column> (merge_update_columns=[]
+     is falsy and falls through to all columns), so a revised mw/price overwrites the stored
+     row exactly as it does on the other two engines.
+     It was `delete+insert` on [date] alone, which replaced whole dates and therefore RETRACTED
+     rows the recomputation no longer produced. That made dwh the only engine whose row count
+     could differ from the other three on identical inputs — see the note on dispatch_duids
+     below for the bug it masked. Retraction is now gone here too: the repair lever for a row
+     that should not exist is REBUILD_SUMMARY=1, not a silent per-date wipe.
+     Bracket every key column: dbt interpolates them raw into the ON clause and `date`/`time`
+     are T-SQL reserved words.
 
      We deliberately do NOT use --full-refresh on this engine: on dbt-fabric that DROPs +
      recreates the table (a Sch-M DDL swap that deadlocks Fabric's background stats
@@ -15,14 +28,14 @@
 
      The intraday branch is gated on dispatch_duids because the two branches read AEMO
      tables with DIFFERENT UNIT UNIVERSES: 26 non-scheduled units publish SCADA telemetry
-     but have zero rows in fct_scada ever. This engine's delete+insert on [date] retracted
-     them for free, which is why only the three merge engines went red — dwh was not more
-     correct, just able to rewrite a whole date. Filter it here too so all four agree.
-     See the duckdb version for the full story. --#}
+     but have zero rows in fct_scada ever. The old delete+insert on [date] retracted them for
+     free, which is why only the three merge engines went red — dwh was not more correct, just
+     able to rewrite a whole date. Now that this engine merges too, that gate is the ONLY thing
+     keeping those units out. See the duckdb version for the full story. --#}
 {{ config(
     materialized='incremental',
-    incremental_strategy='delete+insert',
-    unique_key=['date'],
+    incremental_strategy='merge',
+    unique_key=['[date]', '[time]', '[DUID]'],
     schema='mart'
 ) }}
 {#-- cluster_by was REMOVED: on a CLUSTER BY table Fabric runs automatic background

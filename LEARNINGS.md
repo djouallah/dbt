@@ -238,7 +238,8 @@ Every engine writes them. On 2026-07-28, still inside the intraday window, **dwh
 those rows too**. dwh only looked healthy because `delete+insert` on `unique_key=['date']`
 rewrites a whole date and so can retract; the merge engines key on `['date','time','DUID']`,
 which inserts but never deletes. Same model, same rows written, different ability to take them
-back.
+back. (dwh has since moved to `merge` on that same full grain, so no engine retracts now and the
+`dispatch_duids` gate is the only thing holding those units out.)
 
 Scale: 11,540 orphan rows over two dates, identical on all three merge engines, and it re-fires
 **every day** a date crosses the daily horizon. The last green run before it was timing luck —
