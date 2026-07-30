@@ -1,12 +1,12 @@
 # `cu/` — CU per semantic model
 
-One question: **what did the benchmark's four semantic models cost in capacity units?**
+One question: **what have the benchmark's four semantic models cost in capacity units?**
 
 Fabric has no per-operation CU REST API. The Capacity Metrics app's own semantic model is the only
 authoritative source, so this reads it by DAX and prints one table.
 
 ```
-## Semantic model CU — last 3h (2026-07-30 08:25Z -> 11:25Z)
+## Semantic model CU — everything retained, as of 2026-07-30 11:45Z
 
 | semantic model | XMLA Read Operation | Semantic model refresh | Query |    total |
 |----------------|--------------------:|-----------------------:|------:|---------:|
@@ -17,8 +17,12 @@ authoritative source, so this reads it by DAX and prints one table.
 | **total**      |            14,000.0 |                  500.0 |  75.0 | 14,575.0 |
 ```
 
-Operation columns are discovered from the data and ordered by total CU, so the expensive one reads
-first. That is the whole output and the whole scope.
+**No time filter.** The four models are queried equally by the same DAX suite, so a window buys
+nothing and can mislead — slice a benchmark in half and one engine looks cheap. This reports
+everything the metrics app still holds, which is its full ~14-day retention. Operation columns are
+discovered from the data and ordered by total CU, so the expensive one reads first.
+
+That is the whole output and the whole scope.
 
 ## What it deliberately is not
 
@@ -38,7 +42,6 @@ after the activity you want to measure** — see the lag note below.
 
 | input | default | notes |
 |---|---|---|
-| `window_hours` | `3` | one query per capacity regardless of size; max 14 days |
 | `models` | the four `aemo_*` | comma-separated, in report order. Blank = every semantic model |
 | `workspace` | `ea575278-…` | the workspace ci.yml and benchmark.yml deploy to. Blank = all |
 | `metrics_workspace_id` | `7f7f5d92-…` | where the Capacity Metrics app is installed |
@@ -53,20 +56,20 @@ export PBI_TOKEN=$(az account get-access-token \
   --resource https://analysis.windows.net/powerbi/api --query accessToken -o tsv)
 export CU_METRICS_WORKSPACE_ID=7f7f5d92-1603-4a02-a46a-0d90fe1ed119
 export CU_METRICS_MODEL_ID=0fdedd3b-1451-4499-9ed4-aa3658100ec1
-CU_WINDOW_HOURS=3 CU_DEBUG=1 python cu/capacity_cu.py
+CU_DEBUG=1 python cu/capacity_cu.py
 ```
 
 ## The things that will bite
 
-**It reads `Metrics By Item Operation And Hour`, not `Timepoint Interactive Detail`.** Mind the
-spelling — the model also carries `Metrics By Item And Hour` (no operation split) and `Metrics By
-Item And Operation` (no time axis); this is the only one with both, and it is "Item Operation", not
-"Item And Operation". The detail table was
+**It reads `Metrics By Item And Operation`, not `Timepoint Interactive Detail`.** Mind the
+spelling — the model also carries `Metrics By Item Operation And Hour` (hour buckets) and `Metrics
+By Item And Hour` (no operation split). This is the "And Operation" one, and its lack of a time
+axis is exactly why it fits. The detail table was
 tried first and is the wrong instrument. It is bucketed at 30 seconds and gated by a
-single-timepoint `MPARAMETER`, so a 3-hour window costs 360 requests per capacity; and because an
+single-timepoint `MPARAMETER`, so even a 3-hour window costs 360 requests per capacity; and because an
 interactive operation is smoothed across 10–128 buckets it reappears in every one carrying its full
 `Total CU`, so the rows have to be deduplicated by operation id or the total comes out one to two
-orders of magnitude high. The hourly aggregate answers the same question in **one request per
+orders of magnitude high. The aggregate answers the same question in **one request per
 capacity**, already summed, with no double-counting to guard against. Summing *is* correct on this
 table precisely because it is already an aggregate. The detail table remains the right tool for
 drilling into one timepoint's individual operations — which is not what this does.
@@ -82,7 +85,7 @@ so `CapacitiesList` must carry exactly one capacity. Passing several fails with 
 `Internal Error: Error obtaining data location` that names neither the cause nor the capacity. This
 tenant has two, so each is queried separately and the results merged.
 
-**Item columns hold GUIDs, not names.** `Metrics By Item And Hour[Item Id]` is an id, so
+**Item columns hold GUIDs, not names.** `Metrics By Item And Operation[Item Id]` is an id, so
 `items_for()` joins to `'Items'` (`Item Id`, `Item name`, `Item kind`) to resolve it. An id missing
 from `'Items'` is kept under its raw GUID rather than dropped — losing CU silently is worse than an
 ugly row.
@@ -100,9 +103,10 @@ candidate list said `Item Name`, the app says `Item name`. Nothing hardcodes a n
 candidate list, failing with the actual column list printed. `debug: true` dumps every table's
 columns — when a name moves, the replacement is usually next door.
 
-**14-day retention, ~6 minute lag, 5–64 minute smoothing.** A dispatch immediately after a
-benchmark sees nothing. `CU (s)` is a smoothed attribution, not an instantaneous measurement — fine
-for comparing models to each other, misleading if read as "this model used N CU at that moment".
+**~14-day retention, ~6 minute lag, 5–64 minute smoothing.** A dispatch immediately after a
+benchmark does not yet include it. Retention is also the report's only boundary now that there is
+no window: CU from a benchmark older than that has simply aged out, so a total can fall between two
+runs. `CU (s)` is a smoothed attribution, not an instantaneous measurement.
 
 ## Never auto-trigger it
 

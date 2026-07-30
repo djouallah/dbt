@@ -7,18 +7,14 @@ name: Capacity CU
 # the Capacity Metrics app's own semantic model, read by DAX.
 #
 # It shares NOTHING with benchmark.yml — no needs:, no artifact, no concurrency group, no code. It
-# does not know what a benchmark run is. It reports CU per semantic model over a wall-clock window
-# and stops there. See cu/README.md.
+# does not know what a benchmark run is. It reports CU per semantic model, over everything the
+# metrics app still holds (~14 days), and stops there. See cu/README.md.
 #
 # Run it ~10 minutes AFTER whatever you want to measure: operations land in the metrics model with
 # a ~6 minute lag and are smoothed over 5-64 minutes.
 on:
   workflow_dispatch:
     inputs:
-      window_hours:
-        description: "hours back from now. One query per capacity regardless of size; max 14 days (the app's retention)."
-        type: string
-        default: "3"
       models:
         description: "semantic models to report, comma-separated and in this order. Blank = every semantic model in the workspace."
         type: string
@@ -67,7 +63,6 @@ jobs:
       CU_METRICS_MODEL_ID: ${{ inputs.metrics_model_id }}
       CU_CAPACITY_ID: ${{ inputs.capacity_id }}
       CU_WORKSPACE_FILTER: ${{ inputs.workspace }}
-      CU_WINDOW_HOURS: ${{ inputs.window_hours }}
       CU_MODELS: ${{ inputs.models }}
       CU_DEBUG: ${{ inputs.debug }}
       PYTHONIOENCODING: utf-8
