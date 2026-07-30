@@ -11,7 +11,9 @@ name: dbt
 # green leg means that engine is self-consistent and nothing more. The mart parity table is the only
 # cross-engine signal there is — and it is no longer produced here: it moved to the dispatch-only
 # `Parity dashboard` workflow (.github/workflows/stats.yml), so a green run of THIS workflow says
-# nothing about whether the four engines agree. Dispatch that after a build you care about.
+# nothing about whether the four engines agree. It moved because it costs ~10 minutes of OneLake reads
+# (iceberg alone 12m+) to report a layout that only changes when the tables are rewritten — per-build
+# was paying that for numbers that had not moved. Dispatch it after a build you care about.
 #
 # This comment used to say dwh and spark were "graded by their generic column tests alone". They
 # were graded by nothing: the gate sat on the project key, which also matches generic tests (their

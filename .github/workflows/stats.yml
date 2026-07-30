@@ -3,17 +3,25 @@ name: Parity dashboard
 # MANUAL ONLY. `stats.py` over all four engines: row-count parity plus physical layout, read from
 # each item's Delta log on OneLake. This was the `summary` job of ci.yml and is now its own workflow.
 #
-# WHY IT MOVED, and what that costs. Two things were wanted from it that a job inside `dbt` could not
-# give:
+# WHY IT MOVED: **it takes ~10 minutes and it answers a question whose answer rarely changes.** The
+# iceberg item alone has been observed at 12m+ (386 files, 1,175 row groups — that is the cost of
+# reading its Delta log over OneLake), which is why the timeout here is 40 and not 15. Meanwhile the
+# thing it reports — files, row groups, size, v-order per engine — only moves when the tables are
+# REWRITTEN, and the facts are append-only incrementals: an ordinary run adds a few files. So charging
+# every `dbt` dispatch ten minutes to re-read four Delta logs was paying, per build, for numbers that
+# had not moved since the last build. Dispatch it when you want the current layout.
 #
-#   1. **It has to be runnable without a build.** The dashboard answers "do the four engines hold the
-#      same rows, in what shape" — a question about the CURRENT state of four lakehouses, not about the
-#      run that happened to write them. As a job in `dbt` the only way to ask it was to spend four
-#      Fabric legs first.
-#   2. **Its result has to be reusable.** `cu/` prints the layout beside the CU, and it gets there by
-#      downloading this workflow's `stats` artifact. A step summary inside a bigger run is readable by
-#      a human on that page and by nothing else — stdout is redirected so it never reaches the job log,
-#      and GitHub exposes no REST endpoint for a summary.
+# Two things fell out of moving it, both of which make the split worth more than the ten minutes:
+#
+#   1. **It is now runnable WITHOUT a build.** The dashboard is a question about the current state of
+#      four lakehouses, not about the run that happened to write them; asking it used to mean spending
+#      four Fabric legs first.
+#   2. **Its result is now reusable, and being near-static is exactly what makes that safe.** `cu/`
+#      prints the layout beside the CU by downloading this workflow's `stats` artifact — a cached
+#      reading is fine precisely because the layout does not change between builds. A step summary
+#      inside a bigger run could not serve that: stdout is redirected so it never reaches the job log,
+#      and GitHub exposes no REST endpoint for a summary, so it was readable by a human on that page
+#      and by nothing else.
 #
 # THE COST, stated plainly: **`dbt` no longer ends with a cross-engine check.** Every leg tests its own
 # output in its own `dbt build`, and no test compares one engine to another — so this dashboard is the

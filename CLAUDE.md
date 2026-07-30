@@ -508,18 +508,21 @@ still run it by hand to reproduce a CI failure. That is a debugging affordance, 
   property of the write; a failed assertion is deterministic and would just re-scan on Fabric
   compute to reach the same verdict.
 - **The parity dashboard is its OWN workflow now (`Parity dashboard`, `.github/workflows/stats.yml`),
-  dispatch-only, and `dbt` therefore ends with no cross-engine check at all.** It was the `summary` job
-  of `ci.yml`. Two things wanted from it were impossible inside a build: asking "do the four engines
-  hold the same rows, in what shape" *without* first spending four Fabric legs, and letting another
-  workflow **reuse** the answer — a step summary is readable by a human on the run page and by nothing
-  else, since stdout is redirected away from the job log and GitHub exposes no REST endpoint for it.
-  So `stats.py` also writes `STATS_JSON`, the workflow uploads it as the `stats` artifact, and `cu/`
-  downloads it to print the layout beside the CU. Hold onto the costs: no test compares one engine to
-  another, so **nothing notices drift until someone dispatches this**; and being manual it can be fired
-  mid-build, reading half-written tables and reporting drift that is a build in flight — which is why
-  it shares `onelake-<ref>` with `ci.yml` so a dispatch queues rather than races. The JSON is a data
-  contract with `cu/`: renaming a `DETAIL_KEYS` entry makes the layout table disappear over there with
-  a note, not an error, so change both together.
+  dispatch-only — because it costs ~10 minutes and reports something that barely moves.** It was the
+  `summary` job of `ci.yml`. The iceberg item alone reads at 12m+ (386 files, 1,175 row groups over
+  OneLake), which is why its timeout is 40 minutes, while what it reports — files, row groups, size,
+  v-order — only changes when the tables are **rewritten**, and the facts are append-only
+  incrementals. Every `dbt` dispatch was buying a ten-minute re-read of numbers that had not moved
+  since the previous one. Two things fell out of the split: it can be asked *without* spending four
+  Fabric legs first, and its result became **reusable** — `stats.py` also writes `STATS_JSON`, the
+  workflow uploads it as the `stats` artifact, and `cu/` downloads it to print the layout beside the CU.
+  A cached reading is sound *because* the layout is near-static; that is the same property that made
+  running it per build wasteful. Hold onto the costs: no test compares one engine to another, so
+  **nothing notices drift until someone dispatches this**; and being manual it can be fired mid-build,
+  reading half-written tables and reporting drift that is a build in flight — which is why it shares
+  `onelake-<ref>` with `ci.yml` so a dispatch queues rather than races. The JSON is a data contract with
+  `cu/`: renaming a `DETAIL_KEYS` entry makes the layout table disappear over there with a note, not an
+  error, so change both together.
 - It runs `stats.py` and nothing else, over **every shared table** in pipeline order —
   the staging view, the four facts, then `dim_calendar`/`dim_duid`/`fct_summary`. It was briefly
   cut to the three mart tables on the argument that the facts are inputs whose rows are implied by

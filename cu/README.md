@@ -83,16 +83,19 @@ So the report ends with one table putting them together:
 | dwh     | `warehouse`        | 12,000.0 | 143,844,166 |    79 |         79 |   1,820,812 | 1,567.0 | no     |
 ```
 
-**No Delta log is read here.** The numbers come from the `stats` artifact of the latest successful
-**Parity dashboard** run (`.github/workflows/stats.yml` — `stats.py` writing `STATS_JSON`), which the
+**No Delta log is read here, and it would be wasteful to.** Reading four Delta logs over OneLake takes
+~10 minutes (the iceberg item alone 12m+), and the layout only changes when the tables are REWRITTEN —
+which is why the dashboard is its own dispatch-only workflow rather than a job in every build. So the
+numbers come from the `stats` artifact of the latest successful **Parity dashboard** run (`.github/workflows/stats.yml` — `stats.py` writing `STATS_JSON`), which the
 workflow downloads with `gh run download`. That keeps this directory's one hard property: `requests` is
 still the whole dependency list, there is no duckrun, no storage token, no OneLake read, and
 `rm -rf cu/ .github/workflows/cu.yml` still removes every trace. The coupling is a JSON file produced
 by a workflow that exists anyway, not code.
 
 **The two halves come from different runs**, so the table prints which dashboard run the layout is from
-and when it was written. Dispatch *Parity dashboard* again if the tables have been rewritten since, or
-the CU will sit beside a layout that no longer exists.
+and when it was written. A cached reading is sound precisely because the layout is near-static — but
+dispatch *Parity dashboard* again after anything that rewrites the tables (`REBUILD_SUMMARY=1`, a
+`--full-refresh`, an `OPTIMIZE`), or the CU will sit beside a layout that no longer exists.
 
 **Failure is silent by design**: no dashboard run, an expired artifact (90 days), a renamed
 `DETAIL_KEYS` entry — any of them drop the layout table and log why. A CU report is useful without it;
