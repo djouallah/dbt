@@ -538,6 +538,17 @@ takes to **query** them. Ported from `djouallah/duckrun`'s `parquet_layout.yml`.
   the same Delta logs. The only endpoints touched are the Fabric control plane and XMLA. Keep it that
   way — the moment this writes a table into a lakehouse, `stats.py`'s unscoped `get_stats()` starts
   counting it and the parity dashboard reads it as drift.
+- **The paid work is a matrix, one job per engine, `max-parallel: 1` — and the reason is the token,
+  not the parallelism.** A Fabric/XMLA token lives about an hour; one job over four models, 21
+  queries and two 600s gaps runs past that and the expiry lands mid-measurement on the last engine.
+  Each job mints its own and retires it with the job. Consequences to hold onto: nothing computes a
+  ratio during the measurement any more — each job uploads a report **fragment** and the free
+  `report` job merges (`merge_reports.py`, **basename order**, meta fragment named to sort first so a
+  per-engine fragment cannot overwrite the shared `run` block) and renders; `BENCH_REFERENCE` must be
+  passed to every bench job, because `E.reference(['spark'])` is `spark` and every fragment would
+  otherwise claim the role; and each job resolves the hot-only ladder's DUID itself, which is
+  recorded per model and warned about on disagreement rather than assumed. Do not collapse it back
+  into one job to "save runner minutes" — the runner is free and the capacity is not.
 - **It shares `ci.yml`'s concurrency group (`onelake-<ref>`) deliberately.** Not for correctness, but
   because a concurrent dbt build contends for the same capacity, and capacity contention is the one
   thing a wall-clock benchmark cannot absorb. So a benchmark dispatch queues behind a `dbt` dispatch

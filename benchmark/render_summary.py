@@ -94,6 +94,27 @@ def s1_header(rep):
       f"so every timing is a Delta→memory transcode and an in-memory scan shaped by the physical "
       f"layout — {inp.get('cold_repeats')} cold cycles per query, medians reported.")
     w()
+    # Each engine is measured in its OWN CI job (one fresh token per engine), so each resolves the
+    # hot_only ladder's DUID independently. Same rows everywhere means the same answer — but that is
+    # an expectation, and an unnoticed disagreement would make `sel_1duid*` compare two different
+    # filters across engines. Say so rather than assume it.
+    # One job per engine and none of them fail-fast, so an engine can be missing entirely. Name it:
+    # a report with three columns where the dispatch asked for four otherwise reads as a four-engine
+    # result, and the missing one is exactly the interesting case.
+    asked = [e.strip() for e in (inp.get("engines") or "").split(",") if e.strip()]
+    got = {lbl(m) for m in tim}
+    missing = [e for e in asked if e not in got]
+    if missing:
+        w(f"- ⚠ **no timings for {', '.join(missing)}** — its benchmark job did not report "
+          f"(deploy or XMLA failure; see that job's log). Everything below covers "
+          f"{', '.join(e for e in asked if e in got)} only.")
+        w()
+    tds = {k: v for k, v in (rep.get("top_duid") or {}).items() if v}
+    if len(set(tds.values())) > 1:
+        w("- ⚠ **the hot-only ladder filtered a DIFFERENT DUID per engine** — "
+          + ", ".join(f"`{lbl(m)}`→`{d}`" for m, d in sorted(tds.items()))
+          + ". The `sel_1duid*` rows below are not comparable; pin `BENCH_TOP_DUID` and re-run.")
+        w()
 
 
 def s2_verdicts(rep, analysis, base, models):
@@ -241,8 +262,15 @@ def verify_verdicts(rep, analysis):
     tim = rep.get("timings", {})
     cc = analysis.get("cold_column_cost", {})
     base = rr.reference(rep, list(tim))
+    # Per-engine jobs each resolve the ladder's DUID themselves; a disagreement means `sel_1duid*`
+    # compared different filters. Advisory, not fatal — every other query is unaffected.
+    tds = {k: v for k, v in (rep.get("top_duid") or {}).items() if v}
+    pre = ([f"the hot-only ladder used different DUIDs per engine ("
+            + ", ".join(f"{lbl(m)}={d}" for m, d in sorted(tds.items()))
+            + ") — sel_1duid* is not comparable; pin BENCH_TOP_DUID"]
+           if len(set(tds.values())) > 1 else [])
     if not base or base not in cc:
-        return [], []
+        return [], pre
 
     def _cost(m):
         cols = cc.get(m, {}).get("columns")
@@ -250,7 +278,7 @@ def verify_verdicts(rep, analysis):
 
     base_cost = _cost(base)
     vmap = {v["model"]: v for v in analysis.get("verdicts", []) if v["metric"] == "COLD"}
-    errs, notes = [], []
+    errs, notes = [], list(pre)
     for m in tim:
         if m == base or m not in cc:
             continue

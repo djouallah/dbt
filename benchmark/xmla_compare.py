@@ -28,8 +28,19 @@ cannot refresh cannot dehydrate.
 Uses the XMLA endpoint (ADOMD.NET), NOT the throttled /executeQueries REST endpoint.
 Run headless — see .github/workflows/benchmark.yml.
 
+TWO MODES, and CI only uses the first. When `BENCH_ENGINES` names exactly ONE engine this measures
+that engine and writes its timings, computing no ratios at all — the workflow runs one job per engine
+so that each mints its own token minutes before using it (an XMLA/refresh token lasts about an hour;
+a four-model pass with two 600s gaps does not fit in one). The render layer computes every ratio from
+the merged report, which is where they belonged anyway. With two or more engines named it still walks
+the models in one process and prints the comparison tables — the by-hand scouting path.
+
 Env in:
-  BENCH_ENGINES  — comma-separated engines; the FIRST is the reference every ratio is taken against
+  BENCH_ENGINES  — comma-separated engines; the FIRST is the reference every ratio is taken against.
+                   ONE engine selects the per-engine mode described above.
+  BENCH_TOP_DUID — optional; pins the DUID the hot_only ladder filters on instead of resolving it.
+                   Unset is fine: every engine holds the same rows, so each job resolves the same
+                   DUID, and the value is recorded per model for the render layer to check.
   PBI_WORKSPACE  — workspace *display name* (XMLA data source uses the name, not the id)
   PBI_TOKEN      — optional; else self-acquired via duckrun (analysis.windows.net/powerbi/api)
   ADOMD_DIR      — folder containing Microsoft.AnalysisServices.AdomdClient.dll
@@ -472,6 +483,46 @@ def compare_table(title, base, model, base_res, opt_res, key, spread_key=None):
     print(f"  → {headline}")
 
 
+def _resolve_top_duid(workspace, model, token):
+    """The DUID the hot_only ladder filters on.
+
+    BENCH_TOP_DUID pins it, which is what the per-engine workflow does NOT do: every engine holds
+    the same rows, so each job resolving it independently gets the same answer, and the value is
+    recorded per model so the render layer can say so instead of assuming it."""
+    pinned = (os.environ.get("BENCH_TOP_DUID") or "").strip()
+    if pinned:
+        return pinned
+    try:
+        c = open_conn(workspace, model, token)
+        td = top_duid(c) if warm_up(c, model) else None
+        c.Close()
+        return td
+    except Exception as e:
+        print(f"  top DUID resolve failed ({str(e).splitlines()[0][:100]}) — dropping DUID ladder.")
+        return None
+
+
+def bench_one(workspace, engine, token, runs, want_cold, cold_repeats):
+    """Benchmark ONE engine's model and write its timings. No comparison — with one engine per CI
+    job there is nothing in this process to compare against, and every ratio is computed by the
+    render layer from the merged report. This is the path the workflow takes.
+
+    The point of the split is the token: an XMLA/refresh token is valid for about an hour, and a
+    four-model pass over 21 queries with two 600s gaps runs far past that. One engine per job means
+    the token is minted minutes before it is used and retired with the job."""
+    model = E.model_name(engine)
+    td = _resolve_top_duid(workspace, model, token)
+    print(f"[{engine}] top DUID  : {td}")
+    queries = resolve_queries(td)
+    res, can_cold = bench_model(workspace, model, token, runs, want_cold, cold_repeats, queries)
+    if res is None:
+        sys.exit(f"[{engine}] model {model!r} never became queryable — nothing measured.")
+    _write_timings(model, res)
+    report.merge({"top_duid": {model: td}, "cold_measured": {model: bool(can_cold)}})
+    print(f"\n[{engine}] measured {len(res)} queries (cold={'yes' if can_cold else 'no'}) "
+          f"-> {os.environ.get('RUN_REPORT', 'run_report.json')}")
+
+
 def main():
     workspace = os.environ["PBI_WORKSPACE"].strip()
     from duckrun import auth
@@ -483,6 +534,14 @@ def main():
     gap = int(os.environ.get("BENCH_GAP_SECONDS", "600"))  # idle gap between models (>CU smoothing)
 
     _load_adomd(adomd_dir)
+
+    # One engine => the per-engine job path. The multi-engine path below still works unchanged for a
+    # by-hand run from a laptop, where one token comfortably covers a two-engine scouting pass.
+    picked = E.selected()
+    if len(picked) == 1:
+        print(f"Workspace : {workspace}")
+        return bench_one(workspace, picked[0], token, runs, want_cold, cold_repeats)
+
     base, others = discover_models()
     print(f"Workspace : {workspace}")
     # Label by WRITER, the axis under test — the adapter that produced the parquet each model reads.
@@ -491,16 +550,10 @@ def main():
     print(f"Runs (hot): {runs}   Cold repeats: {cold_repeats}")
 
     # Resolve the top DUID once on the reference model (same data across engines) to fill the ladder.
-    td = None
-    try:
-        c = open_conn(workspace, base, token)
-        if warm_up(c, base):
-            td = top_duid(c)
-        c.Close()
-    except Exception as e:
-        print(f"  top DUID resolve failed ({str(e).splitlines()[0][:100]}) — dropping DUID ladder.")
+    td = _resolve_top_duid(workspace, base, token)
     print(f"Top DUID  : {td}")
     queries = resolve_queries(td)
+    report.merge({"top_duid": {m: td for m in [base] + others}})
 
     base_res, base_cold = bench_model(workspace, base, token, runs, want_cold, cold_repeats, queries)
     if base_res is None:

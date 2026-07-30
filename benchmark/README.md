@@ -111,18 +111,47 @@ the second hand-authored template is deleted, and there is no per-engine `MODE` 
 pushdown timing and a transcode timing are not the same measurement, and the only reliable way to
 keep them out of one table is to not produce both.
 
+## One job per engine, because a token lasts an hour
+
+Every Fabric/XMLA token is valid for roughly an hour. One job walking four models over 21 queries
+with two 600s idle gaps in it runs well past that, and the expiry lands mid-measurement on whichever
+engine happens to be last — a run lost for a reason that has nothing to do with what is being
+measured. So the paid work is a **matrix, one job per engine**: each mints its own token minutes
+before it uses it and retires it with the job. `max-parallel: 1` keeps them serialized, because a
+wall-clock benchmark cannot absorb two models contending for the same capacity, and `fail-fast: false`
+keeps one engine's failure from costing the others their measurement.
+
+Every step in those jobs is named `<engine> — …`, so the run's step list reads as the experiment
+rather than as four indistinguishable copies of the same pipeline.
+
+What the split costs: no process holds all four engines' timings any more, so **nothing computes a
+ratio during the measurement**. Each job writes a report **fragment** and the free `report` job merges
+them and renders. That is where the comparisons always belonged — `render_report.py` recomputed all of
+them from the JSON anyway.
+
+Two consequences worth knowing:
+
+- An engine can be **missing entirely** (its job failed). `render_summary` names it against the
+  dispatch's `engines` input rather than silently reporting three columns as a four-engine result.
+- Each job resolves the hot-only ladder's DUID itself. Same rows in every engine means the same
+  answer, but that is an expectation — the value is recorded per model and a disagreement is reported
+  as a warning. `top_duid` on the dispatch (or `BENCH_TOP_DUID`) pins it.
+
 ## Pipeline
 
-| step | script | notes |
-|---|---|---|
-| 1 | [`resolve_env.py`](resolve_env.py) | `WS_ID` + [`engines.py`](engines.py) → each engine's item GUID. Emits `PBI_WORKSPACE` (the workspace **display name** — XMLA addresses by name) and `BENCH_ITEMS`. |
-| 2 | [`deploy_models.py`](deploy_models.py) | One model per engine from one template via duckrun's `workspace.deploy()`: `lakehouse=`/`warehouse=` rewrites the baked-in GUIDs, `mode=` forces the storage mode. All four are Direct Lake, so all four reframe. Narrows `BENCH_ENGINES` to what deployed. |
-| 3 | [`xmla_compare.py`](xmla_compare.py) | The payload: tiered DAX over ADOMD.NET, dehydrating per query for true cold timing. |
-| 4 | [`render_report.py`](render_report.py) | Job summary + the derived `analysis` block, merged back into the one JSON. |
-| 5 | [`render_summary.py`](render_summary.py) | Specialist findings. **Exits 1 on a verdict-direction inversion** — the only thing here that fails the job. |
+| step | job | script | notes |
+|---|---|---|---|
+| 1 | `checks` | [`test_verdicts.py`](test_verdicts.py) / [`test_templates.py`](test_templates.py) | Free gate, no Fabric. `needs:` on everything paid. |
+| 2 | `resolve` | [`resolve_env.py`](resolve_env.py) | `WS_ID` + [`engines.py`](engines.py) → each engine's item GUID. Emits `PBI_WORKSPACE` (the workspace **display name** — XMLA addresses by name), `BENCH_ITEMS`, and the **engine matrix** the bench jobs fan out over. Resolving all engines here is the cheap early failure: a renamed item raises before any capacity is spent. Writes the `run` block as `report-00-meta.json`. |
+| 3 | `bench (<engine>)` | [`deploy_models.py`](deploy_models.py) | This engine's model only, from the one template via duckrun's `workspace.deploy()`: `lakehouse=`/`warehouse=` rewrites the baked-in GUIDs, `mode=` forces the storage mode. Direct Lake, so it reframes. |
+| 4 | `bench (<engine>)` | [`xmla_compare.py`](xmla_compare.py) | The payload: tiered DAX over ADOMD.NET, dehydrating per query for true cold timing. With one engine named it measures and writes timings and computes **no** ratios; with two or more it still walks them in one process and prints the comparison tables — the by-hand scouting path. |
+| 5 | `report` | [`merge_reports.py`](merge_reports.py) | Deep-merges every fragment in **basename order**, which is why the meta fragment is named to sort first: a per-engine fragment must not overwrite the shared `run` block. |
+| 6 | `report` | [`render_report.py`](render_report.py) | Job summary + the derived `analysis` block — every ratio in the run is computed here. |
+| 7 | `report` | [`render_summary.py`](render_summary.py) | Specialist findings. **Exits 1 on a verdict-direction inversion** — the only thing here that fails the job. |
 
 Everything lands in one `run_report.json` (uploaded as the `run-report` artifact); every number in
-both reports recomputes from it offline.
+both reports recomputes from it offline. The per-engine fragments are uploaded too
+(`report-fragment-<engine>`), so one engine's numbers survive a failure anywhere downstream of it.
 
 ## The query suite
 
@@ -178,7 +207,9 @@ nothing. Read a default-inputs run as a *smoke test with timings*, not as a defe
 ## Running it
 
 **CI:** dispatch *Direct Lake benchmark*. Inputs: `workspace`, `engines` (**order matters** — the
-first is the reference every ratio is taken against), `runs`, `cold`, `cold_repeats`, `gap_seconds`.
+first is the reference every ratio is taken against, and it is job 1 of the matrix), `runs`, `cold`,
+`cold_repeats`, `gap_seconds` (applied *before* each engine after the first), `top_duid` (optional
+pin for the hot-only ladder).
 
 A cheap scouting run — end to end in minutes instead of an hour of capacity:
 

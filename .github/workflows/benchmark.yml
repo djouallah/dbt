@@ -9,6 +9,17 @@ name: Direct Lake benchmark
 # parity, in genuinely different physical shapes. So there is no build phase and no stats phase —
 # this DEPLOYS one semantic model per engine, RUNS the DAX, and REPORTS the timings. Nothing else.
 #
+# ONE JOB PER ENGINE, and that is the point of the shape. Every Fabric/XMLA token is valid for about
+# an hour; a single job walking four models over 21 queries with two 600s idle gaps runs well past
+# that, and the expiry lands mid-measurement on whichever engine happens to be last. A separate job
+# per engine mints its own token, minutes before it uses it, and retires it with the job — so no run
+# can die halfway through for a reason that has nothing to do with the thing being measured. The
+# matrix is `max-parallel: 1`: the engines still run one at a time, because a wall-clock benchmark
+# cannot absorb two models contending for the same capacity.
+#
+# The cost of the split is that no process holds all four engines' timings any more, so the ratios
+# moved to the render layer: each job uploads a report FRAGMENT, and `report` merges them and renders.
+#
 # Physical layout (files, row groups, size, v-order, compression) is already reported per engine by
 # .github/scripts/stats.py in ci.yml's `summary` job, and is deliberately not re-derived here.
 #
@@ -41,9 +52,13 @@ on:
         type: string
         default: "1"
       gap_seconds:
-        description: "idle seconds between models (>5min CU smoothing => clean gaps in the capacity chart)"
+        description: "idle seconds before each engine after the first (>5min CU smoothing => clean gaps in the capacity chart)"
         type: string
         default: "600"
+      top_duid:
+        description: "optional: pin the DUID the hot-only ladder filters on (else each engine resolves it; same data, same answer)"
+        type: string
+        default: ""
 
 # SHARED with ci.yml on purpose, and load-bearing. Not for correctness — this run only reads — but
 # because a concurrent dbt build contends for the same Fabric capacity, and capacity contention is
@@ -56,6 +71,16 @@ concurrency:
 permissions:
   id-token: write
   contents: read
+
+env:
+  # Every job reads these; the per-engine jobs additionally narrow BENCH_ENGINES to themselves.
+  BENCH_ENGINES: ${{ inputs.engines }}
+  BENCH_RUNS: ${{ inputs.runs }}
+  BENCH_COLD: ${{ inputs.cold }}
+  COLD_REPEATS: ${{ inputs.cold_repeats }}
+  BENCH_GAP_SECONDS: ${{ inputs.gap_seconds }}
+  BENCH_TOP_DUID: ${{ inputs.top_duid }}
+  PYTHONIOENCODING: utf-8
 
 jobs:
   # The free gate: no Fabric, no capacity, no network at run time. It buys two things a paid job
@@ -77,33 +102,88 @@ jobs:
       - name: pytest benchmark/
         run: python -m pytest benchmark/ -q
 
-  bench:
-    name: benchmark
+  # Resolve the workspace and EVERY engine's item once, and emit the matrix the bench jobs fan out
+  # over. Two reasons this is its own job rather than a step in each: a renamed item fails here,
+  # before any capacity is spent, instead of on the third job of a serialized matrix; and the `run`
+  # block (inputs, sha, reference) is written once, by one job, so no per-engine fragment can
+  # overwrite it with its own single-engine view.
+  resolve:
+    name: resolve workspace + engine matrix
     needs: checks
     runs-on: ubuntu-latest
-    # Upstream's XMLA step took 21 min for TWO models over 15 cold-measured queries with one 300s
-    # gap. This runs four models over 21, and one of them (`raw_scada_mw`) transcodes a column of the
-    # largest table in the project — so budget several times that, plus three 600s gaps.
-    # It is billed Fabric capacity: cancel a superseded run immediately (CLAUDE.md, CI etiquette),
-    # and use the scouting inputs in benchmark/README.md before committing to a full pass.
-    timeout-minutes: 330
+    timeout-minutes: 10
     env:
-      # The ONLY Azure inputs, same two secrets as ci.yml: the OIDC federated identity. duckrun mints
-      # every token it needs (storage, Fabric control plane, Power BI) and resolves the workspace and
-      # items itself — so there is no azure/login and no `az` anywhere in this job.
       AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
       AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
       WS_ID: ${{ inputs.workspace }}
-      BENCH_ENGINES: ${{ inputs.engines }}
-      BENCH_RUNS: ${{ inputs.runs }}
-      BENCH_COLD: ${{ inputs.cold }}
-      COLD_REPEATS: ${{ inputs.cold_repeats }}
-      BENCH_GAP_SECONDS: ${{ inputs.gap_seconds }}
-      PYTHONIOENCODING: utf-8
+      RUN_REPORT: ${{ github.workspace }}/fragments/report-00-meta.json
+    outputs:
+      matrix: ${{ steps.resolve.outputs.matrix }}
+      pbi_workspace: ${{ steps.resolve.outputs.pbi_workspace }}
+      bench_items: ${{ steps.resolve.outputs.bench_items }}
+      ws_id: ${{ steps.resolve.outputs.ws_id }}
+      reference: ${{ steps.resolve.outputs.reference }}
     steps:
       - uses: actions/checkout@v4
-
       - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install deps
+        run: pip install "duckrun>=0.4.36" requests
+      - name: Init run report
+        run: |
+          mkdir -p fragments
+          python benchmark/report.py init
+      # `report-00-meta.json` sorts first, which is how merge_reports.py guarantees the run block is
+      # laid down before any engine fragment merges on top of it.
+      - name: Resolve workspace + per-engine items
+        id: resolve
+        run: python benchmark/resolve_env.py
+      - uses: actions/upload-artifact@v4
+        with:
+          name: report-fragment-meta
+          path: fragments/report-00-meta.json
+
+  bench:
+    # The engine name is in the job name, so the run's job list reads as the experiment: four
+    # adapters, one per row.
+    name: benchmark ${{ matrix.engine }}
+    needs: resolve
+    runs-on: ubuntu-latest
+    strategy:
+      # Serialized on purpose. Not for correctness — nothing here writes — but because two models
+      # queried at once contend for the same capacity, and a wall-clock number cannot absorb that.
+      max-parallel: 1
+      # Never fail-fast: one engine failing to deploy or warm up must not cost the others their
+      # measurement. The report names whichever engines are missing.
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.resolve.outputs.matrix) }}
+    # One engine over 21 queries, cold + hot, plus one idle gap and the deploy. `raw_scada_mw`
+    # transcodes a column of the largest table in the project, so this is not a small budget.
+    # It is billed Fabric capacity: cancel a superseded run immediately (CLAUDE.md, CI etiquette),
+    # and use the scouting inputs in benchmark/README.md before committing to a full pass.
+    timeout-minutes: 120
+    env:
+      # The ONLY Azure inputs, same two secrets as ci.yml: the OIDC federated identity. duckrun mints
+      # every token it needs (storage, Fabric control plane, Power BI) and resolves the workspace and
+      # items itself — so there is no azure/login and no `az` anywhere in this job. Each engine's job
+      # exchanges its OWN fresh OIDC assertion, which is the whole reason the matrix exists.
+      AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+      AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+      WS_ID: ${{ needs.resolve.outputs.ws_id }}
+      PBI_WORKSPACE: ${{ needs.resolve.outputs.pbi_workspace }}
+      BENCH_ITEMS: ${{ needs.resolve.outputs.bench_items }}
+      BENCH_REFERENCE: ${{ needs.resolve.outputs.reference }}
+      # Narrowed to this engine: deploy_models.py deploys only it, and xmla_compare.py takes its
+      # per-engine path — measure one model, write its timings, compute no ratios.
+      BENCH_ENGINES: ${{ matrix.engine }}
+      RUN_REPORT: ${{ github.workspace }}/fragments/report-${{ matrix.engine }}.json
+    steps:
+      - name: ${{ matrix.engine }} — checkout
+        uses: actions/checkout@v4
+
+      - name: ${{ matrix.engine }} — set up Python
+        uses: actions/setup-python@v5
         with:
           python-version: "3.11"
 
@@ -111,15 +191,19 @@ jobs:
       # Lake like the three lakehouses instead of DirectQuery — so all four legs measure a Delta
       # layout rather than three layouts and one pushdown. (The repo's dbt floor is 0.4.35; this
       # job needs the higher one, plus the OneLake repoints and auth.get_powerbi_token().)
-      - name: Install deps
+      - name: ${{ matrix.engine }} — install deps
         run: pip install "duckrun>=0.4.36" pythonnet requests
 
-      - name: Init run report
+      # Before the first token is minted, not after: the gap is idle time by design, and burning it
+      # on the far side of the deploy would spend a third of the token's life waiting.
+      - name: ${{ matrix.engine }} — idle gap for the capacity chart
+        if: matrix.index != 0 && inputs.gap_seconds != '0'
         run: |
-          echo "RUN_REPORT=$PWD/run_report.json" >> "$GITHUB_ENV"
-          RUN_REPORT="$PWD/run_report.json" python benchmark/report.py init
+          echo "sleeping ${BENCH_GAP_SECONDS}s before ${{ matrix.engine }} so the Fabric capacity"
+          echo "chart shows a clean separation between models (>5min CU smoothing window)."
+          sleep "$BENCH_GAP_SECONDS"
 
-      - name: Install ADOMD.NET client (.NET Core build, cross-platform)
+      - name: ${{ matrix.engine }} — install ADOMD.NET client (.NET Core build, cross-platform)
         run: |
           set -euo pipefail
           # ADOMD.NET's NetCore build is cross-platform and loads under pythonnet/coreclr. `dotnet
@@ -135,35 +219,66 @@ jobs:
           echo "ADOMD_DIR=$proj/publish" >> "$GITHUB_ENV"
           echo "resolved ADOMD_DIR=$proj/publish"
 
-      # Emits PBI_WORKSPACE (the workspace DISPLAY name — XMLA addresses by name) and BENCH_ITEMS
-      # (engine -> item/kind/guid/mode/writer) for every later step.
-      - name: Resolve workspace + per-engine items
-        run: python benchmark/resolve_env.py
+      # ONE semantic model, this engine's, over its own mart.fct_summary, from the ONE template:
+      # lakehouse=/warehouse= says which item holds the tables, mode= says how it is read. Direct
+      # Lake, so the deploy reframes and returns only once the model is live. The Fabric token this
+      # mints is minutes old when the XMLA step below starts using it.
+      - name: ${{ matrix.engine }} — deploy semantic model
+        run: |
+          mkdir -p fragments
+          python benchmark/deploy_models.py
 
-      # One semantic model per engine over that engine's own mart.fct_summary, from ONE template:
-      # lakehouse=/warehouse= says which item holds the tables, mode= says how it is read. All four
-      # are Direct Lake, so every deploy reframes and returns only once the model is live. Rewrites
-      # BENCH_ENGINES to the engines that actually deployed, so a failed deploy can't make
-      # xmla_compare wait out 16 warm-up retries.
-      - name: Deploy semantic models
-        run: python benchmark/deploy_models.py
-
-      # No token re-mint before XMLA: xmla_compare.py self-acquires the Power BI token via duckrun,
-      # which re-exchanges a fresh OIDC assertion (so a long deploy can't hand back an expiring one).
-      - name: Benchmark every model over XMLA
+      # No token re-mint needed: xmla_compare.py self-acquires the Power BI token via duckrun, which
+      # re-exchanges a fresh OIDC assertion. With one engine per job the whole measurement now fits
+      # comfortably inside one token's life — which is what this refactor bought.
+      - name: ${{ matrix.engine }} — benchmark over XMLA
         env:
           PYTHONNET_RUNTIME: coreclr
           PYTHONUNBUFFERED: "1"   # non-TTY runner block-buffers stdout; stream the per-query trace live
         run: python benchmark/xmla_compare.py
 
-      - name: Render report to job summary
+      # The fragment, not a report: ratios need every engine and are computed in `report` below.
+      - name: ${{ matrix.engine }} — upload report fragment
         if: always()
+        continue-on-error: true
+        uses: actions/upload-artifact@v4
+        with:
+          name: report-fragment-${{ matrix.engine }}
+          path: fragments/report-${{ matrix.engine }}.json
+          if-no-files-found: warn
+
+  # Where every comparison is now made. Free: no Fabric, no XMLA, no capacity — it reads the merged
+  # fragments and nothing else. `if: always()` because a report covering three of four engines is
+  # exactly what you want when the fourth failed, and it names the missing one.
+  report:
+    name: merge fragments + render report
+    needs: [resolve, bench]
+    if: always() && needs.resolve.result == 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      RUN_REPORT: ${{ github.workspace }}/run_report.json
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Download every report fragment
+        uses: actions/download-artifact@v4
+        with:
+          pattern: report-fragment-*
+          path: fragments
+
+      - name: Merge fragments into one run report
+        run: python benchmark/merge_reports.py fragments
+
+      - name: Render report to job summary
         continue-on-error: true
         run: python benchmark/render_report.py
 
       # The one step here that can fail the job: it exits 1 on a verdict-direction inversion.
       - name: Render specialist findings to job summary
-        if: always()
         run: python benchmark/render_summary.py
 
       - name: Upload run report
