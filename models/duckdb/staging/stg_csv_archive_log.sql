@@ -9,8 +9,8 @@
 -- {{ this }} in the body puts the read and the commit on one snapshot.
 {{ config(
     materialized='incremental',
-    incremental_strategy='insert' if target.name == 'duckrun' else 'merge',
-    merge_clauses=none if target.name == 'duckrun' else {'when_matched': [{'action': 'do_nothing'}]},
+    incremental_strategy='merge',
+    merge_clauses={'when_matched': [{'action': 'do_nothing'}]},
     unique_key=['source_type', 'source_filename'],
     schema='landing'
 ) }}

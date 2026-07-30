@@ -21,8 +21,8 @@ AND csv_filename NOT IN (SELECT DISTINCT file FROM {{ this }})
 
 {{ config(
     materialized='incremental',
-    incremental_strategy='insert' if target.name == 'duckrun' else 'merge',
-    merge_clauses=none if target.name == 'duckrun' else {'when_matched': [{'action': 'do_nothing'}]},
+    incremental_strategy='merge',
+    merge_clauses={'when_matched': [{'action': 'do_nothing'}]},
     unique_key=['file', 'DUID', 'SETTLEMENTDATE'],
     partition_by=['month_key'] if target.name == 'duckrun' else none,
     incremental_predicates=file_predicate,

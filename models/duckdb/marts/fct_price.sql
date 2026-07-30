@@ -1,9 +1,10 @@
 -- Insert-only: a matched row is left alone, so re-processing a file dedupes on the unique_key.
+-- ONE config for duckrun and iceberg -- dbt-duckdb's merge_clauses spelling, which duckrun
+-- accepts verbatim since 0.4.35 and routes to a DuckDB anti-join + add-only append. Requires
+-- duckrun >= 0.4.35; 0.4.34 and earlier RAISE on when_matched do_nothing.
 -- Never plain 'append' -- the pre_hook file list is computed before the write, so two
 -- overlapping runs would both append the same file. Rationale for every config choice here:
 -- CLAUDE.md, "Incremental write strategies are per engine".
--- The two strategy spellings are temporary; they collapse to one when duckrun accepts
--- merge_clauses do_nothing (duckrun#20).
 -- The pending-file probe must run BEFORE config(): it feeds the has_files no-op gate and
 -- incremental_predicates, and config() needs the latter.
 {%- set pending_files_query -%}
@@ -29,8 +30,8 @@ AND csv_filename NOT IN (SELECT DISTINCT file FROM {{ this }})
 
 {{ config(
     materialized='incremental',
-    incremental_strategy='insert' if target.name == 'duckrun' else 'merge',
-    merge_clauses=none if target.name == 'duckrun' else {'when_matched': [{'action': 'do_nothing'}]},
+    incremental_strategy='merge',
+    merge_clauses={'when_matched': [{'action': 'do_nothing'}]},
     unique_key=['file', 'REGIONID', 'SETTLEMENTDATE','INTERVENTION'],
     partition_by=['month_key'] if target.name == 'duckrun' else none,
     incremental_predicates=file_predicate,

@@ -25,9 +25,9 @@
 -- `dbt run --full-refresh -s dim_duid` is the reconciliation lever.
 {{ config(
     materialized='incremental',
-    incremental_strategy='insert' if target.name == 'duckrun' else 'merge',
+    incremental_strategy='merge',
     unique_key=['DUID'],
-    merge_clauses=none if target.name == 'duckrun' else {'when_matched': [{'action': 'do_nothing'}]},
+    merge_clauses={'when_matched': [{'action': 'do_nothing'}]},
     on_schema_change='sync_all_columns'
 ) }}
 
