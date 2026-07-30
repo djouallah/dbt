@@ -5,10 +5,15 @@ name: dbt
 #
 # Each leg tests its own output, in the same invocation that wrote it: `dbt build` interleaves
 # model and test, so a test failure stops that leg at the node that broke rather than surfacing a
-# run later. What that costs is the neutral reader: the singular suite in tests/ is DuckDB SQL and
-# `data_tests: +enabled` in dbt_project.yml admits it only on the duckdb-family targets, so dwh and
-# spark are now graded by their generic column tests alone. The separate test job that used to run
-# the reference suite against all four items through one duckrun reader is gone.
+# run later. All four legs run the same six assertions — the singular suite is written per dialect
+# (tests/duckdb, tests/dwh, tests/spark) and gated per folder in dbt_project.yml, the same way
+# models/ is. What is gone is the neutral reader: no test compares one engine to another, so a
+# green leg means that engine is self-consistent and nothing more. The mart parity table in
+# `summary` is the only cross-engine signal.
+#
+# This comment used to say dwh and spark were "graded by their generic column tests alone". They
+# were graded by nothing: the gate sat on the project key, which also matches generic tests (their
+# fqn has no folder segment), so `dbt build --target dwh` ran zero tests. See CLAUDE.md.
 
 # DISPATCH ONLY — deliberately no `push:` trigger. Every run lands four Fabric legs on paid
 # capacity, so a push-triggered build meant that any code change, including one that only touched a

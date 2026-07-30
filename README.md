@@ -101,9 +101,9 @@ OneLake**. It's a matrix job (one per engine) that, in the `testing` workspace:
    every shared table side by side — the staging view, the four facts, then `dim_calendar` /
    `dim_duid` / `fct_summary`, so a disagreement in the summary can be traced to its inputs on
    the rows above; that parity table
-   is the only thing comparing engines to each other. Note the singular tests in `tests/` are
-   DuckDB SQL and enabled on the duckdb-family targets only, so `dwh` and `spark` run just the
-   generic key tests on the two dimensions.
+   is the only thing comparing engines to each other. The singular tests are written per dialect
+   (`tests/duckdb`, `tests/dwh`, `tests/spark`, gated per folder in `dbt_project.yml`), so all
+   four targets run the same assertions against the output they just wrote.
 
 Auth is **OIDC only** (the `fabric-github-deploy` app is Admin in the workspace) — the repo
 needs just `AZURE_CLIENT_ID` / `AZURE_TENANT_ID` secrets and a federated credential trusting
@@ -159,7 +159,12 @@ staging view carry descriptions and no tests at all.
 Cross-engine agreement is not tested either — every assertion compares a table to itself. The
 row-count parity table in the `summary` job is the one place the four outputs are compared.
 
-Generic column tests run on **all four** targets — dbt renders them per adapter dialect. The
-singular tests in `tests/` are DuckDB SQL and so are enabled only on the DuckDB-family targets
-(`dbt_project.yml`), which means `dwh` — the one engine whose writes can genuinely race — is not
-covered by the grain check. Run it there by hand.
+All six assertions run on **all four** targets. Generic column tests dbt renders per adapter
+dialect; the singular tests are written out per dialect, one folder each under `tests/`
+(`duckdb`, `dwh`, `spark`), with `data_tests` in `dbt_project.yml` enabling exactly one folder per
+target — the same gating models use. That matters most for `dwh`, the one engine whose writes can
+genuinely race and the one where a whitespace-padded join key silently succeeds.
+
+Note the gate belongs on the **folder** key, not on `aemo_electricity`: a generic test's fqn has no
+folder segment, so a project-level `+enabled` switches those off too. It did, for a while, and both
+`dwh` and `spark` ran zero tests while the docs claimed otherwise.

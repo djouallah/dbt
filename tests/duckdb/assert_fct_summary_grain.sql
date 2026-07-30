@@ -16,8 +16,10 @@
 -- meant to be free of, and a tag would exclude it from every CI leg, leaving fct_summary with no
 -- assertion at all. Cost is one GROUP BY over the table, run by the engine that just wrote it.
 --
--- Only runs on the duckdb-family targets (`data_tests: +enabled`), so dwh -- the one engine whose
--- writes can genuinely race -- is not covered. Run it there by hand: see CLAUDE.md.
+-- DuckDB dialect (duckrun + iceberg). tests/dwh and tests/spark hold the same assertion in their
+-- own dialects; `data_tests` in dbt_project.yml enables exactly one folder per target, the same
+-- way models/ is gated. Keep the three in step -- this is the only assertion fct_summary has, on
+-- any engine, and dwh is the one whose writes can genuinely race.
 
 SELECT date, time, DUID, COUNT(*) AS n
 FROM {{ ref('fct_summary') }}

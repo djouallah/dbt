@@ -48,9 +48,22 @@ models:
       dimensions: {+materialized: table,       +schema: mart}
       marts:      {+materialized: incremental,  +schema: landing}
 
-# Custom singular tests (tests/*.sql) are written in DuckDB SQL and are the reference
-# assertion suite — enabled only on the DuckDB-family targets. The generic column tests
-# in models/_*.yml still run on ALL four targets (dbt renders them per adapter dialect).
+# Singular tests, one folder per SQL dialect — same shape as models/ above, and gated the same
+# way, so every engine runs the same assertions in its own dialect.
+#
+# The gate MUST sit on the folder key, never on `aemo_electricity` itself. A generic test declared
+# in models/_*.yml gets fqn ['aemo_electricity', '<test_name>'] — no folder segment, because the
+# patch files sit at the root of models/ — so a project-level `+enabled` matches it too. That is
+# what a bare `aemo_electricity: +enabled: <duckdb only>` did here: it disabled the four
+# unique/not_null tests along with the singular ones, and `dbt build --target dwh` (and --target
+# spark) ran ZERO tests while reading, in this file and in ci.yml, as though the generic ones still
+# applied. Verify with `dbt parse --target dwh` and grep the manifest's `disabled` block, not by
+# reading the comment.
 data_tests:
   aemo_electricity:
-    +enabled: "{{ target.type in ['duckrun', 'duckdb'] }}"
+    duckdb:
+      +enabled: "{{ target.type in ['duckrun', 'duckdb'] }}"
+    dwh:
+      +enabled: "{{ target.type == 'fabric' }}"
+    spark:
+      +enabled: "{{ target.type == 'fabricspark' }}"

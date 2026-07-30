@@ -159,11 +159,20 @@ Two things this cost, worth remembering separately from the bug:
   divergence *was* the finding, and it was invisible until the same question was asked twice in
   two dialects. `dbt show --target dwh --inline "…"` reaches the warehouse from a laptop.
 
-Guarded by `tests/assert_duid_has_no_whitespace.sql`: no DUID may contain whitespace anywhere.
-It is a one-line assertion at the point the value enters, and it would have caught this on the
-day the CSV changed instead of a year later via a row-count gap on the wrong engine. The class
-is general — any string join key crossing these four engines needs the same guarantee, because
-padding is the one difference the dialects will not agree on and will never report.
+Guarded by `assert_duid_has_no_whitespace`, now in all three dialect folders under `tests/`: no
+DUID may contain whitespace anywhere. It is a one-line assertion at the point the value enters, and
+it would have caught this on the day the CSV changed instead of a year later via a row-count gap on
+the wrong engine. The class is general — any string join key crossing these four engines needs the
+same guarantee, because padding is the one difference the dialects will not agree on and will never
+report.
+
+The first version of the guard was DuckDB SQL only, which put it on the two engines that *cannot*
+exhibit the bug and left it off the one that can. Writing it in T-SQL took two non-obvious choices,
+both of which are the same trap the incident was about: `LIKE` is the match, because it does not
+pad and every character of the value is significant, whereas `DUID <> LTRIM(RTRIM(DUID))` is a
+comparison and comparisons pad — it is identically FALSE for the trailing-space case. And the
+failure output reports `DATALENGTH`, not `LEN`, because `LEN` ignores trailing spaces and would
+print the padded value and the clean one at the same length.
 
 ## A neutral reader cannot grade a writer's rounding
 

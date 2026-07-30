@@ -13,10 +13,12 @@
 -- failed, nothing warned — the only symptom was fct_summary row counts differing by ~250 per
 -- date, which read as write-path drift on the one engine that was actually correct.
 --
--- The neutral reader is DuckDB, so a padded key here means at minimum a silent cross-engine
--- disagreement, and at worst a real generating unit missing from three of four outputs. Catch
--- it at the dimension, where it enters, rather than inferring it from a row-count gap
--- downstream. See LEARNINGS.md.
+-- A padded key here means at minimum a silent cross-engine disagreement, and at worst a real
+-- generating unit missing from three of four outputs. Catch it at the dimension, where it enters,
+-- rather than inferring it from a row-count gap downstream. See LEARNINGS.md.
+--
+-- DuckDB dialect (duckrun + iceberg). tests/dwh and tests/spark carry the same assertion; the dwh
+-- one is the load-bearing copy, since T-SQL is the only dialect where a padded key joins anyway.
 --
 -- \s covers leading and trailing spaces, tabs and newlines, and embedded whitespace too — no
 -- DUID legitimately contains any of them.

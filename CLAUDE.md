@@ -13,13 +13,24 @@ files-processed tests over `fct_price`/`fct_scada` were deleted deliberately, so
 is now only visible where it surfaces in the summary. Adding a test on a fact model is a reversal
 of that decision, not an oversight being corrected.
 
-**And the suite in `tests/` runs on the duckdb-family targets only** — `data_tests: +enabled` in
-`dbt_project.yml` gates it, and it is DuckDB SQL, so it cannot render on dwh or spark. Those two
-are graded by their generic column tests plus the mart parity table. That is the trade made when
-the separate neutral-reader test job was removed: the assertions used to run against all four items
-through one duckrun reader. If a determinism question about dwh or spark comes up, the reader still
-exists — point `duckrun.connect(<abfss Tables path>, read_only=True)` at the item from a laptop and
-run the test body by hand.
+**And `tests/` is written per dialect, exactly like `models/`** — `tests/duckdb`, `tests/dwh`,
+`tests/spark`, each holding the same two singular tests in its own SQL, with `data_tests` in
+`dbt_project.yml` enabling one folder per target. All four engines therefore run the same six
+assertions (two singular, four generic) against the output they just wrote.
+
+**Put the gate on the folder key, never on `aemo_electricity`.** This was a live bug: a generic
+test declared in `models/_*.yml` gets fqn `['aemo_electricity', '<test_name>']` — no folder
+segment, because the patch files sit at the root of `models/` — so a project-level `+enabled`
+matches it too. `data_tests: aemo_electricity: +enabled: "{{ target.type in ['duckrun','duckdb'] }}"`
+therefore disabled the four `unique`/`not_null` tests along with the DuckDB-SQL singular ones, and
+**dwh and spark ran zero tests** for as long as it stood — while this file and `ci.yml` both said
+the generic ones still applied. `dbt build --target dwh` was `dbt run` wearing a hat. Check a
+gating change with `dbt parse --target <name>` and read the manifest's `disabled` block; the
+adapters all install locally and parse needs no credentials, so it costs seconds and no capacity.
+
+A cross-engine reader still exists if a determinism question comes up that the in-leg tests cannot
+answer — point `duckrun.connect(<abfss Tables path>, read_only=True)` at any of the four items from
+a laptop. It is no longer the only way to grade dwh and spark.
 
 The traps below have all been hit for real. Each one cost a CI run or worse.
 [LEARNINGS.md](LEARNINGS.md) records the longer investigations behind some of them — measured
@@ -76,6 +87,16 @@ at them, and run every rendered branch through a local `duckdb.connect()`. It co
 no credentials, and catches the column and syntax errors a render check cannot see. It will not
 cover the spark or dwh dialects — those are structurally identical here, so CI remains their
 first real check.
+
+For the **T-SQL and Spark dialects** there is one offline check short of CI: `sqlglot.parse_one(sql,
+dialect='tsql'|'spark')`. It is a parser, not an engine — it will not tell you that `LEN()` ignores
+trailing spaces or that Fabric DW lacks a function — but it catches the syntax class of error, and
+it is the only thing that does without spending capacity. Worth running over the `tests/dwh` and
+`tests/spark` bodies wrapped in their adapter's own test wrapper: both wrappers put the test SQL
+inside a subquery on its own line (`fabric__get_test_sql` a CTE, `fabricspark__get_test_sql` a
+`from ( … ) dbt_internal_test`), so a leading `--` comment block is safe there — unlike a **view**
+model on dwh, which dbt-fabric wraps in `EXEC('create view … as <sql>')` and where the same comment
+would swallow the SELECT.
 
 When a build does fail, the job uploads `target/` as an artifact. Read the *compiled* SQL
 instead of guessing at the error:
@@ -141,12 +162,13 @@ were all deleted when the suite was cut back to uniqueness. Three consequences w
   happens to surface as a duplicated `(date, time, DUID)` in the summary. One that lands on a
   distinct grain key is invisible. Nothing else would have caught it either: the recomputation
   test recomputed *from* those same facts, so a duplicated source row agreed with itself.
-- **It does not cover dwh**, the one engine whose write path can actually duplicate — under
-  snapshot isolation, without a commit check. It is a singular test, so `data_tests: +enabled`
-  admits it on duckrun and iceberg only. Run it by hand against `dbt_dwh` after any run that could
-  have overlapped (a re-dispatch, a `dbt retry` racing a scheduled run):
-  `duckrun.connect(<dbt_dwh Tables path>, read_only=True)` plus the body of
-  `tests/assert_fct_summary_grain.sql`.
+- **It now covers dwh** — the one engine whose write path can actually duplicate, under snapshot
+  isolation without a commit check, and therefore the one that most needed it. `tests/dwh/`
+  carries the T-SQL spelling and the dwh leg runs it in the same `dbt build` that wrote the table,
+  so a re-dispatch or a `dbt retry` racing a scheduled run is caught in the leg rather than by
+  someone remembering to check afterwards. It was unreachable there until the folder-key gating
+  fix; the by-hand recipe (`duckrun.connect(<dbt_dwh Tables path>, read_only=True)` plus the test
+  body) still works and is now a debugging affordance, not the only coverage.
 - **It is deliberately incurious about everything else.** No join to `dim_duid`, no recomputation,
   no expectation about intervals per day or which dates exist. That is what makes it immune to a
   short AEMO day or a half-drained backlog — and it is also why a wrong `mw`, a NULL `price` or a
@@ -312,11 +334,14 @@ still run it by hand to reproduce a CI failure. That is a debugging affordance, 
   comparison (`'ERB01' = 'ERB01 '` is TRUE); DuckDB and Spark do not. One trailing space in
   `dim_duid.DUID` put a real unit in `dwh` and in none of the other three, for a year, silently
   — and the row-count gap it produced accused the one engine that was correct.
-  `assert_duid_has_no_whitespace` guards it — but it is a singular test, so it now runs on the
-  duckdb targets only, and T-SQL padding is a *dwh* pathology. The guard sits on the two engines
-  that cannot exhibit the bug. `dim_duid` is built from the same source everywhere, so a dirty key
-  will still trip it on duckrun; treat that as the alarm for all four. Any new string key crossing
-  engines needs the same.
+  `assert_duid_has_no_whitespace` guards it, and it now exists in all three dialects — which
+  matters, because the padding is a *dwh* pathology and the guard used to sit only on the two
+  engines that cannot exhibit it. The T-SQL copy has two spellings that are load-bearing rather
+  than stylistic: it matches with `LIKE '%[<tab><lf><cr><space>]%'` because LIKE does **not** pad
+  (`DUID <> LTRIM(RTRIM(DUID))` is a comparison, comparisons pad, so it is always FALSE for exactly
+  the trailing-space case), and it reports `DATALENGTH`, because `LEN()` ignores trailing spaces and
+  would print the padded and clean values as the same length. Any new string key crossing engines
+  needs the same three copies.
 - **A DuckDB assertion cannot grade another engine's rounding.** `DOUBLE → DECIMAL` tie-breaking
   differs per dialect — Spark HALF_UP, DuckDB HALF_EVEN, T-SQL a third — so a test asserting a
   DuckDB recomputation *exactly* equals a stored value can only ever pass for `duckrun`. The
@@ -380,15 +405,25 @@ still run it by hand to reproduce a CI failure. That is a debugging affordance, 
 - Every leg is `dbt build` — the engine tests its own output, in the same DAG walk that wrote it.
   This replaced a separate test job that graded all four items with one neutral duckrun reader.
   What was bought: a failure stops at the node that broke, and four jobs disappeared. What was
-  paid: the two singular tests in `tests/` are DuckDB SQL gated to the duckdb targets, so dwh and
-  spark run only `unique`/`not_null` on the two dimension keys. Read a green duckrun as "duckrun
-  is self-consistent", never as "all four agree" — the mart parity table in `summary` is the only
-  thing that compares engines to each other.
-- **The suite is two singular tests and four generic ones, on purpose.** `fct_summary` is asserted
-  for grain uniqueness and nothing else; `dim_duid`/`dim_calendar` keep `unique` + `not_null` on
-  their keys, plus the whitespace check. Everything that read an upstream table or encoded an
-  expectation about the source was deleted. A red CI leg now means a duplicate key, a null key or
-  a padded DUID — nothing else. Anything subtler surfaces as a ⚠️ in the parity table or not at all.
+  paid: the singular tests had to be written three times, once per dialect, and a *green* leg is
+  still only a self-consistency statement. Read a green duckrun as "duckrun is self-consistent",
+  never as "all four agree" — the mart parity table in `summary` is the only thing that compares
+  engines to each other. (This bullet used to say dwh and spark ran `unique`/`not_null` only. They
+  ran nothing at all; see the folder-key gating note at the top.)
+- **The suite is two singular tests and four generic ones, on purpose — and all six now run on
+  every engine.** `fct_summary` is asserted for grain uniqueness and nothing else;
+  `dim_duid`/`dim_calendar` keep `unique` + `not_null` on their keys, plus the whitespace check.
+  Everything that read an upstream table or encoded an expectation about the source was deleted.
+  A red CI leg now means a duplicate key, a null key or a padded DUID — nothing else. Anything
+  subtler surfaces as a ⚠️ in the parity table or not at all. Adding a test means adding it to all
+  three dialect folders; one dialect only is a silent hole, because nothing reports which engine
+  skipped what.
+- **The grain check is now a full GROUP BY over `fct_summary` on four engines, not two.** That is
+  the real cost of this coverage — one more scan of a 143M-row table per Fabric leg, per run, on
+  paid capacity. It is worth it on dwh (the only engine that can genuinely duplicate) and cheap
+  insurance on spark. If a leg's timing becomes the problem, the lever is the leg, not a date
+  window on the test: a window would encode an assumption about *where* duplicates live, which is
+  exactly the source knowledge this test is built to be free of.
 - **The `heavy` tag is gone from the project** — nothing carries it, so `--exclude tag:heavy` was
   removed from every invocation. It was on the assertions that scanned `fct_summary` whole, and
   those were deleted; a selector matching zero nodes only emits a warning and misdescribes what
