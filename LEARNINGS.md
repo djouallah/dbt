@@ -3,6 +3,28 @@
 A running record of things that took real time to work out. Facts and measurements, not
 recommendations — the rules that follow from them live in [CLAUDE.md](CLAUDE.md).
 
+## dbt-duckdb has no `partition_by` — and says nothing when you pass one
+
+Not "ignored on the incremental path", not "rejected by the OneLake REST catalog": the string
+`partition_by` does not appear **anywhere** in `dbt/include/duckdb/macros/materializations/`
+— not `incremental.sql`, not `external.sql`. There is no code to honour it, so a `partition_by`
+in a model config is silently dropped and every table dbt-duckdb creates is unpartitioned.
+
+Iceberg the *format* partitions fine (partition specs, hidden partitioning). The limit is the
+adapter, so "iceberg can't be partitioned" is the wrong lesson.
+
+Why it mattered here: `partition_by` can therefore only ever be duckrun-only, which makes it
+incompatible **by construction** with the rule that `models/duckdb/` is one body for duckrun and
+iceberg. That is the whole reason the `month_key` column was deleted from the four facts, and why
+that deletion forced a rebuild — duckrun refuses a batch missing a column the target has
+(`delta_plugin.py:645-656`, `insert: … Missing: ['month_key']`). Note the ordering: the rebuild
+was caused by removing a *column*, not by anything about `merge`, which preserves whatever
+partitioning a table already has (`_store_merge` even forwards `partition_by` so a routed
+anti-join keeps its partition `IN` probe).
+
+The silent drop is the part to remember. A config that reads as honoured on both targets was
+honoured on one, with no error and no warning to say so.
+
 ## What actually OOM-killed the duckrun facts: a MERGE reads the whole target, not the batch
 
 The duckrun facts went `append` → keyed write → `append` again → keyed write over a handful of

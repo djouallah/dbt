@@ -129,16 +129,20 @@ in `dbt/include/fabric{,spark}/macros/materializations/models/incremental/`.
 ### A keyed write reads the target — the literal file predicate is what bounds it
 
 **Current state first, history second:** the duckdb facts declare **no `partition_by` and carry no
-`month_key`**. Both were duckrun-only, and the one-body rule retired them. What bounds the target
-read is `macros/pending_file_predicate.sql` — a literal `file IN (…)`, measured at **0 of 60 files
-scanned** where every column-to-column predicate scanned all 60. Read the rest of this section as
-*why partitioning was tried and what it cost*, not as a description of the models.
+`month_key`**, and this is not a preference — **dbt-duckdb cannot express partitioning at all**
+(the string appears nowhere in its materializations; a `partition_by` is silently dropped, see
+[LEARNINGS.md](LEARNINGS.md)). So `partition_by` could only ever be duckrun-only, which makes it
+incompatible by construction with one body for both targets. What bounds the target read instead is
+`macros/pending_file_predicate.sql` — a literal `file IN (…)`, measured at **0 of 60 files scanned**
+where every column-to-column predicate scanned all 60. Read the rest of this section as *why
+partitioning was tried and what it cost*, not as a description of the models.
 
-**Removing the partition column requires a table rebuild.** A Delta table's partitioning is
-metadata: a batch that no longer produces `month_key` cannot be appended to a table partitioned on
-it. So the four duckrun fact tables must be `DROP TABLE`d (never a folder delete) and rebuilt on
-the first run after this change. That rebuild is the whole cost of the rule, and `fct_scada` is
-369M rows of it.
+**Deleting the `month_key` column forced one rebuild**, and note the actual cause: `merge` happily
+writes into whatever partitioning a table already has, but duckrun refuses a batch that is *missing
+a column the target has* (`delta_plugin.py:645-656` → `insert: … Missing: ['month_key']`). So the
+four duckrun fact tables were `DROP TABLE`d (never a folder delete) and rebuilt. That rebuild is
+the whole cost of the rule, and `fct_scada` is 369M rows of it. Do not repeat the mistake of
+blaming `merge` or partitioning for it.
 
 Why partitioning was introduced at all: moving the facts off `append` made every run scan the
 target looking for key collisions. The other three engines absorbed it (dwh 48s, iceberg 49s,
