@@ -62,7 +62,10 @@ WS_FILTER = os.environ.get(
 
 DEBUG = os.environ.get("CU_DEBUG", "").strip().lower() in ("1", "true", "yes")
 
-TABLE = "Metrics By Item And Hour"
+# Item x operation x hour. Note the spelling: the model also has 'Metrics By Item And Hour' (no
+# operation split) and 'Metrics By Item And Operation' (no time axis). This is the only one with
+# both, and it is "Item Operation", not "Item And Operation".
+TABLE = "Metrics By Item Operation And Hour"
 ITEMS = "Items"
 
 # Column names move between Capacity Metrics app versions — Microsoft's own fabric-toolbox
@@ -74,6 +77,7 @@ REQUIRED = {
     TABLE: {
         "item_id":      ["Item Id", "ItemId"],
         "workspace_id": ["Workspace Id", "WorkspaceId"],
+        "operation":    ["Operation name", "Operation Name", "Operation"],
         "cu":           ["CU (s)", "CU(s)", "CU", "Total CU (s)"],
         "when":         ["Datetime", "DateTime", "Date"],
     },
@@ -217,29 +221,46 @@ EVALUATE
     SUMMARIZECOLUMNS (
         '{TABLE}'[{c['item_id']}],
         '{TABLE}'[{c['workspace_id']}],
+        '{TABLE}'[{c['operation']}],
         FILTER ( VALUES ( '{TABLE}'[{c['when']}] ), '{TABLE}'[{c['when']}] >= {lit} ),
         "CU", SUM ( '{TABLE}'[{c['cu']}] )
     )
 """.strip(), fatal=False))
 
 
-def render(per_model, start, end, hours):
+def render(cells, start, end, hours):
+    """cells is {(model, operation): cu}. Rendered as models x operation types."""
     print(f"## Semantic model CU — last {hours:g}h "
           f"({start:%Y-%m-%d %H:%MZ} -> {end:%H:%MZ})\n")
-    # When specific models were asked for, print every one of them in the order given, including
-    # the ones with no activity. A model that silently vanishes from the table is indistinguishable
-    # from one that was never deployed; a 0.0 row says which.
-    rows = ([(m, per_model.get(m.lower(), 0.0)) for m in MODELS] if MODELS
-            else sorted(per_model.items(), key=lambda kv: -kv[1]))
-    if not rows:
+    if not cells:
         print("No semantic model activity in this window. The app holds **14 days** and operations "
               "land **~6 minutes** after they run.")
         return
-    print("| semantic model | CU |")
-    print("|---|---:|")
-    for name, cu in rows:
-        print(f"| {name} | {cu:,.1f} |")
-    print(f"| **total** | **{sum(cu for _, cu in rows):,.1f}** |")
+
+    # When specific models were asked for, print every one of them in the order given, including
+    # the ones with no activity. A model that silently vanishes from the table is indistinguishable
+    # from one that was never deployed; a 0.0 row says which.
+    per_model = {}
+    for (m, _op), cu in cells.items():
+        per_model[m] = per_model.get(m, 0.0) + cu
+    models = ([(m, per_model.get(m.lower(), 0.0)) for m in MODELS] if MODELS
+              else sorted(per_model.items(), key=lambda kv: -kv[1]))
+
+    # Operation columns ordered by total CU, so the expensive one is the first thing read.
+    per_op = {}
+    for (_m, op), cu in cells.items():
+        per_op[op] = per_op.get(op, 0.0) + cu
+    ops = [op for op, _ in sorted(per_op.items(), key=lambda kv: -kv[1])]
+
+    print("| semantic model | " + " | ".join(ops) + " | total |")
+    print("|---|" + "---:|" * (len(ops) + 1))
+    for name, total in models:
+        vals = [cells.get((name.lower(), op), 0.0) for op in ops]
+        print(f"| {name} | " + " | ".join(f"{v:,.1f}" for v in vals) + f" | **{total:,.1f}** |")
+    grand = sum(t for _, t in models)
+    print("| **total** | "
+          + " | ".join(f"**{per_op[op]:,.1f}**" for op in ops)
+          + f" | **{grand:,.1f}** |")
 
 
 def main():
@@ -260,7 +281,7 @@ def main():
         f"workspace={WS_FILTER or '(all)'} models={MODELS or '(every semantic model)'}")
 
     wanted = {m.lower() for m in MODELS}
-    per_model, unknown = {}, 0
+    cells, unknown = {}, 0
     for cap in caps:
         items = items_for(cap, cols[ITEMS])
         rows = cu_for(cap, start, cols[TABLE])
@@ -287,14 +308,15 @@ def main():
                 # Keep it under its GUID rather than drop it: losing CU silently is worse than an
                 # ugly row. Counted so the log can say how much of the table is opaque.
                 unknown += 1
-            per_model[key] = per_model.get(key, 0.0) + float(cu)
+            op = str(r.get(cols[TABLE]["operation"]) or "(unnamed)").strip()
+            cells[(key, op)] = cells.get((key, op), 0.0) + float(cu)
 
     if unknown:
         log(f"  {unknown} item ids had no entry in '{ITEMS}' — shown as raw GUIDs")
-    for name, cu in sorted(per_model.items(), key=lambda kv: -kv[1]):
-        log(f"  {name}: {cu:,.1f} CU")
+    for (name, op), cu in sorted(cells.items(), key=lambda kv: -kv[1]):
+        log(f"  {name} / {op}: {cu:,.1f} CU")
 
-    render({k: round(v, 1) for k, v in per_model.items()}, start, end, HOURS)
+    render({k: round(v, 1) for k, v in cells.items()}, start, end, HOURS)
 
 
 if __name__ == "__main__":

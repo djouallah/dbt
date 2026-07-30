@@ -6,18 +6,19 @@ Fabric has no per-operation CU REST API. The Capacity Metrics app's own semantic
 authoritative source, so this reads it by DAX and prints one table.
 
 ```
-## Semantic model CU — last 3h (2026-07-30 08:20Z -> 11:20Z)
+## Semantic model CU — last 3h (2026-07-30 08:25Z -> 11:25Z)
 
-| semantic model | CU   |
-|----------------|-----:|
-| aemo_duckrun   | 42.5 |
-| aemo_iceberg   |  0.0 |
-| aemo_spark     |  8.0 |
-| aemo_dwh       |  0.0 |
-| **total**      | 50.5 |
+| semantic model | XMLA Read Operation | Semantic model refresh | Query |    total |
+|----------------|--------------------:|-----------------------:|------:|---------:|
+| aemo_duckrun   |            12,000.0 |                  500.0 |   0.0 | 12,500.0 |
+| aemo_iceberg   |                 0.0 |                    0.0 |   0.0 |      0.0 |
+| aemo_spark     |             2,000.0 |                    0.0 |  75.0 |  2,075.0 |
+| aemo_dwh       |                 0.0 |                    0.0 |   0.0 |      0.0 |
+| **total**      |            14,000.0 |                  500.0 |  75.0 | 14,575.0 |
 ```
 
-That is the whole output and the whole scope.
+Operation columns are discovered from the data and ordered by total CU, so the expensive one reads
+first. That is the whole output and the whole scope.
 
 ## What it deliberately is not
 
@@ -57,7 +58,10 @@ CU_WINDOW_HOURS=3 CU_DEBUG=1 python cu/capacity_cu.py
 
 ## The things that will bite
 
-**It reads `Metrics By Item And Hour`, not `Timepoint Interactive Detail`.** The detail table was
+**It reads `Metrics By Item Operation And Hour`, not `Timepoint Interactive Detail`.** Mind the
+spelling — the model also carries `Metrics By Item And Hour` (no operation split) and `Metrics By
+Item And Operation` (no time axis); this is the only one with both, and it is "Item Operation", not
+"Item And Operation". The detail table was
 tried first and is the wrong instrument. It is bucketed at 30 seconds and gated by a
 single-timepoint `MPARAMETER`, so a 3-hour window costs 360 requests per capacity; and because an
 interactive operation is smoothed across 10–128 buckets it reappears in every one carrying its full
