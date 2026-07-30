@@ -1,7 +1,7 @@
 # benchmark — how fast is each engine's output to *query*?
 
-`ci.yml` proves the four engines produce the **same rows**, and the *Parity dashboard* workflow
-(`.github/workflows/stats.yml`, dispatch-only) reports how each one physically wrote them. This adds the missing half: how long Power BI takes to answer the same
+`ci.yml` proves the four engines produce the **same rows**, and the *Table layout* workflow
+(`.github/workflows/table-layout.yml`, dispatch-only) reports how each one physically wrote them. This adds the missing half: how long Power BI takes to answer the same
 DAX against each engine's own copy of `mart.fct_summary`.
 
 Three steps, and nothing else: **deploy a semantic model per engine, run the queries, report the
@@ -24,7 +24,7 @@ a Fabric Spark V-Order copy of one pristine fact, then benchmarked two semantic 
 
 Here they already exist. Four engines write the same table, and it *is* the same table — same rows,
 four genuinely different physical shapes. Measured once against the live workspace, to establish the
-premise (the live version of this is the *Parity dashboard* workflow, not this run):
+premise (the live version of this is the *Table layout* workflow, not this run):
 
 | engine | item | files | row groups | avg RG rows | size MB | vorder |
 |---|---|---:|---:|---:|---:|---|
@@ -46,7 +46,7 @@ set `spark.sql.parquet.vorder.default` on the dbt-fabricspark session, so all fo
 non-V-Order writers. `profiles.yml` now sets it in the spark target's `spark_config.conf`, which
 makes `spark` the V-Order reference the upstream benchmark had to manufacture — for the *files it
 writes from then on*. V-Order is a write-time layout: the numbers above describe parquet already on
-disk and will only move as `fct_summary` is rewritten. Read the *Parity dashboard* workflow, not this
+disk and will only move as `fct_summary` is rewritten. Read the *Table layout* workflow, not this
 table, for the current state — its `vorder` column is the live answer.
 
 ## What is compared
@@ -266,7 +266,7 @@ model cannot serve. Prose counts. (That one was caught for real, by that test, i
 has since been deleted.)
 
 **Checking the premise still holds** — the tables are at parity and each engine wrote them
-differently — is the *Parity dashboard* workflow, or the same read from a laptop
+differently — is the *Table layout* workflow, or the same read from a laptop
 (CLAUDE.md: *"Query the lakehouses directly before instrumenting CI"*):
 
 ```python

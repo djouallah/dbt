@@ -4,8 +4,10 @@ One dbt project, four engines (`duckrun`, `iceberg`, `dwh`, `spark`), one landed
 data. The thesis is *the engine doesn't matter, the output does* — so the models are written
 per dialect (`models/duckdb`, `models/dwh`, `models/spark`, gated by `+enabled` in
 `dbt_project.yml`) and every leg runs `dbt build`, so each engine writes and tests its own output
-in one DAG walk. CI's final word is `stats.py`, which reads all four items through Delta on
-OneLake and puts every shared table side by side.
+in one DAG walk. `stats.py` reads all four items through Delta on OneLake and puts every shared table
+side by side — it is the only cross-engine check there is, and it is **no longer part of the build**:
+it is the dispatch-only `Table layout` workflow, because it costs ~10 minutes to report something that
+only changes when the tables are rewritten.
 
 **The test suite covers the mart and nothing else** — `fct_summary`, `dim_duid`, `dim_calendar`.
 The facts and the staging view carry descriptions, no assertions: the grain and
@@ -467,7 +469,7 @@ still run it by hand to reproduce a CI failure. That is a debugging affordance, 
   leg failed. Cancelling never saved the Fabric compute anyway — the notebook or Livy session
   keeps running workspace-side after the GitHub job dies — it only erased the evidence.
 - **The parity dashboard is not part of this workflow any more** — it is the dispatch-only
-  `Parity dashboard` workflow, so a green `dbt` run reports nothing about cross-engine agreement, and
+  `Table layout` workflow, so a green `dbt` run reports nothing about cross-engine agreement, and
   nobody sees drift until someone dispatches it. It used to be the `summary` job here, with no
   `if: always()`, so that a partial run could not publish a table with holes in it that reads as drift
   that isn't there. The same hazard now takes a different shape: dispatched by hand it can read four
@@ -507,7 +509,7 @@ still run it by hand to reproduce a CI failure. That is a debugging affordance, 
   `fabric_build.py`). The retry ladder is for transient OneLake commit conflicts, which are a
   property of the write; a failed assertion is deterministic and would just re-scan on Fabric
   compute to reach the same verdict.
-- **The parity dashboard is its OWN workflow now (`Parity dashboard`, `.github/workflows/stats.yml`),
+- **The parity dashboard is its OWN workflow now (`Table layout`, `.github/workflows/table-layout.yml`),
   dispatch-only — because it costs ~10 minutes and reports something that barely moves.** It was the
   `summary` job of `ci.yml`. The iceberg item alone reads at 12m+ (386 files, 1,175 row groups over
   OneLake), which is why its timeout is 40 minutes, while what it reports — files, row groups, size,
@@ -556,7 +558,7 @@ takes to **query** them. Ported from `djouallah/duckrun`'s `parquet_layout.yml`.
 - **Deploy models, run queries, report timings — that is the whole scope.** Upstream had to *build*
   the layouts it compared; here the four engines' own `mart.fct_summary` already are four layouts, at
   row-count parity. So there is no build phase, and deliberately **no stats phase either**: physical
-  layout is `stats.py`'s job in the *Parity dashboard* workflow, and re-deriving it here would be a second, slower reader of
+  layout is `stats.py`'s job in the *Table layout* workflow, and re-deriving it here would be a second, slower reader of
   the same Delta logs. The only endpoints touched are the Fabric control plane and XMLA. Keep it that
   way — the moment this writes a table into a lakehouse, `stats.py`'s unscoped `get_stats()` starts
   counting it and the parity dashboard reads it as drift.

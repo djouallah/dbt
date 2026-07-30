@@ -1,18 +1,22 @@
-"""Parity dashboard: duckrun.get_stats() over EVERY engine's output, pivoted to $GITHUB_STEP_SUMMARY.
+"""Table layout + row-count parity: duckrun.get_stats() over EVERY engine's output, pivoted to
+$GITHUB_STEP_SUMMARY. Run by the `Table layout` workflow (.github/workflows/table-layout.yml).
 
 The project's thesis is: same raw data -> four engines (duckrun/Delta, iceberg, Fabric Warehouse,
 Spark) -> identical output. So the final row counts should line up column-for-column. get_stats reads
 each item's Delta log, and OneLake surfaces every item (including the native Iceberg lakehouse and the
 Warehouse) with a Delta representation, so ONE reader covers all four. Diagnostics -> stderr.
 
-**`STATS_JSON` makes this step's result reusable, and that is the point of it existing.** The markdown
-goes to stdout and, in ci.yml, straight into `$GITHUB_STEP_SUMMARY` — where it is readable by a human
-on the run page and by NOTHING else. It is not in the job log (stdout is redirected), there is no REST
-endpoint for a step summary, so the layout numbers this reads off four Delta logs were unreachable
-from any other workflow. Set `STATS_JSON=<path>` and the same numbers are also written as JSON, which
-ci.yml uploads as the `stats` artifact; `cu/` downloads it from the latest successful `dbt` run so a CU
-report can sit next to the layout that produced it, WITHOUT a second reader of the same Delta logs and
-without duckrun or a storage token anywhere near `cu/`.
+**`STATS_JSON` makes this run's result reusable, and that matters because this is EXPENSIVE and
+NEARLY STATIC.** Reading four Delta logs over OneLake takes ~10 minutes (the iceberg item alone 12m+),
+while files/row groups/size/v-order only move when the tables are rewritten — which is why this is a
+dispatch-only workflow rather than a job in every build. A step summary could not be reused: the
+markdown goes to stdout and into `$GITHUB_STEP_SUMMARY`, readable by a human on the run page and by
+NOTHING else — not in the job log (stdout is redirected), and GitHub exposes no REST endpoint for it.
+Set `STATS_JSON=<path>` and the same numbers are also written as JSON, which the workflow uploads as
+the `stats` artifact; `cu/` downloads it from this workflow's latest successful run so a CU report can
+sit next to the layout that produced it, WITHOUT a second reader of the same Delta logs and without
+duckrun or a storage token anywhere near `cu/`. A cached reading is sound precisely because the layout
+is near-static.
 
 That JSON is a data contract with a consumer outside this file. Its shape is
 `{"run": {...}, "engines": {...}, "tables": [...], "stats": {engine: {table: {detail}}}}` and the

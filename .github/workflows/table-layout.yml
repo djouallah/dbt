@@ -1,4 +1,4 @@
-name: Parity dashboard
+name: Table layout
 
 # MANUAL ONLY. `stats.py` over all four engines: row-count parity plus physical layout, read from
 # each item's Delta log on OneLake. This was the `summary` job of ci.yml and is now its own workflow.
@@ -57,8 +57,8 @@ permissions:
   contents: read
 
 jobs:
-  stats:
-    name: parity + layout
+  layout:
+    name: table layout
     runs-on: ubuntu-latest
     # get_stats() over OneLake is slow on the iceberg item (12m+ observed for that one engine);
     # 15 minutes was cancelling stats.py mid-table and turning slowness into a red run.

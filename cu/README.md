@@ -86,7 +86,7 @@ So the report ends with one table putting them together:
 **No Delta log is read here, and it would be wasteful to.** Reading four Delta logs over OneLake takes
 ~10 minutes (the iceberg item alone 12m+), and the layout only changes when the tables are REWRITTEN —
 which is why the dashboard is its own dispatch-only workflow rather than a job in every build. So the
-numbers come from the `stats` artifact of the latest successful **Parity dashboard** run (`.github/workflows/stats.yml` — `stats.py` writing `STATS_JSON`), which the
+numbers come from the `stats` artifact of the latest successful **Table layout** run (`.github/workflows/table-layout.yml` — `stats.py` writing `STATS_JSON`), which the
 workflow downloads with `gh run download`. That keeps this directory's one hard property: `requests` is
 still the whole dependency list, there is no duckrun, no storage token, no OneLake read, and
 `rm -rf cu/ .github/workflows/cu.yml` still removes every trace. The coupling is a JSON file produced
@@ -94,7 +94,7 @@ by a workflow that exists anyway, not code.
 
 **The two halves come from different runs**, so the table prints which dashboard run the layout is from
 and when it was written. A cached reading is sound precisely because the layout is near-static — but
-dispatch *Parity dashboard* again after anything that rewrites the tables (`REBUILD_SUMMARY=1`, a
+dispatch *Table layout* again after anything that rewrites the tables (`REBUILD_SUMMARY=1`, a
 `--full-refresh`, an `OPTIMIZE`), or the CU will sit beside a layout that no longer exists.
 
 **Failure is silent by design**: no dashboard run, an expired artifact (90 days), a renamed
@@ -109,7 +109,7 @@ benchmark queries; `dim_duid` at a few hundred rows explains nothing about a 143
 
 **It shares nothing with `benchmark/`.** No imports, no `run_report.json`, no `needs:`, no
 concurrency group, no ADOMD, no .NET, no duckrun. `requests` is the only dependency. It does read ONE
-artifact — `stats` from the *Parity dashboard* workflow, for the layout table above — and that is a
+artifact — `stats` from the *Table layout* workflow, for the layout table above — and that is a
 JSON file, not code: nothing is imported, and losing it costs one table.
 Deleting `cu/` and `.github/workflows/cu.yml` removes it completely and nothing else in the repo
 notices — which is the point, because this may not turn out to be useful. The four model names are
@@ -133,7 +133,7 @@ after the activity you want to measure** — see the lag note below.
 | `capacity_id` | all | blank = every capacity the metrics model can see |
 | `run_gap_hours` | `2` | idle hours that separate one run from the next. 0 = aggregate only |
 | `run_ops` | false | per-run breakdown by operation type as well |
-| `layout` | true | fetch the layout from the latest *Parity dashboard* run |
+| `layout` | true | fetch the layout from the latest *Table layout* run |
 | `layout_table` | `fct_summary` | which table's layout to show |
 | `debug` | false | dumps every table's columns to stderr |
 

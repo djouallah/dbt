@@ -21,7 +21,7 @@ name: Direct Lake benchmark
 # moved to the render layer: each job uploads a report FRAGMENT, and `report` merges them and renders.
 #
 # Physical layout (files, row groups, size, v-order, compression) is already reported per engine by
-# .github/scripts/stats.py in the *Parity dashboard* workflow, and is deliberately not re-derived here.
+# .github/scripts/stats.py in the *Table layout* workflow, and is deliberately not re-derived here.
 #
 # Nothing is read from OneLake and nothing is written anywhere: the only endpoints this job touches
 # are the Fabric control plane (deploy) and XMLA (query). ci.yml's parity dashboard is unaffected.

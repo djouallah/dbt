@@ -124,7 +124,7 @@ RUN_OPS = os.environ.get("CU_RUN_OPS", "").strip().lower() in ("1", "true", "yes
 # WHY, and the answer is almost always the layout — 37,227 CU next to "386 files, 122k avg row group"
 # is a finding, while either number alone is trivia.
 #
-# The numbers are NOT read here. They come from `stats.py` in the *Parity dashboard* workflow, which already
+# The numbers are NOT read here. They come from `stats.py` in the *Table layout* workflow, which already
 # reads all four Delta logs, via the `stats` artifact of the latest successful `dbt` run — the workflow
 # downloads it and points STATS_JSON at it. That keeps this directory's one hard property intact:
 # `requests` is still the whole dependency list, there is no duckrun, no storage token, no OneLake
@@ -507,10 +507,10 @@ def render_layout(doc, cu_by_model, table=LAYOUT_TABLE):
         writer = (meta.get(e) or {}).get("writer") or "—"
         print(f"| {e} | `{writer}` | {'—' if cu is None else f'{cu:,.1f}'} | "
               + " | ".join(cells) + f" | {'yes' if vo else 'no'} |")
-    print(f"\n<sub>Layout from the **Parity dashboard** run `{run.get('id') or '?'}` "
+    print(f"\n<sub>Layout from the **Table layout** run `{run.get('id') or '?'}` "
           f"(sha `{(run.get('sha') or '?')[:7]}`), written {run.get('written') or '?'} — **a different "
           f"run from the CU above**, so read it as \"the layout as of that dispatch\", and dispatch "
-          f"*Parity dashboard* again if the tables have been rewritten since. The CU column is this "
+          f"*Table layout* again if the tables have been rewritten since. The CU column is this "
           f"report's own total per engine. Nothing here re-read a Delta log; the full eight-table "
           f"dashboard is that run's own summary.</sub>")
 
