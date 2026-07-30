@@ -19,10 +19,14 @@ on:
         description: "hours back from now. One query per capacity regardless of size; max 14 days (the app's retention)."
         type: string
         default: "3"
-      models:
-        description: "semantic models to report, comma-separated and in this order. Blank = every semantic model in the workspace."
+      items:
+        description: "items to report, comma-separated and in this order. Blank = every item in the workspace, of every kind."
         type: string
-        default: "aemo_duckrun,aemo_iceberg,aemo_spark,aemo_dwh"
+        default: ""
+      top_ops:
+        description: "operation columns to print before folding the rest into `other`"
+        type: string
+        default: "8"
       workspace:
         description: "Fabric workspace GUID the models live in — the same one ci.yml and benchmark.yml deploy to. Blank = every workspace on the capacity."
         type: string
@@ -68,7 +72,8 @@ jobs:
       CU_CAPACITY_ID: ${{ inputs.capacity_id }}
       CU_WORKSPACE_FILTER: ${{ inputs.workspace }}
       CU_WINDOW_HOURS: ${{ inputs.window_hours }}
-      CU_MODELS: ${{ inputs.models }}
+      CU_ITEMS: ${{ inputs.items }}
+      CU_TOP_OPS: ${{ inputs.top_ops }}
       CU_DEBUG: ${{ inputs.debug }}
       PYTHONIOENCODING: utf-8
     steps:
