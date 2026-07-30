@@ -15,14 +15,18 @@ name: Capacity CU
 on:
   workflow_dispatch:
     inputs:
-      window_minutes:
-        description: "minutes back from now (or from end_utc). Costs 2 API calls per minute of window; 120/min is the cap."
+      window_hours:
+        description: "hours back from now. One query per capacity regardless of size; max 14 days (the app's retention)."
         type: string
-        default: "30"
-      end_utc:
-        description: "end of the window, ISO-8601 UTC (blank = now). Max 14 days back — the app's retention."
+        default: "3"
+      models:
+        description: "semantic models to report, comma-separated and in this order. Blank = every semantic model in the workspace."
         type: string
-        default: ""
+        default: "aemo_duckrun,aemo_iceberg,aemo_spark,aemo_dwh"
+      workspace:
+        description: "Fabric workspace GUID the models live in — the same one ci.yml and benchmark.yml deploy to. Blank = every workspace on the capacity."
+        type: string
+        default: "ea575278-bd81-459c-9680-47829898c902"
       metrics_workspace_id:
         description: "workspace holding the Fabric Capacity Metrics app"
         type: string
@@ -35,14 +39,6 @@ on:
         description: "capacity GUID (blank = every capacity the metrics model can see)"
         type: string
         default: ""
-      workspace_filter:
-        description: "restrict to one workspace GUID (blank = all). The detail table has no item-kind column, so this is the only narrowing available."
-        type: string
-        default: ""
-      utc_offset_hours:
-        description: "the UTC offset configured IN the Capacity Metrics model (default install: 0)"
-        type: string
-        default: "0"
       debug:
         description: "log the discovered schema and per-timepoint progress to stderr"
         type: boolean
@@ -70,10 +66,9 @@ jobs:
       CU_METRICS_WORKSPACE_ID: ${{ inputs.metrics_workspace_id }}
       CU_METRICS_MODEL_ID: ${{ inputs.metrics_model_id }}
       CU_CAPACITY_ID: ${{ inputs.capacity_id }}
-      CU_WORKSPACE_FILTER: ${{ inputs.workspace_filter }}
-      CU_WINDOW_MINUTES: ${{ inputs.window_minutes }}
-      CU_END_UTC: ${{ inputs.end_utc }}
-      CU_UTC_OFFSET_HOURS: ${{ inputs.utc_offset_hours }}
+      CU_WORKSPACE_FILTER: ${{ inputs.workspace }}
+      CU_WINDOW_HOURS: ${{ inputs.window_hours }}
+      CU_MODELS: ${{ inputs.models }}
       CU_DEBUG: ${{ inputs.debug }}
       PYTHONIOENCODING: utf-8
     steps:

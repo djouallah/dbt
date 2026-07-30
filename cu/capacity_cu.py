@@ -2,23 +2,25 @@
 
 Fabric exposes no per-operation CU REST API. The Capacity Metrics app's model is the only
 authoritative source, so this queries it by DAX over the Power BI `executeQueries` endpoint and
-prints one two-column table: semantic model name, CU consumed.
+prints one two-column table: semantic model name, CU consumed over the last N hours.
 
 Standalone on purpose. It shares NOTHING with benchmark/ — no imports, no run_report.json, no
-artifact, no ADOMD, no .NET. `requests` is the only dependency. Delete cu/ and .github/workflows/
-cu.yml and the rest of the repo does not notice.
+artifact, no ADOMD, no .NET. `requests` is the only dependency.
 
-It also correlates nothing: this is CU per model over a wall-clock window. It cannot say which
-query, run or engine produced it. That is the entire scope.
+Reads 'Metrics By Item And Hour', NOT 'Timepoint Interactive Detail'. The detail table was tried
+first and is the wrong instrument: it is bucketed at 30 seconds and gated by a single-timepoint
+MPARAMETER, so a 3-hour window costs 360 requests per capacity, and because an interactive
+operation is smoothed across 10-128 buckets it reappears in each one at full value and has to be
+deduplicated by operation id. The hourly aggregate answers the same question in one request per
+capacity, already summed, with no double-counting to guard against. The detail table remains the
+right tool for drilling into one timepoint's individual operations — which is not what this does.
 
-Stdout is the markdown table and nothing else (the workflow redirects it into
-$GITHUB_STEP_SUMMARY); diagnostics go to stderr.
+Stdout is the markdown table and nothing else; diagnostics go to stderr.
 """
 import os
 import re
 import sys
 import time
-from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 
 import requests
@@ -39,55 +41,51 @@ WS = os.environ.get("CU_METRICS_WORKSPACE_ID", "").strip()
 MODEL = os.environ.get("CU_METRICS_MODEL_ID", "").strip()
 CAPACITY = os.environ.get("CU_CAPACITY_ID", "").strip()
 
-# The detail table is gated by a single 30-second TimePoint, so a window costs window/30s requests.
-# Power BI allows 120 executeQueries per minute per user; 30 minutes = 60 calls is comfortable,
-# 60 minutes = 120 sits exactly on the limit. Raise it knowingly.
-WINDOW_MIN = int(os.environ.get("CU_WINDOW_MINUTES", "30") or 30)
+HOURS = float(os.environ.get("CU_WINDOW_HOURS", "3") or 3)
 
-# The model stores timepoints against ITS OWN UTC offset, not yours. A default app install is 0.
-# If the app was configured with an offset, the window silently lands in the wrong place — which
-# looks like "no activity" rather than an error.
-OFFSET_H = float(os.environ.get("CU_UTC_OFFSET_HOURS", "0") or 0)
+# The models to report, in this order. Defaults to the benchmark's four, because the capacity is
+# shared and an unfiltered report is dominated by unrelated models nobody here cares about.
+#
+# Named rather than imported from benchmark/engines.py on purpose: this tool shares no code with
+# benchmark/ so that deleting it stays free. If the benchmark's PREFIX or engine list changes, this
+# list changes with it — a rename shows up as a row of 0.0, which is why every requested model is
+# always printed even when it has no activity. Set empty for every semantic model on the capacity.
+MODELS = [m.strip() for m in os.environ.get(
+    "CU_MODELS", "aemo_duckrun,aemo_iceberg,aemo_spark,aemo_dwh").split(",") if m.strip()]
 
-# Optional explicit end of the window, ISO-8601 UTC. Default: now. Handy for going back to a
-# benchmark that finished a while ago (subject to the app's 14-day retention).
-END_UTC = os.environ.get("CU_END_UTC", "").strip()
+# The workspace the models live in — the same one ci.yml and benchmark.yml deploy to. Applied ON
+# TOP of the name filter, not instead of it: display names are not unique across a tenant, so a
+# stale `aemo_spark` in some other workspace would otherwise be silently added to this one's CU.
+# Blank = every workspace on the capacity.
+WS_FILTER = os.environ.get(
+    "CU_WORKSPACE_FILTER", "ea575278-bd81-459c-9680-47829898c902").strip().upper()
 
 DEBUG = os.environ.get("CU_DEBUG", "").strip().lower() in ("1", "true", "yes")
 
-TABLE = "Timepoint Interactive Detail"
+TABLE = "Metrics By Item And Hour"
+ITEMS = "Items"
 
 # Column names move between Capacity Metrics app versions — Microsoft's own fabric-toolbox
 # accelerator carries four DAX variants (v53/v47/v40/v37) for exactly this reason. So nothing here
-# hardcodes a name: the schema is discovered first and each role resolved from candidates, in
-# order of preference.
+# hardcodes a name: the schema is discovered first and each role resolved from candidates.
 #
-# Verified against the installed app on 2026-07-30, which spells them:
-#   Item, Operation, Operation Id, Total CU (s), Workspace Id, User, Billing type, Status
+# Verified against the installed app on 2026-07-30.
 REQUIRED = {
-    "operation_id": ["Operation Id", "OperationId", "Operation ID"],
-    "item_name":    ["Item", "Item Name", "ItemName"],
-    "operation":    ["Operation", "Operation Name", "OperationName"],
-    "total_cu":     ["Total CU (s)", "Total CU", "TotalCU", "CU (s)", "Total CUs"],
+    TABLE: {
+        "item_id":      ["Item Id", "ItemId"],
+        "workspace_id": ["Workspace Id", "WorkspaceId"],
+        "cu":           ["CU (s)", "CU(s)", "CU", "Total CU (s)"],
+        "when":         ["Datetime", "DateTime", "Date"],
+    },
+    ITEMS: {
+        "id":   ["Item Id", "ItemId"],
+        "name": ["Item name", "Item Name", "ItemName"],
+        "kind": ["Item kind", "Item Kind", "ItemKind"],
+    },
 }
 
-# Enrichment, not requirement — resolved if present, silently skipped if not.
-#
-# The installed app carries NO item-kind column on this table, so there is nothing to filter
-# semantic models on. That is less of a loss than it sounds: 'Timepoint Interactive Detail' holds
-# INTERACTIVE operations only, and on this capacity those are Power BI semantic model reads. The
-# operations actually counted are logged to stderr so a warehouse or GraphQL row can't hide in the
-# total unnoticed.
-OPTIONAL = {
-    "item_kind":    ["Item Kind", "ItemKind", "Item Type", "ItemType"],
-    "workspace_id": ["Workspace Id", "WorkspaceId", "Workspace ID"],
-}
-
-# What counts as a semantic model, when a kind column does exist. Case-insensitive.
+# What counts as a semantic model in 'Items'[Item kind]. Compared case-insensitively.
 MODEL_KINDS = {"semanticmodel", "dataset", "semantic model"}
-
-# Optional: restrict to one workspace, when the detail table exposes a workspace id.
-WS_FILTER = os.environ.get("CU_WORKSPACE_FILTER", "").strip().lower()
 
 
 def log(*a):
@@ -102,93 +100,71 @@ def die(msg, code=1):
 def execute_dax(dax, tries=4, fatal=True):
     """POST one DAX query, return its rows as a list of dicts.
 
-    Retries 429 (the per-user request cap) honouring Retry-After, and 5xx. Anything else is
-    surfaced with the API's own message — an empty table must never be mistaken for zero CU.
-
-    fatal=False returns None on a rejected query instead of exiting, for callers that are probing
-    candidate spellings and expect misses. Auth failures stay fatal either way: retrying a 403
-    against a different column name only buries the real reason.
+    Retries 429 (the per-user request cap) honouring Retry-After, and 5xx. fatal=False returns None
+    on a rejected query instead of exiting, for callers probing candidate spellings. Auth failures
+    stay fatal either way: retrying a 403 against a different name only buries the real reason.
     """
     url = f"{PBI}/groups/{WS}/datasets/{MODEL}/executeQueries"
     body = {"queries": [{"query": dax}], "serializerSettings": {"includeNulls": True}}
     headers = {"Authorization": f"Bearer {TOKEN}", "Content-Type": "application/json"}
     for i in range(1, tries + 1):
-        r = requests.post(url, json=body, headers=headers, timeout=180)
+        r = requests.post(url, json=body, headers=headers, timeout=300)
         if r.status_code == 200:
             return r.json()["results"][0]["tables"][0].get("rows", [])
         if r.status_code in (429, 502, 503, 504) and i < tries:
             wait = int(r.headers.get("Retry-After") or min(60, 5 * 2 ** i))
-            log(f"  {r.status_code} from executeQueries; retrying in {wait}s "
-                f"(attempt {i}/{tries})")
+            log(f"  {r.status_code} from executeQueries; retrying in {wait}s ({i}/{tries})")
             time.sleep(wait)
             continue
         detail = r.text[:600].replace("\n", " ")
         if r.status_code in (401, 403):
-            die(f"{r.status_code} from executeQueries. The Capacity Metrics semantic model is "
-                f"widely reported NOT to accept service principals — if this ran on the OIDC SP, "
-                f"supply a user token as the PBI_TOKEN secret instead. API said: {detail}")
+            die(f"{r.status_code} from executeQueries. If this ran on the OIDC service principal "
+                f"and the Capacity Metrics model refused it, supply a user token as the PBI_TOKEN "
+                f"secret. API said: {detail}")
         if not fatal:
             return None
         die(f"executeQueries returned {r.status_code}: {detail}")
-    if not fatal:
-        return None
-    die("executeQueries exhausted its retries")
+    return None if not fatal else die("executeQueries exhausted its retries")
 
 
 def strip_prefix(rows):
     """executeQueries returns keys as `Table[Column]` or `[Alias]`. Reduce to the bare name."""
-    out = []
-    for row in rows:
-        out.append({re.sub(r"^.*\[|\]$", "", k): v for k, v in row.items()})
-    return out
+    return [{re.sub(r"^.*\[|\]$", "", k): v for k, v in row.items()} for row in (rows or [])]
 
 
 def discover_columns():
-    """Read the detail table's real column names, so a version bump fails loudly and specifically.
-
-    INFO.VIEW.COLUMNS() is a DAX INFO function, so it goes down the same executeQueries path as
-    everything else — no DMV, no XMLA endpoint, no extra permission.
-    """
+    """Resolve every role against the model's real schema, so a version bump fails specifically."""
     rows = strip_prefix(execute_dax("EVALUATE INFO.VIEW.COLUMNS()"))
     by_table = {}
     for r in rows:
         by_table.setdefault(r.get("Table"), set()).add(r.get("Name"))
-    cols = by_table.get(TABLE, set())
-    if not cols:
-        die(f"the semantic model at {WS}/{MODEL} has no table named '{TABLE}'. Either that is not "
-            f"the Fabric Capacity Metrics model, or this app version renamed it. Tables present: "
-            f"{sorted(t for t in by_table if t)}")
     if DEBUG:
-        # Every table, not just this one: when a name moves, the replacement is usually next door.
         for t in sorted(x for x in by_table if x):
             log(f"  [{t}] {sorted(c for c in by_table[t] if c and not c.startswith('RowNumber-'))}")
 
-    resolved, missing = {}, []
-    for role, candidates in REQUIRED.items():
-        hit = next((c for c in candidates if c in cols), None)
-        if hit:
-            resolved[role] = hit
-        else:
-            missing.append(f"{role} (tried {candidates})")
-    if missing:
-        die(f"'{TABLE}' exists but these columns were not found: {'; '.join(missing)}. "
-            f"Present: {sorted(cols)}. Add the actual name to REQUIRED in this file.")
-
-    for role, candidates in OPTIONAL.items():
-        hit = next((c for c in candidates if c in cols), None)
-        if hit:
-            resolved[role] = hit
-        else:
-            log(f"note: no {role} column on '{TABLE}' (tried {candidates}) — not filtering on it")
+    resolved = {}
+    for table, roles in REQUIRED.items():
+        cols = by_table.get(table, set())
+        if not cols:
+            die(f"the semantic model at {WS}/{MODEL} has no table named '{table}'. Either that is "
+                f"not the Fabric Capacity Metrics model, or this app version renamed it. Tables "
+                f"present: {sorted(t for t in by_table if t)}")
+        got, missing = {}, []
+        for role, candidates in roles.items():
+            hit = next((c for c in candidates if c in cols), None)
+            if hit:
+                got[role] = hit
+            else:
+                missing.append(f"{role} (tried {candidates})")
+        if missing:
+            die(f"'{table}' exists but these columns were not found: {'; '.join(missing)}. "
+                f"Present: {sorted(cols)}. Add the actual name to REQUIRED in this file.")
+        resolved[table] = got
     return resolved
 
 
 def discover_capacities():
-    """Every capacity the model can see. Used when CU_CAPACITY_ID is unset.
-
-    Passing them all is correct for the single-capacity case and harmless otherwise — the query
-    filters to semantic models by name, and a capacity with no activity contributes no rows.
-    """
+    """Every capacity the model can see. Used when CU_CAPACITY_ID is unset."""
     for col in ("Capacity Id", "capacity Id", "CapacityId"):
         rows = execute_dax(f"EVALUATE VALUES('Capacities'[{col}])", fatal=False)
         if rows is None:
@@ -200,173 +176,70 @@ def discover_capacities():
         "set CU_CAPACITY_ID explicitly")
 
 
-def discover_items(cap_ids):
-    """Map item GUID -> (name, kind), from the model's 'Items' table.
+def items_for(cap, c):
+    """Map item GUID -> (name, kind).
 
-    Necessary, not decorative: `'Timepoint Interactive Detail'[Item]` holds the item **GUID**, not
-    a display name, so without this the report is a list of GUIDs and CU — which answers nothing.
-    'Items' is also where the item kind lives, so this is what makes filtering to semantic models
-    possible at all; the detail table itself carries no kind column.
-
-    Queried per capacity for the same reason the detail table is: one data location per query.
+    Necessary, not decorative: the metrics tables hold item **GUIDs**, so without this the report
+    is a list of GUIDs against CU, which answers nothing. 'Items' is also where the item kind
+    lives, so this is the only route to filtering down to semantic models.
     """
-    out = {}
-    for cap in cap_ids:
-        rows = execute_dax(f"""
+    rows = execute_dax(f"""
 DEFINE
     MPARAMETER 'CapacitiesList' = {{ "{cap}" }}
 EVALUATE
     SELECTCOLUMNS (
-        'Items',
-        "Id",   'Items'[Item Id],
-        "Name", 'Items'[Item name],
-        "Kind", 'Items'[Item kind]
+        '{ITEMS}',
+        "Id",   '{ITEMS}'[{c['id']}],
+        "Name", '{ITEMS}'[{c['name']}],
+        "Kind", '{ITEMS}'[{c['kind']}]
     )
 """.strip(), fatal=False)
-        for r in strip_prefix(rows or []):
-            if r.get("Id"):
-                out[str(r["Id"]).upper()] = (r.get("Name") or "", r.get("Kind") or "")
-    if not out:
-        log("note: 'Items' returned nothing — falling back to raw item GUIDs, unfiltered")
-    return out
+    return {str(r["Id"]).upper(): (r.get("Name") or "", r.get("Kind") or "")
+            for r in strip_prefix(rows) if r.get("Id")}
 
 
-def timepoints(end, minutes):
-    """The 30-second boundaries covering [end - minutes, end], oldest first.
+def cu_for(cap, start, c):
+    """CU per item for one capacity since `start`, summed server-side.
 
-    Timepoints are stamped in the model's own UTC offset, so the window is shifted by OFFSET_H
-    before being turned into DAX literals.
+    Summing IS correct here, unlike on the timepoint detail table: these rows are already an
+    aggregate per (item, hour), so there is no smoothing duplication to deduplicate away.
+
+    One capacity per query, deliberately. These tables are DirectQuery and resolve one data
+    location per query; passing several capacities fails with an opaque
+    `Internal Error: Error obtaining data location` that names neither the cause nor the capacity.
     """
-    end = end + timedelta(hours=OFFSET_H)
-    end = end.replace(second=(end.second // 30) * 30, microsecond=0)
-    n = int(minutes * 2)
-    return [end - timedelta(seconds=30 * i) for i in range(n, -1, -1)]
-
-
-def detail_dax(tp, cap_ids, c):
-    caps = ", ".join(f'"{x}"' for x in cap_ids)
-    lit = (f"DATE({tp.year}, {tp.month}, {tp.day}) + "
-           f"TIME({tp.hour}, {tp.minute}, {tp.second})")
-    # Only project what the installed app version actually has — the optional roles are absent on
-    # at least one version, and naming a missing column fails the whole query.
-    proj = [("OperationId", c["operation_id"]), ("ItemName", c["item_name"]),
-            ("Operation", c["operation"]), ("TotalCU", c["total_cu"])]
-    for alias, role in (("ItemKind", "item_kind"), ("WorkspaceId", "workspace_id")):
-        if role in c:
-            proj.append((alias, c[role]))
-    cols = ",\n        ".join(f'"{a}", \'{TABLE}\'[{n}]' for a, n in proj)
-    return f"""
+    lit = (f"DATE({start.year}, {start.month}, {start.day}) + "
+           f"TIME({start.hour}, {start.minute}, 0)")
+    return strip_prefix(execute_dax(f"""
 DEFINE
-    MPARAMETER 'CapacitiesList' = {{ {caps} }}
-    MPARAMETER 'TimePoint' = {lit}
+    MPARAMETER 'CapacitiesList' = {{ "{cap}" }}
 EVALUATE
-    SELECTCOLUMNS (
-        '{TABLE}',
-        {cols}
+    SUMMARIZECOLUMNS (
+        '{TABLE}'[{c['item_id']}],
+        '{TABLE}'[{c['workspace_id']}],
+        FILTER ( VALUES ( '{TABLE}'[{c['when']}] ), '{TABLE}'[{c['when']}] >= {lit} ),
+        "CU", SUM ( '{TABLE}'[{c['cu']}] )
     )
-""".strip()
+""".strip(), fatal=False))
 
 
-def collect(tps, cap_ids, cols, items):
-    """Query every timepoint and return {operation_id: (item_name, operation, total_cu)}.
-
-    Keyed by operation id, NOT summed across timepoints. An interactive operation is smoothed over
-    10 to 128 timepoints and reappears in each one carrying its FULL Total CU — so adding the rows
-    up would multiply every operation by the number of buckets it happens to span. Deduplicating
-    on operation id is the difference between a number and a fiction.
-
-    `items` resolves the detail table's item GUID to a name and kind, and is what makes the
-    semantic-model filter possible. An unknown GUID is kept under its raw id rather than dropped —
-    losing CU silently is worse than an ugly row.
-    """
-    seen, dropped = {}, {}
-
-    def one(job):
-        cap, tp = job
-        rows = execute_dax(detail_dax(tp, [cap], cols), fatal=False)
-        return tp, strip_prefix(rows or [])
-
-    jobs = [(cap, tp) for cap in cap_ids for tp in tps]
-
-    # Four at a time: enough to make a 60-call window quick, far enough under the 120/min cap that
-    # the 429 path stays exceptional rather than routine.
-    with ThreadPoolExecutor(max_workers=4) as pool:
-        for i, (tp, rows) in enumerate(pool.map(one, jobs), 1):
-            for r in rows:
-                if WS_FILTER and str(r.get("WorkspaceId", "")).strip().lower() != WS_FILTER:
-                    continue
-                oid = r.get("OperationId")
-                cu = r.get("TotalCU")
-                if oid is None or cu is None:
-                    continue
-                raw = str(r.get("ItemName") or "").strip()
-                name, kind = items.get(raw.upper(), ("", ""))
-                if items and kind and kind.strip().lower() not in MODEL_KINDS:
-                    dropped[kind] = dropped.get(kind, 0) + 1
-                    continue
-                prev = seen.get(oid)
-                cu = float(cu)
-                # Max, not first: a partially-smoothed slice can appear before the final total.
-                if prev is None or cu > prev[2]:
-                    seen[oid] = (name or raw or "(unnamed)", r.get("Operation") or "", cu)
-            if DEBUG and i % 20 == 0:
-                log(f"  {i}/{len(jobs)} queries, {len(seen)} operations so far")
-    for kind, n in sorted(dropped.items(), key=lambda kv: -kv[1]):
-        log(f"  dropped {n:>4} operations on {kind} items (not a semantic model)")
-    return seen
-
-
-def usable_capacities(cap_ids, tp, cols):
-    """Keep the capacities this model will actually serve, in the id spelling it accepts.
-
-    Two things were learned the hard way here, both surfacing as the same opaque 400
-    (`Internal Error: Error obtaining data location`):
-
-    - The detail table is DirectQuery and resolves ONE data location per query, so
-      `CapacitiesList` must carry a single capacity. Passing every capacity at once fails
-      outright — and this tenant has two.
-    - Casing is not guaranteed. The model exposes both `Capacity Id` and `Uppercase capacity Id`,
-      and which spelling the parameter wants is not documented, so both are tried.
-
-    A capacity that fails every spelling is dropped with a note rather than killing the run: the
-    interesting one may well be the other.
-    """
-    ok = []
-    for cap in cap_ids:
-        for cand in dict.fromkeys([cap, cap.lower(), cap.upper()]):
-            if execute_dax(detail_dax(tp, [cand], cols), fatal=False) is not None:
-                ok.append(cand)
-                log(f"  capacity {cap} -> queryable as {cand}")
-                break
-        else:
-            log(f"  capacity {cap} rejected in every spelling — skipping it")
-    if not ok:
-        die("no capacity could be queried. If this tenant's capacities are in a region the "
-            "metrics model cannot serve, pass one explicitly with capacity_id.")
-    return ok
-
-
-def render(seen, start, end):
-    per_model = {}
-    for name, _op, cu in seen.values():
-        per_model[name] = per_model.get(name, 0.0) + cu
-    # Round before totalling, not after: a cost table whose rows visibly don't add up to its own
-    # total is the fastest way to make someone stop believing the whole report.
-    per_model = {k: round(v, 1) for k, v in per_model.items()}
-
-    # ASCII arrow on purpose: this also runs from a laptop, and a Windows console is cp1252.
-    span = f"{start:%Y-%m-%d %H:%MZ} -> {end:%H:%MZ}"
-    print(f"## Semantic model CU — {span}\n")
-    if not per_model:
-        print(f"No semantic model activity in this window. Note the app holds **14 days**, "
-              f"operations land **~6 minutes** after they run, and a non-zero "
-              f"`CU_UTC_OFFSET_HOURS` shifts where the window lands.")
+def render(per_model, start, end, hours):
+    print(f"## Semantic model CU — last {hours:g}h "
+          f"({start:%Y-%m-%d %H:%MZ} -> {end:%H:%MZ})\n")
+    # When specific models were asked for, print every one of them in the order given, including
+    # the ones with no activity. A model that silently vanishes from the table is indistinguishable
+    # from one that was never deployed; a 0.0 row says which.
+    rows = ([(m, per_model.get(m.lower(), 0.0)) for m in MODELS] if MODELS
+            else sorted(per_model.items(), key=lambda kv: -kv[1]))
+    if not rows:
+        print("No semantic model activity in this window. The app holds **14 days** and operations "
+              "land **~6 minutes** after they run.")
         return
     print("| semantic model | CU |")
     print("|---|---:|")
-    for name, cu in sorted(per_model.items(), key=lambda kv: -kv[1]):
+    for name, cu in rows:
         print(f"| {name} | {cu:,.1f} |")
-    print(f"| **total** | **{sum(per_model.values()):,.1f}** |")
+    print(f"| **total** | **{sum(cu for _, cu in rows):,.1f}** |")
 
 
 def main():
@@ -375,37 +248,53 @@ def main():
             "user token as a secret. See cu/README.md.")
     if not (WS and MODEL):
         die("CU_METRICS_WORKSPACE_ID and CU_METRICS_MODEL_ID must both be set.")
+    if HOURS > 14 * 24:
+        die("the requested window exceeds the Capacity Metrics app's 14-day retention; it would "
+            "return a partial answer that reads as a whole one.")
 
-    end = (datetime.fromisoformat(END_UTC.replace("Z", "+00:00")).astimezone(timezone.utc)
-           if END_UTC else datetime.now(timezone.utc))
-    if (datetime.now(timezone.utc) - end).days > 14:
-        die("the requested window is older than the Capacity Metrics app's 14-day retention; "
-            "it would return nothing, which reads as zero CU.")
-
+    end = datetime.now(timezone.utc)
+    start = end - timedelta(hours=HOURS)
     cols = discover_columns()
-    cap_ids = [CAPACITY] if CAPACITY else discover_capacities()
-    tps = timepoints(end, WINDOW_MIN)
-    log(f"candidate capacities={cap_ids} window={WINDOW_MIN}min timepoints={len(tps)} "
-        f"offset={OFFSET_H}h")
-    # Probe once against the newest timepoint before spending 60 requests per capacity.
-    cap_ids = usable_capacities(cap_ids, tps[-1], cols)
+    caps = [CAPACITY] if CAPACITY else discover_capacities()
+    log(f"capacities={caps} window={HOURS:g}h from {start:%Y-%m-%d %H:%MZ} "
+        f"workspace={WS_FILTER or '(all)'} models={MODELS or '(every semantic model)'}")
 
-    items = discover_items(cap_ids)
-    log(f"{len(items)} items resolved for id -> name/kind")
+    wanted = {m.lower() for m in MODELS}
+    per_model, unknown = {}, 0
+    for cap in caps:
+        items = items_for(cap, cols[ITEMS])
+        rows = cu_for(cap, start, cols[TABLE])
+        if rows is None:
+            log(f"  capacity {cap}: refused the query — skipping it")
+            continue
+        log(f"  capacity {cap}: {len(rows)} item-rows, {len(items)} items resolved")
+        for r in rows:
+            iid = str(r.get(cols[TABLE]["item_id"]) or "").upper()
+            wsid = str(r.get(cols[TABLE]["workspace_id"]) or "").upper()
+            cu = r.get("CU")
+            if cu is None or not iid:
+                continue
+            if WS_FILTER and wsid != WS_FILTER:
+                continue
+            name, kind = items.get(iid, ("", ""))
+            key = (name or iid).lower()
+            if wanted:
+                if key not in wanted:
+                    continue
+            elif kind and kind.strip().lower() not in MODEL_KINDS:
+                continue
+            if not name:
+                # Keep it under its GUID rather than drop it: losing CU silently is worse than an
+                # ugly row. Counted so the log can say how much of the table is opaque.
+                unknown += 1
+            per_model[key] = per_model.get(key, 0.0) + float(cu)
 
-    seen = collect(tps, cap_ids, cols, items)
-    log(f"{len(seen)} distinct operations across {len(tps)} timepoints")
+    if unknown:
+        log(f"  {unknown} item ids had no entry in '{ITEMS}' — shown as raw GUIDs")
+    for name, cu in sorted(per_model.items(), key=lambda kv: -kv[1]):
+        log(f"  {name}: {cu:,.1f} CU")
 
-    # With no item-kind column there is no way to prove every row is a semantic model, so name what
-    # got counted. A warehouse or GraphQL operation inflating the total should be visible here
-    # rather than silently folded into a number labelled "semantic model CU".
-    by_op = {}
-    for _name, op, cu in seen.values():
-        n, tot = by_op.get(op, (0, 0.0))
-        by_op[op] = (n + 1, tot + cu)
-    for op, (n, tot) in sorted(by_op.items(), key=lambda kv: -kv[1][1]):
-        log(f"  counted {n:>4} x {op or '(unnamed)'}  = {tot:,.1f} CU")
-    render(seen, end - timedelta(minutes=WINDOW_MIN), end)
+    render({k: round(v, 1) for k, v in per_model.items()}, start, end, HOURS)
 
 
 if __name__ == "__main__":
