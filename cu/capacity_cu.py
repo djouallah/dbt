@@ -119,6 +119,24 @@ RUN_GAP_HOURS = int(os.environ.get("CU_RUN_GAP_HOURS", "2") or 0)
 # of tables, and the aggregate operation table below already answers "what kind of work cost the CU".
 RUN_OPS = os.environ.get("CU_RUN_OPS", "").strip().lower() in ("1", "true", "yes")
 
+# A bar chart of the same numbers, one bar per hour per engine. On by default because it is FREE — the
+# same rows the tables are built from, drawn instead of tabulated. A table says what each engine cost;
+# the chart says where in the run it was spent, which is the thing you actually look at a capacity
+# chart for.
+#
+# ONE BAR = ONE HOUR, and that is the app's bucket, not a choice. The Capacity Metrics app's own chart
+# is drawn at 30 seconds, which lives only in 'Timepoint Interactive Detail' — one request per bucket,
+# 120 per hour, and its rows carry no timestamp so a batch could not be attributed. That is a real
+# capacity cost to draw a prettier picture of numbers already in hand, so it is not done. If a
+# finer-grained shape is ever genuinely needed, read cu/README.md first: the request count, the
+# `Total CU` smoothing-duplication trap, and the reason the aggregate is the default are all recorded
+# there.
+CHART = os.environ.get("CU_CHART", "true").strip().lower() not in ("0", "false", "no")
+
+# Bars are scaled against the largest single (engine, hour) cell, so heights are comparable across
+# engines AND across runs in one reading. 8 unicode block levels; "·" is a genuine zero.
+BLOCKS = "▁▂▃▄▅▆▇█"
+
 # Item x operation x hour. The hour axis supports SINCE and the per-run split below.
 # Mind the spelling: the model also has 'Metrics By Item And Operation' (no time axis) and 'Metrics
 # By Item And Hour' (no operation split). This is the one with both.
@@ -397,6 +415,58 @@ def render_runs(hourly, runs):
             _op_table(cells)
 
 
+def render_chart(hourly, runs):
+    """CU per hour per engine, as bars. Costs nothing — same rows as the tables.
+
+    Two columns per hour so the hour labels line up under their own bars, and `┊` between runs so a
+    gap in the capacity chart is visible as a gap here. Every engine asked for gets a line even if it
+    is empty, for the same reason it gets a 0.0 table row: an absent line and an idle one are
+    different findings.
+    """
+    hours = sorted({h for (_m, _o, h) in hourly})
+    if not hours:
+        return
+    per = {}                                     # (engine, hour) -> cu
+    for (m, _op, h), cu in hourly.items():
+        per[(m, h)] = per.get((m, h), 0.0) + cu
+    peak = max(per.values()) if per else 0.0
+    if peak <= 0:
+        return
+
+    names = [m for m, _ in _model_rows({(k[0], k[1]): v for k, v in hourly.items()})]
+    # Which run each hour belongs to, so a boundary can be drawn between them.
+    run_of = {h: i for i, hrs in enumerate(runs) for h in hrs}
+    width = max((len(n) for n in names), default=7)
+
+    def cell(v):
+        if v <= 0:
+            return "··"
+        lvl = BLOCKS[min(len(BLOCKS) - 1, int(v / peak * len(BLOCKS)) if v < peak else len(BLOCKS) - 1)]
+        return lvl * 2
+
+    print(f"\n### Shape — CU per hour\n")
+    print("```")
+    print(f"peak {peak:,.1f} CU  ·  1 bar = 1 hour ({len(hours)} active)  ·  "
+          f"┊ = gap between runs  ·  ·· = idle")
+    for n in names:
+        row = []
+        for i, h in enumerate(hours):
+            if i and run_of.get(h) != run_of.get(hours[i - 1]):
+                row.append("┊")
+            row.append(cell(per.get((n.lower(), h), 0.0)))
+        print(f"{n:<{width}}  {''.join(row)}")
+    # Hour axis, two chars per hour to match; the date changes are called out underneath.
+    axis = []
+    for i, h in enumerate(hours):
+        if i and run_of.get(h) != run_of.get(hours[i - 1]):
+            axis.append("┊")
+        axis.append(f"{h:%H}")
+    print(f"{'hour':<{width}}  {''.join(axis)}")
+    days = sorted({h.date() for h in hours})
+    print(f"{'':<{width}}  {'· '.join(str(d) for d in days)} (model clock)")
+    print("```")
+
+
 def render(cells, hourly, since, asof):
     """cells is {(model, operation): cu}; hourly is {(model, operation, hour): cu}."""
     span = (f"since {since:%Y-%m-%d %H:%M} (model clock)" if since else "everything retained")
@@ -409,8 +479,11 @@ def render(cells, hourly, since, asof):
 
     print(f"Every dispatch since the floor, summed:\n")
     _op_table(cells)
-    if RUN_GAP_HOURS > 0 and hourly:
-        render_runs(hourly, sessionize(h for (_m, _o, h) in hourly))
+    runs = sessionize(h for (_m, _o, h) in hourly) if (RUN_GAP_HOURS > 0 and hourly) else []
+    if runs:
+        render_runs(hourly, runs)
+    if CHART and hourly:
+        render_chart(hourly, runs or [sorted({h for (_m, _o, h) in hourly})])
 
 
 def main():

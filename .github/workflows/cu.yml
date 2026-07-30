@@ -51,6 +51,10 @@ on:
         description: "also break each run down by operation type (off by default — with several runs it is a wall of tables)"
         type: boolean
         default: false
+      chart:
+        description: "draw CU per hour per engine as bars. FREE — the same rows as the tables, drawn instead of tabulated. One bar = one hour; finer would mean the 30s detail table at 120 requests/hour, which this does not spend."
+        type: boolean
+        default: true
       debug:
         description: "log the discovered schema and per-timepoint progress to stderr"
         type: boolean
@@ -83,6 +87,7 @@ jobs:
       CU_SINCE: ${{ inputs.since }}
       CU_RUN_GAP_HOURS: ${{ inputs.run_gap_hours }}
       CU_RUN_OPS: ${{ inputs.run_ops }}
+      CU_CHART: ${{ inputs.chart }}
       CU_DEBUG: ${{ inputs.debug }}
       PYTHONIOENCODING: utf-8
     steps:

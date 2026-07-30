@@ -60,6 +60,31 @@ the split keys off, and **per-engine separation does not depend on time at all**
 own semantic model, so it is already its own column. The timepoint detail table has finer resolution
 and this deliberately does not use it (see below).
 
+## The chart is free, and one bar is one hour
+
+The same rows, drawn instead of tabulated — where in a run the CU went, rather than only how much:
+
+```
+peak 300.0 CU  ·  1 bar = 1 hour (9 active)  ·  ┊ = gap between runs  ·  ·· = idle
+aemo_duckrun  ▅▅······┊▅▅······┊··
+aemo_iceberg  ··▆▆····┊··▆▆····┊··
+aemo_spark    ····██··┊····██··┊··
+aemo_dwh      ······██┊······██┊██
+hour          12131415┊09101112┊20
+              2026-07-30· 2026-07-31 (model clock)
+```
+
+Bars are scaled against the largest single (engine, hour) cell, so heights compare across engines and
+across runs in one reading. Every requested model gets a line even when it is empty — an absent line
+and an idle one are different findings.
+
+**One bar = one hour because that is the app's bucket**, not a styling choice. The Capacity Metrics
+app's own chart is drawn at 30 seconds, and that resolution lives only in `Timepoint Interactive
+Detail`: one request per 30s bucket, **120 per hour per capacity**, and its rows carry no timestamp
+column (the MPARAMETER *is* the timestamp), so a batch could not be attributed back to buckets even
+if the parameter took a list. That is real capacity spent to draw a prettier picture of numbers
+already in hand, so it is not spent. `chart=false` turns the chart off.
+
 **It is still not correlated with a GitHub run.** A run here is identified by its own time window.
 `benchmark/` records durations but no absolute timestamps, and adding them is the coupling this
 directory exists without. If the split shows one cluster where you expected two, the report says so
