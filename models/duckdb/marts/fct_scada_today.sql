@@ -1,13 +1,5 @@
--- Insert-only on both targets: a matched row is left alone, so a re-processed file dedupes on
--- the unique_key instead of double-inserting. duckrun spells that 'insert' (a DuckDB anti-join
--- over the key columns, committed as a fenced add-only append), iceberg spells it merge +
--- when_matched do_nothing -- see the fct_price.sql header for why the two cannot be written the
--- same way, and for why neither is plain 'append'. No INTERVENTION in the key: the intraday
--- SCADA feed has no such column.
--- The pending-file probe runs BEFORE config() on purpose: it feeds both the has_files no-op gate
--- and iceberg's incremental_predicates, and config() needs the latter. Same single query that
--- used to return only COUNT(*), so it costs no extra read of this table. See
--- macros/pending_file_predicate.sql -- iceberg only; duckrun derives its own literal filters.
+-- Insert-only. See fct_price.sql for the shared rationale. No INTERVENTION in the key: the
+-- intraday SCADA feed has no such column.
 {%- set pending_files_query -%}
 SELECT csv_filename FROM {{ ref('stg_csv_archive_log') }}
 WHERE source_type = 'scada_today'
@@ -25,10 +17,6 @@ AND csv_filename NOT IN (SELECT DISTINCT file FROM {{ this }})
 {%- endif -%}
 {%- set has_files = pending_files is none or pending_files | length > 0 -%}
 
-{#-- ICEBERG ONLY: the literal file predicate. Its merge prunes target FILES only from literal
-    values -- a column-to-column predicate scans 60/60 even on a partitioned table (measured --
-    see macros/pending_file_predicate.sql). duckrun needs none of it: engine.probe_filters builds
-    the equivalent from the batch itself. --#}
 {%- set file_predicate = pending_file_predicate(pending_files) -%}
 
 {{ config(
@@ -37,8 +25,7 @@ AND csv_filename NOT IN (SELECT DISTINCT file FROM {{ this }})
     merge_clauses=none if target.name == 'duckrun' else {'when_matched': [{'action': 'do_nothing'}]},
     unique_key=['file', 'DUID', 'SETTLEMENTDATE'],
     partition_by=['month_key'] if target.name == 'duckrun' else none,
-    incremental_predicates=(['target.month_key = source.month_key']
-                            if target.name == 'duckrun' else file_predicate),
+    incremental_predicates=file_predicate,
     pre_hook="SET VARIABLE scada_today_paths = (SELECT COALESCE(NULLIF(list('{{ get_csv_archive_path() }}' || archive_path), []), ['']) FROM (SELECT archive_path FROM {{ ref('stg_csv_archive_log') }} WHERE source_type = 'scada_today'{% if is_incremental() %} AND csv_filename NOT IN (SELECT DISTINCT file FROM {{ this }}){% endif %} ORDER BY archive_path))"
 ) }}
 

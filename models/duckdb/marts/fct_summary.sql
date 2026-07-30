@@ -1,51 +1,21 @@
 -- depends_on: {{ ref('fct_scada_today') }}
 -- depends_on: {{ ref('fct_price_today') }}
 
--- Determinism contract: fct_summary must be a pure function of its inputs — same
--- fct_scada/fct_price/dim_duid/_today tables => same summary, on every engine,
--- regardless of that engine's run history. The old three-branch incremental
--- (backfill-missing-dates | append-intraday-after-cutoff, matches never touched)
--- violated this: a date first written by the intraday path kept whatever gaps that
--- engine's schedule left, forever, and the four engines fossilized different tables
--- from identical inputs.
+-- Determinism contract: same inputs => same summary, on every engine, regardless of that
+-- engine's run history. Every run emits the COMPLETE recomputation -- the same SQL as a full
+-- refresh -- for exactly the dates whose stored content could still be stale, and the write
+-- reconciles that batch key by key. A partial top-up would fossilize gaps forever.
 --
--- The defect was in WHAT THE SOURCE EMITTED, not in how it was written: the source only
--- ever offered wholly-missing dates, so a date that existed but was incomplete could
--- never be repaired by any write strategy. Now every run emits the COMPLETE
--- recomputation — the same SQL as a full refresh — for exactly the dates whose stored
--- content could still be stale, and the write reconciles that batch key by key.
+-- The one model here that is NOT insert-only: a re-emitted row may carry REVISED mw/price and
+-- must overwrite. duckrun merges (update matched); iceberg cannot (its catalog 400s on a
+-- matched UPDATE) and so only fills craters. Not delete+insert on duckrun: that adapter
+-- implements it as a fenced full-table overwrite, i.e. 143M rows every run.
 --
--- Write strategy stays each target's proven one; only the source changed:
---   duckrun -> merge (update matched + insert new) on the grain. delta_rs prunes target
---     files from the source's own stats, so a ~3-date batch touches only those files.
---     This is the ONE model here that is not incremental_strategy='insert': the facts can be
---     insert-only because a stored row is final, but a re-emitted summary row may carry
---     REVISED mw/price and must overwrite what is stored. Insert-only would keep the stale
---     value, which is exactly the fossilization this header is about.
---     NOT delete+insert: this adapter implements that as a fenced FULL-TABLE overwrite
---     (it materializes every surviving target row plus the batch into a DuckDB temp
---     table, then overwrites), which would rewrite all 143M rows on every run.
---   iceberg -> merge with WHEN MATCHED DO NOTHING, unchanged. The OneLake Iceberg REST
---     catalog rejects a matched-UPDATE branch (BadRequest 400: only one add-snapshot
---     update per commit). Insert-only suffices because every input is append-only: a
---     (date, time, DUID) value is final once produced, and craters are missing keys,
---     which insert repairs. (Emitting deletes is NOT the blocker — XTable converts
---     Iceberg positional deletes to Delta deletion vectors fine.)
---
--- Neither merge path DELETES a stored row the recomputation no longer produces, and that
--- is NOT free just because the inputs are append-only — the assumption this header used
--- to make. No input row has to disappear: a row's PRODUCING BRANCH switches from intraday
--- to daily when the daily file lands, and the two branches read different AEMO tables
--- covering DIFFERENT UNIT UNIVERSES. fct_scada (DISPATCH_UNIT_SOLUTION) has 644 DUIDs;
--- fct_scada_today (DISPATCH_UNIT_SCADA) has 406, of which 26 non-scheduled units
--- (ROWALLAN, WAUBRAWF, ROYALLA1, GERMCRK, ...) have ZERO rows in fct_scada across all
--- 369M — they publish telemetry but are never dispatched. The intraday branch wrote them;
--- once the date settled nothing could reproduce them, so they became permanent orphans:
--- 5,861 rows on one date, every date, on all three merge engines. dwh only looked healthy
--- because delete+insert on [date] can retract; it was not more correct.
--- Hence dispatch_duids below: the intraday branch may only emit units the daily branch
--- will be able to reproduce. assert_fct_summary_matches_recomputation applies the SAME
--- filter and is the tripwire; the two must always change together.
+-- No merge path DELETES a row the recomputation stops producing, which is why dispatch_duids
+-- below gates the intraday branch to units the daily branch can reproduce.
+-- assert_fct_summary_matches_recomputation applies the SAME filter and is the tripwire -- the
+-- two must always change together. Full story: LEARNINGS.md, "Two branches of one model, two
+-- different unit universes"; CLAUDE.md, "fct_summary must be a pure function of its inputs".
 {{ config(
     materialized='incremental',
     incremental_strategy='merge',

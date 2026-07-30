@@ -1,16 +1,5 @@
--- Insert-only on both targets: a matched row is left alone, so a re-processed file dedupes on
--- the unique_key instead of double-inserting. See the fct_price.sql header for why the two
--- adapters cannot spell that the same way, and for why neither is plain 'append'.
---
--- fct_scada is the big one (369M rows). On duckrun 'insert' is a DuckDB anti-join over the
--- target's KEY columns committed as an add-only append, so its cost tracks the BATCH, not the
--- table; partition_by + the declared month_key equality are what let the probe emit a literal
--- `"month_key" IN (...)` and skip whole partition directories.
--- The pending-file probe runs BEFORE config() on purpose: it feeds both the has_files no-op
--- gate and iceberg's incremental_predicates, and config() needs the latter. Same single query
--- that used to return only COUNT(*), so it costs no extra read of this table. See
--- macros/pending_file_predicate.sql -- it is the ICEBERG predicate only; duckrun derives its
--- own literal filters from the batch.
+-- Insert-only. See fct_price.sql for the shared rationale; this is the big one (369M rows), so
+-- the pruning predicate and the month_key partitioning below are load-bearing, not decorative.
 {%- set pending_files_query -%}
 SELECT csv_filename FROM {{ ref('stg_csv_archive_log') }}
 WHERE source_type = 'daily'
@@ -28,12 +17,7 @@ AND csv_filename NOT IN (SELECT DISTINCT file FROM {{ this }})
 {%- endif -%}
 {%- set has_files = pending_files is none or pending_files | length > 0 -%}
 
-{#-- ICEBERG ONLY: the literal file predicate. delta-rs/DuckDB prune target FILES only from
-    literal values -- a column-to-column predicate scans 60/60 even on a partitioned table
-    (measured -- see macros/pending_file_predicate.sql). duckrun needs none of it: its insert
-    anti-join derives its own literal filters from the batch (engine.probe_filters -- an exact
-    `IN` list for the declared partition equality, min/max bounds for every other join key, so
-    `file` gets its range for free). --#}
+{#-- Literal file names, one spelling for both adapters. See macros/pending_file_predicate.sql. --#}
 {%- set file_predicate = pending_file_predicate(pending_files) -%}
 
 {{ config(
@@ -42,8 +26,7 @@ AND csv_filename NOT IN (SELECT DISTINCT file FROM {{ this }})
     merge_clauses=none if target.name == 'duckrun' else {'when_matched': [{'action': 'do_nothing'}]},
     unique_key=['file', 'DUID', 'SETTLEMENTDATE','INTERVENTION'],
     partition_by=['month_key'] if target.name == 'duckrun' else none,
-    incremental_predicates=(['target.month_key = source.month_key']
-                            if target.name == 'duckrun' else file_predicate),
+    incremental_predicates=file_predicate,
     pre_hook="SET VARIABLE scada_daily_paths = (SELECT COALESCE(NULLIF(list('{{ get_csv_archive_path() }}' || archive_path), []), ['']) FROM (SELECT archive_path FROM {{ ref('stg_csv_archive_log') }} WHERE source_type = 'daily'{% if is_incremental() %} AND csv_filename NOT IN (SELECT DISTINCT file FROM {{ this }}){% endif %} ORDER BY archive_path))"
 ) }}
 
