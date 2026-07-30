@@ -189,7 +189,7 @@ def discover_capacities():
     Passing them all is correct for the single-capacity case and harmless otherwise — the query
     filters to semantic models by name, and a capacity with no activity contributes no rows.
     """
-    for col in ("capacity Id", "Capacity Id", "CapacityId"):
+    for col in ("Capacity Id", "capacity Id", "CapacityId"):
         rows = execute_dax(f"EVALUATE VALUES('Capacities'[{col}])", fatal=False)
         if rows is None:
             continue
@@ -247,13 +247,17 @@ def collect(tps, cap_ids, cols):
     seen = {}
     has_kind = "item_kind" in cols
 
-    def one(tp):
-        return tp, strip_prefix(execute_dax(detail_dax(tp, cap_ids, cols)))
+    def one(job):
+        cap, tp = job
+        rows = execute_dax(detail_dax(tp, [cap], cols), fatal=False)
+        return tp, strip_prefix(rows or [])
+
+    jobs = [(cap, tp) for cap in cap_ids for tp in tps]
 
     # Four at a time: enough to make a 60-call window quick, far enough under the 120/min cap that
     # the 429 path stays exceptional rather than routine.
     with ThreadPoolExecutor(max_workers=4) as pool:
-        for i, (tp, rows) in enumerate(pool.map(one, tps), 1):
+        for i, (tp, rows) in enumerate(pool.map(one, jobs), 1):
             for r in rows:
                 if has_kind and str(r.get("ItemKind", "")).strip().lower() not in MODEL_KINDS:
                     continue
@@ -268,9 +272,39 @@ def collect(tps, cap_ids, cols):
                 # Max, not first: a partially-smoothed slice can appear before the final total.
                 if prev is None or cu > prev[2]:
                     seen[oid] = (r.get("ItemName") or "(unnamed)", r.get("Operation") or "", cu)
-            if DEBUG and i % 10 == 0:
-                log(f"  {i}/{len(tps)} timepoints, {len(seen)} operations so far")
+            if DEBUG and i % 20 == 0:
+                log(f"  {i}/{len(jobs)} queries, {len(seen)} operations so far")
     return seen
+
+
+def usable_capacities(cap_ids, tp, cols):
+    """Keep the capacities this model will actually serve, in the id spelling it accepts.
+
+    Two things were learned the hard way here, both surfacing as the same opaque 400
+    (`Internal Error: Error obtaining data location`):
+
+    - The detail table is DirectQuery and resolves ONE data location per query, so
+      `CapacitiesList` must carry a single capacity. Passing every capacity at once fails
+      outright — and this tenant has two.
+    - Casing is not guaranteed. The model exposes both `Capacity Id` and `Uppercase capacity Id`,
+      and which spelling the parameter wants is not documented, so both are tried.
+
+    A capacity that fails every spelling is dropped with a note rather than killing the run: the
+    interesting one may well be the other.
+    """
+    ok = []
+    for cap in cap_ids:
+        for cand in dict.fromkeys([cap, cap.lower(), cap.upper()]):
+            if execute_dax(detail_dax(tp, [cand], cols), fatal=False) is not None:
+                ok.append(cand)
+                log(f"  capacity {cap} -> queryable as {cand}")
+                break
+        else:
+            log(f"  capacity {cap} rejected in every spelling — skipping it")
+    if not ok:
+        die("no capacity could be queried. If this tenant's capacities are in a region the "
+            "metrics model cannot serve, pass one explicitly with capacity_id.")
+    return ok
 
 
 def render(seen, start, end):
@@ -312,8 +346,10 @@ def main():
     cols = discover_columns()
     cap_ids = [CAPACITY] if CAPACITY else discover_capacities()
     tps = timepoints(end, WINDOW_MIN)
-    log(f"capacities={cap_ids} window={WINDOW_MIN}min timepoints={len(tps)} "
+    log(f"candidate capacities={cap_ids} window={WINDOW_MIN}min timepoints={len(tps)} "
         f"offset={OFFSET_H}h")
+    # Probe once against the newest timepoint before spending 60 requests per capacity.
+    cap_ids = usable_capacities(cap_ids, tps[-1], cols)
 
     seen = collect(tps, cap_ids, cols)
     log(f"{len(seen)} distinct operations across {len(tps)} timepoints")
