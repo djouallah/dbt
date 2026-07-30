@@ -2,12 +2,19 @@
 
 Fabric exposes no per-operation CU REST API. The Capacity Metrics app's model is the only
 authoritative source, so this queries it by DAX over the Power BI `executeQueries` endpoint and
-prints one two-column table: semantic model name, CU consumed over the last N hours.
+prints one table: the benchmark's semantic models against the operation types they spent CU on,
+over the last N hours.
+
+Deliberately scoped to the semantic models. Widening it to every item in the workspace was tried
+and reverted: the lakehouses' OneLake read AND write operations bring a dozen operation types each,
+plus a row per throwaway `duckrun-py-*` notebook, and the table stopped being readable. The
+pipeline's own cost is a different question from what querying the four models costs, and mixing
+them in one table served neither.
 
 Standalone on purpose. It shares NOTHING with benchmark/ — no imports, no run_report.json, no
 artifact, no ADOMD, no .NET. `requests` is the only dependency.
 
-Reads 'Metrics By Item And Hour', NOT 'Timepoint Interactive Detail'. The detail table was tried
+Reads 'Metrics By Item Operation And Hour', NOT 'Timepoint Interactive Detail'. The detail table was tried
 first and is the wrong instrument: it is bucketed at 30 seconds and gated by a single-timepoint
 MPARAMETER, so a 3-hour window costs 360 requests per capacity, and because an interactive
 operation is smoothed across 10-128 buckets it reappears in each one at full value and has to be
@@ -43,19 +50,15 @@ CAPACITY = os.environ.get("CU_CAPACITY_ID", "").strip()
 
 HOURS = float(os.environ.get("CU_WINDOW_HOURS", "3") or 3)
 
-# Items to report, in this order. Blank — the default — means EVERY item in the workspace, of every
-# kind, which is the honest reading: the four semantic models are only the query side. The
-# lakehouses' OneLake reads and writes and the warehouse's T-SQL are billed separately, against the
-# lakehouse and warehouse items, and leaving them out makes the pipeline look free.
+# The models to report, in this order. Defaults to the benchmark's four, because the capacity is
+# shared and an unfiltered report is dominated by unrelated models nobody here cares about.
 #
-# The workspace filter below is what keeps "everything" meaningful on a shared capacity. Name items
-# explicitly only to narrow further; a named item with no activity still prints a 0.0 row, so a
-# rename is visible rather than silently absent.
-WANT_ITEMS = [m.strip() for m in os.environ.get("CU_ITEMS", "").split(",") if m.strip()]
-
-# How many operation columns to print before folding the rest into "other". Every item kind brings
-# its own operation vocabulary — OneLake alone has a dozen — so an unfolded table is unreadable.
-TOP_OPS = int(os.environ.get("CU_TOP_OPS", "8") or 8)
+# Named rather than imported from benchmark/engines.py on purpose: this tool shares no code with
+# benchmark/ so that deleting it stays free. If the benchmark's PREFIX or engine list changes, this
+# list changes with it — a rename shows up as a row of 0.0, which is why every requested model is
+# always printed even when it has no activity. Set empty for every semantic model on the capacity.
+MODELS = [m.strip() for m in os.environ.get(
+    "CU_MODELS", "aemo_duckrun,aemo_iceberg,aemo_spark,aemo_dwh").split(",") if m.strip()]
 
 # The workspace the models live in — the same one ci.yml and benchmark.yml deploy to. Applied ON
 # TOP of the name filter, not instead of it: display names are not unique across a tenant, so a
@@ -92,7 +95,8 @@ REQUIRED = {
     },
 }
 
-ROW_KEY = ("item", "kind")
+# What counts as a semantic model in 'Items'[Item kind]. Compared case-insensitively.
+MODEL_KINDS = {"semanticmodel", "dataset", "semantic model"}
 
 
 def log(*a):
@@ -231,53 +235,39 @@ EVALUATE
 """.strip(), fatal=False))
 
 
-def render(cells, kinds, start, end, hours):
-    """cells is {(item, operation): cu}, kinds is {item: item kind}. Items x operation types."""
-    print(f"## Fabric item CU — last {hours:g}h "
+def render(cells, start, end, hours):
+    """cells is {(model, operation): cu}. Rendered as models x operation types."""
+    print(f"## Semantic model CU — last {hours:g}h "
           f"({start:%Y-%m-%d %H:%MZ} -> {end:%H:%MZ})\n")
     if not cells:
-        print("No activity in this window. The app holds **14 days**, operations land **~6 "
-              "minutes** after they run, and `workspace` may be excluding them.")
+        print("No semantic model activity in this window. The app holds **14 days** and operations "
+              "land **~6 minutes** after they run.")
         return
 
-    per_item = {}
-    for (it, _op), cu in cells.items():
-        per_item[it] = per_item.get(it, 0.0) + cu
-    # When specific items were asked for, print every one in the order given, including any with no
-    # activity — an item that silently vanishes is indistinguishable from one that was renamed, and
-    # a 0.0 row says which. Otherwise it is everything in the workspace, dearest first.
-    items = ([(m, per_item.get(m.lower(), 0.0)) for m in WANT_ITEMS] if WANT_ITEMS
-             else sorted(per_item.items(), key=lambda kv: -kv[1]))
+    # When specific models were asked for, print every one of them in the order given, including
+    # the ones with no activity. A model that silently vanishes from the table is indistinguishable
+    # from one that was never deployed; a 0.0 row says which.
+    per_model = {}
+    for (m, _op), cu in cells.items():
+        per_model[m] = per_model.get(m, 0.0) + cu
+    models = ([(m, per_model.get(m.lower(), 0.0)) for m in MODELS] if MODELS
+              else sorted(per_model.items(), key=lambda kv: -kv[1]))
 
-    # Operation columns by total CU, so the expensive one reads first. Beyond TOP_OPS they fold
-    # into "other" — every item kind brings its own vocabulary and the table stops being readable.
+    # Operation columns ordered by total CU, so the expensive one is the first thing read.
     per_op = {}
-    for (_it, op), cu in cells.items():
+    for (_m, op), cu in cells.items():
         per_op[op] = per_op.get(op, 0.0) + cu
-    ranked = [op for op, _ in sorted(per_op.items(), key=lambda kv: -kv[1])]
-    ops, rest = ranked[:TOP_OPS], ranked[TOP_OPS:]
-    cols = ops + (["other"] if rest else [])
+    ops = [op for op, _ in sorted(per_op.items(), key=lambda kv: -kv[1])]
 
-    def row_vals(name):
-        key = name.lower()
-        vals = [cells.get((key, op), 0.0) for op in ops]
-        if rest:
-            vals.append(sum(cells.get((key, op), 0.0) for op in rest))
-        return vals
-
-    print("| item | kind | " + " | ".join(cols) + " | total |")
-    print("|---|---|" + "---:|" * (len(cols) + 1))
-    for name, total in items:
-        print(f"| {name} | {kinds.get(name.lower(), '?')} | "
-              + " | ".join(f"{v:,.1f}" for v in row_vals(name))
-              + f" | **{total:,.1f}** |")
-    totals = [per_op[op] for op in ops] + ([sum(per_op[op] for op in rest)] if rest else [])
-    print("| **total** |  | " + " | ".join(f"**{v:,.1f}**" for v in totals)
-          + f" | **{sum(t for _, t in items):,.1f}** |")
-    if rest:
-        print(f"\n`other` folds {len(rest)} further operation types: "
-              + ", ".join(f"{op} ({per_op[op]:,.1f})" for op in rest[:12])
-              + ("…" if len(rest) > 12 else ""))
+    print("| semantic model | " + " | ".join(ops) + " | total |")
+    print("|---|" + "---:|" * (len(ops) + 1))
+    for name, total in models:
+        vals = [cells.get((name.lower(), op), 0.0) for op in ops]
+        print(f"| {name} | " + " | ".join(f"{v:,.1f}" for v in vals) + f" | **{total:,.1f}** |")
+    grand = sum(t for _, t in models)
+    print("| **total** | "
+          + " | ".join(f"**{per_op[op]:,.1f}**" for op in ops)
+          + f" | **{grand:,.1f}** |")
 
 
 def main():
@@ -295,10 +285,10 @@ def main():
     cols = discover_columns()
     caps = [CAPACITY] if CAPACITY else discover_capacities()
     log(f"capacities={caps} window={HOURS:g}h from {start:%Y-%m-%d %H:%MZ} "
-        f"workspace={WS_FILTER or '(all)'} items={WANT_ITEMS or '(every item in the workspace)'}")
+        f"workspace={WS_FILTER or '(all)'} models={MODELS or '(every semantic model)'}")
 
-    wanted = {m.lower() for m in WANT_ITEMS}
-    cells, kinds, unknown = {}, {}, 0
+    wanted = {m.lower() for m in MODELS}
+    cells, unknown = {}, 0
     for cap in caps:
         items = items_for(cap, cols[ITEMS])
         rows = cu_for(cap, start, cols[TABLE])
@@ -316,12 +306,11 @@ def main():
                 continue
             name, kind = items.get(iid, ("", ""))
             key = (name or iid).lower()
-            # No item-kind gate: the lakehouses' OneLake traffic and the warehouse's T-SQL are the
-            # point of widening this beyond semantic models. The workspace filter is what keeps the
-            # report to this project's items.
-            if wanted and key not in wanted:
+            if wanted:
+                if key not in wanted:
+                    continue
+            elif kind and kind.strip().lower() not in MODEL_KINDS:
                 continue
-            kinds[key] = kind or "?"
             if not name:
                 # Keep it under its GUID rather than drop it: losing CU silently is worse than an
                 # ugly row. Counted so the log can say how much of the table is opaque.
@@ -331,10 +320,10 @@ def main():
 
     if unknown:
         log(f"  {unknown} item ids had no entry in '{ITEMS}' — shown as raw GUIDs")
-    for (name, op), cu in sorted(cells.items(), key=lambda kv: -kv[1])[:40]:
+    for (name, op), cu in sorted(cells.items(), key=lambda kv: -kv[1]):
         log(f"  {name} / {op}: {cu:,.1f} CU")
 
-    render({k: round(v, 1) for k, v in cells.items()}, kinds, start, end, HOURS)
+    render({k: round(v, 1) for k, v in cells.items()}, start, end, HOURS)
 
 
 if __name__ == "__main__":

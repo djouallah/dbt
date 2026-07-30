@@ -1,29 +1,24 @@
-# `cu/` — CU per Fabric item
+# `cu/` — CU per semantic model
 
-One question: **what did this workspace cost in capacity units?**
+One question: **what did the benchmark's four semantic models cost in capacity units?**
 
 Fabric has no per-operation CU REST API. The Capacity Metrics app's own semantic model is the only
 authoritative source, so this reads it by DAX and prints one table.
 
 ```
-## Fabric item CU — last 3h (2026-07-30 08:32Z -> 11:32Z)
+## Semantic model CU — last 3h (2026-07-30 08:25Z -> 11:25Z)
 
-| item         | kind          | XMLA Read | Warehouse Query | On-Demand Refresh |   other |    total |
-|--------------|---------------|----------:|----------------:|------------------:|--------:|---------:|
-| aemo_duckrun | SemanticModel |  16,539.9 |             0.0 |           1,396.6 |     0.0 | 17,936.5 |
-| dbt_dwh      | Warehouse     |       0.0 |         5,200.0 |               0.0 |    77.0 |  5,277.0 |
-| dbt_delta    | Lakehouse     |       0.0 |             0.0 |               0.0 | 1,292.0 |  1,292.0 |
-| **total**    |               |  16,539.9 |         5,200.0 |           1,396.6 | 1,369.0 | 24,505.5 |
+| semantic model | XMLA Read Operation | Semantic model refresh | Query |    total |
+|----------------|--------------------:|-----------------------:|------:|---------:|
+| aemo_duckrun   |            12,000.0 |                  500.0 |   0.0 | 12,500.0 |
+| aemo_iceberg   |                 0.0 |                    0.0 |   0.0 |      0.0 |
+| aemo_spark     |             2,000.0 |                    0.0 |  75.0 |  2,075.0 |
+| aemo_dwh       |                 0.0 |                    0.0 |   0.0 |      0.0 |
+| **total**      |            14,000.0 |                  500.0 |  75.0 | 14,575.0 |
 ```
 
-**Every item kind, not just the semantic models.** The four `aemo_*` models are only the query
-side; the lakehouses' OneLake reads and writes and the warehouse's T-SQL are billed separately
-against the lakehouse and warehouse items, and omitting them makes the pipeline look free. Rows are
-whatever the workspace holds, dearest first. Operation columns are discovered from the data and
-ordered by total CU, folding past `top_ops` into `other` — every item kind brings its own operation
-vocabulary and OneLake alone has a dozen.
-
-That is the whole output and the whole scope.
+Operation columns are discovered from the data and ordered by total CU, so the expensive one reads
+first. That is the whole output and the whole scope.
 
 ## What it deliberately is not
 
@@ -44,8 +39,7 @@ after the activity you want to measure** — see the lag note below.
 | input | default | notes |
 |---|---|---|
 | `window_hours` | `3` | one query per capacity regardless of size; max 14 days |
-| `items` | all | comma-separated, in report order. Blank = every item in the workspace |
-| `top_ops` | `8` | operation columns before the rest fold into `other` |
+| `models` | the four `aemo_*` | comma-separated, in report order. Blank = every semantic model |
 | `workspace` | `ea575278-…` | the workspace ci.yml and benchmark.yml deploy to. Blank = all |
 | `metrics_workspace_id` | `7f7f5d92-…` | where the Capacity Metrics app is installed |
 | `metrics_model_id` | `0fdedd3b-…` | the app's semantic model |
@@ -77,11 +71,11 @@ capacity**, already summed, with no double-counting to guard against. Summing *i
 table precisely because it is already an aggregate. The detail table remains the right tool for
 drilling into one timepoint's individual operations — which is not what this does.
 
-**`workspace` is what makes "every item" safe.** The capacity is shared, so an unfiltered report is
-dominated by items nobody here owns. Display names are also not unique across a tenant — a stale
-`aemo_spark` elsewhere would be silently added to this one's CU — so when `items` is used to narrow
-further, both filters apply. A named item with no activity still prints a `0.0` row: that
-distinguishes "ran and cost nothing" from "renamed", which a missing row would not.
+**Both filters are needed, and they stack.** Display names are not unique across a tenant, so a
+stale `aemo_spark` in some other workspace would otherwise be silently added to this one's CU.
+`models` selects by name, `workspace` restricts to the workspace the benchmark deploys to, and both
+apply. Every requested model is printed even with no activity — a `0.0` row distinguishes "ran and
+cost nothing" from "vanished", which a missing row would not.
 
 **One capacity per query.** These tables are DirectQuery and resolve one data location per query,
 so `CapacitiesList` must carry exactly one capacity. Passing several fails with an opaque
