@@ -118,7 +118,12 @@ jobs:
           echo "::add-mask::$TOKEN"
           echo "PBI_TOKEN=$TOKEN" >> "$GITHUB_ENV"
 
-      # stdout is the markdown table and nothing else; diagnostics are on stderr and stay in the
-      # job log.
+      # stdout is the markdown table and nothing else; diagnostics are on stderr.
+      #
+      # tee rather than `>>`: the table lands in the step summary AND in the job log, so a run can
+      # be reviewed with `gh run view --log` instead of only in a browser. pipefail because the
+      # pipe would otherwise report tee's exit status and turn a failed read green.
       - name: Read CU from the Capacity Metrics model
-        run: python cu/capacity_cu.py >> "$GITHUB_STEP_SUMMARY"
+        run: |
+          set -o pipefail
+          python cu/capacity_cu.py | tee -a "$GITHUB_STEP_SUMMARY"
