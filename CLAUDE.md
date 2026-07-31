@@ -387,10 +387,24 @@ still run it by hand to reproduce a CI failure. That is a debugging affordance, 
   Asking for the *profile* instead binds, and V-Order follows it.
   **`profiles.yml` therefore sets the profile and nothing else** — the explicit
   `spark.sql.parquet.vorder.default` was removed, because on its own it did nothing and alongside
-  the profile it made the two indistinguishable. The open question that arrangement answers is
-  whether `readHeavyForPBI` carries `vorder=true` unaided; it should, since the profile defines the
-  key. If a run ever reads `readHeavyForPBI` with `vorder=false`, put the key back *below* the
-  profile line and record it. Do not re-add it "to be safe" — that is what hid the mechanism.
+  the profile it made the two indistinguishable. Microsoft's
+  [resource profile reference](https://learn.microsoft.com/en-us/fabric/data-engineering/configure-resource-profile-configurations)
+  confirms the key is redundant — it publishes each profile's exact config set:
+
+  | profile | configs |
+  |---|---|
+  | `writeHeavy` (workspace default) | `vorder.default: "false"`, `optimizeWrite.enabled: "null"`, `binSize: "128"`, `optimizeWrite.partitioned.enabled: "true"` |
+  | `readHeavyForPBI` | **`vorder.default: "true"`**, `optimizeWrite.enabled: "true"`, **`binSize: "1g"`** |
+  | `readHeavyForSpark` | `optimizeWrite.enabled: "true"`, `optimizeWrite.partitioned.enabled: "true"`, `binSize: "128"` — **does not set vorder at all** |
+
+  Two things to carry from that table. `readHeavyForPBI` is the *only* profile that enables
+  V-Order, so `readHeavyForSpark` would be the wrong choice here despite the name — and note the
+  V-Order page contradicts this, saying "switch to `readHeavyforSpark` or `ReadHeavy` … which
+  automatically enable V-Order". The profile reference and our own in-session measurement agree
+  with each other and against that sentence; trust them. Second, the profile also flips
+  `optimizeWrite` on with a **1 GB bin size** against `writeHeavy`'s 128 MB, so it rewrites file
+  layout far beyond V-Order — `fct_summary` at 19 files / 1.2 GB should collapse to very few files.
+  Expect the next `Table layout` run to move a lot, and read it as the profile working, not drift.
   Two dead hypotheses, recorded so they are not retried: the adapter is not dropping the conf, and
   REPL packing is not either (the canary reads `alive` on the worker, which is a packed acquire).
   Two earlier claims in this file were wrong and are retracted: that the conf was "inert / has
@@ -492,6 +506,16 @@ still run it by hand to reproduce a CI failure. That is a debugging affordance, 
     would break both and neither failure would name the runtime.
   - The Native Execution Engine (`spark.native.enabled`) was never enabled: an execution-side
     change with documented divergences (`round()`, `DECIMAL`→`FLOAT`) and no bearing on layout.
+    **Whether NEE writes V-Order is undocumented, checked 2026-07-31 and still unanswered.** The
+    [NEE overview](https://learn.microsoft.com/en-us/fabric/data-engineering/native-execution-engine-overview)
+    (updated 2026-06-05) does not mention V-Order anywhere — not as a supported feature, not in
+    *Existing limitations*, not in *Other considerations*; its limitation list is entirely about
+    query operators, file formats and semantic divergences, and the only layout items it names are
+    Z-Order and Liquid Clustering, both read-side accelerations. The
+    [V-Order page](https://learn.microsoft.com/en-us/fabric/data-engineering/delta-optimization-and-v-order)
+    (same date) never mentions NEE. Neither references the other, so "V-Order is absent from the
+    NEE limitations list" means *unstated*, not *supported* — do not cite that absence as evidence
+    in either direction. It only becomes worth resolving if NEE is ever turned on here.
   - **A resource profile can also be set workspace-wide** (Workspace settings → Spark settings →
     "Optimize for your use case", workspace Admin only), or by making an environment the workspace
     default. Either would give the spark leg V-Order with **nothing at all in `profiles.yml`** —
