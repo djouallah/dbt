@@ -27,6 +27,11 @@ on-run-start:
   - "{% if target.name == 'duckrun' %}SET GLOBAL temp_directory = '{{ env_var('DUCKDB_TEMP_DIR', '/tmp/duckdb_spill') }}'{% endif %}"
   # Fabric Warehouse has no implicit schemas — create them before any model runs.
   - "{% if target.type == 'fabric' %}{{ create_schemas_if_not_exists(['landing', 'mart']) }}{% endif %}"
+  # TEMPORARY: is spark_config.conf actually reaching the session? on-run-start runs on dbt's
+  # MASTER connection, which is the acquire that most likely CREATED the Livy session — so this
+  # reads the one REPL whose conf could have applied. dim_duid's pre_hook reads a worker REPL,
+  # which is packed. See macros/probe_spark_conf.sql. Delete both once they have reported.
+  - "{% if target.type == 'fabricspark' %}{{ probe_spark_conf('master') }}{% endif %}"
 
 # Three model folders, one per SQL dialect. Exactly one is enabled per target, so the
 # model NAMES are shared across dialects and ref()/tests are identical everywhere.

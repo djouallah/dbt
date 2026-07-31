@@ -3,9 +3,14 @@
 -- atomic, so no concurrent-writer duplicate risk, and attribute changes flow through. It
 -- previously also carried incremental_strategy='merge' and unique_key, which materialized
 -- ='table' silently ignores; they are gone rather than left to describe a merge that never ran.
+--
+-- The first pre_hook is a TEMPORARY diagnostic. It renders to whitespace, so run_hooks skips it
+-- as an empty hook; the reading happens during render, on THIS worker thread's REPL — which is a
+-- packed acquire, unlike the master connection the on-run-start copy reads. Delete with the macro.
 {{ config(
     materialized='table',
     pre_hook=[
+      "{{ probe_spark_conf('worker') }}",
       "CREATE OR REPLACE TEMPORARY VIEW duid_data USING csv OPTIONS (path '" ~ get_csv_archive_path() ~ "/duid/duid_data.csv', header 'true', inferSchema 'true')",
       "CREATE OR REPLACE TEMPORARY VIEW facilities USING csv OPTIONS (path '" ~ get_csv_archive_path() ~ "/duid/facilities.csv', header 'true', inferSchema 'true')",
       "CREATE OR REPLACE TEMPORARY VIEW wa_energy_raw USING csv OPTIONS (path '" ~ get_csv_archive_path() ~ "/duid/WA_ENERGY.csv', header 'true', inferSchema 'true')",
