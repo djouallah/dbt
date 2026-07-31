@@ -415,13 +415,15 @@ still run it by hand to reproduce a CI failure. That is a debugging affordance, 
   this is the same profile the reverted Fabric Environment was built to get, now obtained with one
   line in `profiles.yml` and no environment, so no starter-pool penalty.
   To re-measure, re-add the probe: `git show df1e5ec -- macros/probe_spark_conf.sql`.
-  The old `add.tags {"VORDER": "true"}` observation — small writes tagged, `mart/fct_summary`
-  `tags: {}` on all 19 files — was read as "V-Order works but leaks on the large write, size cutoff
-  unexplained". That reading assumed the key was in force, and it was not, so there is no cutoff to
-  explain and the tags on the small writes came from something else. Whether the large write now
-  V-Orders under `readHeavyForPBI` is **open and worth checking**, since it is the only table
-  `benchmark/` queries: read `_delta_log/*.json` for `"VORDER": "true"` in the `add` actions.
-  `stats.py`'s `vorder` column cannot answer it — see the bullet below on why.
+  **The large-write hole is CLOSED.** Confirmed by inspecting the parquet after a rebuild under
+  `readHeavyForPBI`: V-Order is present throughout, including `mart/fct_summary`. The old
+  observation — small writes tagged `add.tags {"VORDER": "true"}`, `fct_summary` `tags: {}` on all
+  19 files — was read as "V-Order works but leaks on the large write, size cutoff unexplained".
+  That reading assumed the session key was in force. It was not, so there was never a cutoff to
+  explain; the whole thing was one setting that had never taken effect, and the tags on the small
+  writes came from something else. Do not go looking for a size threshold — there isn't one.
+  To re-verify after any layout change, read `_delta_log/*.json` for `"VORDER": "true"` in the `add`
+  actions. `stats.py`'s `vorder` column cannot answer it — see the bullet below on why.
   **Do not read the Spark UI Environment tab to check any of this.** It renders the SparkContext
   conf captured at application launch and never shows a `spark.sql.*` value applied afterwards to a
   SparkSession, so it cannot distinguish "dropped" from "live but invisible" — it was the instrument
