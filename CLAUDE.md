@@ -777,25 +777,39 @@ detail.
 - **It correlates nothing with a GitHub run, and that is still true after the per-run split.** It
   cannot say which *query* produced a number. It can now say which *run* and which *engine*, and
   neither needed coupling to `benchmark/`: an engine has its own semantic model, so it is already its
-  own row, and a run is inferred as a **cluster of active hours** split on more than
-  `CU_RUN_GAP_HOURS` (default 2) idle hours, identified by its own time window. `benchmark/` still
-  records durations but no absolute timestamps, and adding them is the coupling this avoids.
+  own row, and a run is inferred as **one deployment generation** — every dispatch deletes and
+  recreates the models, so a repeated model *name* among the item GUIDs is the next run — identified
+  by its own GUIDs and time window. `benchmark/` still records durations but no absolute timestamps,
+  and adding them is the coupling this avoids.
 - **There is no chart, and that was tried.** A per-hour bar chart of the same rows was built and removed: at the hour bucket a real run is two or three bars per engine, which reads as noise next to the numbers it was drawn from. The app's own chart is drawn at 30 seconds, and that resolution lives only in `'Timepoint Interactive Detail'` — one request per bucket, **120 per hour per capacity**, rows carrying no timestamp column (the MPARAMETER *is* the timestamp) so a batch could not be attributed even if the parameter took a list. Real capacity to redraw numbers already in hand, so it stays tables. If it comes up again: sum `Timepoint CU (s)`, never `Total CU (s)` — the smoothing-duplication trap below applies to that table too.
-- **The per-run split costs zero extra requests, and the hour bucket is its hard floor.** The hour
-  column was always projected — it has to be, or `since` cannot be verified to bind — and was simply
-  discarded after that check; the split is post-processing of rows already in hand, so it is still one
-  request per capacity. What it cannot do is separate two dispatches inside the same hour:
-  `Metrics By Item Operation And Hour` is bucketed hourly, and the finer instrument is the timepoint
-  detail table this deliberately does not use. Do not reach for that table to sharpen the split — the
-  dedup trap below is why, and the benchmark's own inter-engine gaps already create the idle hours the
-  clustering keys off. When everything lands in one cluster the report says so rather than printing a
-  one-column "runs" table that repeats the aggregate.
+- **The per-run split costs zero extra requests, and it keys on the ITEM GUID — the hour bucket is no
+  longer its floor.** Both signals were always in the row: the hour has to be projected or `since`
+  cannot be verified to bind, and the GUID has to be read to resolve a name. Neither costs a request,
+  so the split is still post-processing of rows already in hand. **Hour-clustering alone was not
+  enough and this was measured, not assumed:** with `CU_RUN_GAP_HOURS=2` a window holding four
+  benchmark dispatches printed **two** columns — one pair was 1h20m apart, and the other pair was ten
+  minutes apart, i.e. inside one hour bucket, where no gap value could ever have separated them.
+  Because `deploy_models.py` deletes and recreates each model, a dispatch mints a fresh GUID per
+  engine and a model cannot appear twice in one run, so a repeated model name IS the boundary. Two
+  consequences: adjacent columns may **overlap by an hour** (allocation is by GUID, so this costs no
+  accuracy), and `CU_RUN_GAP_HOURS` now only splits a model that was *not* redeployed. Do not reach
+  for the timepoint detail table to sharpen this further — the dedup trap below is why, and this
+  change is what keeps it unnecessary. When everything lands in one generation the report says so
+  rather than printing a one-column "runs" table that repeats the aggregate — which is the expected
+  output at the default `since`, because that floor is pinned to the newest dispatch.
+- **`CU_SINCE` is pinned to the first dispatch measured the CURRENT way, and that is a floor to keep
+  bumping.** It is `2026-07-31T16:00:00` (model clock), the hour holding run 30609137059, which
+  started four minutes after `8c037c8`/`debef3a` changed the benchmark from a per-query dehydrate to
+  a user-session walk with think time. Older dispatches are still retained and still readable — pass
+  a wider `since` on the dispatch — but their CU is a different experiment and summing it with the
+  current one is apples to oranges. Bump the default again the next time `benchmark/` changes what it
+  measures; the value lives in both `cu/capacity_cu.py` and `cu.yml`.
 - **The runs table is model-down / run-across, and the transpose was the earlier shape.** One row per
   semantic model, one column per run, so "what did iceberg cost yesterday against today" is one row
   read left to right — and it matches the aggregate table above it instead of making the eye re-learn
-  the layout halfway down. A column is a whole run, never an hour: contiguous active hours are merged,
-  so a pass spanning 12:00→15:00 is one column, and the per-run hour *count* sits in the footnote
-  precisely so the columns are not read as hourly. Runs being columns is also why `CU_RUN_COLS`
+  the layout halfway down. A column is a whole run, never an hour: a pass spanning 12:00→15:00 is one
+  column, and the per-run hour *count* sits in the footnote precisely so the columns are not read as
+  hourly. Runs being columns is also why `CU_RUN_COLS`
   (default 8, env-only, no dispatch input) folds the oldest into one `earlier` column — named in the
   header and logged, never a silent cap. Deliberately **no Δ / change column**: a run-over-run
   percentage only means anything if both dispatches used the same `runs`, and `cu/`
@@ -823,7 +837,10 @@ detail.
   the Items join alone. Related and equally load-bearing: an empty result now prints its own
   diagnosis — rows returned after the floor, which filter dropped them and how many, any item whose
   name matched but whose workspace did not (with the real id), and the top spenders it did see. A bare
-  GUID in that last table IS this trap.
+  GUID in that last table IS this trap. The same fact is now also **load-bearing in the other
+  direction**: a fresh GUID per dispatch is exactly what the per-run split keys on, so anything that
+  made a redeploy reuse an id (an `overwrite=True` deploy, say) would silently merge two runs into
+  one column rather than break anything.
 - **`'Timepoint Interactive Detail'[Item]` is a GUID, and the table has no name or kind column** —
   the real columns are `Item`, `Operation`, `Operation Id`, `Total CU (s)`, `Workspace Id`, `User`,
   `Billing type`, `Status`, `Duration (s)`, `Timepoint CU (s)`. So `discover_items()` joins to

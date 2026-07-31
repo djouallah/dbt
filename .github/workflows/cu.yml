@@ -20,9 +20,9 @@ on:
   workflow_dispatch:
     inputs:
       since:
-        description: "count only from this instant, IN THE MODEL'S CLOCK (the app's own offset, not UTC — the run logs the hour range it saw). A pinned floor, not a rolling window. Blank = everything retained (~14 days)."
+        description: "count only from this instant, IN THE MODEL'S CLOCK (the app's own offset, not UTC — the run logs the hour range it saw). A pinned floor, not a rolling window. The default is the first dispatch measured the current way; widen it to reach older suites, whose CU is not comparable. Blank = everything retained (~14 days)."
         type: string
-        default: "2026-07-30T22:00:00"
+        default: "2026-07-31T16:00:00"
       models:
         description: "semantic models to report, comma-separated and in this order. Blank = every semantic model in the workspace."
         type: string
@@ -44,7 +44,7 @@ on:
         type: string
         default: ""
       run_gap_hours:
-        description: "split the report per RUN: a new run starts after this many idle hours. The metrics table is bucketed at one HOUR, so two dispatches inside the same hour cannot be separated. 0 = aggregate only."
+        description: "the report splits per RUN on the semantic model's item GUID — every dispatch redeploys, so even two dispatches in the same hour separate. This is the secondary rule, for a model that was NOT redeployed: it splits after this many idle hours. 0 = aggregate only."
         type: string
         default: "2"
       run_ops:

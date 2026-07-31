@@ -20,11 +20,14 @@ authoritative source, so this reads it by DAX and prints one table.
 **Time is a pinned floor, not a rolling window.** A window ("last 3h") moves with every dispatch
 and can slice one benchmark in half, making an engine look cheap for no reason but where the
 boundary fell. `since` stays put, everything after it accumulates, and two dispatches a day apart
-are comparable. Its specific purpose: the app's ~14 days of retention still contains the run where
-dwh was **DirectQuery** rather than Direct Lake — not the same experiment, and its CU must not be
-summed with the rest (see `benchmark/README.md`). Bump `since` whenever you want to start fresh;
-blank means everything retained. Operation columns are discovered from the data and ordered by
-total CU, so the expensive one reads first.
+are comparable. Its specific purpose: the app's ~14 days of retention spans more than one version of
+the benchmark — the run where dwh was **DirectQuery** rather than Direct Lake, and then the switch
+from a per-query dehydrate to a user-session walk with think time (`8c037c8`/`debef3a`, 06:11Z on
+2026-07-31). Those are different experiments and their CU must not be summed (see
+`benchmark/README.md`), so the default floor sits at the first dispatch measured the current way,
+`2026-07-31T16:00:00` in the model's clock. Bump it again the next time the suite changes; blank
+means everything retained. Operation columns are discovered from the data and ordered by total CU,
+so the expensive one reads first.
 
 ## Runs are separated, and it costs nothing extra
 
@@ -48,34 +51,40 @@ One row per model, one column per run — so "what did iceberg cost yesterday ag
 single row read left to right. It is the same shape as the aggregate table above it, deliberately.
 Column 3 is a dwh-only dispatch, and it separates itself: nothing had to be told that it happened.
 
-**A column is a whole run, never an hour.** Contiguous active hours are merged, so a pass spread over
-12:00→15:00 is one column carrying all four hours' CU. The per-run hour *count* is in the footnote
-rather than the table, so nothing invites reading the columns as hourly. The flip side of the rule:
-if one pass ever sits idle for more than `run_gap_hours` in the middle, it splits into two columns —
-raise `run_gap_hours` on that dispatch to glue it back.
+**A column is a whole run, never an hour.** A pass spread over 12:00→15:00 is one column carrying all
+four hours' CU. The per-run hour *count* is in the footnote rather than the table, so nothing invites
+reading the columns as hourly.
 
 Runs are columns, so the table grows sideways. Past `CU_RUN_COLS` (default 8) the oldest fold into a
 single `earlier` column — named in the header, restated in the footnote, and logged to stderr, never
 silently. `CU_RUN_COLS=0` gives every run its own column. It only binds on a widened `since`, which
 is why it is an env var and not a dispatch input.
 
-**No extra requests.** The hour column was always in every row (it has to be, or `since` cannot
-bind); it was simply discarded after the floor check. The split is pure post-processing of rows
-already in hand, so the request count is unchanged: one per capacity.
+**No extra requests.** Both signals the split uses — the item GUID and the hour — were always in
+every row (the hour has to be, or `since` cannot bind) and were simply discarded after the name
+lookup and the floor check. The split is pure post-processing of rows already in hand, so the request
+count is unchanged: one per capacity.
 
-**How a run is decided:** a maximal cluster of active hours, split wherever more than
-`run_gap_hours` (default 2) idle hours sit between them. Nothing assumes how long a pass takes or how
-many engines it covered — an idle gap is the only signal, which is why the same rule survives a
-dispatch with different `engines`, `runs` or `gap_seconds`.
+**How a run is decided: one DEPLOYMENT GENERATION.** `deploy_models.py` deletes and recreates each
+semantic model, so every dispatch mints a fresh item GUID per engine — and a model cannot be deployed
+twice inside one dispatch. So walking the GUIDs oldest-first, a repeated model *name* is the boundary
+between two runs. That rule uses no clock at all, which is why it survives a dispatch with different
+`engines`, `runs` or `gap_seconds`, and why two dispatches **ten minutes apart** are two columns.
 
-**The resolution limit is the app's, and it is one hour.** `Metrics By Item Operation And Hour` is
-bucketed hourly, so two dispatches inside the same hour are one column and cannot be told apart from
-this table. Two things make that enough: the benchmark's own inter-engine gaps create the idle hours
-the split keys off, and **per-engine separation does not depend on time at all** — each engine has its
-own semantic model, so it is already its own row. The timepoint detail table has finer resolution
-and this deliberately does not use it (see below).
+`run_gap_hours` (default 2) is the second rule and applies to one GUID's own hours: a model that was
+*not* redeployed but is queried again days later splits there rather than dragging the later CU into
+the earlier column.
 
-**It is still not correlated with a GitHub run.** A run here is identified by its own time window.
+**The hour bucket is no longer the floor on separating dispatches.** `Metrics By Item Operation And
+Hour` is still bucketed hourly, and this used to mean two dispatches inside one hour were one
+unsplittable column. Keying on the GUID removes that limit; the bucket now only bounds the gap rule
+above, and it is why two adjacent columns can **overlap by an hour**. That costs nothing in accuracy:
+CU is assigned to a column by item GUID, not by hour, and the metrics rows are per item. The
+timepoint detail table has finer resolution and this deliberately does not use it (see below) — this
+is the change that keeps it unnecessary.
+
+**It is still not correlated with a GitHub run.** A run here is identified by its own GUIDs and time
+window.
 `benchmark/` records durations but no absolute timestamps, and adding them is the coupling this
 directory exists without. If the split shows one cluster where you expected two, the report says so
 rather than printing a one-column "runs" table that repeats the aggregate.
@@ -140,13 +149,13 @@ after the activity you want to measure** — see the lag note below.
 
 | input | default | notes |
 |---|---|---|
-| `since` | `2026-07-30T22:00:00` | floor, **in the model's clock** (see below). Blank = everything retained |
+| `since` | `2026-07-31T16:00:00` | floor, **in the model's clock** (see below) — the first dispatch measured the current way. Blank = everything retained |
 | `models` | the four `aemo_*` | comma-separated, in report order. Blank = every semantic model |
 | `workspace` | `ea575278-…` | the workspace ci.yml and benchmark.yml deploy to. Blank = all |
 | `metrics_workspace_id` | `7f7f5d92-…` | where the Capacity Metrics app is installed |
 | `metrics_model_id` | `0fdedd3b-…` | the app's semantic model |
 | `capacity_id` | all | blank = every capacity the metrics model can see |
-| `run_gap_hours` | `2` | idle hours that separate one run from the next. 0 = aggregate only |
+| `run_gap_hours` | `2` | idle hours that split a model that was *not* redeployed. Runs themselves separate on the item GUID. 0 = aggregate only |
 | `run_ops` | false | per-run breakdown by operation type as well |
 | `layout` | true | fetch the layout from the latest *Table layout* run |
 | `layout_table` | `fct_summary` | which table's layout to show |
@@ -159,7 +168,7 @@ export PBI_TOKEN=$(az account get-access-token \
   --resource https://analysis.windows.net/powerbi/api --query accessToken -o tsv)
 export CU_METRICS_WORKSPACE_ID=7f7f5d92-1603-4a02-a46a-0d90fe1ed119
 export CU_METRICS_MODEL_ID=0fdedd3b-1451-4499-9ed4-aa3658100ec1
-CU_SINCE=2026-07-30T22:00:00 CU_DEBUG=1 python cu/capacity_cu.py
+CU_SINCE=2026-07-31T16:00:00 CU_DEBUG=1 python cu/capacity_cu.py
 ```
 
 `CU_RUN_COLS` (default 8, `0` = unlimited) is env-only — how many runs get their own column before

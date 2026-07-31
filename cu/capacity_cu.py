@@ -78,10 +78,14 @@ DEBUG = os.environ.get("CU_DEBUG", "").strip().lower() in ("1", "true", "yes")
 # the boundary fell. A pinned floor stays put: everything after it accumulates, and two dispatches a
 # day apart are comparable.
 #
-# What it is for: the app retains ~14 days, which still contains the run where dwh was DirectQuery
-# rather than Direct Lake. Those two are not the same experiment and their CU must not be summed —
-# see benchmark/README.md on the DirectQuery leg. Set this past that run and the report starts
-# clean. Bump it again whenever you want to start fresh; blank means everything retained.
+# What it is for: the app retains ~14 days, and the benchmark's METHODOLOGY has moved inside that
+# window more than once — the run where dwh was DirectQuery rather than Direct Lake, and then the
+# per-query dehydrate being dropped for a user-session walk with think time (8c037c8 / debef3a,
+# 06:11Z on 2026-07-31). None of those are the same experiment and their CU must not be summed.
+# So the floor sits at the first dispatch measured the CURRENT way — 30609137059, which started
+# 06:16Z, i.e. hour 16:00 in the model's clock. Bump it again the next time the suite changes;
+# blank means everything retained, and a wider floor is a dispatch input away when the older runs
+# are wanted for a one-off comparison.
 #
 # EXPRESSED IN THE MODEL'S OWN CLOCK, not UTC. The Capacity Metrics tables stamp everything in the
 # offset configured inside the app — +10 here, so a benchmark that ran at 05:15Z sits under hour
@@ -92,28 +96,34 @@ DEBUG = os.environ.get("CU_DEBUG", "").strip().lower() in ("1", "true", "yes")
 # ~9 days into the FUTURE (it returned +227.5h), MAX() over activity lags by however long the
 # capacity has been idle, and there is no offset column anywhere in the model. Every run logs the
 # range of hours it actually saw, so one dispatch tells you what to set this to.
-SINCE = os.environ.get("CU_SINCE", "2026-07-30T22:00:00").strip()
+SINCE = os.environ.get("CU_SINCE", "2026-07-31T16:00:00").strip()
 
-# Run separation. The hour axis is already in every row (it has to be, to make `since` bind), so
+# Run separation. Both signals it uses are already in every row — the item GUID and the hour — so
 # splitting the report per RUN costs nothing extra: no more requests, no new query, pure
 # post-processing of rows already in hand.
 #
-# A "run" is a maximal cluster of active hours: a new one starts when the gap since the previous hour
-# that had any activity exceeds CU_RUN_GAP_HOURS. Sized from what the benchmark actually is — with one
-# job per engine and a 600s inter-engine gap, a full pass is ~2h of essentially continuous activity,
-# and two dispatches are hours apart. 0 disables segmentation and prints only the aggregate.
+# A "run" is ONE DEPLOYMENT GENERATION, and the item GUID is what says so. `deploy_models.py` DELETES
+# and recreates each semantic model, so every dispatch mints a fresh GUID for every engine it ran —
+# the same fact recorded in CLAUDE.md as the trap that once made this report read empty. A model
+# therefore cannot appear twice in one dispatch, so when a model NAME repeats among the GUIDs, the
+# repeat is by definition the next run. That rule is time-free, which is what makes it exact.
 #
-# THE RESOLUTION LIMIT IS HARD AND IT IS THE APP'S, not this code's: 'Metrics By Item Operation And
-# Hour' is bucketed at ONE HOUR. So two dispatches inside the same hour are one run here and there is
-# no way to tell them apart from this table — the timepoint detail table is the only instrument with
-# finer resolution, and cu/README.md says why this does not use it. Two things make the hour bucket
-# enough anyway: per-ENGINE separation does not depend on time at all (each engine has its own
-# semantic model, so it is already its own row), and the benchmark's own gaps are what create the
-# idle hours the split keys off.
+# CU_RUN_GAP_HOURS is the SECOND rule, for activity with no redeploy behind it: one GUID queried
+# again days later (a subset-`engines` dispatch, or someone opening the report in Power BI) splits
+# when the gap since its own previous active hour exceeds this. 2h is sized from what the benchmark
+# is — one job per engine and a 600s inter-engine gap, so a pass is ~2h of essentially continuous
+# activity. 0 disables segmentation entirely and prints only the aggregate.
+#
+# The hour bucket of 'Metrics By Item Operation And Hour' is still this table's resolution, but it is
+# NO LONGER the floor on separating dispatches — two dispatches ten minutes apart used to be one
+# unsplittable column and now are two, because they are two GUIDs. It only bounds the gap rule above,
+# and it is why two adjacent runs can share an hour: the CU is still allocated exactly, because the
+# rows are per item. The timepoint detail table remains unnecessary — cu/README.md says why it is
+# also unwise.
 #
 # What this deliberately does NOT do is correlate a run with a GitHub run id. `benchmark/` records
 # durations but no absolute timestamps, and adding them is the coupling cu/ exists without. A run
-# here is identified by its own time window and nothing else.
+# here is identified by its own item GUIDs and time window, and nothing else.
 RUN_GAP_HOURS = int(os.environ.get("CU_RUN_GAP_HOURS", "2") or 0)
 
 # Per-run breakdown BY OPERATION as well as by model. Off by default: with several runs it is a wall
@@ -397,22 +407,73 @@ def _op_table(cells):
           + f" | **{grand:,.1f}** |")
 
 
-def sessionize(hours, gap_hours=RUN_GAP_HOURS):
-    """Cluster active hours into runs. `hours` is an iterable of datetimes; returns a list of sorted
-    hour lists, oldest run first.
+def _cluster_hours(hours, gap_hours):
+    """Cluster datetimes into maximal blocks separated by more than `gap_hours` of idle.
 
-    A new run starts when the gap since the previous ACTIVE hour exceeds `gap_hours`. Nothing here
-    assumes how long a run is or how many there should be — an idle gap is the only signal, which is
-    why it survives a dispatch with different `engines`, `runs` or `gap_seconds` inputs.
+    Was the whole of `sessionize` when a run was nothing but a gap in the hour axis. It is now the
+    inner rule only — applied per item GUID, never across items.
     """
     uniq = sorted(set(hours))
     if not uniq or gap_hours <= 0:
         return [uniq] if uniq else []
-    runs = [[uniq[0]]]
+    blocks = [[uniq[0]]]
     for h in uniq[1:]:
-        if (h - runs[-1][-1]).total_seconds() > gap_hours * 3600:
-            runs.append([])
-        runs[-1].append(h)
+        if (h - blocks[-1][-1]).total_seconds() > gap_hours * 3600:
+            blocks.append([])
+        blocks[-1].append(h)
+    return blocks
+
+
+def sessionize(events, gap_hours=RUN_GAP_HOURS):
+    """Group activity into runs. `events` is an iterable of `(item_id, model, hour)`; returns
+    `[{"items": {item_id, ...}, "models": {name, ...}, "hours": [datetime, ...],
+       "pairs": {(item_id, hour), ...}}, ...]`, oldest run first. `pairs` is what the caller
+    allocates CU with; `items`/`hours`/`models` are for the header, the footnote and the log.
+
+    A run is ONE DEPLOYMENT GENERATION. Every benchmark dispatch deletes and recreates each semantic
+    model, so it mints a fresh GUID per engine, and a model cannot be deployed twice inside one
+    dispatch — so a repeated model NAME among GUIDs ordered by time IS the boundary between two runs.
+    That rule needs no clock at all, which is why it separates two dispatches ten minutes apart that
+    the hour bucket cannot tell apart, and why it survives a dispatch with different `engines`,
+    `runs` or `gap_seconds` inputs.
+
+    `gap_hours` is the second rule, and it applies to a GUID's own hours: one model that was NOT
+    redeployed but is queried again days later splits into two segments rather than dragging the
+    later run's CU into the earlier column. `gap_hours <= 0` keeps its documented meaning — one
+    cluster, i.e. aggregate only.
+    """
+    by_item = {}
+    for iid, model, hour in events:
+        by_item.setdefault((iid, model), set()).add(hour)
+    if not by_item:
+        return []
+    if gap_hours <= 0:
+        return [{"items": {iid for iid, _m in by_item},
+                 "models": {m for _iid, m in by_item},
+                 "hours": sorted({h for hs in by_item.values() for h in hs}),
+                 "pairs": {(iid, h) for (iid, _m), hs in by_item.items() for h in hs}}]
+
+    # (first hour, model, iid, hours) per contiguous block of one GUID's activity. `model` and `iid`
+    # are in the sort key only to make ties deterministic — two engines of one dispatch start in the
+    # same hour, and which of them is read first must not depend on dict ordering.
+    segments = sorted((blk[0], model, iid, blk)
+                      for (iid, model), hs in by_item.items()
+                      for blk in _cluster_hours(hs, gap_hours))
+
+    runs = []
+    for first, model, iid, blk in segments:
+        cur = runs[-1] if runs else None
+        if cur is None or model in cur["models"] or (
+                (first - cur["hours"][-1]).total_seconds() > gap_hours * 3600):
+            runs.append({"items": set(), "models": set(), "hours": [], "pairs": set()})
+            cur = runs[-1]
+        cur["items"].add(iid)
+        cur["models"].add(model)
+        cur["hours"] = sorted(set(cur["hours"]) | set(blk))
+        # (item, hour) is the allocation key, not the item alone: a GUID that was NOT redeployed but
+        # queried again days later is split by the gap rule, so it belongs to two runs and only the
+        # hour says which of its rows go where.
+        cur["pairs"] |= {(iid, h) for h in blk}
     return runs
 
 
@@ -436,19 +497,21 @@ def render_runs(hourly, runs, cells=None):
     matches the aggregate table directly above it, so the two read the same way rather than making
     the eye re-learn the layout halfway down the report.
 
-    A column is a whole run, NOT an hour: `sessionize` has already merged every contiguous active
-    hour, so a pass spread over 12:00→15:00 is one column carrying all four hours' CU. The per-run
-    hour COUNT is in the footnote rather than the table for the same reason — it is diagnostic, and in
-    a column it invited reading the table as hourly.
+    A column is a whole run, NOT an hour: a pass spread over 12:00→15:00 is one column carrying all
+    four hours' CU. The per-run hour COUNT is in the footnote rather than the table for the same
+    reason — it is diagnostic, and in a column it invited reading the table as hourly.
+
+    CU is assigned to a column by ITEM GUID, not by hour. That is what lets two dispatches share an
+    hour bucket and still land in their own columns, which the hour-only version could not do: the
+    metrics rows are per item, so the allocation is exact even where the windows overlap.
     """
     if len(runs) < 2:
-        # One cluster is not a separation, and printing a one-column "runs" table beside an identical
+        # One run is not a separation, and printing a one-column "runs" table beside an identical
         # aggregate reads as two findings where there is one. Say why instead.
-        span = "" if not runs else f" ({_window(runs[0], year=True)})"
-        print(f"\n<sub>All activity sits in a single ≤{RUN_GAP_HOURS}h-contiguous cluster{span}, so "
-              f"there is nothing to separate — the table above IS that run. Raise `since` or lower "
-              f"`run_gap_hours` to split more finely; the app's hour bucket is the floor on how fine "
-              f"that can get.</sub>")
+        span = "" if not runs else f" ({_window(runs[0]['hours'], year=True)})"
+        print(f"\n<sub>All activity belongs to a single deployment generation{span}, so there is "
+              f"nothing to separate — the table above IS that run. Raise `since` to reach earlier "
+              f"dispatches; each one redeployed the models, so each is its own column.</sub>")
         return
     names = [m for m, _ in _model_rows({(k[0], k[1]): v for k, v in hourly.items()})]
 
@@ -457,18 +520,19 @@ def render_runs(hourly, runs, cells=None):
     folded = max(0, len(runs) - MAX_RUN_COLS) if MAX_RUN_COLS > 0 else 0
     cols = []
     if folded:
-        early = sorted(h for hrs in runs[:folded] for h in hrs)
-        cols.append((f"earlier<br>{folded} runs, {_window(early)}", set(early)))
+        early = sorted(h for r in runs[:folded] for h in r["hours"])
+        cols.append((f"earlier<br>{folded} runs, {_window(early)}",
+                     {p for r in runs[:folded] for p in r["pairs"]}))
         log(f"  run table: folding the {folded} oldest runs into one column "
             f"(CU_RUN_COLS={MAX_RUN_COLS})")
-    for i, hrs in enumerate(runs[folded:], start=folded + 1):
-        cols.append((f"run {i}<br>{_window(hrs)}", set(hrs)))
+    for i, r in enumerate(runs[folded:], start=folded + 1):
+        cols.append((f"run {i}<br>{_window(r['hours'])}", set(r["pairs"])))
 
-    # One pass over `hourly`, not one per run: bucket each hour to its column first.
-    hour_col = {h: ci for ci, (_hdr, hrs) in enumerate(cols) for h in hrs}
+    # One pass over `hourly`, not one per run: map each (item, hour) to its column first.
+    pair_col = {p: ci for ci, (_hdr, pairs) in enumerate(cols) for p in pairs}
     per = {}
-    for (m, _op, h), cu in hourly.items():
-        ci = hour_col.get(h)
+    for (m, _op, h, iid), cu in hourly.items():
+        ci = pair_col.get((iid, h))
         if ci is not None:
             per[(ci, m)] = per.get((ci, m), 0.0) + cu
 
@@ -487,13 +551,16 @@ def render_runs(hourly, runs, cells=None):
     print("| **total** | " + " | ".join(f"**{v:,.1f}**" for v in col_tot)
           + f" | **{grand:,.1f}** |")
 
-    hours = ", ".join(f"run {i}: {len(hrs)}h" for i, hrs in enumerate(runs, start=1))
-    print(f"\n<sub>A run is a cluster of active hours separated from the next by more than "
-          f"{RUN_GAP_HOURS}h idle — a pass spanning several hours is ONE column, not one per hour "
-          f"({hours}; windows are the first and last active hour bucket, in the model's clock). The "
-          f"metrics table is bucketed at ONE HOUR, so two dispatches inside the same hour are one "
-          f"column here and cannot be told apart from this table. Per-ENGINE separation does not "
-          f"depend on time — each engine has its own semantic model, so it is already its own row."
+    shape = ", ".join(f"run {i}: {len(r['models'])} models over {len(r['hours'])}h"
+                      for i, r in enumerate(runs, start=1))
+    print(f"\n<sub>A run is one DEPLOYMENT GENERATION: every dispatch deletes and recreates the "
+          f"semantic models, so a model name repeating among the item GUIDs is the next run — which "
+          f"is why two dispatches inside the same hour are still two columns here, and why adjacent "
+          f"windows can overlap by an hour ({shape}; windows are the first and last active hour "
+          f"bucket, in the model's clock). CU is allocated by item GUID, not by hour, so an overlap "
+          f"costs nothing in accuracy. A model that was NOT redeployed splits only on more than "
+          f"{RUN_GAP_HOURS}h idle. Per-ENGINE separation does not depend on time at all — each engine "
+          f"has its own semantic model, so it is already its own row."
           + (f" The {folded} oldest runs are folded into the `earlier` column; raise `CU_RUN_COLS` "
              f"(currently {MAX_RUN_COLS}) to give them their own." if folded else "") + "</sub>")
 
@@ -516,13 +583,13 @@ def render_runs(hourly, runs, cells=None):
                   f"aggregate — so one of the two tables is wrong. Do not quote either.</sub>")
 
     if RUN_OPS:
-        for i, hrs in enumerate(runs, start=1):
-            inside = set(hrs)
+        for i, r in enumerate(runs, start=1):
+            inside = r["pairs"]
             ops = {}
-            for (m, op, h), cu in hourly.items():
-                if h in inside:
+            for (m, op, h, iid), cu in hourly.items():
+                if (iid, h) in inside:
                     ops[(m, op)] = ops.get((m, op), 0.0) + cu
-            print(f"\n#### Run {i} — {_window(hrs, year=True)}, by operation\n")
+            print(f"\n#### Run {i} — {_window(r['hours'], year=True)}, by operation\n")
             _op_table(ops)
 
 
@@ -587,7 +654,7 @@ def render_layout(doc, cu_by_model, table=LAYOUT_TABLE):
 
 
 def render(cells, hourly, since, asof, seen=0, dropped=None, active=None, near=None):
-    """cells is {(model, operation): cu}; hourly is {(model, operation, hour): cu}."""
+    """cells is {(model, operation): cu}; hourly is {(model, operation, hour, item_id): cu}."""
     span = (f"since {since:%Y-%m-%d %H:%M} (model clock)" if since else "over everything retained")
     print(f"## Semantic model CU — {span}, as of {asof:%Y-%m-%d %H:%MZ}\n")
     if not cells:
@@ -597,7 +664,8 @@ def render(cells, hourly, since, asof, seen=0, dropped=None, active=None, near=N
 
     print(f"Every dispatch since the floor, summed:\n")
     _op_table(cells)
-    runs = sessionize(h for (_m, _o, h) in hourly) if (RUN_GAP_HOURS > 0 and hourly) else []
+    runs = (sessionize((iid, m, h) for (m, _o, h, iid) in hourly)
+            if (RUN_GAP_HOURS > 0 and hourly) else [])
     if runs:
         render_runs(hourly, runs, cells)
     doc = load_layout()
@@ -703,7 +771,10 @@ def main():
             except ValueError:
                 unparsed += 1
                 continue
-            hkey = (key, op, hour)
+            # The item GUID is kept at this grain and nowhere else: the aggregate is per model name,
+            # but the per-run split needs to tell one deployment of a model from the next, and the
+            # GUID is the only thing in the row that says which generation it was.
+            hkey = (key, op, hour, iid)
             hourly[hkey] = hourly.get(hkey, 0.0) + float(cu)
 
     if unknown:
@@ -727,9 +798,14 @@ def main():
     for (name, op), cu in sorted(cells.items(), key=lambda kv: -kv[1]):
         log(f"  {name} / {op}: {cu:,.1f} CU")
 
-    runs = sessionize(h for (_m, _o, h) in hourly) if RUN_GAP_HOURS > 0 else []
-    for i, hrs in enumerate(runs, start=1):
-        log(f"  run {i}: {hrs[0]:%Y-%m-%d %H:%M} .. {hrs[-1]:%H:%M} ({len(hrs)} active hours)")
+    runs = sessionize((iid, m, h) for (m, _o, h, iid) in hourly) if RUN_GAP_HOURS > 0 else []
+    for i, r in enumerate(runs, start=1):
+        hrs = r["hours"]
+        # The models are named, not counted: a run holding three of the four dispatched engines is a
+        # deploy that failed, and in the table it is a 0.0 cell indistinguishable from an engine that
+        # was never asked for.
+        log(f"  run {i}: {hrs[0]:%Y-%m-%d %H:%M} .. {hrs[-1]:%H:%M} ({len(hrs)} active hours, "
+            f"{len(r['items'])} item GUIDs: {', '.join(sorted(r['models']))})")
 
     if not cells and seen:
         log(f"  dropped: {dropped['workspace']} on workspace "
