@@ -107,17 +107,20 @@ aemo_electricity:
       #   delta.parquet.vorder.enabled      a TBLPROPERTIES key, table-level, not a session conf
       # Anything claiming "V-Order config is deprecated" is quoting the first one. It is not this.
       #
-      # BOTH LINES BELOW ARE LOAD-BEARING, AND THE ORDER OF DISCOVERY MATTERS. `vorder.default`
-      # alone did NOT work: a Fabric workspace defaults to `spark.fabric.resourceProfile =
-      # writeHeavy`, whose definition includes `spark.sql.parquet.vorder.default: "false"`, and the
-      # profile is applied AFTER the session conf — so the key was set and immediately overwritten,
-      # and read `false` in-session on every REPL for as long as it stood alone.
-      # Asking for the PROFILE binds. Measured across three runs (30599066885, 30599860363 without
-      # it; 30600482604 with it), master and worker agreeing every time:
-      #     without -> resourceProfile=writeHeavy,       vorder.default=false
-      #     with    -> resourceProfile=readHeavyForPBI,  vorder.default=true
-      # So do not delete the resourceProfile line thinking the vorder line is doing the work. It is
-      # not, and the failure is silent.
+      # THE PROFILE IS THE LEVER. `spark.sql.parquet.vorder.default` is deliberately NOT set here
+      # any more — setting it alone did nothing, and setting it alongside the profile made it
+      # impossible to tell which line was doing the work. A Fabric workspace defaults to
+      # `spark.fabric.resourceProfile = writeHeavy`, whose definition includes
+      # `spark.sql.parquet.vorder.default: "false"`, and the profile is applied AFTER the session
+      # conf — so an explicit vorder key is set and then immediately overwritten. It read `false`
+      # in-session on every REPL for as long as it stood alone.
+      # Measured across three runs, master and worker agreeing every time:
+      #     30599066885, 30599860363  no profile set        -> writeHeavy,       vorder=false
+      #     30600482604               profile + vorder key  -> readHeavyForPBI,  vorder=true
+      # The open question this arrangement answers: does readHeavyForPBI bring vorder=true on its
+      # own? It should — the profile defines the key — and if it does, the explicit key was always
+      # redundant rather than load-bearing. If a run shows readHeavyForPBI with vorder=false, put
+      # the key back BELOW the profile line and say so here.
       #
       # Cost: readHeavyForPBI changes write layout for the whole spark leg, not just V-Order —
       # judge it in the `Table layout` workflow. Upside: this is the same profile the Fabric
@@ -133,8 +136,7 @@ aemo_electricity:
       spark_config:
         name: dl_vorder_build
         conf:
-          # This one overrides the workspace's writeHeavy default and is what actually enables
-          # V-Order; the key below it is a no-op without this line. Listed first for readability
-          # only — a conf block is a dict, so the order here encodes nothing.
+          # Overrides the workspace's writeHeavy default. This single line is what enables V-Order;
+          # an explicit spark.sql.parquet.vorder.default alongside it is redundant at best and was
+          # a silent no-op on its own. See the note above before adding one back.
           spark.fabric.resourceProfile: "readHeavyForPBI"
-          spark.sql.parquet.vorder.default: "true"

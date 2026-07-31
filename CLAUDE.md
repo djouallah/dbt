@@ -385,6 +385,12 @@ still run it by hand to reproduce a CI failure. That is a debugging affordance, 
   outranks individual keys**: `writeHeavy` defines `spark.sql.parquet.vorder.default = false` and
   is applied after the session conf, so it clobbered that key while leaving the canary alone.
   Asking for the *profile* instead binds, and V-Order follows it.
+  **`profiles.yml` therefore sets the profile and nothing else** — the explicit
+  `spark.sql.parquet.vorder.default` was removed, because on its own it did nothing and alongside
+  the profile it made the two indistinguishable. The open question that arrangement answers is
+  whether `readHeavyForPBI` carries `vorder=true` unaided; it should, since the profile defines the
+  key. If a run ever reads `readHeavyForPBI` with `vorder=false`, put the key back *below* the
+  profile line and record it. Do not re-add it "to be safe" — that is what hid the mechanism.
   Two dead hypotheses, recorded so they are not retried: the adapter is not dropping the conf, and
   REPL packing is not either (the canary reads `alive` on the worker, which is a packed acquire).
   Two earlier claims in this file were wrong and are retracted: that the conf was "inert / has
