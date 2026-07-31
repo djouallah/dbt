@@ -240,9 +240,11 @@ ugly row.
 
 **The service principal works — measured, against the expectation.** The community consensus is
 that the Capacity Metrics semantic model rejects service principals, and this was built assuming
-that would be the first thing to fail. It isn't. The `PBI_TOKEN` secret path is kept as a fallback
-anyway, since the workflow prefers a secret over the SP when one is set and that costs nothing to
-leave in place. A user token expires in about an hour, so it is a per-investigation thing.
+that would be the first thing to fail. It isn't — so the workflow mints `PBI_TOKEN` from the SP
+and there is **no repo secret involved at all**. A `secrets.PBI_TOKEN` branch that took precedence
+when set was removed once it was clear it would never fire; it only produced editor warnings about
+a secret that deliberately did not exist. If the SP is ever refused, export a user token as
+`PBI_TOKEN` for that investigation — it expires in about an hour.
 
 **Column names move between app versions.** Microsoft's own fabric-toolbox accelerator ships four
 DAX variants (v53/v47/v40/v37) for this reason, and it has already bitten here — the first

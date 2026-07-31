@@ -894,8 +894,10 @@ detail.
   parameter is undocumented.
 - **The service principal works against that model.** The community consensus says it does not, and
   this was built expecting a 401 — measured otherwise on run 30536137179, which read it on the OIDC
-  SP. The `PBI_TOKEN` secret path stays as a free fallback (the workflow prefers a secret when one
-  is set); a user token expires in ~1 hour, so per-investigation, not a standing secret.
+  SP, so `cu.yml` mints `PBI_TOKEN` from it and **no repo secret is involved**. The
+  `secrets.PBI_TOKEN` branch that used to take precedence was deleted — it never fired and only
+  produced "context access might be invalid" warnings for a secret that deliberately did not exist.
+  A user token (~1h) remains the manual escape hatch if the SP is ever refused.
 - **`workflow_dispatch` only, same standing rule as the benchmark.** No `schedule`, no `push`, no
   `workflow_run`, no `needs:` from another workflow. Interactive reads against shared capacity are
   what a capacity admin notices. Its **own** concurrency group though, not `onelake-<ref>` — it

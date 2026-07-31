@@ -223,8 +223,8 @@ def execute_dax(dax, tries=4, fatal=True):
         detail = r.text[:600].replace("\n", " ")
         if r.status_code in (401, 403):
             die(f"{r.status_code} from executeQueries. If this ran on the OIDC service principal "
-                f"and the Capacity Metrics model refused it, supply a user token as the PBI_TOKEN "
-                f"secret. API said: {detail}")
+                f"and the Capacity Metrics model refused it, run the workflow with PBI_TOKEN set "
+                f"to a user token (see cu/README.md). API said: {detail}")
         if not fatal:
             return None
         die(f"executeQueries returned {r.status_code}: {detail}")
@@ -675,8 +675,8 @@ def render(cells, hourly, since, asof, seen=0, dropped=None, active=None, near=N
 
 def main():
     if not TOKEN:
-        die("PBI_TOKEN is empty — the workflow mints it from the OIDC login, or you supply a "
-            "user token as a secret. See cu/README.md.")
+        die("PBI_TOKEN is empty — the workflow mints it from the OIDC login. "
+            "See cu/README.md.")
     if not (WS and MODEL):
         die("CU_METRICS_WORKSPACE_ID and CU_METRICS_MODEL_ID must both be set.")
     asof = datetime.now(timezone.utc)

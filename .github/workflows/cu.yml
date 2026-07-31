@@ -116,26 +116,24 @@ jobs:
           tenant-id: ${{ secrets.AZURE_TENANT_ID }}
           allow-no-subscriptions: true
 
-      # The script only ever reads PBI_TOKEN, so there is one code path whether the token came
-      # from the service principal or from a human.
+      # PBI_TOKEN is an env var the script reads, minted here from the OIDC service principal.
+      # It is NOT a repo secret and none is needed.
       #
-      # Service principals are widely reported NOT to work against the Capacity Metrics semantic
-      # model specifically. If the SP draws a 401/403, set a PBI_TOKEN repo secret to a user token
-      # (`az account get-access-token --resource https://analysis.windows.net/powerbi/api
-      # --query accessToken -o tsv`) and it takes precedence here. Such a token expires in ~1 hour,
-      # so it is a per-investigation thing, not a standing secret.
+      # There was a `secrets.PBI_TOKEN` branch taking precedence when set — written because the
+      # community consensus is that a service principal CANNOT read the Capacity Metrics semantic
+      # model, so a human's ~1h user token was the planned escape hatch. The SP works (measured,
+      # run 30536137179), the branch never fired, and it left two "context access might be
+      # invalid" warnings pointing at a secret that deliberately did not exist. If the SP ever
+      # does draw a 401/403 here, the hatch is one command:
+      #   az account get-access-token --resource https://analysis.windows.net/powerbi/api \
+      #     --query accessToken -o tsv
+      # and exporting the result as PBI_TOKEN — not a standing secret.
       - name: Acquire a Power BI token
         run: |
           set -euo pipefail
-          if [ -n "${{ secrets.PBI_TOKEN }}" ]; then
-            echo "using the PBI_TOKEN secret (user token)" >&2
-            TOKEN='${{ secrets.PBI_TOKEN }}'
-          else
-            echo "using the OIDC service principal" >&2
-            TOKEN=$(az account get-access-token \
-              --resource https://analysis.windows.net/powerbi/api \
-              --query accessToken -o tsv)
-          fi
+          TOKEN=$(az account get-access-token \
+            --resource https://analysis.windows.net/powerbi/api \
+            --query accessToken -o tsv)
           echo "::add-mask::$TOKEN"
           echo "PBI_TOKEN=$TOKEN" >> "$GITHUB_ENV"
 
