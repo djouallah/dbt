@@ -370,47 +370,48 @@ still run it by hand to reproduce a CI failure. That is a debugging affordance, 
 - **Query the lakehouses directly before instrumenting CI.** `duckrun.connect(<abfss Tables
   path>, read_only=True)` works from a laptop against any of the four items and answers
   schema/row/value questions in minutes. Several CI round trips were spent not doing this.
-- **`spark_config.conf` IS delivered. The `writeHeavy` resource profile overwrites the one key
-  that matters. Measured, not inferred.** Two probe runs on 2026-07-31 read the effective SQLConf
-  from inside the REPLs dbt was actually using. Run 30599860363, master and worker identical:
+- **Set the resource profile from `spark_config.conf`, not the individual key. Measured.** Three
+  probe runs on 2026-07-31 read the effective SQLConf from inside the REPLs dbt was actually using
+  (`SET <key>` in an `on-run-start` hook and a model `pre_hook`, so master and a packed worker
+  both reported). Master and worker agreed in every run:
 
-  | key | reading |
-  |---|---|
-  | `spark.sql.parquet.vorder.default` | `false` — the profile asks for `"true"` |
-  | `spark.fabric.resourceProfile` | `writeHeavy` |
-  | `spark.dbt.probe.canary` | `alive` — a made-up key, arrived intact |
+  | run | `resourceProfile` | `vorder.default` | canary |
+  |---|---|---|---|
+  | 30599066885 / 30599860363 — profile not set | `writeHeavy` | **`false`** (conf asks `"true"`) | `alive` |
+  | 30600482604 — `resourceProfile: readHeavyForPBI` in conf | `readHeavyForPBI` | **`true`** | `alive` |
 
-  The canary is the whole finding: an arbitrary conf key survives to both REPLs, so **delivery
-  works end to end** and packing does not strip it either. What fails is *precedence* — the
-  workspace profile `writeHeavy` defines `spark.sql.parquet.vorder.default = false` and is applied
-  **after** the session conf, so it clobbers that key while leaving every key it does not define
-  alone. Nothing in Fabric's docs says a resource profile outranks an explicitly requested session
-  conf; that is the gap.
-  **An earlier commit in this repo called the conf "inert" and said it "has never been in force".
-  That was wrong** — it was measured before the canary existed, when `vorder=false` alone could not
-  distinguish "dropped" from "overridden". The V-Order key specifically has never been in force;
-  the mechanism is not the one that sentence claimed.
-  Consequence for the fix: the lever is the **profile**, not the key. Setting
-  `spark.fabric.resourceProfile: readHeavyForPBI` in the same `conf` block is the untested
-  candidate — the canary proves arbitrary keys land, and that profile is Microsoft's documented
-  answer for V-Order — but whether Fabric reads that key early enough to matter is unknown, and it
-  changes write layout for the whole leg. Test it with the probe still in place before believing it.
-  **This bullet used to claim the conf was "the only thing switching V-Order on at all". That was
-  wrong too** — the key never won, so it never switched V-Order on, and the framing that V-Order
-  "worked but leaked on the large write" is unsupported. Whatever produced `add.tags
-  {"VORDER": "true"}` on the small writes (`stg_csv_archive_log`, `dim_duid`, `fct_price_today`,
-  `fct_scada_today`) while `mart/fct_summary` came out `tags: {}` on all 19 files, it was not this
-  setting — so the "unexplained size cutoff" was a phantom created by assuming the key was in force.
-  **Do not read the Spark UI Environment tab to check this.** It renders the SparkContext conf
-  captured at application launch and never shows a `spark.sql.*` value applied afterwards to a
-  SparkSession, so it cannot distinguish "dropped" from "live but invisible". The in-session
-  `SET <key>` read is the only authoritative instrument; that is what the probe macro exists for.
-  The two levers that would actually work, neither in use: `+tblproperties:
+  Two things this pins down. **Delivery was never the problem** — the canary is a made-up key no
+  profile defines and it arrives intact on both REPLs, in every run. And the **resource profile
+  outranks individual keys**: `writeHeavy` defines `spark.sql.parquet.vorder.default = false` and
+  is applied after the session conf, so it clobbered that key while leaving the canary alone.
+  Asking for the *profile* instead binds, and V-Order follows it.
+  Two dead hypotheses, recorded so they are not retried: the adapter is not dropping the conf, and
+  REPL packing is not either (the canary reads `alive` on the worker, which is a packed acquire).
+  Two earlier claims in this file were wrong and are retracted: that the conf was "inert / has
+  never been in force" (delivery works; only the one key was losing), and that the conf was "the
+  only thing switching V-Order on at all" (it switched nothing on until the profile changed).
+  **Cost, and it is not free:** `readHeavyForPBI` changes write layout for the whole spark leg, not
+  just V-Order. Judge it in the *Table layout* workflow before treating it as settled — and note
+  this is the same profile the reverted Fabric Environment was built to get, now obtained with one
+  line in `profiles.yml` and no environment, so no starter-pool penalty.
+  To re-measure, re-add the probe: `git show df1e5ec -- macros/probe_spark_conf.sql`.
+  The old `add.tags {"VORDER": "true"}` observation — small writes tagged, `mart/fct_summary`
+  `tags: {}` on all 19 files — was read as "V-Order works but leaks on the large write, size cutoff
+  unexplained". That reading assumed the key was in force, and it was not, so there is no cutoff to
+  explain and the tags on the small writes came from something else. Whether the large write now
+  V-Orders under `readHeavyForPBI` is **open and worth checking**, since it is the only table
+  `benchmark/` queries: read `_delta_log/*.json` for `"VORDER": "true"` in the `add` actions.
+  `stats.py`'s `vorder` column cannot answer it — see the bullet below on why.
+  **Do not read the Spark UI Environment tab to check any of this.** It renders the SparkContext
+  conf captured at application launch and never shows a `spark.sql.*` value applied afterwards to a
+  SparkSession, so it cannot distinguish "dropped" from "live but invisible" — it was the instrument
+  that made this look like an adapter bug for three runs. The in-session `SET <key>` read is the
+  only authoritative one.
+  Levers if the profile ever stops being enough: `+tblproperties:
   {delta.parquet.vorder.enabled: "true"}` — the docs say `INSERT`/`UPDATE`/`MERGE` honour it,
   dbt-fabricspark emits it from `create_table_as`, and it is also the key `stats.py` reads — or
-  `OPTIMIZE … VORDER` as a post_hook on `fct_summary` alone. A third, untested: re-assert the conf
-  per REPL with a `SET` statement, since `spark.sql.*` is runtime-settable and the adapter already
-  does exactly that for two of its own confs (`incremental.sql:37-41`, `:101-105`).
+  `OPTIMIZE … VORDER` as a post_hook on `fct_summary` alone. A third: re-assert the conf per REPL
+  with a `SET` statement, which runs after the profile is applied and therefore wins.
 - **The adapter is not what drops it — do not go looking there again.** `credentials.py:65` holds
   `spark_config` untouched, `__post_init__` (`credentials.py:203-207`) only asserts `name` is
   present, and `concurrent_livy.py:195-228` copies `conf` verbatim into the
