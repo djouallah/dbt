@@ -370,23 +370,52 @@ still run it by hand to reproduce a CI failure. That is a debugging affordance, 
 - **Query the lakehouses directly before instrumenting CI.** `duckrun.connect(<abfss Tables
   path>, read_only=True)` works from a laptop against any of the four items and answers
   schema/row/value questions in minutes. Several CI round trips were spent not doing this.
-- **A session conf asking for V-Order loses to the workspace's resource profile.** A Fabric
-  workspace defaults to `spark.fabric.resourceProfile = writeHeavy`, and that profile's own
-  defaults include **`spark.sql.parquet.vorder.default = false`**. So the spark leg spent a
-  commit asking for V-Order inside a profile built to disable it. What it bought was partial and
-  the shortfall was silent: from the run that added the conf, every *small* write did carry
-  `add.tags {"VORDER": "true"}` (`stg_csv_archive_log`, `dim_duid`, `fct_price_today`,
-  `fct_scada_today`), while **`mart/fct_summary` — 19 files, 1.2 GB, the only large write and the
-  only table `benchmark/` actually queries — came out with `tags: {}` on all 19**. Not a session
-  problem: `run_results.json` puts that node on Thread-2, the same HC REPL that had V-Ordered two
-  tables minutes earlier. **Root cause of the large-write case is unproven** — no documented size
-  cutoff, V-Order is absent from the NEE limitations list, and the doc claims a session setting
-  covers "all Parquet writes in that session", so either that overstates or the write went through
-  a different writer (optimizeWrite rebalance, native engine). The conf stays because it is the
-  only thing switching V-Order on at all; the hole is known and untreated. Two levers if it needs
-  treating, neither in use: `+tblproperties: {delta.parquet.vorder.enabled: "true"}` — the docs say
-  `INSERT`/`UPDATE`/`MERGE` honour it, dbt-fabricspark emits it from `create_table_as`, and it is
-  also the key `stats.py` reads — or `OPTIMIZE … VORDER` as a post_hook on `fct_summary` alone.
+- **`spark_config.conf` DOES NOTHING on the spark target. Measured, not inferred.** A probe run on
+  2026-07-31 (run 30599066885) read the effective SQLConf from inside the REPLs dbt was actually
+  using and got, on **both** the master connection and a worker:
+  `spark.sql.parquet.vorder.default -> false`, `spark.fabric.resourceProfile -> writeHeavy`.
+  The profile has asked for `"true"` since the commit that added it. It has never been in force.
+  **This bullet used to claim the conf was "the only thing switching V-Order on at all". That was
+  wrong.** It switches nothing on, and every conclusion drawn downstream of it is suspect —
+  including the framing that V-Order "worked but leaked on the large write". Nothing leaked;
+  nothing was V-Ordered by the conf. Whatever produced `add.tags {"VORDER": "true"}` on the small
+  writes (`stg_csv_archive_log`, `dim_duid`, `fct_price_today`, `fct_scada_today`) while
+  `mart/fct_summary` came out `tags: {}` on all 19 files, it was **not** this setting — so the
+  "unexplained size cutoff" was a phantom created by assuming the conf was live.
+  What is **not** yet distinguished: whether Fabric ignores `conf` on the HC acquire outright, or
+  accepts it and lets the `writeHeavy` resource profile overwrite it. Both produce `false`. A
+  canary key that no resource profile defines settles it — `macros/probe_spark_conf.sql` carries
+  one and will report on the next dispatch, at no extra capacity.
+  **Do not read the Spark UI Environment tab to check this.** It renders the SparkContext conf
+  captured at application launch and never shows a `spark.sql.*` value applied afterwards to a
+  SparkSession, so it cannot distinguish "dropped" from "live but invisible". The in-session
+  `SET <key>` read is the only authoritative instrument; that is what the probe macro exists for.
+  The two levers that would actually work, neither in use: `+tblproperties:
+  {delta.parquet.vorder.enabled: "true"}` — the docs say `INSERT`/`UPDATE`/`MERGE` honour it,
+  dbt-fabricspark emits it from `create_table_as`, and it is also the key `stats.py` reads — or
+  `OPTIMIZE … VORDER` as a post_hook on `fct_summary` alone. A third, untested: re-assert the conf
+  per REPL with a `SET` statement, since `spark.sql.*` is runtime-settable and the adapter already
+  does exactly that for two of its own confs (`incremental.sql:37-41`, `:101-105`).
+- **The adapter is not what drops it — do not go looking there again.** `credentials.py:65` holds
+  `spark_config` untouched, `__post_init__` (`credentials.py:203-207`) only asserts `name` is
+  present, and `concurrent_livy.py:195-228` copies `conf` verbatim into the
+  `POST …/highConcurrencySessions` body, where `conf` is a **documented** field of
+  `HighConcurrencySessionRequest`. The loss is Fabric-side. Two adapter-side defects are real but
+  are about *observability*, not delivery: the acquire payload is never logged
+  (`concurrent_livy.py:136` logs only the `sessionTag`) and `spark_config` is excluded from
+  `_connection_keys()`, so nothing short of reading the adapter source tells you what was sent;
+  and non-whitelisted `spark_config` keys are dropped silently in the HC path
+  (`concurrent_livy.py:200-219`) while the singleton path forwards the whole dict verbatim.
+  Note also that `high_concurrency` defaults to **True** and `threads: 4` fires **five** acquires
+  under one `sessionTag` (4 workers + dbt's master connection —
+  [dbt-fabricspark#242](https://github.com/microsoft/dbt-fabricspark/issues/242)), exactly Fabric's
+  5-REPL cap; acquires 2..5 are packed into the application the first one created and their `conf`
+  is unappliable by construction. That is a real mechanism, but it is **not** the explanation here:
+  the master reading is `false` too, and the master is the acquire that created the session.
+- **[dbt-fabricspark#243](https://github.com/microsoft/dbt-fabricspark/issues/243) was closed on a
+  false positive, by us.** It concluded `spark.sql.parquet.vorder.default: "true"` "seems to be
+  working", on the strength of the small-write VORDER tags. The in-session read says otherwise.
+  Treat that issue's resolution as retracted.
 - **The V-Order key that is deprecated is spelled differently from the one in use.** Three
   near-identical spellings, one dead: `spark.sql.parquet.vorder.enable` was **removed in runtime
   1.3+**; `spark.sql.parquet.vorder.default` is the live session conf and is what `profiles.yml`
