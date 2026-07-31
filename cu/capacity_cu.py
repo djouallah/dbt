@@ -120,6 +120,16 @@ RUN_GAP_HOURS = int(os.environ.get("CU_RUN_GAP_HOURS", "2") or 0)
 # of tables, and the aggregate operation table below already answers "what kind of work cost the CU".
 RUN_OPS = os.environ.get("CU_RUN_OPS", "").strip().lower() in ("1", "true", "yes")
 
+# A run is a COLUMN, so the run table grows sideways with every dispatch inside the floor. At the
+# default `since` that is one to three columns; against a blank `since` (~14 days retained) it can be
+# a dozen, and a dozen-column markdown table is not readable — which is the whole point of the table.
+# So the oldest fold into one `earlier` column and the most recent MAX_RUN_COLS keep their own.
+#
+# Never silently: the fold is named in the column header, restated in the footnote, and logged. 0
+# disables it and prints every run as its own column. No workflow input, deliberately — it only binds
+# on a widened `since`, which is a local-investigation case, and the dispatch form is long enough.
+MAX_RUN_COLS = int(os.environ.get("CU_RUN_COLS", "8") or 0)
+
 # Physical layout, printed beside the CU. CU on its own says which engine cost more; it does not say
 # WHY, and the answer is almost always the layout — 37,227 CU next to "386 files, 122k avg row group"
 # is a finding, while either number alone is trivia.
@@ -406,53 +416,114 @@ def sessionize(hours, gap_hours=RUN_GAP_HOURS):
     return runs
 
 
-def render_runs(hourly, runs):
-    """One row per detected run: its window, and the CU each model spent inside it.
+def _window(hrs, year=False):
+    """`MM-DD HH:MM→HH:MM` over a run's first and last ACTIVE hour bucket, short form when same-day."""
+    fmt = "%Y-%m-%d %H:%M" if year else "%m-%d %H:%M"
+    return (f"{hrs[0]:{fmt}}→{hrs[-1]:%H:%M}" if hrs[0].date() == hrs[-1].date()
+            else f"{hrs[0]:{fmt}}→{hrs[-1]:%m-%d %H:%M}")
+
+
+def render_runs(hourly, runs, cells=None):
+    """One ROW per semantic model, one COLUMN per detected run.
 
     This is the whole point of the per-run split — the aggregate table sums every dispatch since the
     floor, so a model's number there is "all the benchmarking we have done", not "what one pass
-    costs". A row here is one pass.
+    costs". A column here is one pass.
+
+    Oriented model-down / run-across on purpose, and it used to be the transpose. The question this
+    answers is "what did *iceberg* cost yesterday against today", which on the old shape meant
+    reading down one column and across two rows; here it is one row read left to right. It also
+    matches the aggregate table directly above it, so the two read the same way rather than making
+    the eye re-learn the layout halfway down the report.
+
+    A column is a whole run, NOT an hour: `sessionize` has already merged every contiguous active
+    hour, so a pass spread over 12:00→15:00 is one column carrying all four hours' CU. The per-run
+    hour COUNT is in the footnote rather than the table for the same reason — it is diagnostic, and in
+    a column it invited reading the table as hourly.
     """
     if len(runs) < 2:
-        # One cluster is not a separation, and printing a one-row "runs" table beside an identical
+        # One cluster is not a separation, and printing a one-column "runs" table beside an identical
         # aggregate reads as two findings where there is one. Say why instead.
-        span = "" if not runs else f" ({runs[0][0]:%Y-%m-%d %H:%M} .. {runs[0][-1]:%H:%M})"
+        span = "" if not runs else f" ({_window(runs[0], year=True)})"
         print(f"\n<sub>All activity sits in a single ≤{RUN_GAP_HOURS}h-contiguous cluster{span}, so "
               f"there is nothing to separate — the table above IS that run. Raise `since` or lower "
               f"`run_gap_hours` to split more finely; the app's hour bucket is the floor on how fine "
               f"that can get.</sub>")
         return
     names = [m for m, _ in _model_rows({(k[0], k[1]): v for k, v in hourly.items()})]
+
+    # Columns, oldest left. Run numbering always counts from the oldest run overall, so a folded
+    # report still calls the newest run by the same number an unfolded one would.
+    folded = max(0, len(runs) - MAX_RUN_COLS) if MAX_RUN_COLS > 0 else 0
+    cols = []
+    if folded:
+        early = sorted(h for hrs in runs[:folded] for h in hrs)
+        cols.append((f"earlier<br>{folded} runs, {_window(early)}", set(early)))
+        log(f"  run table: folding the {folded} oldest runs into one column "
+            f"(CU_RUN_COLS={MAX_RUN_COLS})")
+    for i, hrs in enumerate(runs[folded:], start=folded + 1):
+        cols.append((f"run {i}<br>{_window(hrs)}", set(hrs)))
+
+    # One pass over `hourly`, not one per run: bucket each hour to its column first.
+    hour_col = {h: ci for ci, (_hdr, hrs) in enumerate(cols) for h in hrs}
+    per = {}
+    for (m, _op, h), cu in hourly.items():
+        ci = hour_col.get(h)
+        if ci is not None:
+            per[(ci, m)] = per.get((ci, m), 0.0) + cu
+
     print(f"\n### Runs detected: {len(runs)}\n")
-    print("| run | window (model clock) | hours | " + " | ".join(names) + " | total |")
-    print("|---|:--|--:|" + "---:|" * (len(names) + 1))
-    for i, hrs in enumerate(runs, start=1):
-        window = (f"{hrs[0]:%Y-%m-%d %H:%M} → {hrs[-1]:%H:%M}" if hrs[0].date() == hrs[-1].date()
-                  else f"{hrs[0]:%Y-%m-%d %H:%M} → {hrs[-1]:%m-%d %H:%M}")
-        inside = set(hrs)
-        per = {}
-        for (m, op, h), cu in hourly.items():
-            if h in inside:
-                per[m] = per.get(m, 0.0) + cu
-        vals = [per.get(n.lower(), 0.0) for n in names]
-        print(f"| {i} | {window} | {len(hrs)} | "
-              + " | ".join(f"{v:,.1f}" for v in vals)
+    print("| semantic model | " + " | ".join(h for h, _ in cols) + " | total |")
+    print("|:--|" + "---:|" * (len(cols) + 1))
+    col_tot = [0.0] * len(cols)
+    grand = 0.0
+    for name in names:
+        vals = [per.get((ci, name.lower()), 0.0) for ci in range(len(cols))]
+        for ci, v in enumerate(vals):
+            col_tot[ci] += v
+        grand += sum(vals)
+        print(f"| {name} | " + " | ".join(f"{v:,.1f}" for v in vals)
               + f" | **{sum(vals):,.1f}** |")
+    print("| **total** | " + " | ".join(f"**{v:,.1f}**" for v in col_tot)
+          + f" | **{grand:,.1f}** |")
+
+    hours = ", ".join(f"run {i}: {len(hrs)}h" for i, hrs in enumerate(runs, start=1))
     print(f"\n<sub>A run is a cluster of active hours separated from the next by more than "
-          f"{RUN_GAP_HOURS}h idle. The metrics table is bucketed at ONE HOUR, so two dispatches "
-          f"inside the same hour are one row here and cannot be told apart from this table. Per-"
-          f"ENGINE separation does not depend on time — each engine has its own semantic model, so it "
-          f"is already its own column.</sub>")
+          f"{RUN_GAP_HOURS}h idle — a pass spanning several hours is ONE column, not one per hour "
+          f"({hours}; windows are the first and last active hour bucket, in the model's clock). The "
+          f"metrics table is bucketed at ONE HOUR, so two dispatches inside the same hour are one "
+          f"column here and cannot be told apart from this table. Per-ENGINE separation does not "
+          f"depend on time — each engine has its own semantic model, so it is already its own row."
+          + (f" The {folded} oldest runs are folded into the `earlier` column; raise `CU_RUN_COLS` "
+             f"(currently {MAX_RUN_COLS}) to give them their own." if folded else "") + "</sub>")
+
+    # The run columns can total LESS than the aggregate table, and silently: a row whose hour stamp
+    # would not parse lands in `cells` but never in `hourly`, so it is in no run. Small, but this file
+    # refuses to print a plausible wrong number elsewhere and should not start here.
+    if cells:
+        agg = sum(cells.values())
+        if agg - grand > 0.05:
+            print(f"\n<sub>⚠️ These columns total {grand:,.1f} CU against the aggregate table's "
+                  f"{agg:,.1f} — {agg - grand:,.1f} CU came back with an hour stamp that could not "
+                  f"be parsed, so it is counted above and belongs to no run. stderr says how many "
+                  f"rows.</sub>")
+        elif grand - agg > 0.05:
+            # Every hourly row is also a cells row, so the runs can only ever total LESS. More means
+            # the two were built from different data and one of these tables is wrong — say that,
+            # rather than blaming a timestamp that would not explain it.
+            print(f"\n<sub>⚠️ These columns total {grand:,.1f} CU, MORE than the aggregate table's "
+                  f"{agg:,.1f}. That should be impossible — every hour-stamped row is also in the "
+                  f"aggregate — so one of the two tables is wrong. Do not quote either.</sub>")
 
     if RUN_OPS:
         for i, hrs in enumerate(runs, start=1):
             inside = set(hrs)
-            cells = {}
+            ops = {}
             for (m, op, h), cu in hourly.items():
                 if h in inside:
-                    cells[(m, op)] = cells.get((m, op), 0.0) + cu
-            print(f"\n#### Run {i} — {hrs[0]:%Y-%m-%d %H:%M} → {hrs[-1]:%H:%M}, by operation\n")
-            _op_table(cells)
+                    ops[(m, op)] = ops.get((m, op), 0.0) + cu
+            print(f"\n#### Run {i} — {_window(hrs, year=True)}, by operation\n")
+            _op_table(ops)
 
 
 def load_layout(path=None):
@@ -528,7 +599,7 @@ def render(cells, hourly, since, asof, seen=0, dropped=None, active=None, near=N
     _op_table(cells)
     runs = sessionize(h for (_m, _o, h) in hourly) if (RUN_GAP_HOURS > 0 and hourly) else []
     if runs:
-        render_runs(hourly, runs)
+        render_runs(hourly, runs, cells)
     doc = load_layout()
     if doc:
         render_layout(doc, {m.lower(): t for m, t in _model_rows(cells)})

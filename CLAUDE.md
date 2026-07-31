@@ -758,7 +758,17 @@ detail.
   detail table this deliberately does not use. Do not reach for that table to sharpen the split — the
   dedup trap below is why, and the benchmark's own inter-engine gaps already create the idle hours the
   clustering keys off. When everything lands in one cluster the report says so rather than printing a
-  one-row "runs" table that repeats the aggregate.
+  one-column "runs" table that repeats the aggregate.
+- **The runs table is model-down / run-across, and the transpose was the earlier shape.** One row per
+  semantic model, one column per run, so "what did iceberg cost yesterday against today" is one row
+  read left to right — and it matches the aggregate table above it instead of making the eye re-learn
+  the layout halfway down. A column is a whole run, never an hour: contiguous active hours are merged,
+  so a pass spanning 12:00→15:00 is one column, and the per-run hour *count* sits in the footnote
+  precisely so the columns are not read as hourly. Runs being columns is also why `CU_RUN_COLS`
+  (default 8, env-only, no dispatch input) folds the oldest into one `earlier` column — named in the
+  header and logged, never a silent cap. Deliberately **no Δ / change column**: a run-over-run
+  percentage only means anything if both dispatches used the same `runs`/`cold_repeats`, and `cu/`
+  correlates with no GitHub run so it cannot know that.
 - **Deduplication by operation id is load-bearing.** `'Timepoint Interactive Detail'` is gated by a
   single 30-second `TimePoint` MPARAMETER, so the window is walked one bucket at a time — but an
   interactive operation is smoothed across 10–128 buckets and **reappears in every one carrying its

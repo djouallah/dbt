@@ -35,14 +35,29 @@ run:
 ```
 ### Runs detected: 3
 
-| run | window (model clock) | hours | aemo_duckrun | aemo_iceberg | aemo_spark | aemo_dwh |   total |
-|-----|:---------------------|------:|-------------:|-------------:|-----------:|---------:|--------:|
-| 1   | 2026-07-30 12:00 → 15:00 |   4 |        160.0 |        170.0 |      180.0 |    300.0 |   810.0 |
-| 2   | 2026-07-31 09:00 → 12:00 |   4 |        160.0 |        170.0 |      180.0 |    300.0 |   810.0 |
-| 3   | 2026-07-31 20:00 → 20:00 |   1 |          0.0 |          0.0 |        0.0 |    275.0 |   275.0 |
+| semantic model | run 1<br>07-30 12:00→15:00 | run 2<br>07-31 09:00→12:00 | run 3<br>07-31 20:00→20:00 |     total |
+|:---------------|---------------------------:|---------------------------:|---------------------------:|----------:|
+| aemo_duckrun   |                      160.0 |                      158.0 |                        0.0 |     318.0 |
+| aemo_iceberg   |                      170.0 |                      171.0 |                        0.0 |     341.0 |
+| aemo_spark     |                      180.0 |                      179.0 |                        0.0 |     359.0 |
+| aemo_dwh       |                      300.0 |                      295.0 |                      275.0 |     870.0 |
+| **total**      |                  **810.0** |                  **803.0** |                  **275.0** |**1,888.0**|
 ```
 
-Row 3 is a dwh-only dispatch, and it separates itself — nothing had to be told that it happened.
+One row per model, one column per run — so "what did iceberg cost yesterday against today" is a
+single row read left to right. It is the same shape as the aggregate table above it, deliberately.
+Column 3 is a dwh-only dispatch, and it separates itself: nothing had to be told that it happened.
+
+**A column is a whole run, never an hour.** Contiguous active hours are merged, so a pass spread over
+12:00→15:00 is one column carrying all four hours' CU. The per-run hour *count* is in the footnote
+rather than the table, so nothing invites reading the columns as hourly. The flip side of the rule:
+if one pass ever sits idle for more than `run_gap_hours` in the middle, it splits into two columns —
+raise `run_gap_hours` on that dispatch to glue it back.
+
+Runs are columns, so the table grows sideways. Past `CU_RUN_COLS` (default 8) the oldest fold into a
+single `earlier` column — named in the header, restated in the footnote, and logged to stderr, never
+silently. `CU_RUN_COLS=0` gives every run its own column. It only binds on a widened `since`, which
+is why it is an env var and not a dispatch input.
 
 **No extra requests.** The hour column was always in every row (it has to be, or `since` cannot
 bind); it was simply discarded after the floor check. The split is pure post-processing of rows
@@ -54,16 +69,16 @@ many engines it covered — an idle gap is the only signal, which is why the sam
 dispatch with different `engines`, `runs` or `gap_seconds`.
 
 **The resolution limit is the app's, and it is one hour.** `Metrics By Item Operation And Hour` is
-bucketed hourly, so two dispatches inside the same hour are one row and cannot be told apart from
+bucketed hourly, so two dispatches inside the same hour are one column and cannot be told apart from
 this table. Two things make that enough: the benchmark's own inter-engine gaps create the idle hours
 the split keys off, and **per-engine separation does not depend on time at all** — each engine has its
-own semantic model, so it is already its own column. The timepoint detail table has finer resolution
+own semantic model, so it is already its own row. The timepoint detail table has finer resolution
 and this deliberately does not use it (see below).
 
 **It is still not correlated with a GitHub run.** A run here is identified by its own time window.
 `benchmark/` records durations but no absolute timestamps, and adding them is the coupling this
 directory exists without. If the split shows one cluster where you expected two, the report says so
-rather than printing a one-row "runs" table that repeats the aggregate.
+rather than printing a one-column "runs" table that repeats the aggregate.
 
 That is the whole output and the whole scope.
 
@@ -146,6 +161,9 @@ export CU_METRICS_WORKSPACE_ID=7f7f5d92-1603-4a02-a46a-0d90fe1ed119
 export CU_METRICS_MODEL_ID=0fdedd3b-1451-4499-9ed4-aa3658100ec1
 CU_SINCE=2026-07-30T22:00:00 CU_DEBUG=1 python cu/capacity_cu.py
 ```
+
+`CU_RUN_COLS` (default 8, `0` = unlimited) is env-only — how many runs get their own column before
+the oldest fold into one. It only matters against a widened `since`, which is a local thing.
 
 ## The things that will bite
 
