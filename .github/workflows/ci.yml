@@ -111,7 +111,11 @@ jobs:
   # files) saved a session start-up while the expensive case it mis-sized cost a 7GB runner
   # thrashing on a real fold. One path, always remote, is the same build with nothing to get wrong.
   fabric:
-    name: fabric ${{ matrix.engine }}
+    # Labelled by what the leg actually is — both are DuckDB, differing only in the table format
+    # they write (delta-rs via duckrun, Iceberg via dbt-duckdb). "fabric duckrun" read as if the
+    # engine were the adapter, and as if the other leg were not equally on Fabric. `label` is the
+    # display name ONLY; `engine` is still the key provision.py and the dbt target key take.
+    name: duckdb ${{ matrix.label }}
     needs: land
     runs-on: ubuntu-latest
     timeout-minutes: 90
@@ -119,7 +123,9 @@ jobs:
       # One engine failing says nothing about the other — they share only the landed data.
       fail-fast: false
       matrix:
-        engine: [duckrun, iceberg]
+        include:
+          - {engine: duckrun, label: delta_rs}
+          - {engine: iceberg, label: iceberg}
     env:
       FILES_PATH: ${{ needs.land.outputs.files_path }}
     steps:
