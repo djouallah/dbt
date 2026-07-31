@@ -632,8 +632,8 @@ takes to **query** them. Ported from `djouallah/duckrun`'s `parquet_layout.yml`.
 - **It measures a USER SESSION, and nothing is ever cleared. The pass number is the tier.**
   `deploy_models.py` **deletes and recreates** each semantic model, so it starts with an empty
   VertiPaq store; `xmla_compare.py` then walks the whole 25-query suite `runs` times — pass 1 **cold**,
-  pass 2 **warm**, passes 3+ **hot** (median + spread). Defaults `runs=6`, `gap_seconds=600`. Things
-  worth not rediscovering:
+  pass 2 **warm**, passes 3+ **hot** (median + spread), with `think_seconds` of idle between
+  queries. Defaults `runs=6`, `think_seconds=4`, `gap_seconds=600`. Things worth not rediscovering:
   - **The per-query dehydrate is gone and must not come back.** It ran `clearValues` + `full` before
     *every* cold-tier query — 21 forced transcodes per engine per run. No user is ever in that state,
     and `clearValues` clears the **data cache**, not the data (TMSL: "Clear values in this object and
@@ -683,7 +683,7 @@ takes to **query** them. Ported from `djouallah/duckrun`'s `parquet_layout.yml`.
   fall back to an in-process walk of every model, for running this from a laptop; that path is deleted
   — the laptop is not a supported way to spend this capacity, and a second orchestration shape kept
   alive to serve it meant two implementations answering the same question. `dbt`-style scouting is
-  still a dispatch, just with `engines=duckrun,spark runs=3 gap_seconds=0`.
+  still a dispatch, just with `engines=duckrun,spark runs=3 think_seconds=0 gap_seconds=0`.
 - **It shares `ci.yml`'s concurrency group (`onelake-<ref>`) deliberately.** Not for correctness, but
   because a concurrent dbt build contends for the same capacity, and capacity contention is the one
   thing a wall-clock benchmark cannot absorb. So a benchmark dispatch queues behind a `dbt` dispatch
@@ -755,7 +755,8 @@ takes to **query** them. Ported from `djouallah/duckrun`'s `parquet_layout.yml`.
   *deploy* time, after ADOMD.NET is installed and the workspace resolved. The render layer is pure
   JSON → markdown, so a past run's `run-report` artifact re-renders offline with
   `RUN_REPORT=<file> python benchmark/render_report.py` — no credentials.
-- Scout with `engines=duckrun,spark runs=3 gap_seconds=0` before spending a full run: it exercises
+- Scout with `engines=duckrun,spark runs=3 think_seconds=0 gap_seconds=0` before spending a full
+  run: it exercises
   deploy → XMLA → render end to end in minutes rather than an hour of capacity. Read two things in
   its log — the deploy printed a **different item id** than last time (`replaced <guid>`, so pass 1
   really was cold) and pass 1 > pass 2 > pass 3.

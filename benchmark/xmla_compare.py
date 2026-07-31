@@ -14,6 +14,9 @@ whole suite `BENCH_RUNS` times and the PASS NUMBER is the tier:
     pass 2     -> warm   second visit
     pass 3..N  -> hot    settled; median + spread over N-2 samples
 
+with BENCH_THINK_SECONDS of idle between consecutive queries, because a person reads a visual before
+clicking the next one. The pause is outside every timed region.
+
 Those labels are positions in a session, not engine states. Microsoft uses the same words more
 narrowly (warm = data resident, VertiScan caches empty; hot = resident AND caches populated), and by
 that definition pass 2 is arguably already hot because pass 1 populated the caches too. A TMSL
@@ -64,6 +67,13 @@ Env in:
                    At 6 the hot median is over 4 samples and the hot spread is real. Below 3 there
                    is no hot tier at all, which the render layer scopes out per metric rather than
                    guessing at.
+  BENCH_THINK_SECONDS
+                 — idle seconds BETWEEN queries (default 4): a person reading a visual before
+                   clicking the next one. Firing the suite back-to-back is the one thing left in
+                   this that no user does. It sits outside every timed region, so it changes what
+                   is reproduced and not what is measured — but it is idle inside the token's ~1h
+                   life, so raising it eats the headroom the per-engine job split exists to protect.
+                   0 disables it.
 
 Cold and warm are single samples by construction — there is exactly one first visit and one second
 visit per deployed model — so neither carries a spread. More cold samples means more dispatches, not
@@ -348,14 +358,19 @@ def _finalize(by_pass, tier, rows):
     return res
 
 
-def bench_model(workspace, model, token, runs, pinned_duid=None):
+def bench_model(workspace, model, token, runs, pinned_duid=None, think_seconds=0.0):
     """Replay `runs` passes of the whole suite against one model and return (timings, top_duid).
 
     The ORDER here is the measurement. Readiness, then pass 1 with nothing in between — no refresh,
     no DMV probe, no DUID resolve — because anything that touches a fact column first would spend
     the cold pass before it starts.
+
+    `think_seconds` pauses BETWEEN queries — a person reading a visual before clicking the next one.
+    It is outside every timed region (`run_query` starts its clock after the pause), so it changes
+    what is being reproduced without changing what is being measured.
     """
-    print(f"\n=== Benchmarking {model} ({runs} passes: 1 cold, 2 warm, 3+ hot) ===")
+    print(f"\n=== Benchmarking {model} ({runs} passes: 1 cold, 2 warm, 3+ hot; "
+          f"{think_seconds}s think time) ===")
     conn = open_conn(workspace, model, token)
     if not warm_up(conn, model):
         conn.Close()
@@ -364,11 +379,17 @@ def bench_model(workspace, model, token, runs, pinned_duid=None):
     td = pinned_duid
     queries = resolve_queries(td)   # 25 when the DUID is pinned, 21 when it is resolved below
     samples, rows_of, tier_of = {}, {}, {}
+    first = True
     try:
         for p in range(1, runs + 1):
             tier = _tier_of(p)
             print(f"\n  --- pass {p}/{runs} ({tier}) — {len(queries)} queries ---", flush=True)
             for tier_name, name, dax in queries:
+                # Between queries, not before the first: a session opens with a query, and the pause
+                # carries across the pass boundary because the user does not know where that is.
+                if think_seconds and not first:
+                    time.sleep(think_seconds)
+                first = False
                 t, rows = run_query(conn, dax)
                 samples.setdefault(name, {})[p] = t
                 rows_of[name] = rows
@@ -411,6 +432,7 @@ def main():
     token = os.environ.get("PBI_TOKEN") or auth.get_powerbi_token()  # self-acquire the XMLA token
     adomd_dir = os.environ.get("ADOMD_DIR", ".")
     runs = int(os.environ.get("BENCH_RUNS", "6"))
+    think = float(os.environ.get("BENCH_THINK_SECONDS", "4"))
     # Pinning the DUID skips the resolve entirely, so the ladder runs from pass 1 like everything
     # else. Unpinned, it is resolved after the cold pass and the ladder joins at pass 2 — see
     # bench_model. Either way the value is recorded per model, so the render layer can warn if two
@@ -420,10 +442,15 @@ def main():
     _load_adomd(adomd_dir)
     print(f"Workspace : {workspace}")
     print(f"Engine    : {engine} -> {model} (written by {E.WRITER.get(engine, '?')})")
+    # Think time is idle, so it costs no CU — but it is idle INSIDE the token's ~1 hour life, which
+    # is the whole reason the workflow runs one job per engine. Say what it adds up to, so a raised
+    # value that would run the token out is visible before the measurement rather than after.
     print(f"Passes    : {runs} (1 cold, 2 warm, 3+ hot)   "
           f"Top DUID: {pinned_duid or '(resolved after the cold pass)'}")
+    print(f"Think time: {think}s between queries "
+          f"(~{think * (len(QUERIES) * runs - 1) / 60:.0f} min of idle across this session)")
 
-    res, td = bench_model(workspace, model, token, runs, pinned_duid)
+    res, td = bench_model(workspace, model, token, runs, pinned_duid, think)
     if res is None:
         sys.exit(f"[{engine}] {model!r} never became queryable — nothing measured.")
     _write_timings(model, res)

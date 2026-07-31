@@ -56,7 +56,7 @@ def s1_header(rep):
     w(f"- run `{run.get('run_id')}` · sha `{run.get('sha')}` · {run.get('date')}")
     w(f"- duckrun `{run.get('duckrun_version')}` · workspace `{run.get('workspace')}`")
     w(f"- inputs: engines={inp.get('engines')} · runs={inp.get('runs')} passes · "
-      f"gap_seconds={inp.get('gap_seconds')}")
+      f"think_seconds={inp.get('think_seconds')} · gap_seconds={inp.get('gap_seconds')}")
     w()
     # The experiment in one sentence: identical DAX, identical semantic models, N dbt adapters. The
     # adapter that wrote the parquet is the only variable, which is why no engine is described here
@@ -66,7 +66,8 @@ def s1_header(rep):
       f"so every timing is a Delta→memory transcode and an in-memory scan shaped by the physical "
       f"layout. Each engine is measured as **one user session**: the model is deleted and recreated "
       f"so it starts with an empty VertiPaq store, then the suite is walked "
-      f"{inp.get('runs')} times — pass 1 **cold**, pass 2 **warm**, the rest **hot** (median). "
+      f"{inp.get('runs')} times — pass 1 **cold**, pass 2 **warm**, the rest **hot** (median) — "
+      f"with {inp.get('think_seconds')}s of think time between queries. "
       f"Nothing is cleared between passes. No baseline: the engines are peers and are ranked "
       f"against each other.")
     w()

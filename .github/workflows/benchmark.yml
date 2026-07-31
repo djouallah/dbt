@@ -48,8 +48,12 @@ on:
         description: "PASSES over the whole query suite. The pass number is the tier: 1 cold (a freshly created model), 2 warm, 3+ hot (median). Below 3 there is no hot tier."
         type: string
         default: "6"
+      think_seconds:
+        description: "idle seconds BETWEEN queries — a user reading a visual before clicking the next. Outside every timed region, so it changes what is reproduced, not what is measured. Idle inside the token's ~1h life though, so raising it eats the headroom the per-engine split protects. 0 disables."
+        type: string
+        default: "4"
       gap_seconds:
-        description: "idle seconds before each engine after the first (>5min CU smoothing => clean gaps in the capacity chart)"
+        description: "idle seconds before each engine after the first (>5min CU smoothing => clean gaps in the capacity chart). NOT think time — this is between ENGINES, and it runs before the token is minted."
         type: string
         default: "600"
       top_duid:
@@ -73,6 +77,7 @@ env:
   # Every job reads these; the per-engine jobs additionally narrow BENCH_ENGINES to themselves.
   BENCH_ENGINES: ${{ inputs.engines }}
   BENCH_RUNS: ${{ inputs.runs }}
+  BENCH_THINK_SECONDS: ${{ inputs.think_seconds }}
   BENCH_GAP_SECONDS: ${{ inputs.gap_seconds }}
   BENCH_TOP_DUID: ${{ inputs.top_duid }}
   PYTHONIOENCODING: utf-8

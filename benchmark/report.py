@@ -57,6 +57,9 @@ def _init():
             "engines": os.environ.get("BENCH_ENGINES"),
             # PASSES over the suite, not hot repetitions: pass 1 cold, pass 2 warm, the rest hot.
             "runs": _int("BENCH_RUNS"),
+            # think_seconds is BETWEEN queries (a user reading a result); gap_seconds is between
+            # ENGINES (capacity-chart separation). Different things, both recorded.
+            "think_seconds": _int("BENCH_THINK_SECONDS"),
             "gap_seconds": _int("BENCH_GAP_SECONDS"),
         },
         "duckrun_version": dv,

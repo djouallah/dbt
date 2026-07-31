@@ -311,6 +311,58 @@ def test_nothing_touches_the_model_between_readiness_and_pass_1(monkeypatch):
     assert "cold_ms" in res["probe_mw"] and "cold_ms" not in res["sel_1duid"]
 
 
+def test_think_time_pauses_between_queries_and_is_not_measured(monkeypatch):
+    """A user reads a visual before clicking the next one, so the suite does not fire back-to-back.
+
+    Two things must hold and only one is obvious: the pause happens between EVERY consecutive pair
+    of queries (including across the pass boundary — the user does not know where that is) and never
+    before the first; and it sits OUTSIDE the timed region, so it changes what is reproduced and not
+    what is measured. A pause inside `run_query`'s clock would add itself to every number."""
+    import xmla_compare as xc
+    slept, order = [], []
+
+    class FakeConn:
+        def Close(self):
+            pass
+
+    def fake_query(conn, dax):
+        order.append("Q")
+        return 7.0, 1                       # a fixed, small measured time
+
+    monkeypatch.setattr(xc, "open_conn", lambda *a, **k: FakeConn())
+    monkeypatch.setattr(xc, "_refresh", lambda *a, **k: None)
+    monkeypatch.setattr(xc, "run_query", fake_query)
+    monkeypatch.setattr(xc, "top_duid", lambda conn: "ERGT01")
+    monkeypatch.setattr(xc.time, "sleep", lambda s: (slept.append(s), order.append("T"))[0])
+
+    res, _td = xc.bench_model("ws", "aemo_duckrun", "tok", 2, "ERGT01", think_seconds=4)
+
+    n = len(xc.resolve_queries("ERGT01")) * 2          # 2 passes, DUID pinned so nothing joins late
+    assert slept == [4] * (n - 1)                      # between every pair, never before the first
+    assert order[0] == "Q" and "TT" not in "".join(order)   # never two pauses back to back
+    # the pause is not in the timings: every measured value is still the query's own 7.0ms
+    assert res["probe_mw"]["cold_ms"] == 7.0 and res["probe_mw"]["warm_ms"] == 7.0
+
+
+def test_think_time_of_zero_sleeps_not_at_all(monkeypatch):
+    """Scouting dispatches set it to 0; a 0-second sleep per query would still be 150 syscalls and,
+    worse, would read as "think time is on" in a trace."""
+    import xmla_compare as xc
+    slept = []
+
+    class FakeConn:
+        def Close(self):
+            pass
+
+    monkeypatch.setattr(xc, "open_conn", lambda *a, **k: FakeConn())
+    monkeypatch.setattr(xc, "_refresh", lambda *a, **k: None)
+    monkeypatch.setattr(xc, "run_query", lambda conn, dax: (7.0, 1))
+    monkeypatch.setattr(xc, "top_duid", lambda conn: "ERGT01")
+    monkeypatch.setattr(xc.time, "sleep", lambda s: slept.append(s))
+    xc.bench_model("ws", "aemo_duckrun", "tok", 2, "ERGT01", think_seconds=0)
+    assert slept == []
+
+
 def test_nothing_dehydrates_any_more():
     """The per-query `clearValues` cycle is gone and must not come back: no user is ever in that
     state. `clearCache` is likewise absent — it would manufacture the strict warm state, and this

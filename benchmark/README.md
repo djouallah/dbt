@@ -188,6 +188,17 @@ semantic model, so it starts with an empty VertiPaq store; this script then walk
 | 2 | **warm** | second visit |
 | 3…N | **hot** | settled — median + spread over N−2 samples |
 
+**With think time between queries** (`think_seconds`, default 4). A person reads a visual before
+clicking the next one; firing 25 queries back-to-back was the last thing left in here that no user
+does. The pause sits **outside every timed region** — `run_query` starts its clock after it — so it
+changes what is reproduced, not what is measured, and it applies between every consecutive pair
+including across a pass boundary (the user does not know where that is). Two costs worth knowing: it
+adds `think_seconds × (25 × runs − 1)` of idle per engine — ~10 minutes at the defaults — and that
+idle is **inside the token's ~1 hour life**, which is precisely the headroom the one-job-per-engine
+split exists to protect. Raising it much further is how a run dies to an expiry mid-measurement.
+It is not `gap_seconds`: that one is between **engines**, for capacity-chart separation, and it
+elapses before the token is minted.
+
 **Nothing is ever cleared.** What this replaced was a per-query dehydrate: `clearValues` + `full`
 before *every* cold-tier query, 21 forced transcodes per engine per run. No user is ever in that
 state, and `clearValues` clears the data cache — TMSL defines it as no more than *"Clear values in
@@ -281,15 +292,16 @@ the way to test whether a cold number is repeatable is a second dispatch.
 **CI, and only CI.** Dispatch *Direct Lake benchmark*. Inputs: `workspace`, `engines` (order is the
 order they are **measured** in — index 0 is simply the job that skips the idle gap; no number in the
 report depends on it), `runs` (**passes** over the suite — the pass number is the tier),
-`gap_seconds` (applied *before* each engine after the first), `top_duid` (optional pin for the
-selectivity ladder; pinning it lets the ladder run from pass 1).
+`think_seconds` (idle *between queries*, default 4), `gap_seconds` (idle *before each engine* after
+the first — a different thing), `top_duid` (optional pin for the selectivity ladder; pinning it lets
+the ladder run from pass 1).
 
 There is no supported way to run the paid part from a laptop: `xmla_compare.py` measures one engine
 per process and the workflow is what fans it out. A cheap scouting **dispatch** — end to end in
 minutes instead of an hour of capacity:
 
 ```
-engines=duckrun,spark  runs=3  gap_seconds=0
+engines=duckrun,spark  runs=3  think_seconds=0  gap_seconds=0
 ```
 
 Two things to read in a scout's logs: the deploy printed a **different item id** than last time
