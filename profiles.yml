@@ -135,9 +135,15 @@ aemo_electricity:
       spark_config:
         name: dl_vorder_build
         conf:
+          # The profile is set FIRST here for readability only — a conf block is a dict, not an
+          # ordered application sequence, so this does not encode precedence. Whether Fabric reads
+          # resourceProfile from a session conf at all is exactly what the probe is measuring.
+          # `writeHeavy` (the workspace default) defines vorder.default=false and overwrites the
+          # key below; `readHeavyForPBI` is Microsoft's documented profile for V-Order.
+          spark.fabric.resourceProfile: "readHeavyForPBI"
           spark.sql.parquet.vorder.default: "true"
-          # Canary for macros/probe_spark_conf.sql. A made-up key no resource profile defines, so
-          # if it survives into the session the conf IS being delivered and `writeHeavy` is simply
-          # outranking the V-Order key; if it is `<undefined>` too, Fabric discards `conf` wholesale.
-          # Rides the next dispatch at no extra cost. Delete with the probe macro.
+          # Canary for macros/probe_spark_conf.sql. A made-up key no resource profile defines. It
+          # read `alive` on run 30599860363 on both master and worker, which is what proved `conf`
+          # is delivered end to end and that the failure is precedence, not delivery. Kept as the
+          # control: if it ever goes `<undefined>`, delivery itself broke. Delete with the probe.
           spark.dbt.probe.canary: "alive"
