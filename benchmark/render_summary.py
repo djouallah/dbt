@@ -37,19 +37,6 @@ def lbl(model):
     return rr._short(model)  # engine label: aemo_duckrun -> duckrun
 
 
-def _noisy_cols(rep, thresh=25.0):
-    """Probe columns whose cold spread exceeds `thresh`% in ANY engine — measurement is too noisy
-    to quote (n = cold_repeats over shared capacity). These are excluded from headline sentences."""
-    tim = rep.get("timings", {})
-    noisy = set()
-    for m in tim:
-        for col in rr._PROBE_COLS:
-            sp = tim[m].get(f"probe_{col}", {}).get("cold_spread_pct")
-            if sp is not None and sp > thresh:
-                noisy.add(col)
-    return noisy
-
-
 def _ms(v):
     return "—" if v is None else f"{v:,.0f}"
 
@@ -68,8 +55,8 @@ def s1_header(rep):
     w()
     w(f"- run `{run.get('run_id')}` · sha `{run.get('sha')}` · {run.get('date')}")
     w(f"- duckrun `{run.get('duckrun_version')}` · workspace `{run.get('workspace')}`")
-    w(f"- inputs: engines={inp.get('engines')} · cold_repeats={inp.get('cold_repeats')} · "
-      f"runs={inp.get('runs')} · gap_seconds={inp.get('gap_seconds')}")
+    w(f"- inputs: engines={inp.get('engines')} · runs={inp.get('runs')} passes · "
+      f"gap_seconds={inp.get('gap_seconds')}")
     w()
     # The experiment in one sentence: identical DAX, identical semantic models, N dbt adapters. The
     # adapter that wrote the parquet is the only variable, which is why no engine is described here
@@ -77,8 +64,11 @@ def s1_header(rep):
     w(f"Identical DAX over XMLA against {len(tim)} semantic models, one per dbt adapter, each over "
       f"that adapter's own copy of the same `mart.fct_summary` at row-count parity. All Direct Lake, "
       f"so every timing is a Delta→memory transcode and an in-memory scan shaped by the physical "
-      f"layout — {inp.get('cold_repeats')} cold cycles per query, medians reported. No baseline: the "
-      f"engines are peers and are ranked against each other.")
+      f"layout. Each engine is measured as **one user session**: the model is deleted and recreated "
+      f"so it starts with an empty VertiPaq store, then the suite is walked "
+      f"{inp.get('runs')} times — pass 1 **cold**, pass 2 **warm**, the rest **hot** (median). "
+      f"Nothing is cleared between passes. No baseline: the engines are peers and are ranked "
+      f"against each other.")
     w()
     # One job per engine and none of them fail-fast, so an engine can be missing entirely. Name it:
     # a report with three columns where the dispatch asked for four otherwise reads as a four-engine
@@ -124,12 +114,15 @@ def s2_ranking(rep, analysis):
         if s:
             w(f"- {s}")
     w()
-    noisy = sorted(_noisy_cols(rep))
-    if noisy:
-        cr = rep.get("run", {}).get("inputs", {}).get("cold_repeats")
-        w(f"- ⚠ {len(noisy)} probe columns exceed 25% cold spread (n={cr}, shared capacity; see §2). "
-          f"The headline rests on the aggregate totals above, not on any single column.")
-        w()
+    # There is no cold/warm noise filter any more, and its absence is stated rather than left to be
+    # noticed. It read `cold_spread_pct` over `cold_repeats` dehydrate cycles per query; a session
+    # has exactly one first visit, so cold and warm are n=1 and have no spread to threshold. What is
+    # left is the HOT spread in §3. A cold or warm row two runs apart is the only way to judge how
+    # repeatable those two columns are.
+    w("- <sub>COLD and WARM are single samples (one first visit, one second visit per deployed "
+      "model), so neither carries a spread and neither can be noise-filtered. Judge them across "
+      "dispatches; §3 covers the hot spread.</sub>")
+    w()
 
 
 def s3_cold_decomp(rep, analysis, models):
@@ -137,11 +130,13 @@ def s3_cold_decomp(rep, analysis, models):
     if not cc:
         return
     models = [m for m in models if m in cc]
-    noisy = _noisy_cols(rep)
     w("## 2. Cold decomposition (marginal cost per column)")
     w()
-    w("<sub>Each cell is that column's probe median minus the `probe_rowcount` control — the "
-      "marginal cost of touching one more column, cold.</sub>")
+    w("<sub>Each cell is that column's cold-pass time minus the `probe_rowcount` control — the "
+      "marginal cost of touching one more column. It reads that way because of the session order: "
+      "in the cold pass each probe is the first query to touch its column, and `probe_rowcount` "
+      "runs last among the probes, so by then everything is resident and it is ~pure overhead. "
+      "Single samples — see the note in §1.</sub>")
     w()
     w("| column | " + " | ".join(f"{lbl(m)} ms" for m in models) + " |")
     w("|:--|" + "--:|" * len(models))
@@ -167,57 +162,54 @@ def s3_cold_decomp(rep, analysis, models):
             floor[col] = statistics.mean(v)
     if cv:
         med_cv = statistics.median(cv.values())
-        # engine-sensitivity is only quotable for low-noise columns; noisy ones (spread>25%) have
-        # cost variance confounded with measurement noise, so name them separately.
-        hi = sorted((c for c, x in cv.items() if x >= med_cv and c not in noisy), key=lambda c: -cv[c])
-        lo = [c for c, x in cv.items() if x < med_cv and c not in noisy]
-        # The cheapest columns overall (candidate "floor"). If any is non-quotable, the irreducible
-        # transcode floor isn't measurable at this n — naming a noisy cheap column the floor while
-        # its own medians sit below it is the contradiction we refuse to print.
+        # The noise filter that used to qualify these two lines is gone with cold_spread_pct: a
+        # session gives one cold sample per query, so there is nothing to threshold. The variance
+        # below is therefore variance ACROSS ENGINES, which is what these lines were always about —
+        # it just no longer has a per-column repeatability figure sitting beside it.
+        hi = sorted((c for c, x in cv.items() if x >= med_cv), key=lambda c: -cv[c])
+        lo = [c for c, x in cv.items() if x < med_cv]
         cheap = sorted(floor, key=floor.get)[:2]
-        cheap_noisy = [c for c in cheap if c in noisy]
-        w(f"- engine-sensitive (high cross-engine variance, low noise): "
-          f"{', '.join(f'{c} (CV {cv[c]:.2f})' for c in hi) or 'none clearly separable at this n'}.")
-        w(f"- engine-invariant (low variance, low noise): "
-          f"{', '.join(lo) or 'none clearly separable at this n'}.")
-        if noisy:
-            w(f"- non-quotable (cold spread >25%): {', '.join(sorted(noisy))}.")
-        if cheap_noisy:
-            w(f"- irreducible floor: not measurable at this n — the cheapest columns "
-              f"({', '.join(cheap_noisy)}) are non-quotable; anchor conclusions on the aggregate "
-              "cold ranking (§1), not per-column costs.")
-        elif cheap:
-            w(f"- irreducible floor (stable): {cheap[0]} (~{floor[cheap[0]]:,.0f} ms across engines).")
+        w(f"- engine-sensitive (high cross-engine variance): "
+          f"{', '.join(f'{c} (CV {cv[c]:.2f})' for c in hi) or 'none clearly separable'}.")
+        w(f"- engine-invariant (low cross-engine variance): "
+          f"{', '.join(lo) or 'none clearly separable'}.")
+        if cheap:
+            w(f"- cheapest column across engines: {cheap[0]} "
+              f"(~{floor[cheap[0]]:,.0f} ms). Read it as a candidate transcode floor, not a "
+              f"measured one — a single cold sample cannot separate a cheap column from a lucky "
+              f"one. Two dispatches agreeing is what would.")
         w()
 
 
 def s4_spread(rep, models):
-    """How trustworthy each engine's numbers are. Without this the medians read as exact."""
+    """How trustworthy each engine's HOT numbers are. Without this the medians read as exact.
+
+    Hot only, and not by omission: cold and warm are one sample each per query, so they have no
+    spread to report. Passes 3+ are the only repeated measurement in a session."""
     tim = rep.get("timings", {})
     rows = []
     for m in models:
         qs = tim.get(m, {})
-        cold = [d["cold_spread_pct"] for d in qs.values() if d.get("cold_spread_pct") is not None]
         hot = [d["hot_spread_pct"] for d in qs.values() if d.get("hot_spread_pct") is not None]
-        if not (cold or hot):
+        if not hot:
             continue
-        rows.append((lbl(m), len(qs),
-                     statistics.median(cold) if cold else None,
-                     max(cold) if cold else None,
-                     statistics.median(hot) if hot else None,
-                     max(hot) if hot else None))
+        # Samples per query behind each median — the number that says whether a 0% spread means
+        # "stable" or "n=1". Max over the queries, since the ladder can join the session late.
+        n = max((len(d.get("all_hot_ms") or []) for d in qs.values()), default=0)
+        rows.append((lbl(m), len(qs), n, statistics.median(hot), max(hot)))
     if not rows:
         return
-    w("## 3. Measurement spread")
+    w("## 3. Hot measurement spread")
     w()
     w("<sub>Spread does not decide a winner — the faster time wins by any margin — but a rank gap "
-      "smaller than the spread beside it is not a result worth quoting. This is where a default "
-      "run (cold_repeats=1, runs=3, so every spread is 0) shows itself as a smoke test.</sub>")
+      "smaller than the spread beside it is not a result worth quoting. Hot only: cold and warm are "
+      "single samples. `runs=3` leaves ONE hot pass and every spread reads 0, which is how a smoke "
+      "test shows itself; the default of 6 gives four.</sub>")
     w()
-    w("| engine | queries | cold spread median % | cold max % | hot spread median % | hot max % |")
-    w("|:--|--:|--:|--:|--:|--:|")
-    for r in rows:
-        w(f"| {r[0]} | {r[1]} | {_ratio(r[2])} | {_ratio(r[3])} | {_ratio(r[4])} | {_ratio(r[5])} |")
+    w("| engine | queries | hot samples/query | hot spread median % | hot max % |")
+    w("|:--|--:|--:|--:|--:|")
+    for lab, nq, n, med, mx in rows:
+        w(f"| {lab} | {nq} | {n or '—'} | {_ratio(med)} | {_ratio(mx)} |")
     w()
 
 

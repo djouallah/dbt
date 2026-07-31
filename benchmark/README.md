@@ -83,8 +83,9 @@ mode, one query suite. `deploy()` therefore takes exactly one per-engine argumen
 | `lakehouse=` / `warehouse=` | `engines.KIND` | yes — which Fabric item holds the tables |
 | `mode=` | `engines.DEPLOY_MODE` | **no** — one constant, `direct_lake`, for every engine |
 
-Direct Lake is what makes the timing an answer about layout: a Delta→memory transcode (cold) and an
-in-memory scan (hot), both shaped by how the files were written. `mode="direct_lake"` also sets
+Direct Lake is what makes the timing an answer about layout: a Delta→memory transcode (the cold pass)
+and an in-memory scan (warm, then hot), all shaped by how the files were written.
+`mode="direct_lake"` also sets
 `directLakeBehavior: directLakeOnly`, so a query Direct Lake cannot serve **fails** rather than
 falling back to the SQL endpoint and logging a pushdown time that would read as a slow layout.
 
@@ -99,11 +100,13 @@ timings so nobody read them as a layout. It did not work, and the last DirectQue
 | spark | Direct Lake | 69,449 | 4,000 | 17.4× |
 | dwh | DirectQuery | 27,622 | 28,696 | **0.96×** |
 
-A DirectQuery model has no transcoded data to evict, so its dehydrate is a **no-op that succeeds** —
-not the failure the hot-only degradation was watching for. Fifteen "cold" samples got recorded that
-were really just more pushdown queries, `dwh` entered the COLD totals, and the summary named it the
-**cold winner** — 27,622 against duckrun's 63,437 — for the sole reason that it had no cold tier to
-pay for. The ✔ went to the engine that never did the work being measured.
+A DirectQuery model has no transcoded data to evict, so the dehydrate of the day was a **no-op that
+succeeded** — not the failure the hot-only degradation was watching for. Fifteen "cold" samples got
+recorded that were really just more pushdown queries, `dwh` entered the COLD totals, and the summary
+named it the **cold winner** — 27,622 against duckrun's 63,437 — for the sole reason that it had no
+cold tier to pay for. The ✔ went to the engine that never did the work being measured. (That
+dehydrate is gone — see *The session* below — but the lesson is about mixing two kinds of number in
+one table, and it stands.)
 
 A warehouse's `Tables` are Delta in OneLake like any other item's — that is how `stats.py` has always
 read them — so the asymmetry was never about the storage, and it is gone. All four are Direct Lake,
@@ -113,7 +116,7 @@ keep them out of one table is to not produce both.
 
 ## One job per engine, because a token lasts an hour
 
-Every Fabric/XMLA token is valid for roughly an hour. One job walking four models over 21 queries
+Every Fabric/XMLA token is valid for roughly an hour. One job walking four models over 25 queries
 with two 600s idle gaps in it runs well past that, and the expiry lands mid-measurement on whichever
 engine happens to be last — a run lost for a reason that has nothing to do with what is being
 measured. So the paid work is a **matrix, one job per engine**: each mints its own token minutes
@@ -133,9 +136,10 @@ Two consequences worth knowing:
 
 - An engine can be **missing entirely** (its job failed). `render_summary` names it against the
   dispatch's `engines` input rather than silently reporting three columns as a four-engine result.
-- Each job resolves the hot-only ladder's DUID itself. Same rows in every engine means the same
-  answer, but that is an expectation — the value is recorded per model and a disagreement is reported
-  as a warning. `top_duid` on the dispatch (or `BENCH_TOP_DUID`) pins it.
+- Each job resolves the selectivity ladder's DUID itself, after its cold pass. Same rows in every
+  engine means the same answer, but that is an expectation — the value is recorded per model and a
+  disagreement is reported as a warning. `top_duid` on the dispatch (or `BENCH_TOP_DUID`) pins it,
+  which also lets the ladder run from pass 1.
 
 ## Pipeline
 
@@ -144,7 +148,7 @@ Two consequences worth knowing:
 | 1 | `checks` | [`test_verdicts.py`](test_verdicts.py) / [`test_templates.py`](test_templates.py) | Free gate, no Fabric. `needs:` on everything paid. |
 | 2 | `resolve` | [`resolve_env.py`](resolve_env.py) | `WS_ID` + [`engines.py`](engines.py) → each engine's item GUID. Emits `PBI_WORKSPACE` (the workspace **display name** — XMLA addresses by name), `BENCH_ITEMS`, and the **engine matrix** the bench jobs fan out over. Resolving all engines here is the cheap early failure: a renamed item raises before any capacity is spent. Writes the `run` block as `report-00-meta.json`. |
 | 3 | `bench (<engine>)` | [`deploy_models.py`](deploy_models.py) | This engine's model only, from the one template via duckrun's `workspace.deploy()`: `lakehouse=`/`warehouse=` rewrites the baked-in GUIDs, `mode=` forces the storage mode. Direct Lake, so it reframes. |
-| 4 | `bench (<engine>)` | [`xmla_compare.py`](xmla_compare.py) | The payload: tiered DAX over ADOMD.NET, dehydrating per query for true cold timing. Measures **one** engine and computes **no** ratios — it refuses more than one, so there is only ever one orchestration shape. |
+| 4 | `bench (<engine>)` | [`xmla_compare.py`](xmla_compare.py) | The payload: one user session over ADOMD.NET — `runs` passes over the whole suite, pass 1 cold, 2 warm, 3+ hot, nothing cleared between them. Measures **one** engine and computes **no** ratios — it refuses more than one, so there is only ever one orchestration shape. |
 | 5 | `report` | [`merge_reports.py`](merge_reports.py) | Deep-merges every fragment in **basename order**, which is why the meta fragment is named to sort first: a per-engine fragment must not overwrite the shared `run` block. |
 | 6 | `report` | [`render_report.py`](render_report.py) | Job summary + the derived `analysis` block — every ratio in the run is computed here. |
 | 7 | `report` | [`render_summary.py`](render_summary.py) | Specialist findings. **Exits 1 if the printed ranking disagrees with the totals it came from** — the only thing here that fails the job. |
@@ -157,30 +161,77 @@ both reports recomputes from it offline. The per-engine fragments are uploaded t
 
 25 queries in four tiers, in [`xmla_compare.py`](xmla_compare.py):
 
-- **`probe`** (6) — one `fct_summary` column, full scan, scalar result. Cold time ≈ that column's
-  transcode cost plus fixed overhead; `probe_rowcount` is the ~zero-column control, so subtracting it
-  gives the marginal per-column cost. Cold **and** hot.
-- **`composite`** (9) — realistic multi-column mart workloads. Cold and hot.
-- **`raw`** (6) — one query per raw landing table, so nothing in the model goes unmeasured. Cold and
-  hot. `raw_scada_mw` is the heaviest measurement in the suite: `fct_scada` is the largest table in
+- **`probe`** (6) — one `fct_summary` column, full scan, scalar result. In the cold pass each probe is
+  the first query to touch its column, so its time ≈ that column's transcode cost plus fixed
+  overhead; `probe_rowcount` runs **last** among the probes, by which point everything is resident,
+  so it is the ~zero-column control and subtracting it gives the marginal per-column cost. That
+  ordering is load-bearing and `test_verdicts.py` pins it.
+- **`composite`** (9) — realistic multi-column mart workloads.
+- **`raw`** (6) — one query per raw landing table, so nothing in the model goes unmeasured.
+  `raw_scada_mw` is the heaviest measurement in the suite: `fct_scada` is the largest table in
   the project, so a cold sum over one of its columns is the biggest Delta→memory transcode any engine
   here performs, and where a layout difference has the most room to show.
-- **`hot_only`** (4) — a selectivity ladder (1 year → 1 month → 1 DUID → both). Hot only: row-group
-  elimination is only visible once resident, since cold is dominated by full-column transcode.
+- **`hot_only`** (4) — a selectivity ladder (1 year → 1 month → 1 DUID → both).
 
-21 of the 25 are cold-measured, so each engine pays 21 × `cold_repeats` dehydrate→query cycles —
-21 at the default of 1, 63 at the old default of 3. That is the bulk of the run's cost, which is
-why the default was cut to 1: this job runs on shared, billed capacity and the dehydrate cycles are
-what an interactive-CU spike looks like to a capacity admin. Scout first, and raise `cold_repeats`
-only for a run whose result has to survive argument.
+Every query runs in every pass. The tier is descriptive — it used to gate a per-query dehydrate, and
+that is gone.
 
-Cold is forced per query by **dehydrating** first — a TMSL `clearValues` evicts all transcoded
-column data, then a `full` reframes (metadata only on Direct Lake) — so the next query pays the full
-cold cost. Per query, not once, because the queries share the big fact columns. `COLD_REPEATS` cycles
-give a median and a spread instead of an n=1 point.
+## The session
 
-Rankings use **medians, never means** (one capacity spike among 110ms runs blows up a mean and
-fabricates a winner), and hot runs 1 and 2 are dropped as the warm transition.
+**This measures a user session, not the engine.** `deploy_models.py` **deletes and recreates** the
+semantic model, so it starts with an empty VertiPaq store; this script then walks the whole suite
+`runs` times and the **pass number is the tier**:
+
+| pass | tier | what it is |
+|---|---|---|
+| 1 | **cold** | first visit — pays the whole Delta→memory transcode, once |
+| 2 | **warm** | second visit |
+| 3…N | **hot** | settled — median + spread over N−2 samples |
+
+**Nothing is ever cleared.** What this replaced was a per-query dehydrate: `clearValues` + `full`
+before *every* cold-tier query, 21 forced transcodes per engine per run. No user is ever in that
+state, and `clearValues` clears the data cache — TMSL defines it as no more than *"Clear values in
+this object and all its dependents"* — which is not a statement about transcoding cost. The session
+shape is both more realistic and cheaper: one transcode instead of 21.
+
+**A new dataset is the cold guarantee, and there is no non-destructive alternative.** All three were
+checked, so none needs retrying:
+
+| lever | why not |
+|---|---|
+| TMSL `clearCache` | clears query caches, **not** resident columns — DAX Studio's Clear Cache button issues it and Direct Lake queries stay fast afterwards. A hot→warm lever, not a cold one. |
+| reframing / redeploy in place | framing is *incremental*: it drops only segments whose row groups changed and **retains dictionaries**. Semiwarm at best. |
+| memory pressure, node reassignment | genuinely do produce cold state, but neither is commandable. |
+
+The accepted cost is one extra item GUID per dispatch in the Capacity Metrics app's item list. It
+does not break `cu/` — that tool resolves names live from the REST API *precisely because* a recreate
+mints a new GUID — and the display name never changes, so CU stays attributed. The other trade: if
+the delete succeeds and the deploy then fails, that engine has no model at all, where an overwrite
+failure used to leave the previous one standing.
+
+**The labels are session positions, not engine states.** Microsoft uses the same words more narrowly
+([Understand Direct Lake query performance](https://learn.microsoft.com/en-us/fabric/fundamentals/direct-lake-understand-storage):
+*warm* = data resident, VertiScan caches empty; *hot* = resident **and** caches populated), and by
+that definition pass 2 is arguably already hot, because pass 1 populated the caches too. A
+`clearCache` between passes would manufacture the strict warm state. **It is deliberately not used** —
+this reproduces user behaviour, and a user's second visit is simply their second visit. Do not add it
+to make the label technically precise.
+
+Cold here also means cold **VertiPaq**, not cold storage: OneLake and the capacity's local caching sit
+underneath a new dataset untouched. Nothing available would give a colder number.
+
+**Nothing touches the model between readiness and pass 1**, and two details exist only to keep that
+true. The top-DUID resolve runs `TOPN` over `DUID` and `Total MWh` — the very columns `probe_duid`
+and `probe_mw` measure — so it happens **after** the cold pass, and the ladder's two DUID queries
+join the session at pass 2 with no cold number (pin `top_duid` and they run from pass 1 like
+everything else). And the readiness probe reads `dim_calendar`, not `COUNTROWS(fct_summary)` as it
+once did — that was byte-identical to `probe_rowcount`, so the readiness check was pre-warming the
+control it would later be measured against.
+
+Rankings use **medians, never means** for hot (one capacity spike among 110ms runs blows up a mean
+and fabricates a winner). Cold and warm are single samples by construction — one first visit, one
+second visit per deployed model — so neither carries a spread, and neither can be noise-filtered.
+More cold samples means more dispatches, not a bigger `runs`.
 
 **The fastest engine wins a row, by any margin — there is no tie band.** There used to be one: a
 per-query gap smaller than the larger of the two spreads was called a tie. It was removed because
@@ -218,26 +269,32 @@ effects worth knowing:
   from: ordered by total, rank 1 the lowest, `× fastest` ≥ 1. Still fatal, for the original reason —
   a table naming the slower engine the winner is worse than no table.
 
-**The defaults trade statistical strength for capacity cost, deliberately.** At `cold_repeats=1`
-and `runs=3` there is exactly one measured sample per query per tier, so "median" is that sample
-and both spreads are 0 — which means `render_summary`'s >25%-cold-spread noise filter flags
-nothing. Read a default-inputs run as a *smoke test with timings*, not as a defensible ranking.
-`cold_repeats=3 runs=5` (the previous defaults) is what a result worth quoting costs.
+**What the defaults buy.** `runs=6` gives one cold sample, one warm, and **four** hot — so the hot
+median is a real median and the hot spread in §3 is a real spread. Drop to `runs=3` and there is a
+single hot pass, every spread reads 0, and the run is a smoke test with timings rather than a
+defensible ranking. Below 3 there is no hot tier at all, which the report shows as a gap rather than
+a zero. Cold and warm cannot be strengthened by raising `runs` — a session has one first visit — so
+the way to test whether a cold number is repeatable is a second dispatch.
 
 ## Running it
 
 **CI, and only CI.** Dispatch *Direct Lake benchmark*. Inputs: `workspace`, `engines` (order is the
 order they are **measured** in — index 0 is simply the job that skips the idle gap; no number in the
-report depends on it), `runs`, `cold`, `cold_repeats`, `gap_seconds` (applied *before* each engine
-after the first), `top_duid` (optional pin for the hot-only ladder).
+report depends on it), `runs` (**passes** over the suite — the pass number is the tier),
+`gap_seconds` (applied *before* each engine after the first), `top_duid` (optional pin for the
+selectivity ladder; pinning it lets the ladder run from pass 1).
 
 There is no supported way to run the paid part from a laptop: `xmla_compare.py` measures one engine
 per process and the workflow is what fans it out. A cheap scouting **dispatch** — end to end in
 minutes instead of an hour of capacity:
 
 ```
-engines=duckrun,spark  runs=1  cold=false  cold_repeats=1  gap_seconds=0
+engines=duckrun,spark  runs=3  gap_seconds=0
 ```
+
+Two things to read in a scout's logs: the deploy printed a **different item id** than last time
+(`replaced <guid>` — the delete took, so the model really was new and pass 1 really was cold), and
+pass 1 > pass 2 > pass 3.
 
 **Free, locally, before pushing** (no credentials, no Fabric — this is the CI gate, and it runs as
 a `needs:` on the paid job):
@@ -250,8 +307,13 @@ RUN_REPORT=some_run_report.json python benchmark/render_report.py   # re-render 
 [`test_verdicts.py`](test_verdicts.py) pins the ranking layer: rank direction (ordered by total,
 rank 1 lowest, `× fastest` ≥ 1), fastest-wins (a 1ms win is a win, and the `best` column names an
 engine rather than `tie`), that no result depends on the engine order given and that no `reference()`
-helper comes back, hot-only scoping (an engine whose dehydrate could not run), and comparable
-totals.
+helper comes back, per-metric scoping (a model with no cold/warm numbers is kept out of those totals
+rather than emptying them), and comparable totals. It also pins **the session's shape**, which is
+where the wrong-but-silent failures live: that `probe_rowcount` runs last among the probes, that the
+pass number is the tier, that cold and warm carry no spread, that a query joining at pass 2 gets no
+cold number, that nothing dehydrates any more — and, replaying a whole session against a stub
+connection, that the only things touching the model between readiness and the end of pass 1 are the
+readiness probe and the suite itself, in order.
 [`test_templates.py`](test_templates.py) checks the `.bim` against duckrun's *own* repoint regexes and
 pins the deploy wiring: that `DEPLOY_MODE` is one constant duckrun's own `_normalize_mode` accepts and
 that no per-engine `MODE` has crept back, that `deploy_kwargs` pairs `warehouse=` with the warehouse

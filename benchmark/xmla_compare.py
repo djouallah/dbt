@@ -1,17 +1,36 @@
-"""Benchmark ONE engine's semantic model by running the heavy DAX suite against it over the XMLA
+"""Benchmark ONE engine's semantic model by replaying a USER SESSION against it over the XMLA
 endpoint and timing every query. One process, one engine, no comparison of any kind.
 
 Every model exposes identical tables, columns and measures over the SAME 143M-row `mart.fct_summary`
 — one copy per engine, at row-count parity. So this is NOT a correctness check: the numbers are
 identical by construction. What differs is how each engine physically wrote the table, which changes
-how much the Direct Lake engine has to transcode (cold) and scan (hot). We measure both as query
-wall-clock.
+how much the Direct Lake engine has to transcode and scan. We measure that as query wall-clock.
 
-COLD is forced per query by DEHYDRATING the model first: a TMSL `clearValues` refresh evicts all
-transcoded column data from memory, then a `full` refresh reframes (on Direct Lake that's metadata
-only — no transcode), so the next query pays the full cold Delta→memory cost. We dehydrate before
-EACH query because the queries share the big fact columns (mw/price/DUID/date/time) — without a
-per-query dehydrate only the first query would be cold.
+**The session is the measurement, and nothing is ever cleared.** `deploy_models.py` deletes and
+recreates the semantic model, so it starts with an empty VertiPaq store; this script then walks the
+whole suite `BENCH_RUNS` times and the PASS NUMBER is the tier:
+
+    pass 1     -> cold   first visit; pays the whole Delta->memory transcode, once
+    pass 2     -> warm   second visit
+    pass 3..N  -> hot    settled; median + spread over N-2 samples
+
+Those labels are positions in a session, not engine states. Microsoft uses the same words more
+narrowly (warm = data resident, VertiScan caches empty; hot = resident AND caches populated), and by
+that definition pass 2 is arguably already hot because pass 1 populated the caches too. A TMSL
+`clearCache` between passes would manufacture the strict warm state — it clears query caches without
+evicting resident columns, which is exactly that transition. It is DELIBERATELY NOT USED: this
+reproduces user behaviour rather than testing the engine, and a user's second visit is simply their
+second visit. Do not add it to make the label technically precise.
+
+What this replaced: a per-query dehydrate (`clearValues` + `full` before EVERY cold-tier query). No
+user is ever in that state, and `clearValues` clears the data cache — TMSL defines it as no more than
+"Clear values in this object and all its dependents" — which is not a statement about transcoding
+cost. Nothing here issues a refresh after readiness.
+
+**Nothing touches the model between readiness and pass 1.** That is why the top-DUID resolve happens
+AFTER pass 1 (it transcodes DUID and mw, the very columns probe_duid/probe_mw measure) and why the
+readiness probe reads a tiny dimension instead of `COUNTROWS(fct_summary)`, which is byte-identical
+to probe_rowcount — the control the marginal-column-cost decomposition subtracts.
 
 What is under test: **identical DAX, identical semantic models, four dbt adapters.** Every model is
 Direct Lake over its own adapter's copy of the same tables, so every timing is a Delta→memory
@@ -20,10 +39,6 @@ thing that differs. `dwh` included: duckrun 0.4.36's `deploy(mode=)` reads a war
 Delta they are, so it is no longer measured as SQL-endpoint pushdown to a different engine. A pushdown
 time is not a slow layout, and mixing the two kinds of number in one table invited exactly that
 misreading.
-
-`bench_model` still degrades a model to hot-only when its dehydrate fails, but that is about the
-refresh rather than the storage mode: `BENCH_COLD=false` skips cold deliberately, and a token that
-cannot refresh cannot dehydrate.
 
 Uses the XMLA endpoint (ADOMD.NET), NOT the throttled /executeQueries REST endpoint.
 Run headless — see .github/workflows/benchmark.yml.
@@ -45,21 +60,14 @@ Env in:
   PBI_WORKSPACE  — workspace *display name* (XMLA data source uses the name, not the id)
   PBI_TOKEN      — optional; else self-acquired via duckrun (analysis.windows.net/powerbi/api)
   ADOMD_DIR      — folder containing Microsoft.AnalysisServices.AdomdClient.dll
-  BENCH_RUNS     — HOT repetitions per query per model (default 3); run1/run2 dropped as warm.
-                   At the default that leaves ONE measured hot sample per query, so the hot
-                   "median" is that sample and the hot spread is 0. Raise it to get a real one.
-  COLD_REPEATS   — cold dehydrate→query cycles per cold-tier query (default 1); we report the
-                   median + spread over these. The defaults are set for capacity cost, not
-                   statistical strength: at 1 the cold median IS the single sample and the
-                   spread is 0, which also means render_summary's >25%-spread noise filter
-                   flags nothing. Raise both when a result actually has to be defended.
-  BENCH_COLD     — "true"/"false": measure cold via dehydrate (default true). Falls back to
-                   hot-only automatically if the token can't run the refresh (needs write).
+  BENCH_RUNS     — PASSES over the whole suite (default 6): pass 1 cold, pass 2 warm, the rest hot.
+                   At 6 the hot median is over 4 samples and the hot spread is real. Below 3 there
+                   is no hot tier at all, which the render layer scopes out per metric rather than
+                   guessing at.
 
-Cold is a black box probed only by wall-clock: dehydrate (clearValues+full) forces a full
-Delta→memory transcode on the next query, so COLD_REPEATS cycles give a small distribution
-instead of an n=1 point — at the default of 1 it IS an n=1 point. Queries are tiered — see
-QUERIES below.
+Cold and warm are single samples by construction — there is exactly one first visit and one second
+visit per deployed model — so neither carries a spread. More cold samples means more dispatches, not
+a bigger number here.
 
 Exit 0 always — this is a benchmark, not a pass/fail gate.
 """
@@ -80,21 +88,29 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import engines as E  # noqa: E402
 import report  # noqa: E402
 
-# Tiered DAX suite. Each entry is (tier, name, dax). Adding a query = adding a tuple.
-#   probe      — one column, full scan, scalar result. Cold time ≈ that column's transcode cost +
-#                fixed overhead; probe_rowcount is the ~zero-column control (subtract it in P3 to
-#                get the marginal per-column cost). Measured cold (COLD_REPEATS×) AND hot.
-#   composite  — realistic multi-column workloads over the mart, also measured cold AND hot.
+# The session's query suite. Each entry is (tier, name, dax). Adding a query = adding a tuple.
+#
+# EVERY query runs in EVERY pass — the tier is descriptive, not a switch, and no query is measured
+# differently from any other. (It used to gate a per-query dehydrate; that is gone.)
+#   probe      — one column, full scan, scalar result.
+#   composite  — realistic multi-column workloads over the mart.
 #   raw        — one query per RAW landing table, so every table in the model is measured and none
-#                is dead weight. Cold and hot. `raw_scada_mw` is the heaviest measurement here.
-#   hot_only   — selectivity ladder on the sort-key column, measured HOT only (segment/row-group
-#                elimination is only visible once resident — cold is dominated by full-column
-#                transcode). "{duid}" is filled at runtime with the top DUID by MWh.
+#                is dead weight. `raw_scada_mw` is the heaviest measurement here.
+#   hot_only   — selectivity ladder on the sort-key column. "{duid}" is filled at runtime with the
+#                top DUID by MWh, and unless BENCH_TOP_DUID is pinned that resolve happens after
+#                pass 1, so these join the session from pass 2 and have no cold number.
+#
+# ORDER IS LOAD-BEARING, in one specific way: `probe_rowcount` must stay LAST among the probes.
+# render_summary's marginal-column-cost table is `probe_<col>` minus `probe_rowcount`, and that
+# subtraction only means "the cost of touching one more column" if each probe is the first query to
+# touch its column and the rowcount control runs once everything is already resident. Reordering the
+# probes silently changes what that table measures. test_verdicts.py pins it.
+#
 # Every table, column and measure referenced below exists in BOTH templates — benchmark/
 # test_templates.py asserts the two semantic surfaces are identical, and that identity is what makes
 # one suite portable across every engine's model — they are structurally identical by construction.
 QUERIES = [
-    # --- Tier 1: per-column cold probes ---
+    # --- Tier 1: per-column probes (rowcount LAST — see the note above) ---
     ("probe", "probe_mw",       'EVALUATE ROW("x", SUM(fct_summary[mw]))'),
     ("probe", "probe_price",    'EVALUATE ROW("x", SUM(fct_summary[price]))'),
     ("probe", "probe_duid",     'EVALUATE ROW("x", DISTINCTCOUNT(fct_summary[DUID]))'),
@@ -153,7 +169,7 @@ QUERIES = [
     ("raw", "raw_archive_log",
      'EVALUATE SUMMARIZECOLUMNS(stg_csv_archive_log[source_type], '
      '"Files", [Archive Files], "Rows", [Archive Source Rows])'),
-    # --- Tier 4: hot-only selectivity ladder (SUMX lifts work above the XMLA noise floor) ---
+    # --- Tier 4: selectivity ladder (SUMX lifts work above the XMLA noise floor) ---
     ("hot_only", "sel_1yr",
      'EVALUATE ROW("r", CALCULATE(SUMX(fct_summary, fct_summary[mw] * fct_summary[price]), '
      'dim_calendar[year] = 2024))'),
@@ -167,9 +183,6 @@ QUERIES = [
      'EVALUATE ROW("r", CALCULATE(SUMX(fct_summary, fct_summary[mw] * fct_summary[price]), '
      'fct_summary[DUID] = "{duid}", dim_calendar[year] = 2024, dim_calendar[month] = 6))'),
 ]
-
-COLD_TIERS = ("probe", "composite", "raw")   # tiers that get the dehydrate→query cold path
-
 
 def resolve_queries(top_duid):
     """Fill the "{duid}" placeholder in the hot_only ladder with the actual top DUID. If no top
@@ -228,27 +241,26 @@ def _refresh(conn, model, kind):
     AdomdCommand(tmsl, conn).ExecuteNonQuery()
 
 
-def dehydrate_model(conn, model):
-    """Evict all column data (clearValues) then reframe (full = metadata only on Direct Lake),
-    leaving the model cold — the next query pays the full Delta->memory transcode cost.
-
-    A FAILURE here is tolerated, not fatal: it means this run cannot measure cold — most likely a
-    token that cannot refresh. bench_model catches it and degrades the model to hot-only, which is
-    the correct reading, since the hot numbers are still real."""
-    for kind in ("clearValues", "full"):
-        _refresh(conn, model, kind)
-
-
 def warm_up(conn, model, tries=16, delay=30):
-    """A freshly-deployed Direct Lake model can't read its OneLake source until security
+    """A freshly-created Direct Lake model can't read its OneLake source until security
     propagates — the first refresh/query fails with 'source tables ... do not exist or access
     was denied'. Reframe (full) + probe a trivial query, looping until it actually reads data
     (or we give up). Returns True once queryable.
 
+    This is the ONLY refresh the run issues, and the only query before pass 1. It matters more now
+    that the model is deleted and recreated every run: a brand-new item is exactly the propagation
+    case this exists for.
+
+    The probe reads a TINY DIMENSION, not `COUNTROWS(fct_summary)` as it once did. That was
+    byte-identical to the `probe_rowcount` query — the zero-column control that render_summary's
+    marginal-column-cost table subtracts from every other probe — so the readiness check was
+    pre-warming the very control it would later be measured against. dim_calendar is a few thousand
+    rows and proves the same thing: the model can reach its OneLake source.
+
     The refresh is BEST-EFFORT and its failure is explicitly NOT a readiness signal — a model can be
     perfectly queryable while a refresh against it is rejected. Only the probe decides. Retrying the
     pair as one unit spent 16×30s and then skipped the leg entirely."""
-    probe = 'EVALUATE ROW("n", COUNTROWS(fct_summary))'
+    probe = 'EVALUATE ROW("n", COUNTROWS(dim_calendar))'
     for i in range(1, tries + 1):
         try:
             _refresh(conn, model, "full")   # (re)frame Direct Lake against the current Delta
@@ -306,97 +318,80 @@ def top_duid(conn):
     return None if v is None else str(v)
 
 
-def bench_model(workspace, model, token, runs, want_cold, cold_repeats, queries):
-    print(f"\n=== Benchmarking {model} (runs={runs}, cold={want_cold}) ===")
+def _tier_of(pass_no):
+    """The tier a pass belongs to. The pass NUMBER is the tier — that is the whole design."""
+    return "cold" if pass_no == 1 else ("warm" if pass_no == 2 else "hot")
+
+
+def _finalize(by_pass, tier, rows):
+    """One query's samples, keyed by pass number, reduced to the reported metrics.
+
+    cold and warm are single samples and carry no spread: there is exactly one first visit and one
+    second visit per deployed model. Hot is passes 3+, reported as a MEDIAN — a single capacity spike
+    (a 2.5s blip among 110ms runs) blows up a mean and fabricates a winner.
+
+    A query can legitimately be missing pass 1: unless BENCH_TOP_DUID is pinned, the ladder joins the
+    session at pass 2, so it has warm and hot numbers and no cold one. The render layer scopes each
+    metric to the engines and queries that have it, so a missing tier is a gap, not a zero.
+    """
+    res = {"tier": tier, "rows": rows, "ms_by_pass": {str(p): v for p, v in sorted(by_pass.items())}}
+    if 1 in by_pass:
+        res["cold_ms"] = by_pass[1]
+    if 2 in by_pass:
+        res["warm_ms"] = by_pass[2]
+    hot = [v for p, v in sorted(by_pass.items()) if p >= 3]
+    if hot:
+        res["all_hot_ms"] = hot
+        res["hot_median_ms"] = statistics.median(hot)
+        hlo, hhi, hmed = min(hot), max(hot), statistics.median(hot)
+        res["hot_spread_pct"] = 100.0 * (hhi - hlo) / hmed if hmed else 0.0
+    return res
+
+
+def bench_model(workspace, model, token, runs, pinned_duid=None):
+    """Replay `runs` passes of the whole suite against one model and return (timings, top_duid).
+
+    The ORDER here is the measurement. Readiness, then pass 1 with nothing in between — no refresh,
+    no DMV probe, no DUID resolve — because anything that touches a fact column first would spend
+    the cold pass before it starts.
+    """
+    print(f"\n=== Benchmarking {model} ({runs} passes: 1 cold, 2 warm, 3+ hot) ===")
     conn = open_conn(workspace, model, token)
     if not warm_up(conn, model):
         conn.Close()
-        return None, False
-    can_cold = want_cold
-    if want_cold:
-        try:
-            dehydrate_model(conn, model)
-            print("  dehydrate: OK (per-query cold timing enabled)")
-        except Exception as e:
-            can_cold = False
-            print(f"  dehydrate: unavailable ({str(e).splitlines()[0][:120]}) — hot timing only")
-    results = {}
+        return None, None
+
+    td = pinned_duid
+    queries = resolve_queries(td)   # 25 when the DUID is pinned, 21 when it is resolved below
+    samples, rows_of, tier_of = {}, {}, {}
     try:
-        for tier, name, dax in queries:
-            do_cold = can_cold and tier in COLD_TIERS
-            rowcount = None
-            res = {"tier": tier}
-            # COLD: dehydrate → query, COLD_REPEATS times, so cold is a small distribution (median +
-            # spread) rather than an n=1 point. Each cycle pays the full Delta→memory transcode.
-            cold = []
-            if do_cold:
-                for _ in range(cold_repeats):
-                    dehydrate_model(conn, model)
-                    t, rows = run_query(conn, dax)
-                    cold.append(t)
-                    rowcount = rows
-                res["cold_ms_all"] = cold
-                res["cold_median_ms"] = statistics.median(cold)
-                res["cold_min_ms"] = min(cold)
-                lo, hi, med = min(cold), max(cold), statistics.median(cold)
-                res["cold_spread_pct"] = 100.0 * (hi - lo) / med if med else 0.0
-            # HOT: run WITHOUT dehydrating; drop run1/run2 as the warm transition. Report the
-            # MEDIAN of the rest — a single capacity spike (a 2.5s blip among 110ms runs) blows up
-            # the mean and fabricates a verdict, so the mean is kept only for continuity.
-            hot_times = []
-            for _ in range(runs):
+        for p in range(1, runs + 1):
+            tier = _tier_of(p)
+            print(f"\n  --- pass {p}/{runs} ({tier}) — {len(queries)} queries ---", flush=True)
+            for tier_name, name, dax in queries:
                 t, rows = run_query(conn, dax)
-                hot_times.append(t)
-                rowcount = rows
-            hot = hot_times[2:] or hot_times[1:] or hot_times[:1]
-            res["all_hot_ms"] = hot_times
-            res["hot_avg_ms"] = sum(hot) / len(hot)      # continuity only — NOT used for verdicts
-            res["hot_median_ms"] = statistics.median(hot)
-            hlo, hhi, hmed = min(hot), max(hot), statistics.median(hot)
-            res["hot_spread_pct"] = 100.0 * (hhi - hlo) / hmed if hmed else 0.0
-            if tier == "hot_only":
-                res["first_touch_ms"] = hot_times[0]     # first run = the data-skipping measurement
-            res["rows"] = rowcount
-            results[name] = res
-            # Console trace.
-            print(f"  [{tier}] {name}  (rows={rowcount})")
-            if do_cold:
-                cold_str = ", ".join(f"{c:.1f}" for c in cold)
-                print(f"      cold x{cold_repeats}: [{cold_str}]  median={res['cold_median_ms']:.1f}ms"
-                      f"  spread={res['cold_spread_pct']:.1f}%")
-            hot_str = ", ".join(f"{h:.1f}" for h in hot_times)
-            print(f"      hot   x{runs}: [{hot_str}]  median={res['hot_median_ms']:.1f}ms"
-                  f"  spread={res['hot_spread_pct']:.1f}%")
+                samples.setdefault(name, {})[p] = t
+                rows_of[name] = rows
+                tier_of[name] = tier_name
+                print(f"    [{tier_name}] {name}: {t:,.1f}ms (rows={rows})", flush=True)
+            if p == 1 and not td:
+                # Only now — this transcodes DUID and mw, which probe_duid and probe_mw measure.
+                # Free at this point, because pass 1 has already touched both.
+                td = top_duid(conn)
+                queries = resolve_queries(td)
+                print(f"  top DUID resolved after the cold pass: {td} "
+                      f"— the ladder joins from pass 2 ({len(queries)} queries)", flush=True)
     finally:
         conn.Close()
-    return results, can_cold
 
-
+    results = {n: _finalize(by_pass, tier_of[n], rows_of[n]) for n, by_pass in samples.items()}
+    return results, td
 
 
 def _write_timings(model, res):
-    # res is already keyed by query with the final report keys (tier, rows, cold_ms_all,
-    # cold_median_ms, cold_min_ms, cold_spread_pct, all_hot_ms, hot_avg_ms) — merge as-is.
+    # res is already keyed by query with the final report keys (tier, rows, ms_by_pass, cold_ms,
+    # warm_ms, all_hot_ms, hot_median_ms, hot_spread_pct) — merge as-is.
     report.merge({"timings": {model: res}})
-
-
-def _resolve_top_duid(workspace, model, token):
-    """The DUID the hot_only ladder filters on.
-
-    BENCH_TOP_DUID pins it. Unpinned, every job resolves it against its own model — the engines hold
-    the same rows, so they get the same answer, and the value is recorded per model so the render
-    layer can say so instead of assuming it."""
-    pinned = (os.environ.get("BENCH_TOP_DUID") or "").strip()
-    if pinned:
-        return pinned
-    try:
-        c = open_conn(workspace, model, token)
-        td = top_duid(c) if warm_up(c, model) else None
-        c.Close()
-        return td
-    except Exception as e:
-        print(f"  top DUID resolve failed ({str(e).splitlines()[0][:100]}) — dropping DUID ladder.")
-        return None
 
 
 def main():
@@ -415,24 +410,25 @@ def main():
     from duckrun import auth
     token = os.environ.get("PBI_TOKEN") or auth.get_powerbi_token()  # self-acquire the XMLA token
     adomd_dir = os.environ.get("ADOMD_DIR", ".")
-    runs = int(os.environ.get("BENCH_RUNS", "3"))
-    cold_repeats = int(os.environ.get("COLD_REPEATS", "1"))
-    want_cold = (os.environ.get("BENCH_COLD", "true").strip().lower() != "false")
+    runs = int(os.environ.get("BENCH_RUNS", "6"))
+    # Pinning the DUID skips the resolve entirely, so the ladder runs from pass 1 like everything
+    # else. Unpinned, it is resolved after the cold pass and the ladder joins at pass 2 — see
+    # bench_model. Either way the value is recorded per model, so the render layer can warn if two
+    # engines disagreed instead of assuming they did not.
+    pinned_duid = (os.environ.get("BENCH_TOP_DUID") or "").strip() or None
 
     _load_adomd(adomd_dir)
     print(f"Workspace : {workspace}")
     print(f"Engine    : {engine} -> {model} (written by {E.WRITER.get(engine, '?')})")
-    print(f"Runs (hot): {runs}   Cold repeats: {cold_repeats}   Cold: {want_cold}")
+    print(f"Passes    : {runs} (1 cold, 2 warm, 3+ hot)   "
+          f"Top DUID: {pinned_duid or '(resolved after the cold pass)'}")
 
-    td = _resolve_top_duid(workspace, model, token)
-    print(f"Top DUID  : {td}")
-    res, can_cold = bench_model(workspace, model, token, runs, want_cold, cold_repeats,
-                               resolve_queries(td))
+    res, td = bench_model(workspace, model, token, runs, pinned_duid)
     if res is None:
         sys.exit(f"[{engine}] {model!r} never became queryable — nothing measured.")
     _write_timings(model, res)
-    report.merge({"top_duid": {model: td}, "cold_measured": {model: bool(can_cold)}})
-    print(f"\n[{engine}] measured {len(res)} queries (cold={'yes' if can_cold else 'no'}) "
+    report.merge({"top_duid": {model: td}})
+    print(f"\n[{engine}] measured {len(res)} queries over {runs} passes "
           f"-> {os.environ.get('RUN_REPORT', 'run_report.json')}")
 
 

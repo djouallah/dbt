@@ -9,8 +9,13 @@ name: Direct Lake benchmark
 # parity, in genuinely different physical shapes. So there is no build phase and no stats phase —
 # this DEPLOYS one semantic model per engine, RUNS the DAX, and REPORTS the timings. Nothing else.
 #
+# What it measures is ONE USER SESSION per engine. The deploy DELETES and recreates the model, so it
+# starts with an empty VertiPaq store; the suite is then walked `runs` times and the pass number is
+# the tier — 1 cold, 2 warm, 3+ hot. Nothing is cleared between passes: the per-query
+# `clearValues` dehydrate is gone, because no user is ever in that state.
+#
 # ONE JOB PER ENGINE, and that is the point of the shape. Every Fabric/XMLA token is valid for about
-# an hour; a single job walking four models over 21 queries with two 600s idle gaps runs well past
+# an hour; a single job walking four models over 25 queries with two 600s idle gaps runs well past
 # that, and the expiry lands mid-measurement on whichever engine happens to be last. A separate job
 # per engine mints its own token, minutes before it uses it, and retires it with the job — so no run
 # can die halfway through for a reason that has nothing to do with the thing being measured. The
@@ -40,23 +45,15 @@ on:
         type: string
         default: "duckrun,iceberg,spark,dwh"
       runs:
-        description: "HOT runs per query per model (run 1/2 dropped as warm; rest median'd)"
+        description: "PASSES over the whole query suite. The pass number is the tier: 1 cold (a freshly created model), 2 warm, 3+ hot (median). Below 3 there is no hot tier."
         type: string
-        default: "3"
-      cold:
-        description: "measure cold by dehydrating (clearValues+full) before each query"
-        type: boolean
-        default: true
-      cold_repeats:
-        description: "cold dehydrate->query cycles per cold-tier query (median + spread reported)"
-        type: string
-        default: "1"
+        default: "6"
       gap_seconds:
         description: "idle seconds before each engine after the first (>5min CU smoothing => clean gaps in the capacity chart)"
         type: string
         default: "600"
       top_duid:
-        description: "optional: pin the DUID the hot-only ladder filters on (else each engine resolves it; same data, same answer)"
+        description: "optional: pin the DUID the selectivity ladder filters on. Pinned, the ladder runs from pass 1; unpinned it is resolved AFTER the cold pass (resolving it transcodes DUID and mw) and joins at pass 2."
         type: string
         default: ""
 
@@ -76,8 +73,6 @@ env:
   # Every job reads these; the per-engine jobs additionally narrow BENCH_ENGINES to themselves.
   BENCH_ENGINES: ${{ inputs.engines }}
   BENCH_RUNS: ${{ inputs.runs }}
-  BENCH_COLD: ${{ inputs.cold }}
-  COLD_REPEATS: ${{ inputs.cold_repeats }}
   BENCH_GAP_SECONDS: ${{ inputs.gap_seconds }}
   BENCH_TOP_DUID: ${{ inputs.top_duid }}
   PYTHONIOENCODING: utf-8
@@ -157,7 +152,7 @@ jobs:
       # measurement. The report names whichever engines are missing.
       fail-fast: false
       matrix: ${{ fromJSON(needs.resolve.outputs.matrix) }}
-    # One engine over 21 queries, cold + hot, plus one idle gap and the deploy. `raw_scada_mw`
+    # One engine over 25 queries x `runs` passes, plus one idle gap and the deploy. `raw_scada_mw`
     # transcodes a column of the largest table in the project, so this is not a small budget.
     # It is billed Fabric capacity: cancel a superseded run immediately (CLAUDE.md, CI etiquette),
     # and use the scouting inputs in benchmark/README.md before committing to a full pass.

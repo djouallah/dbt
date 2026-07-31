@@ -34,8 +34,13 @@ except Exception:
 
 _PROBE_COLS = ["mw", "price", "duid", "date", "time"]     # probe_<col> minus probe_rowcount
 
-# The two measured metrics, in report order: (label, per-query median key, per-query spread key).
-METRICS = (("COLD", "cold_median_ms", "cold_spread_pct"),
+# The three measured metrics, in report order: (label, per-query value key, per-query spread key).
+#
+# One per position in the session — pass 1 is COLD, pass 2 WARM, passes 3+ HOT. COLD and WARM have
+# no spread key because they are single samples by construction: a deployed model has exactly one
+# first visit and one second visit. Only HOT is a distribution, hence the median.
+METRICS = (("COLD", "cold_ms", None),
+           ("WARM", "warm_ms", None),
            ("HOT", "hot_median_ms", "hot_spread_pct"))
 
 
@@ -97,10 +102,10 @@ def _totals(timings, models, key):
     Restricted to the common query set, because summing over each engine's own set would compare
     different amounts of work and make the column meaningless.
 
-    Participation is per metric, because an engine can be missing one: `BENCH_COLD=false` skips cold
-    for everyone, and a dehydrate that fails (a token that cannot refresh) drops that engine to hot
-    only. Letting a hot-only engine into the COLD intersection would empty the column for the engines
-    that do have cold numbers."""
+    Participation is per metric, because a model can be missing one: `runs<3` produces no hot tier at
+    all, `runs<2` no warm one, and a job that died before reporting has none of them. Letting a
+    hot-only model into the COLD intersection would empty the column for the models that do have cold
+    numbers."""
     have = [m for m in models
             if any((d or {}).get(key) is not None for d in timings.get(m, {}).values())]
     if not have:
@@ -157,15 +162,20 @@ def compute_analysis(rep):
     models = _order(list(timings))
     analysis = {"cold_column_cost": {}, "ranking": {}}
 
-    # cold_column_cost: probe_<col>.cold_median - probe_rowcount.cold_median (marginal transcode).
+    # cold_column_cost: probe_<col>.cold - probe_rowcount.cold (marginal transcode cost).
     # Timing-only — a difference between two measured queries, not a claim about the files.
+    #
+    # This works BECAUSE of the session shape, and it depends on the order in xmla_compare.QUERIES:
+    # in the cold pass each probe is the first query to touch its column, and probe_rowcount runs
+    # last among the probes, so by then everything is resident and it is ~pure overhead. Reordering
+    # the probes changes what this measures; test_verdicts.py pins probe_rowcount last.
     for m in models:
-        base = timings[m].get("probe_rowcount", {}).get("cold_median_ms")
+        base = timings[m].get("probe_rowcount", {}).get("cold_ms")
         if base is None:
             continue
         row = {}
         for col in _PROBE_COLS:
-            v = timings[m].get(f"probe_{col}", {}).get("cold_median_ms")
+            v = timings[m].get(f"probe_{col}", {}).get("cold_ms")
             if v is not None:
                 row[col] = round(v - base, 1)
         analysis["cold_column_cost"][m] = {"rowcount_overhead_ms": round(base, 1), "columns": row}
@@ -203,30 +213,33 @@ def _summary_table(rep, analysis):
     if not models:
         return
 
-    cold_tot = _totals(timings, models, "cold_median_ms")
-    hot_tot = _totals(timings, models, "hot_median_ms")
+    tots = {label: _totals(timings, models, key) for label, key, _s in METRICS}
 
     def _winner(tot):
-        # Needs something to beat: with one participant (e.g. COLD when every other engine dropped
-        # to hot-only) a ✔ would decorate an uncontested number.
+        # Needs something to beat: with one participant (e.g. COLD when only one engine reported it)
+        # a ✔ would decorate an uncontested number.
         return min(tot, key=tot.get) if len(tot) > 1 else None
 
-    cold_w, hot_w = _winner(cold_tot), _winner(hot_tot)
+    winners = {label: _winner(tot) for label, tot in tots.items()}
 
     body = []
     for m in models:
         name = _short(m)
         meta = (rep.get("engines", {}) or {}).get(name) or {}
         writer = meta.get("writer") or E.WRITER.get(name, "—")
-        c, h = cold_tot.get(name), hot_tot.get(name)
-        cc = f"{_int(c)} ✔" if name == cold_w else _int(c)
-        hc = f"{_int(h)} ✔" if name == hot_w else _int(h)
-        body.append([name, f"`{writer}`", meta.get("item") or "—", cc, hc])
+        cells = []
+        for label, _k, _s in METRICS:
+            v = tots[label].get(name)
+            cells.append(f"{_int(v)} ✔" if name == winners[label] else _int(v))
+        body.append([name, f"`{writer}`", meta.get("item") or "—"] + cells)
     out = ["## Summary", "",
-           "No baseline: every engine is measured the same way and ranked. Totals are over the "
+           "One session per engine: pass 1 **cold** (a freshly created model, so it pays the whole "
+           "transcode), pass 2 **warm**, passes 3+ **hot**. Nothing is cleared between them. "
+           "No baseline — every engine is measured the same way and ranked. Totals are over the "
            "queries every participating engine answered; ✔ is the fastest total.", "",
-           "| engine | writer | item | cold total (ms) | hot total (ms) |",
-           "|:--|:--|:--|--:|--:|"]
+           "| engine | writer | item | " + " | ".join(f"{l.lower()} total (ms)" for l, _k, _s in METRICS)
+           + " |",
+           "|:--|:--|:--|" + "--:|" * len(METRICS)]
     for r in body:
         out.append("| " + " | ".join(r) + " |")
     for metric, _k, _s in METRICS:
@@ -250,9 +263,10 @@ def _sidebyside(title, timings, models, key):
     exact times are in the row for anyone who wants to judge the margin.
 
     Participation is per metric, for the same reason `_totals` scopes it: a row is dropped when any
-    COLUMN lacks the metric, so admitting a hot-only engine (one whose dehydrate failed, or any
-    engine at all when BENCH_COLD=false) to the COLD table would drop every row and render
-    nothing."""
+    COLUMN lacks the metric, so admitting a model with no cold numbers to the COLD table would drop
+    every row and render nothing. Note this also drops individual ROWS legitimately — the ladder's
+    DUID queries join the session at pass 2 when the DUID is unpinned, so they appear in WARM and HOT
+    and not in COLD."""
     models = [m for m in _order(models)
               if any((d or {}).get(key) is not None for d in timings.get(m, {}).values())]
     if len(models) < 2:
@@ -279,6 +293,8 @@ def _cold_cost_table(cc):
         return
     models = _order(list(cc))
     out = ["### Marginal cold column cost (probe_col − probe_rowcount, ms)", "",
+           "<sub>From the cold pass: each probe is the first query to touch its column, and "
+           "`probe_rowcount` runs last among the probes so it is ~pure overhead.</sub>", "",
            "| column | " + " | ".join(_short(m) for m in models) + " |",
            "|:--|" + "--:|" * len(models)]
     for col in _PROBE_COLS:
@@ -325,8 +341,10 @@ def main():
 
     timings = rep.get("timings", {})
     models = _order(list(timings))
-    _sidebyside("COLD (median of dehydrate cycles)", timings, models, "cold_median_ms")
-    _sidebyside("HOT (median of steady-state runs)", timings, models, "hot_median_ms")
+    _sidebyside("COLD (pass 1 — first visit to a freshly created model)",
+                timings, models, "cold_ms")
+    _sidebyside("WARM (pass 2 — second visit)", timings, models, "warm_ms")
+    _sidebyside("HOT (median of passes 3+)", timings, models, "hot_median_ms")
     _cold_cost_table(analysis.get("cold_column_cost", {}))
     _ranking_table(analysis)
 

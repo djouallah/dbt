@@ -36,10 +36,6 @@ def merge(obj, path=None):
         json.dump(cur, f, indent=2, default=str)
 
 
-def _bool(name):
-    return os.environ.get(name, "").strip().lower() in ("true", "1", "yes")
-
-
 def _int(name):
     try:
         return int(os.environ.get(name, "") or 0)
@@ -59,9 +55,8 @@ def _init():
         "date": datetime.now(timezone.utc).isoformat(),
         "inputs": {
             "engines": os.environ.get("BENCH_ENGINES"),
+            # PASSES over the suite, not hot repetitions: pass 1 cold, pass 2 warm, the rest hot.
             "runs": _int("BENCH_RUNS"),
-            "cold": _bool("BENCH_COLD"),
-            "cold_repeats": _int("COLD_REPEATS"),
             "gap_seconds": _int("BENCH_GAP_SECONDS"),
         },
         "duckrun_version": dv,

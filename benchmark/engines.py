@@ -16,9 +16,10 @@ pushdown to a different engine. Nothing here carries a DirectQuery alternative a
 timing is not a slow layout, and a report that mixed the two kinds of number invited exactly that
 misreading.
 
-The hot-only path downstream survives and is no longer about DirectQuery: `BENCH_COLD=false` skips
-cold deliberately, and a dehydrate can fail when the token cannot refresh. Either way an engine
-reports hot numbers only, and `render_report._totals` scopes each metric to the engines that have it.
+The hot-only path downstream survives and is no longer about DirectQuery: a model can be missing its
+cold and warm numbers because its job died before reporting them, or because the dispatch asked for
+fewer than three passes. `render_report._totals` scopes each metric to the models that have it, so a
+missing tier is a gap rather than a zero.
 """
 import json
 import os

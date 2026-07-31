@@ -27,6 +27,12 @@ Every model is Direct Lake, so every deploy REFRESHES (a reframe onto the latest
 only once the model is live. Nothing is written to any lakehouse — the models read tables the dbt run
 already produced.
 
+**Each model is DELETED before it is deployed**, so the deploy creates a new item rather than
+updating one in place. That is the benchmark's cold guarantee: a newly created dataset has an empty
+VertiPaq store, so pass 1 of the session pays the full transcode. `overwrite=True` alone keeps the
+item id and can inherit the previous dispatch's resident columns. See `_delete_existing` for the
+alternatives that were checked and rejected, and for the costs.
+
 Env in: WS_ID, BENCH_ITEMS (from resolve_env.py), BENCH_ENGINES, BENCH_FOLDER (optional).
 """
 import os
@@ -69,6 +75,72 @@ def deploy_kwargs(meta):
     kw = {"warehouse": meta["item"]} if meta["kind"] == "warehouses" else {"lakehouse": meta["item"]}
     kw["mode"] = E.DEPLOY_MODE
     return kw
+
+
+def _delete_existing(ws, name):
+    """Delete the semantic model called `name` so the deploy below CREATES a new item.
+
+    **This is the benchmark's cold guarantee, and the only reset in the run.** A newly created
+    dataset has an empty VertiPaq store — "After the initial semantic model load, no column data is
+    resident in memory yet. Direct Lake is cold." — so pass 1 of the measurement pays the full
+    Delta->memory transcode. `overwrite=True` on its own does NOT give that: it updates the
+    definition in place and keeps the item id, so residency can survive from the previous dispatch.
+
+    There is no non-destructive way to force cold, and each alternative was checked and rejected:
+    TMSL `clearCache` clears query caches but leaves resident columns alone (it is a hot->warm
+    lever); reframing is *incremental* and retains dictionaries, so it lands at semiwarm at best;
+    memory pressure and node reassignment do produce cold state but neither is commandable. See
+    benchmark/README.md.
+
+    The accepted cost is one extra item GUID per dispatch in the Capacity Metrics app's item list.
+    It does not break `cu/` — that tool resolves names live from the REST API precisely because a
+    recreate mints a new GUID — and the display name never changes, so CU stays attributed.
+
+    The other trade, stated because it is a real regression: if this delete succeeds and the deploy
+    then fails, the engine is left with NO model, where an overwrite failure used to leave the
+    previous one standing. Acceptable here because the model is rebuilt from the template every run
+    and nothing between runs depends on it.
+
+    Best-effort on the lookup, deliberate on the delete: if the item cannot be listed we let the
+    deploy overwrite as before (and say so), because a benchmark that refuses to run is worse than
+    one that warns its first pass may not be cold.
+
+    Returns the deleted item id, or None if there was nothing to delete.
+    """
+    h = {"Authorization": f"Bearer {duckrun.auth.get_fabric_token()}"}
+    try:
+        # Paginated: a workspace with enough items returns a continuationToken, and stopping at the
+        # first page would report "no existing model" for one that is simply on page two — which
+        # reads as the cold guarantee holding while it silently does not.
+        hit, token, page = None, None, 0
+        while hit is None and page < 20:
+            url = f"{FAB}/workspaces/{ws.id}/items?type=SemanticModel"
+            if token:
+                url += f"&continuationToken={token}"
+            r = requests.get(url, headers=h)
+            r.raise_for_status()
+            body = r.json()
+            hit = next((i for i in body.get("value", []) if i.get("displayName") == name), None)
+            token = body.get("continuationToken")
+            page += 1
+            if not token:
+                break
+    except Exception as ex:
+        print(f"  note: could not list semantic models ({type(ex).__name__}: "
+              f"{str(ex).splitlines()[0][:120]}) — deploying over whatever is there, so pass 1 "
+              f"may not be cold", flush=True)
+        return None
+    if not hit:
+        print(f"  no existing {name} — the deploy creates it (cold by construction)", flush=True)
+        return None
+    old = hit["id"]
+    r = requests.delete(f"{FAB}/workspaces/{ws.id}/items/{old}", headers=h)
+    if r.status_code in (200, 202, 204):
+        print(f"  deleted the previous {name} ({old}) — the deploy creates a new item", flush=True)
+        return old
+    print(f"  note: DELETE {name} returned HTTP {r.status_code} — deploying over it instead, so "
+          f"pass 1 may not be cold", flush=True)
+    return None
 
 
 def _reparent(ws, item_id, name):
@@ -117,20 +189,40 @@ def main():
         kwargs = deploy_kwargs(meta)
         print(f"deploying {name} -> {item} ({kind[:-1]}, {E.DEPLOY_MODE}) into folder {FOLDER!r} ...",
               flush=True)
+        old_id = _delete_existing(ws, name)
         t0 = time.perf_counter()
-        try:
-            item_id = ws.deploy(TEMPLATE, name=name, overwrite=True, folder=FOLDER, **kwargs)
-        except Exception as ex:
-            # One engine failing to deploy must not cost the others their run: record it and carry
-            # on. xmla_compare.py benchmarks whatever actually deployed.
-            failed[e] = f"{type(ex).__name__}: {str(ex).splitlines()[0][:200]}"
-            print(f"  FAILED {name}: {failed[e]}", flush=True)
+        item_id = None
+        # Retry the CREATE: the workspace can still hold the deleted name for a moment, and the
+        # create then 409s. Only a conflict is retried — anything else is a real failure and must
+        # not be masked by three more attempts.
+        for attempt in range(1, 4):
+            try:
+                item_id = ws.deploy(TEMPLATE, name=name, overwrite=True, folder=FOLDER, **kwargs)
+                break
+            except Exception as ex:
+                msg = str(ex)
+                conflict = "409" in msg or "conflict" in msg.lower() or "already exists" in msg.lower()
+                if attempt < 3 and conflict:
+                    wait = 10 * attempt
+                    print(f"  create conflicted (the delete is still propagating); "
+                          f"retrying in {wait}s ({attempt}/3)", flush=True)
+                    time.sleep(wait)
+                    continue
+                # One engine failing to deploy must not cost the others their run: record it and
+                # carry on. xmla_compare.py benchmarks whatever actually deployed.
+                failed[e] = f"{type(ex).__name__}: {msg.splitlines()[0][:200]}"
+                print(f"  FAILED {name}: {failed[e]}", flush=True)
+                break
+        if item_id is None:
             continue
         secs = round(time.perf_counter() - t0, 1)
-        deployed[e] = {"model": name, "item_id": item_id, "seconds": secs, "folder": FOLDER}
+        deployed[e] = {"model": name, "item_id": item_id, "previous_item_id": old_id,
+                       "seconds": secs, "folder": FOLDER}
         # Direct Lake everywhere, so deploy always reframes onto the latest Delta and returns only
-        # once the model is live.
-        print(f"  ok {name} ({item_id}) in {secs}s — refreshed", flush=True)
+        # once the model is live. The item id is printed against the one it replaced because that
+        # difference IS the evidence the model is new, and therefore that pass 1 is cold.
+        print(f"  ok {name} ({item_id}) in {secs}s — refreshed"
+              + (f"; replaced {old_id}" if old_id else "; created fresh"), flush=True)
         _reparent(ws, item_id, name)
 
     report.merge({"deploy": {"deployed": deployed, "failed": failed}})

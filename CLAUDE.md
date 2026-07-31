@@ -625,16 +625,43 @@ takes to **query** them. Ported from `djouallah/duckrun`'s `parquet_layout.yml`.
 - **`workflow_dispatch` only, and nothing depends on it.** Never triggered by a push, never a gate.
   Do not add `schedule`, `push`, `workflow_run`, `repository_dispatch` or a `needs:` from another
   workflow — not even a nightly, not even behind an `if:`. This is a standing instruction, not a
-  default to be weighed against convenience. The benchmark's dehydrate→query cycles are
+  default to be weighed against convenience. The benchmark's query passes are
   **interactive CU** on shared Fabric capacity, which is the class of usage a capacity admin sees
   and asks about; a run nobody chose to start is the one that causes trouble. A human dispatches
   it, or it does not run.
-- **The dispatch defaults are tuned for capacity cost, not statistical strength**: `cold_repeats=1`,
-  `runs=3`, `gap_seconds=600`. That is one measured sample per query per tier, so both spreads are
-  0 and `render_summary`'s >25%-cold-spread noise filter flags nothing —
-  a default run is a smoke test with timings, not a defensible ranking. `cold_repeats=3 runs=5` (the
-  previous defaults) is what a quotable result costs; raise them per dispatch, don't raise the
-  defaults back.
+- **It measures a USER SESSION, and nothing is ever cleared. The pass number is the tier.**
+  `deploy_models.py` **deletes and recreates** each semantic model, so it starts with an empty
+  VertiPaq store; `xmla_compare.py` then walks the whole 25-query suite `runs` times — pass 1 **cold**,
+  pass 2 **warm**, passes 3+ **hot** (median + spread). Defaults `runs=6`, `gap_seconds=600`. Things
+  worth not rediscovering:
+  - **The per-query dehydrate is gone and must not come back.** It ran `clearValues` + `full` before
+    *every* cold-tier query — 21 forced transcodes per engine per run. No user is ever in that state,
+    and `clearValues` clears the **data cache**, not the data (TMSL: "Clear values in this object and
+    all its dependents"), so it was never a statement about transcoding cost anyway.
+  - **A new dataset is the only way to guarantee a cold VertiPaq store.** All the alternatives were
+    checked: TMSL **`clearCache` clears query caches, not resident columns** (DAX Studio's Clear Cache
+    button issues it and Direct Lake queries stay fast after — a hot→warm lever); **reframing is
+    incremental** and retains dictionaries, so a redeploy-in-place is semiwarm at best; memory
+    pressure and node reassignment do produce cold but are not commandable. `overwrite=True` keeps
+    the item id, which is why the delete exists.
+  - **Accepted cost:** one extra item GUID per dispatch in the Capacity Metrics item list. `cu/`
+    survives it because it resolves names live from the REST API, and the display name never changes.
+  - **`clearCache` between passes is deliberately NOT used**, even though it would make "warm" match
+    Microsoft's strict definition (resident data, empty VertiScan caches). This reproduces user
+    behaviour, not engine states; a user's second visit is simply their second visit.
+  - **Cold and warm are single samples** — one first visit per deployed model — so they carry no
+    spread and the old >25%-cold-spread noise filter is gone. Raising `runs` only strengthens hot; a
+    second dispatch is what tests whether a cold number repeats. `runs<3` yields no hot tier, which
+    the render layer shows as a gap.
+  - **Nothing may touch the model between readiness and pass 1.** The top-DUID resolve therefore runs
+    *after* pass 1 (it transcodes `DUID` and `mw`, which `probe_duid`/`probe_mw` measure) and the
+    ladder joins at pass 2 unless `top_duid` is pinned; and the readiness probe reads `dim_calendar`,
+    because `COUNTROWS(fct_summary)` was byte-identical to `probe_rowcount`. A stub-connection test
+    in `test_verdicts.py` pins the exact sequence — it is the one guard against a silently warm
+    "cold" pass.
+  - **`probe_rowcount` must stay LAST among the probes.** The marginal-column-cost table subtracts it,
+    and that only means "one more column" because every other probe is the first query to touch its
+    column while rowcount runs once they are all resident. Pinned by a test.
 - **Deploy models, run queries, report timings — that is the whole scope.** Upstream had to *build*
   the layouts it compared; here the four engines' own `mart.fct_summary` already are four layouts, at
   row-count parity. So there is no build phase, and deliberately **no stats phase either**: physical
@@ -643,19 +670,20 @@ takes to **query** them. Ported from `djouallah/duckrun`'s `parquet_layout.yml`.
   way — the moment this writes a table into a lakehouse, `stats.py`'s unscoped `get_stats()` starts
   counting it and the parity dashboard reads it as drift.
 - **The paid work is a matrix, one job per engine, `max-parallel: 1` — and the reason is the token,
-  not the parallelism.** A Fabric/XMLA token lives about an hour; one job over four models, 21
-  queries and two 600s gaps runs past that and the expiry lands mid-measurement on the last engine.
+  not the parallelism.** A Fabric/XMLA token lives about an hour; one job over four models, 25
+  queries x `runs` passes and two 600s gaps runs past that and the expiry lands mid-measurement on
+  the last engine.
   Each job mints its own and retires it with the job. Consequences to hold onto: nothing computes a
   ratio during the measurement any more — each job uploads a report **fragment** and the free
   `report` job merges (`merge_reports.py`, **basename order**, meta fragment named to sort first so a
   per-engine fragment cannot overwrite the shared `run` block) and renders; and each job resolves the
-  hot-only ladder's DUID itself, which is recorded per model and warned about on disagreement rather
-  than assumed. Do not collapse it back into one job to "save runner minutes" — the runner is free and
+  selectivity ladder's DUID itself after its cold pass, which is recorded per model and warned about
+  on disagreement rather than assumed. Do not collapse it back into one job to "save runner minutes" — the runner is free and
   the capacity is not. **`xmla_compare.py` now refuses more than one engine outright.** It used to
   fall back to an in-process walk of every model, for running this from a laptop; that path is deleted
   — the laptop is not a supported way to spend this capacity, and a second orchestration shape kept
   alive to serve it meant two implementations answering the same question. `dbt`-style scouting is
-  still a dispatch, just with `engines=duckrun,spark runs=1 cold=false`.
+  still a dispatch, just with `engines=duckrun,spark runs=3 gap_seconds=0`.
 - **It shares `ci.yml`'s concurrency group (`onelake-<ref>`) deliberately.** Not for correctness, but
   because a concurrent dbt build contends for the same capacity, and capacity contention is the one
   thing a wall-clock benchmark cannot absorb. So a benchmark dispatch queues behind a `dbt` dispatch
@@ -674,8 +702,8 @@ takes to **query** them. Ported from `djouallah/duckrun`'s `parquet_layout.yml`.
   which is how `stats.py` has always read them — and the labelling that was supposed to make it safe
   did not work. Measured, from the last DirectQuery run: cold ÷ hot was 15.9× / 47.1× / 17.4× on the
   three Direct Lake engines and **0.96× on dwh**, because a DirectQuery model has nothing to evict, so
-  its dehydrate is a **no-op that SUCCEEDS** rather than the failure the hot-only degradation watches
-  for. Fifteen bogus "cold" samples were recorded, dwh entered the COLD totals, and the summary printed
+  the dehydrate of the day was a **no-op that SUCCEEDED** rather than the failure the hot-only
+  degradation watched for. Fifteen bogus "cold" samples were recorded, dwh entered the COLD totals, and the summary printed
   it the **cold winner** — 27,622 ms against duckrun's 63,437 — for never doing the work being measured.
   Two kinds of number in one table will find a way into one comparison; the fix is to not produce both.
   So: don't reintroduce a DirectQuery leg, and don't re-add a per-engine mode to make one possible. If
@@ -727,8 +755,10 @@ takes to **query** them. Ported from `djouallah/duckrun`'s `parquet_layout.yml`.
   *deploy* time, after ADOMD.NET is installed and the workspace resolved. The render layer is pure
   JSON → markdown, so a past run's `run-report` artifact re-renders offline with
   `RUN_REPORT=<file> python benchmark/render_report.py` — no credentials.
-- Scout with `engines=duckrun,spark runs=1 cold=false cold_repeats=1 gap_seconds=0` before spending a
-  full run: it exercises deploy → XMLA → render end to end in minutes rather than an hour of capacity.
+- Scout with `engines=duckrun,spark runs=3 gap_seconds=0` before spending a full run: it exercises
+  deploy → XMLA → render end to end in minutes rather than an hour of capacity. Read two things in
+  its log — the deploy printed a **different item id** than last time (`replaced <guid>`, so pass 1
+  really was cold) and pass 1 > pass 2 > pass 3.
 
 ## `cu/` is a third workflow, and it shares nothing with the other two
 
@@ -767,7 +797,7 @@ detail.
   precisely so the columns are not read as hourly. Runs being columns is also why `CU_RUN_COLS`
   (default 8, env-only, no dispatch input) folds the oldest into one `earlier` column — named in the
   header and logged, never a silent cap. Deliberately **no Δ / change column**: a run-over-run
-  percentage only means anything if both dispatches used the same `runs`/`cold_repeats`, and `cu/`
+  percentage only means anything if both dispatches used the same `runs`, and `cu/`
   correlates with no GitHub run so it cannot know that.
 - **Deduplication by operation id is load-bearing.** `'Timepoint Interactive Detail'` is gated by a
   single 30-second `TimePoint` MPARAMETER, so the window is walked one bucket at a time — but an
