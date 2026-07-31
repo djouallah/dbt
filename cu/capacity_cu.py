@@ -212,17 +212,19 @@ def die(msg, code=1):
 def refresh_metrics_model():
     """Refresh the Capacity Metrics semantic model and wait for it, BEFORE any DAX runs.
 
-    Why: the app's `'Items'` table is a lagging snapshot. `benchmark/deploy_models.py` deletes and
-    recreates each semantic model, so a dispatch mints four item GUIDs the metrics model has never
-    seen — and the whole report used to come back empty because those GUIDs resolved to no name and
-    failed the name filter. Resolving names live from the REST API covers the *names*; it does not
-    put the new items into the metrics model's own tables, so the CU attached to them can still be
-    missing until the app refreshes on its own schedule. Refreshing first is the direct fix.
+    Why: `benchmark/deploy_models.py` deletes and recreates each semantic model, so a dispatch
+    mints four item GUIDs the metrics model has never seen — and **without this refresh their CU
+    does not show up at all**. Do not talk yourself out of it by noting that
+    `'Timepoint Interactive Detail'` is DirectQuery and therefore reads live: that is true and it
+    is not sufficient, because the report only surfaces an item the model has catalogued. Resolving
+    names live from the REST API fixes the LABEL, not this.
 
-    NON-FATAL by construction. The app's dataset is not ours: the service principal may have no
-    refresh rights on that workspace, an app-installed model can refuse the call outright, and a
-    scheduled refresh may already be running. None of that is a reason to skip the CU report — it
-    just means reading whatever the model currently holds, which is what this tool did before.
+    NON-FATAL by construction, but not because rights are in doubt — the service principal IS a
+    contributor on the metrics workspace, so the call is expected to succeed. It stays non-fatal
+    because a scheduled refresh may already be running (that one is waited on instead) and because
+    a CU report over an already-settled window is still worth printing if the refresh misbehaves.
+    A `refresh NOT started (403 ...)` line means the SP's access has changed and is worth chasing,
+    not shrugging at.
     """
     base = f"{PBI}/groups/{WS}/datasets/{MODEL}/refreshes"
     headers = {"Authorization": f"Bearer {TOKEN}", "Content-Type": "application/json"}

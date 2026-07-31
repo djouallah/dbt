@@ -873,12 +873,15 @@ detail.
   `OPTIONAL` ones degrade to "not filtering on it". This caught a real miss on the first dispatch:
   the candidates said `Item Name`, the app says `Item`.
 - **The metrics model is refreshed and waited on BEFORE any DAX runs** (`CU_REFRESH`, on by
-  default; `CU_REFRESH_TIMEOUT` 900s). Same root cause as the bullet below: a dispatch creates four
-  semantic models the app has never seen, and an unrefreshed metrics model holds no rows for an
-  item it does not know about, so live name resolution alone can leave the CU itself missing.
-  Non-fatal on purpose — no refresh rights, an app-installed model refusing the call, or a
-  scheduled refresh already running all log a line and read the model as it stands. `cu.yml`'s
-  job timeout is 45 minutes to cover the wait.
+  default; `CU_REFRESH_TIMEOUT` 900s). A dispatch creates four semantic models the app has never
+  seen, and **without the refresh their CU does not show up at all** — confirmed by the person who
+  runs this capacity. Do not argue it away from the fact that `'Timepoint Interactive Detail'` is
+  DirectQuery and reads live: that is true, and it is not sufficient, because the report only
+  surfaces an item the model has catalogued. Live name resolution (the bullet below) fixes the
+  LABEL, not this. **The service principal is a contributor on the metrics workspace**, so the
+  refresh is expected to succeed; it is non-fatal only so that an already-running scheduled refresh
+  or a misbehaving one still yields a report. A `refresh NOT started (403 …)` line means the SP's
+  access changed — chase it. `cu.yml`'s job timeout is 45 minutes to cover the wait.
 - **A deploy mints a NEW item GUID, and `'Items'` is a lagging snapshot — this made the whole report
   read empty.** The metrics tables hold item GUIDs; a semantic model that was just created (or deleted
   and recreated — `overwrite=True` keeps its id, a recreate does not) has a GUID `'Items'` has not seen
