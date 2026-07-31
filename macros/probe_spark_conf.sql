@@ -1,18 +1,21 @@
 {#-- TEMPORARY DIAGNOSTIC — one question left, then delete this file and its two call sites
      (dbt_project.yml on-run-start, models/spark/dimensions/dim_duid.sql pre_hook).
 
-     WHAT IT ALREADY ESTABLISHED (run 30599066885, 2026-07-31). `spark_config.conf` in
-     profiles.yml has no effect. Read from inside the REPLs dbt was actually using:
+     WHAT IT ESTABLISHED (run 30599860363, 2026-07-31). `spark_config.conf` IS delivered;
+     the V-Order key is overwritten by the resource profile. Master and worker identical:
 
-       [master] spark.sql.parquet.vorder.default -> false      (profile asks for "true")
-       [worker] spark.sql.parquet.vorder.default -> false
-       [master] spark.fabric.resourceProfile     -> writeHeavy
-       [worker] spark.fabric.resourceProfile     -> writeHeavy
+       spark.sql.parquet.vorder.default -> false        (profile asks for "true")
+       spark.fabric.resourceProfile     -> writeHeavy
+       spark.dbt.probe.canary           -> alive        (made-up key, arrived intact)
 
-     The adapter is NOT what drops it: concurrent_livy.py:195-228 copies `conf` verbatim into
-     the POST .../highConcurrencySessions body, and `conf` is a documented field of
-     HighConcurrencySessionRequest. Nor is it REPL packing — the master connection is the
-     acquire that CREATED the session, and it reads false too.
+     The canary is the finding: an arbitrary key survives to both REPLs, so delivery works
+     end to end. `writeHeavy` DEFINES vorder.default=false and is applied AFTER the session
+     conf, so it clobbers that key and leaves keys it does not define alone. Precedence.
+
+     Two hypotheses this killed, so they do not get retried. The adapter is not dropping it
+     (concurrent_livy.py:195-228 copies `conf` verbatim into the POST body, and `conf` is a
+     documented field of HighConcurrencySessionRequest). REPL packing is not dropping it
+     either — the canary reads `alive` on the worker, which is a packed acquire.
 
      Do not re-check this in the Spark UI Environment tab. That tab renders the SparkContext
      conf captured at application launch and never shows a `spark.sql.*` value applied later
@@ -20,19 +23,19 @@
      `SET <key>` read below is the only authoritative instrument. `SET <key>` with no `=` is a
      read, never an assignment, so it cannot fail the way setting a static conf can.
 
-     THE ONE QUESTION LEFT. Two mechanisms both produce `false` and are not yet separated:
+     WHY IT IS STILL HERE. The headline question is answered; keeping it costs three `SET`
+     reads per REPL and buys the next experiment for free. The open one is whether the
+     profile itself can be set from the conf block — add
+     `spark.fabric.resourceProfile: readHeavyForPBI` to profiles.yml and read this probe:
+     if resourceProfile flips and vorder.default follows it to `true`, that is the fix and
+     the probe has earned its keep. If resourceProfile still reads `writeHeavy`, the profile
+     is not settable per-session and the remaining levers are a tblproperty, OPTIMIZE ...
+     VORDER, or a per-REPL `SET` issued after session start (which runs after the profile is
+     applied, and would therefore win).
 
-       (a) Fabric ignores `conf` on the HC acquire outright; or
-       (b) Fabric applies it, then the writeHeavy resource profile overwrites it.
-
-     CANARY_KEY settles it at zero extra capacity — it rides the next dispatch, whenever one
-     happens. It is a made-up key no resource profile defines, set alongside V-Order in
-     profiles.yml, so nothing can overwrite it:
-
-       canary present -> (b): conf IS delivered; the resource profile is what wins. The fix is
-                              then to set spark.fabric.resourceProfile in the same conf block.
-       canary absent  -> (a): Fabric discards the conf wholesale. Only a per-REPL `SET`, a
-                              tblproperty, or OPTIMIZE ... VORDER can help.
+     Delete this file and its two call sites — dbt_project.yml on-run-start, and
+     models/spark/dimensions/dim_duid.sql pre_hook — once that is settled. Drop the canary
+     from profiles.yml at the same time.
 --#}
 {% macro probe_spark_conf(label) %}
   {%- if execute and target.type == 'fabricspark' -%}

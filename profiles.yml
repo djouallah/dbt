@@ -93,14 +93,16 @@ aemo_electricity:
       # NOTE: compute sizing is NOT configurable from here — Livy API sessions take the WORKSPACE
       # Spark pool settings (the observed "initial executors = 1" launch is the pool's
       # dynamic-allocation floor). To change launch size, change the workspace pool, not this file.
-      # ⚠️ THE `conf` BELOW IS MEASURED TO HAVE NO EFFECT. It is kept only so the canary probe has
-      # something to ride on; do not add settings here expecting them to apply, and do not delete it
-      # without reading the V-Order bullet in CLAUDE.md first.
-      # The adapter forwards it correctly — `_build_acquire_payload` (concurrent_livy.py:195-228)
-      # copies name/conf/driverMemory/... into both the singleton POST and the HC acquire, and `conf`
-      # is a documented field of HighConcurrencySessionRequest. Fabric is what drops it. Probe run
-      # 30599066885 read the effective SQLConf from inside the REPLs and got, on BOTH the master
-      # connection and a worker: vorder.default=false, resourceProfile=writeHeavy.
+      # `conf` IS delivered — but the V-Order key below is overwritten before you see it, so do not
+      # read this block as working configuration for THAT key. Read the V-Order bullet in CLAUDE.md
+      # before changing anything here.
+      # The adapter forwards correctly (`_build_acquire_payload`, concurrent_livy.py:195-228, and
+      # `conf` is a documented field of HighConcurrencySessionRequest), and probe run 30599860363
+      # proved delivery end to end: the made-up `spark.dbt.probe.canary` key reads `alive` on BOTH
+      # the master connection and a worker REPL. In the same reading, vorder.default is `false`
+      # while resourceProfile is `writeHeavy` — that profile DEFINES vorder.default=false and is
+      # applied AFTER the session conf, so it clobbers that key and leaves keys it does not define
+      # (the canary) alone. Precedence, not delivery.
       #
       # V-ORDER: `vorder.default` IS THE LIVE KEY — the DEPRECATED one is spelled differently.
       # Three near-identical spellings exist and only one is dead:
@@ -109,25 +111,27 @@ aemo_electricity:
       #   delta.parquet.vorder.enabled      a TBLPROPERTIES key, table-level, not a session conf
       # Anything claiming "V-Order config is deprecated" is quoting the first one. It is not this.
       #
-      # This line was believed to be fighting a workspace default: a Fabric workspace defaults to
-      # `spark.fabric.resourceProfile = writeHeavy`, whose own definition includes
-      # `spark.sql.parquet.vorder.default: "false"`. The probe confirms the profile IS in force
-      # (resourceProfile=writeHeavy) and that the conf below LOSES to it — or never arrives. Both
-      # readings are `false`, on the creating acquire as well as a packed one, so this is not the
-      # REPL-packing mechanism. Which of the two it is stays open until the canary reports.
+      # This line loses a fight it was written to win. A Fabric workspace defaults to
+      # `spark.fabric.resourceProfile = writeHeavy`, whose definition includes
+      # `spark.sql.parquet.vorder.default: "false"`, and the profile is applied after the session
+      # conf. So the key below is set and then immediately overwritten. It has never been in force.
       #
       # WHAT IT WAS BELIEVED TO BUY — RETRACTED. This block used to claim the conf demonstrably
       # V-Ordered every small write (stg_csv_archive_log, dim_duid, fct_price_today,
       # fct_scada_today, all carrying `add.tags {"VORDER": "true"}`) while `mart/fct_summary` came
-      # out `tags: {}` on all 19 files — and called that split an unexplained size cutoff. With the
-      # conf measured inert, the split cannot be attributed to it at all: whatever tagged those
-      # small writes, it was not this setting, and there is no cutoff to explain.
-      # Levers that would actually work, none in use: a table property
+      # out `tags: {}` on all 19 files — and called that split an unexplained size cutoff. The key
+      # never won, so it cannot be the cause of either half: whatever tagged those small writes, it
+      # was not this setting, and there is no cutoff to explain.
+      # The lever is the PROFILE, not the key. Untested candidate, and the cheapest thing to try
+      # next because the canary proves arbitrary keys land: add
+      # `spark.fabric.resourceProfile: readHeavyForPBI` to the conf block below and re-read the
+      # probe. Unknown whether Fabric reads that key early enough to matter, and it changes write
+      # layout for the whole leg — so measure, do not assume. Failing that: a table property
       # (`+tblproperties: {delta.parquet.vorder.enabled: "true"}`, which the docs say INSERT/UPDATE/
       # MERGE honour, and which is also the key `stats.py` reads); `OPTIMIZE … VORDER` as a
-      # post_hook on that one table; or a per-REPL `SET` statement, since `spark.sql.*` is
-      # runtime-settable. A Fabric ENVIRONMENT with `resourceProfile = readHeavyForPBI`
-      # was built for this and REVERTED — see CLAUDE.md for why, before rebuilding it.
+      # post_hook on that one table; or a per-REPL `SET` after session start, which runs after the
+      # profile is applied and would therefore win. A Fabric ENVIRONMENT with
+      # `resourceProfile = readHeavyForPBI` was built for this and REVERTED — see CLAUDE.md for why.
       spark_config:
         name: dl_vorder_build
         conf:

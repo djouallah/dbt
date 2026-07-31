@@ -370,22 +370,37 @@ still run it by hand to reproduce a CI failure. That is a debugging affordance, 
 - **Query the lakehouses directly before instrumenting CI.** `duckrun.connect(<abfss Tables
   path>, read_only=True)` works from a laptop against any of the four items and answers
   schema/row/value questions in minutes. Several CI round trips were spent not doing this.
-- **`spark_config.conf` DOES NOTHING on the spark target. Measured, not inferred.** A probe run on
-  2026-07-31 (run 30599066885) read the effective SQLConf from inside the REPLs dbt was actually
-  using and got, on **both** the master connection and a worker:
-  `spark.sql.parquet.vorder.default -> false`, `spark.fabric.resourceProfile -> writeHeavy`.
-  The profile has asked for `"true"` since the commit that added it. It has never been in force.
+- **`spark_config.conf` IS delivered. The `writeHeavy` resource profile overwrites the one key
+  that matters. Measured, not inferred.** Two probe runs on 2026-07-31 read the effective SQLConf
+  from inside the REPLs dbt was actually using. Run 30599860363, master and worker identical:
+
+  | key | reading |
+  |---|---|
+  | `spark.sql.parquet.vorder.default` | `false` — the profile asks for `"true"` |
+  | `spark.fabric.resourceProfile` | `writeHeavy` |
+  | `spark.dbt.probe.canary` | `alive` — a made-up key, arrived intact |
+
+  The canary is the whole finding: an arbitrary conf key survives to both REPLs, so **delivery
+  works end to end** and packing does not strip it either. What fails is *precedence* — the
+  workspace profile `writeHeavy` defines `spark.sql.parquet.vorder.default = false` and is applied
+  **after** the session conf, so it clobbers that key while leaving every key it does not define
+  alone. Nothing in Fabric's docs says a resource profile outranks an explicitly requested session
+  conf; that is the gap.
+  **An earlier commit in this repo called the conf "inert" and said it "has never been in force".
+  That was wrong** — it was measured before the canary existed, when `vorder=false` alone could not
+  distinguish "dropped" from "overridden". The V-Order key specifically has never been in force;
+  the mechanism is not the one that sentence claimed.
+  Consequence for the fix: the lever is the **profile**, not the key. Setting
+  `spark.fabric.resourceProfile: readHeavyForPBI` in the same `conf` block is the untested
+  candidate — the canary proves arbitrary keys land, and that profile is Microsoft's documented
+  answer for V-Order — but whether Fabric reads that key early enough to matter is unknown, and it
+  changes write layout for the whole leg. Test it with the probe still in place before believing it.
   **This bullet used to claim the conf was "the only thing switching V-Order on at all". That was
-  wrong.** It switches nothing on, and every conclusion drawn downstream of it is suspect —
-  including the framing that V-Order "worked but leaked on the large write". Nothing leaked;
-  nothing was V-Ordered by the conf. Whatever produced `add.tags {"VORDER": "true"}` on the small
-  writes (`stg_csv_archive_log`, `dim_duid`, `fct_price_today`, `fct_scada_today`) while
-  `mart/fct_summary` came out `tags: {}` on all 19 files, it was **not** this setting — so the
-  "unexplained size cutoff" was a phantom created by assuming the conf was live.
-  What is **not** yet distinguished: whether Fabric ignores `conf` on the HC acquire outright, or
-  accepts it and lets the `writeHeavy` resource profile overwrite it. Both produce `false`. A
-  canary key that no resource profile defines settles it — `macros/probe_spark_conf.sql` carries
-  one and will report on the next dispatch, at no extra capacity.
+  wrong too** — the key never won, so it never switched V-Order on, and the framing that V-Order
+  "worked but leaked on the large write" is unsupported. Whatever produced `add.tags
+  {"VORDER": "true"}` on the small writes (`stg_csv_archive_log`, `dim_duid`, `fct_price_today`,
+  `fct_scada_today`) while `mart/fct_summary` came out `tags: {}` on all 19 files, it was not this
+  setting — so the "unexplained size cutoff" was a phantom created by assuming the key was in force.
   **Do not read the Spark UI Environment tab to check this.** It renders the SparkContext conf
   captured at application launch and never shows a `spark.sql.*` value applied afterwards to a
   SparkSession, so it cannot distinguish "dropped" from "live but invisible". The in-session
@@ -400,22 +415,25 @@ still run it by hand to reproduce a CI failure. That is a debugging affordance, 
   `spark_config` untouched, `__post_init__` (`credentials.py:203-207`) only asserts `name` is
   present, and `concurrent_livy.py:195-228` copies `conf` verbatim into the
   `POST …/highConcurrencySessions` body, where `conf` is a **documented** field of
-  `HighConcurrencySessionRequest`. The loss is Fabric-side. Two adapter-side defects are real but
-  are about *observability*, not delivery: the acquire payload is never logged
-  (`concurrent_livy.py:136` logs only the `sessionTag`) and `spark_config` is excluded from
-  `_connection_keys()`, so nothing short of reading the adapter source tells you what was sent;
-  and non-whitelisted `spark_config` keys are dropped silently in the HC path
-  (`concurrent_livy.py:200-219`) while the singleton path forwards the whole dict verbatim.
-  Note also that `high_concurrency` defaults to **True** and `threads: 4` fires **five** acquires
-  under one `sessionTag` (4 workers + dbt's master connection —
-  [dbt-fabricspark#242](https://github.com/microsoft/dbt-fabricspark/issues/242)), exactly Fabric's
-  5-REPL cap; acquires 2..5 are packed into the application the first one created and their `conf`
-  is unappliable by construction. That is a real mechanism, but it is **not** the explanation here:
-  the master reading is `false` too, and the master is the acquire that created the session.
+  `HighConcurrencySessionRequest`, and the canary proves it arrives. The adapter's real defects are
+  about *observability*, not delivery, and they are what made this take three runs to work out: the
+  acquire payload is never logged (`concurrent_livy.py:136` logs only the `sessionTag`) and
+  `spark_config` is excluded from `_connection_keys()`, so nothing short of reading the adapter
+  source tells you what was sent; and non-whitelisted `spark_config` keys are dropped silently in
+  the HC path (`concurrent_livy.py:200-219`) while the singleton path forwards the whole dict
+  verbatim. Filed as
+  [dbt-fabricspark#257](https://github.com/microsoft/dbt-fabricspark/issues/257).
+- **REPL packing does not strip `conf` — hypothesis tested and dead.** `high_concurrency` defaults
+  to **True** and `threads: 4` fires **five** acquires under one `sessionTag` (4 workers + dbt's
+  master connection — [dbt-fabricspark#242](https://github.com/microsoft/dbt-fabricspark/issues/242)),
+  exactly Fabric's 5-REPL cap, and acquires 2..5 are packed into the application the first created.
+  That much is real. It is **not** a conf-delivery problem: the canary reads `alive` on the worker
+  as well as the master. Do not resurrect this explanation.
 - **[dbt-fabricspark#243](https://github.com/microsoft/dbt-fabricspark/issues/243) was closed on a
   false positive, by us.** It concluded `spark.sql.parquet.vorder.default: "true"` "seems to be
-  working", on the strength of the small-write VORDER tags. The in-session read says otherwise.
-  Treat that issue's resolution as retracted.
+  working", on the strength of the small-write VORDER tags. The key reads `false` in-session on
+  every REPL. Treat that issue's resolution as retracted — but note the correct reason is
+  resource-profile precedence, not the adapter, and #257 has been retitled accordingly.
 - **The V-Order key that is deprecated is spelled differently from the one in use.** Three
   near-identical spellings, one dead: `spark.sql.parquet.vorder.enable` was **removed in runtime
   1.3+**; `spark.sql.parquet.vorder.default` is the live session conf and is what `profiles.yml`
