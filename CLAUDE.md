@@ -872,6 +872,13 @@ detail.
   each role from candidate lists — `REQUIRED` roles fail with the actual column list printed,
   `OPTIONAL` ones degrade to "not filtering on it". This caught a real miss on the first dispatch:
   the candidates said `Item Name`, the app says `Item`.
+- **The metrics model is refreshed and waited on BEFORE any DAX runs** (`CU_REFRESH`, on by
+  default; `CU_REFRESH_TIMEOUT` 900s). Same root cause as the bullet below: a dispatch creates four
+  semantic models the app has never seen, and an unrefreshed metrics model holds no rows for an
+  item it does not know about, so live name resolution alone can leave the CU itself missing.
+  Non-fatal on purpose — no refresh rights, an app-installed model refusing the call, or a
+  scheduled refresh already running all log a line and read the model as it stands. `cu.yml`'s
+  job timeout is 45 minutes to cover the wait.
 - **A deploy mints a NEW item GUID, and `'Items'` is a lagging snapshot — this made the whole report
   read empty.** The metrics tables hold item GUIDs; a semantic model that was just created (or deleted
   and recreated — `overwrite=True` keeps its id, a recreate does not) has a GUID `'Items'` has not seen

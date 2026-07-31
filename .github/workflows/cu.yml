@@ -59,6 +59,10 @@ on:
         description: "which table's layout to show"
         type: string
         default: "fct_summary"
+      refresh:
+        description: "refresh the Capacity Metrics semantic model and wait for it before querying — a dispatch creates items the app has not seen yet. Turn off only to re-read a settled window."
+        type: boolean
+        default: true
       debug:
         description: "log the discovered schema and per-timepoint progress to stderr"
         type: boolean
@@ -84,7 +88,9 @@ jobs:
   cu:
     name: semantic model CU
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    # 45, not 20: the pre-query refresh of the metrics model waits up to CU_REFRESH_TIMEOUT (15
+    # min) before giving up, and the read itself is ~60 sequential timepoint requests.
+    timeout-minutes: 45
     env:
       CU_METRICS_WORKSPACE_ID: ${{ inputs.metrics_workspace_id }}
       CU_METRICS_MODEL_ID: ${{ inputs.metrics_model_id }}
@@ -95,6 +101,7 @@ jobs:
       CU_RUN_GAP_HOURS: ${{ inputs.run_gap_hours }}
       CU_RUN_OPS: ${{ inputs.run_ops }}
       CU_LAYOUT_TABLE: ${{ inputs.layout_table }}
+      CU_REFRESH: ${{ inputs.refresh && '1' || '0' }}
       CU_DEBUG: ${{ inputs.debug }}
       PYTHONIOENCODING: utf-8
     steps:

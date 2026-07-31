@@ -159,6 +159,7 @@ after the activity you want to measure** — see the lag note below.
 | `run_ops` | false | per-run breakdown by operation type as well |
 | `layout` | true | fetch the layout from the latest *dbt* run |
 | `layout_table` | `fct_summary` | which table's layout to show |
+| `refresh` | true | refresh the metrics semantic model and wait, **before** any DAX. A dispatch creates items the app has not seen; an unrefreshed model cannot report CU against them. Off = re-read a settled window without the wait |
 | `debug` | false | dumps every table's columns to stderr |
 
 Locally, with `PBI_TOKEN` set:
@@ -237,6 +238,17 @@ tenant has two, so each is queried separately and the results merged.
 `items_for()` joins to `'Items'` (`Item Id`, `Item name`, `Item kind`) to resolve it. An id missing
 from `'Items'` is kept under its raw GUID rather than dropped — losing CU silently is worse than an
 ugly row.
+
+**The metrics model is refreshed first, and the wait is the point.** `'Items'` is a lagging
+snapshot: `deploy_models.py` deletes and recreates each semantic model, so every benchmark dispatch
+mints four item GUIDs the app has never seen, and CU attached to an item the model does not know
+about cannot be reported at all. So the run POSTs a refresh, polls until it completes
+(`CU_REFRESH_TIMEOUT`, default 900s), and only then queries. It is **non-fatal by construction** —
+the app's dataset is not ours, the service principal may hold no refresh rights on that workspace,
+and a scheduled refresh may already be running (that one is waited on instead). Any of those logs a
+line and reads the model as it stands, which is exactly what this tool did before the refresh
+existed. Live name resolution from `GET /groups/{ws}/datasets` still covers the *names* either way;
+what the refresh adds is the rows behind them.
 
 **The service principal works — measured, against the expectation.** The community consensus is
 that the Capacity Metrics semantic model rejects service principals, and this was built assuming

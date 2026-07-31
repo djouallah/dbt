@@ -73,6 +73,14 @@ WS_FILTER = os.environ.get(
 
 DEBUG = os.environ.get("CU_DEBUG", "").strip().lower() in ("1", "true", "yes")
 
+# Refresh the metrics model before querying it, and wait. ON by default: every benchmark dispatch
+# creates four semantic models the app has never seen, and an unrefreshed model cannot report CU
+# against an item that is not in its tables yet. Off is for a re-read of a window that has already
+# settled, where the refresh is pure latency. See refresh_metrics_model() for why a failure here
+# is logged rather than fatal.
+REFRESH = os.environ.get("CU_REFRESH", "1").strip().lower() not in ("0", "false", "no", "")
+REFRESH_TIMEOUT = int(os.environ.get("CU_REFRESH_TIMEOUT", "900"))
+
 # A FLOOR, not a rolling window, and the difference matters. A window ("last 3h") moves with every
 # dispatch and can slice one benchmark in half, making an engine look cheap for no reason but where
 # the boundary fell. A pinned floor stays put: everything after it accumulates, and two dispatches a
@@ -199,6 +207,55 @@ def log(*a):
 def die(msg, code=1):
     log(f"ERROR: {msg}")
     sys.exit(code)
+
+
+def refresh_metrics_model():
+    """Refresh the Capacity Metrics semantic model and wait for it, BEFORE any DAX runs.
+
+    Why: the app's `'Items'` table is a lagging snapshot. `benchmark/deploy_models.py` deletes and
+    recreates each semantic model, so a dispatch mints four item GUIDs the metrics model has never
+    seen — and the whole report used to come back empty because those GUIDs resolved to no name and
+    failed the name filter. Resolving names live from the REST API covers the *names*; it does not
+    put the new items into the metrics model's own tables, so the CU attached to them can still be
+    missing until the app refreshes on its own schedule. Refreshing first is the direct fix.
+
+    NON-FATAL by construction. The app's dataset is not ours: the service principal may have no
+    refresh rights on that workspace, an app-installed model can refuse the call outright, and a
+    scheduled refresh may already be running. None of that is a reason to skip the CU report — it
+    just means reading whatever the model currently holds, which is what this tool did before.
+    """
+    base = f"{PBI}/groups/{WS}/datasets/{MODEL}/refreshes"
+    headers = {"Authorization": f"Bearer {TOKEN}", "Content-Type": "application/json"}
+    r = requests.post(base, json={"notifyOption": "NoNotification"}, headers=headers, timeout=60)
+    if r.status_code in (200, 202):
+        log("  refresh accepted, waiting for it to finish ...")
+    elif r.status_code in (400, 409) and "already" in r.text.lower():
+        # A scheduled refresh beat us to it. Waiting on it is exactly as good.
+        log("  a refresh is already running; waiting for that one instead")
+    else:
+        log(f"  refresh NOT started ({r.status_code}: {r.text[:200].replace(chr(10), ' ')}) — "
+            f"reading the model as it stands. Newly created items may be missing.")
+        return False
+
+    deadline = time.time() + REFRESH_TIMEOUT
+    while time.time() < deadline:
+        time.sleep(20)
+        g = requests.get(f"{base}?$top=1", headers=headers, timeout=60)
+        if g.status_code != 200:
+            log(f"  cannot read refresh status ({g.status_code}) — continuing without waiting")
+            return False
+        rows = g.json().get("value") or []
+        status = (rows[0].get("status") if rows else "") or ""
+        if status == "Completed":
+            log(f"  refresh completed in {int(time.time() - (deadline - REFRESH_TIMEOUT))}s")
+            return True
+        if status in ("Failed", "Disabled", "Cancelled"):
+            err = (rows[0].get("serviceExceptionJson") or "")[:200]
+            log(f"  refresh {status.lower()} ({err}) — reading the model as it stands")
+            return False
+    log(f"  refresh still running after {REFRESH_TIMEOUT}s — not waiting any longer. The numbers "
+        f"below are whatever the model holds now; re-dispatch if a run looks missing.")
+    return False
 
 
 def execute_dax(dax, tries=4, fatal=True):
@@ -687,6 +744,13 @@ def main():
         except ValueError:
             die(f"CU_SINCE={SINCE!r} is not ISO-8601 (e.g. 2026-07-30T22:00:00). It is in the "
                 f"MODEL's clock, not UTC — a trailing Z is ignored rather than honoured.")
+
+    # Before ANY query: the model has to know about items this dispatch just created.
+    if REFRESH:
+        log("refreshing the Capacity Metrics semantic model ...")
+        refresh_metrics_model()
+    else:
+        log("CU_REFRESH is off — reading the metrics model as it stands")
 
     cols = discover_columns()
     caps = [CAPACITY] if CAPACITY else discover_capacities()
