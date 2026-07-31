@@ -546,12 +546,18 @@ still run it by hand to reproduce a CI failure. That is a debugging affordance, 
 
 - Cancel superseded runs immediately (`gh run cancel <id>`) — spark and Fabric legs cost money.
 - **`reset_outputs` is the start-from-nothing lever, off by default, and it never touches the
-  landing data.** The `dbt` workflow's dispatch input sets `RESET_OUTPUTS=1`, which each leg's
-  own `provision.py` step reads: it DELETEs that engine's output ITEM (`dbt_delta`,
-  `dbt_iceberg`, `dbt_spark`, `dbt_dwh`) and recreates it empty, so dbt then builds every model
-  from scratch. Scoping is by construction — a leg only ever names its own item — and
-  `dbt_landing` is excluded **twice**: `ensure()` skips it (so the `land` job is unaffected by a
-  workflow-level flag rather than failing) and `drop()` refuses it outright. That lakehouse holds
+  landing data.** It runs as its own `reset` job — **first, before `land`** — which calls
+  `provision.py reset` to DELETE all four output items (`dbt_delta`, `dbt_iceberg`, `dbt_spark`,
+  `dbt_dwh`). The engine legs then create their item the ordinary way, unaware a reset happened.
+  **That ordering is load-bearing, not tidiness:** Fabric keeps a deleted item's DISPLAY NAME
+  reserved for minutes after the item stops being listed, so the first version — each leg
+  dropping and recreating its own item on the way in — drew `409 ItemDisplayNameNotAvailableYet`
+  and killed three of four legs on run 30639018466. The one that survived did so purely because
+  its delete took 36s to propagate. Waiting on the item list proves nothing; only the create can
+  tell you the name is free, which is why the fix is the download-long gap and not a longer poll.
+  `ensure()` does still ride out that 409 as a backstop, for a by-hand reset followed straight
+  away by a build. `dbt_landing` is never dropped — `drop()` refuses it by name, and the `reset`
+  mode's item list does not contain it. That lakehouse holds
   the downloaded AEMO archive, the one thing here that cannot be rebuilt from the workspace, and
   re-landing it means re-downloading years of files `download_limit` at a time.
   This is the lever to reach for when a table is wrong in a way no incremental write can repair —

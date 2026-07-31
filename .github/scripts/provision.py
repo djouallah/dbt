@@ -3,32 +3,39 @@ print the env vars dbt/the notebook read to stdout (the workflow appends stdout 
 $GITHUB_ENV). Diagnostics -> stderr.
 
 Usage:
+  python provision.py reset                # DELETE all four OUTPUT items (never the landing one)
   python provision.py land                 # the ONE shared landing lakehouse (holds Files)
   python provision.py {duckrun|iceberg|dwh|spark}   # that engine's OUTPUT item
-  python provision.py <engine> --reset     # DELETE that output item first, then recreate empty
 
 The download happens once (in the `land` job); every engine job reads the same FILES_PATH
 and only provisions its own output item. Naming is prefixed `dbt_` so it never clashes with
 the other AEMO repos sharing this workspace.
 
-`--reset` (or RESET_OUTPUTS=1, which is how the workflow's `reset_outputs` input arrives) is
-the start-from-nothing lever: it deletes the engine's whole output ITEM — not tables inside it
-— so the following `ensure()` recreates it empty and dbt builds every model from scratch. It is
-scoped per leg by construction: each job only ever names its own item, so there is no path from
-one leg to another's data. `dbt_landing` is **excluded by name** and `drop()` refuses it outright
-— that lakehouse holds the downloaded AEMO archive, the one thing here that cannot be rebuilt
-from anything else in the workspace, and a `land` job running with RESET_OUTPUTS=1 set globally
-must skip the drop rather than fail. Costs of a reset, none of them errors: the dwh warehouse
-comes back with a new connectionString and no grants, and every item comes back with a new GUID,
-so anything bound to the old one (a Direct Lake semantic model, a shortcut) is pointing at an
-item that no longer exists. `benchmark/` survives it because it deletes and recreates its models
-per dispatch; nothing else in this repo holds a binding.
+`reset` is the start-from-nothing lever (the workflow's `reset_outputs` input), and it is a
+**separate mode run in its own job before `land`** rather than something each leg does to its
+own item on the way in. That ordering is the whole point: Fabric keeps a deleted item's DISPLAY
+NAME reserved for minutes after the item stops being listed, so a drop immediately followed by a
+create draws `409 ItemDisplayNameNotAvailableYet` — which is exactly how the per-leg version
+failed on run 30639018466. Deleting everything up front and then landing the data gives the
+reservation the whole download to expire in.
+
+It deletes the whole ITEM, not tables inside it — a `Tables/<schema>/<name>` folder removed by
+hand leaves the catalog entry behind and dbt then emits DML against nothing. `dbt_landing` is
+**excluded by name** and `drop()` refuses it outright: that lakehouse holds the downloaded AEMO
+archive, the one thing here that cannot be rebuilt from anything else in the workspace. Costs,
+none of them errors: the dwh warehouse comes back with a new connectionString and no grants, and
+every item comes back with a new GUID, so anything bound to the old one (a Direct Lake semantic
+model, a shortcut) is pointing at an item that no longer exists. `benchmark/` survives it because
+it deletes and recreates its models per dispatch; nothing else in this repo holds a binding.
 """
 import os, sys, time, subprocess, requests
 
 mode = sys.argv[1]
-RESET = "--reset" in sys.argv[2:] or os.environ.get("RESET_OUTPUTS") == "1"
 LANDING = "dbt_landing"
+# Every OUTPUT item, and the only list `reset` will touch. Kept beside the per-mode branches
+# below, which must name the same items.
+OUTPUTS = [("lakehouses", "dbt_delta"), ("lakehouses", "dbt_iceberg"),
+           ("lakehouses", "dbt_spark"), ("warehouses", "dbt_dwh")]
 ws = os.environ["WS_ID"]
 FAB = "https://api.fabric.microsoft.com/v1"
 
@@ -77,12 +84,12 @@ FOLDER_ID = ensure_folder("dbt")
 
 
 def drop(kind, name):
-    """Delete an output item so the next ensure() recreates it empty.
+    """Delete an output item. The recreate is a LATER JOB's business, not this call's.
 
     Deletes the ITEM, never a folder under it: a `Tables/<schema>/<name>` directory removed by
     hand leaves the catalog entry behind and dbt then emits DML against nothing (see CLAUDE.md).
-    Waits for the name to disappear before returning, because ensure() would otherwise find the
-    item mid-delete and hand back an id that is about to stop existing."""
+    Waits for it to stop being listed, which is a weaker guarantee than it looks — Fabric holds
+    the display NAME for minutes longer, which is why nothing recreates anything here."""
     if name == LANDING:
         raise SystemExit(f"refusing to drop {name}: it holds the raw landing data")
     it = find(kind, name)
@@ -103,13 +110,6 @@ def drop(kind, name):
 
 
 def ensure(kind, name, payload=None):
-    # The landing exclusion is stated twice on purpose: ensure() never asks for it (so the
-    # `land` job runs unaffected when RESET_OUTPUTS is set workflow-wide, rather than failing),
-    # and drop() refuses it (so a direct call cannot get through either).
-    if RESET and name == LANDING:
-        sys.stderr.write(f"  reset requested but {name} is never dropped — keeping raw data\n")
-    elif RESET:
-        drop(kind, name)
     it = find(kind, name)
     if it:
         sys.stderr.write(f"  {kind}/{name} exists ({it['id']})\n")
@@ -118,12 +118,13 @@ def ensure(kind, name, payload=None):
     body = {"displayName": name, "folderId": FOLDER_ID}
     if payload:
         body.update(payload)
-    # A create straight after a drop hits `ItemDisplayNameNotAvailableYet` (409): Fabric frees the
-    # display NAME minutes after the item stops being listed, so drop()'s wait — which polls the
-    # item list — returns long before the name can be reused. Measured on run 30639018466, where
-    # three legs deleted in ~2s and were rejected, while the one whose delete took 36s to
-    # propagate got through. Fabric marks the error `isRetriable`, so poll until it clears rather
-    # than failing the leg; anything not retriable still raises on the first response.
+    # BACKSTOP, not the fix. A create too soon after a drop hits `ItemDisplayNameNotAvailableYet`
+    # (409): Fabric frees the display NAME minutes after the item stops being listed. In CI that
+    # cannot bite any more — the `reset` job drops everything before `land`, so the whole download
+    # sits between the delete and the create — but a by-hand `provision.py reset` followed
+    # straight away by a build would hit it, as run 30639018466 did when each leg dropped its own
+    # item on the way in. Fabric marks the error `isRetriable`, so poll until it clears; anything
+    # not retriable still raises on the first response.
     for attempt in range(40):                      # ~10 minutes at 15s
         r = requests.post(f"{FAB}/workspaces/{ws}/{kind}", headers=H, json=body)
         if r.status_code in (200, 201, 202):
@@ -170,7 +171,15 @@ base = f"abfss://{ws}@onelake.dfs.fabric.microsoft.com"
 lh_payload = {"creationPayload": {"enableSchemas": True}}
 out = []
 
-if mode == "land":
+if mode == "reset":
+    # Deletes only. Nothing is recreated here and nothing is printed to stdout — the engine legs
+    # provision their own item as usual, minutes later, by which time Fabric has released the
+    # display names. See the module docstring for why that gap is the design.
+    for kind, name in OUTPUTS:
+        drop(kind, name)
+    sys.stderr.write(f"  reset: {len(OUTPUTS)} output items dropped, {LANDING} untouched\n")
+
+elif mode == "land":
     lh = ensure("lakehouses", LANDING, lh_payload)
     n = os.environ.get("CI_DOWNLOAD_LIMIT", "1000")   # one knob: same cap for daily + intraday
     out += [f"FILES_PATH={base}/{lh}/Files",

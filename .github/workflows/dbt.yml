@@ -97,28 +97,51 @@ env:
   # It was pinned to readHeavyForPBI in profiles.yml; making it an input means a layout change is
   # something a dispatch asks for. Expect the next build's layout table to move.
   SPARK_RESOURCE_PROFILE: ${{ inputs.spark_resource_profile || 'writeHeavy' }}
-  # Start-from-nothing lever, off by default. '1' makes each leg's provision.py DELETE its own
-  # output item (dbt_delta / dbt_iceberg / dbt_spark / dbt_dwh) and recreate it empty, so dbt
-  # builds every model from scratch — this is what to reach for when an engine's tables are
+  # `reset_outputs` needs no env var — the `reset` job below reads the input directly. What it
+  # does: DELETE the four output items (dbt_delta / dbt_iceberg / dbt_spark / dbt_dwh) before
+  # anything else runs, so every model is rebuilt from scratch. Reach for it when tables are
   # wrong in a way no incremental write can repair, instead of --full-refresh (which DROPs on
-  # dwh and fails outright on iceberg; see CLAUDE.md).
+  # dwh and fails outright on iceberg; see CLAUDE.md). It also replaced the `rebuild_summary`
+  # input: one path to a clean table on all four engines, instead of three engine-specific ones
+  # of which the iceberg one never worked.
   #
-  # `dbt_landing` is NEVER dropped: provision.py excludes it by name in both ensure() and
-  # drop(), so the `land` job is unaffected by this flag. That lakehouse holds the downloaded
-  # AEMO archive — the only data here that cannot be rebuilt from the workspace itself — and
-  # re-landing it means re-downloading years of files a few hundred at a time.
+  # `dbt_landing` is NEVER dropped — provision.py excludes it by name — because it holds the
+  # downloaded AEMO archive, the only data here that cannot be rebuilt from the workspace itself.
   #
-  # Two consequences of a reset, neither of which surfaces as an error: a recreated item has a
-  # NEW GUID, so anything bound to the old one (a Direct Lake semantic model, a shortcut) points
-  # at an item that is gone; and the recreated warehouse comes back with a fresh connectionString
-  # and no grants. `benchmark/` is fine — it deletes and recreates its models per dispatch.
-  # It is also what replaced the `rebuild_summary` input: one path to a clean table on all four
-  # engines, instead of three engine-specific ones of which the iceberg one never worked.
-  RESET_OUTPUTS: ${{ inputs.reset_outputs && '1' || '0' }}
+  # Two consequences, neither of which surfaces as an error: a recreated item has a NEW GUID, so
+  # anything bound to the old one (a Direct Lake semantic model, a shortcut) points at an item
+  # that is gone; and the recreated warehouse comes back with a fresh connectionString and no
+  # grants. `benchmark/` is fine — it deletes and recreates its models per dispatch.
 
 jobs:
+  # FIRST, and before `land` on purpose. Fabric keeps a deleted item's DISPLAY NAME reserved for
+  # minutes after the item stops being listed, so dropping and recreating in the same step draws
+  # `409 ItemDisplayNameNotAvailableYet` — which is how the per-leg version of this failed on run
+  # 30639018466, taking three legs with it. Deleting everything up front and then landing the data
+  # gives the reservation the whole download to expire in, and the engine legs then create their
+  # item the ordinary way, unaware a reset happened.
+  #
+  # The job always runs; only its step is conditional. A job skipped by `if:` skips everything
+  # that needs it, so gating the job itself would skip the entire build.
+  reset:
+    name: reset outputs
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        if: inputs.reset_outputs
+      - uses: actions/setup-python@v5
+        if: inputs.reset_outputs
+        with: {python-version: "3.11"}
+      - run: pip install duckrun
+        if: inputs.reset_outputs
+      - name: Drop the four output items
+        if: inputs.reset_outputs
+        run: python .github/scripts/provision.py reset
+
   land:
     name: land data
+    needs: reset
     runs-on: ubuntu-latest
     timeout-minutes: 30
     outputs:
