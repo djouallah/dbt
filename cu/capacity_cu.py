@@ -93,10 +93,13 @@ ETL = os.environ.get("CU_ETL", "1").strip().lower() not in ("0", "false", "no", 
 #
 # `analytics` is what READS the tables, `etl` is what WRITES them. Anything unrecognised lands in
 # `other` and is printed rather than dropped — with its kind named in the stderr log, because that
-# log is how a kind gets added here. That matters most for Spark: dbt's Livy sessions bill against
-# whichever item Fabric attributes them to (the notebook that ran them, or the lakehouse), and which
-# one it is has never been read off a real dispatch. `other` means "this file has not seen that kind
-# yet", never "ignore it".
+# log is how a kind gets added here. `other` means "this file has not seen that kind yet", never
+# "ignore it".
+#
+# **Livy bills against the LAKEHOUSE**, measured, not assumed — there is no Spark item of any kind in
+# the report. So `dbt_spark`'s row is its OneLake operations AND the whole spark leg's compute added
+# together, and the only thing that separates them is the operation column. `sparkjobdefinition` /
+# `sparkapplication` below are kept for completeness and are expected to stay empty here.
 CLASS_BY_KIND = {
     # reads
     "semanticmodel": "analytics", "dataset": "analytics", "report": "analytics",

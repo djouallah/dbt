@@ -816,7 +816,7 @@ detail.
 
 - **It reports ETL and analytics, not semantic models alone — and that is a REVERSAL of an earlier
   decision made for a real reason.** Every item in the workspace is classified by kind: `etl` (the
-  lakehouses, the warehouse, the notebooks and whatever Fabric bills Livy against) against
+  lakehouses, the warehouse, the notebooks) against
   `analytics` (the semantic models), rolled up per class and per run, so a dbt build's cost sits
   beside a benchmark's in the same units. The first attempt at this width was reverted because it was
   genuinely unreadable — a dozen OneLake operation types per lakehouse and a row per throwaway
@@ -825,10 +825,17 @@ detail.
   `other` column that is **named and counted**, and `CU_GROUP_PREFIXES` collapses the notebooks to
   one row. Remove a guard and the earlier verdict comes straight back. `etl: false` restores the old
   scope exactly, which is what makes an older dispatch's numbers still comparable.
+- **Livy bills against the LAKEHOUSE. There is no Spark item of any kind.** So `dbt_spark`'s ETL row
+  is its OneLake operations *and* the whole spark leg's compute added together, and the operation
+  column is the only thing that separates them. It also means the per-engine ETL rows have three
+  different attribution shapes and are **not** "compute for this leg": spark's compute is on its
+  lakehouse, the two DuckDB legs' compute is on the throwaway `duckrun.run_python` **notebooks**
+  (which `CU_GROUP_PREFIXES` collapses into one `duckrun-py-*` row shared by duckrun and iceberg),
+  and dwh's is warehouse queries. Compare them as "what this item spent", not as a like-for-like
+  engine benchmark — that is what `benchmark/` is for.
 - **An unrecognised item kind lands in `other` and is logged, never dropped.** That log line
-  (`kind X: N CU -> other`) is the route by which a kind gets into `CLASS_BY_KIND` — most usefully
-  whichever item Fabric attributes dbt's **Livy sessions** to, which has never been read off a real
-  dispatch. Do not guess it into the mapping; dispatch once and read stderr.
+  (`kind X: N CU -> other`) is the route by which a kind gets into `CLASS_BY_KIND`. Do not guess a
+  kind into the mapping; dispatch once and read stderr.
 - **The isolation is the design, not an accident.** No imports from `benchmark/`, no
   `run_report.json`, no artifact, no `needs:`, no shared concurrency group, no ADOMD, no .NET, no
   duckrun — `requests` is the whole runtime dependency list, plus `pytest` for `cu/`'s own offline

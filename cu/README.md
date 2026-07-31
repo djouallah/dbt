@@ -38,9 +38,18 @@ table. So the width is now bounded three ways rather than avoided:
 when comparing against an older dispatch's numbers.
 
 **An unrecognised item kind is kept, never dropped.** It lands in a third `other` class and its kind
-is named on stderr (`kind X: 1,234.0 CU -> other`), which is how a kind gets added to `CLASS_BY_KIND`.
-That matters most for Spark: dbt's Livy sessions bill against whichever item Fabric attributes them
-to, and which one that is has not been read off a real dispatch yet.
+is named on stderr (`kind X: 1,234.0 CU -> other`), which is how a kind gets added to
+`CLASS_BY_KIND`.
+
+**An ETL row does not mean the same thing for every engine, and this is the thing to hold onto when
+reading the table.** Fabric bills **Livy against the lakehouse** — there is no Spark item of any
+kind — so `dbt_spark`'s row is its OneLake operations *and* the entire spark leg's compute, added
+together, separable only by the operation column. The two DuckDB legs run through
+`duckrun.run_python`, so *their* compute is on the throwaway **notebook** items, which the prefix
+collapse merges into one `duckrun-py-*` row shared by duckrun and iceberg (set
+`CU_GROUP_PREFIXES=` to un-collapse them, though the names may not distinguish the legs anyway).
+`dbt_dwh` bills as warehouse queries. So the per-engine ETL rows are comparable in *total capacity
+spent by that item*, not in "compute for this leg" — three different attribution shapes.
 
 **Time is a pinned floor, not a rolling window.** A window ("last 3h") moves with every dispatch
 and can slice one benchmark in half, making an engine look cheap for no reason but where the
