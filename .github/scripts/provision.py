@@ -5,14 +5,30 @@ $GITHUB_ENV). Diagnostics -> stderr.
 Usage:
   python provision.py land                 # the ONE shared landing lakehouse (holds Files)
   python provision.py {duckrun|iceberg|dwh|spark}   # that engine's OUTPUT item
+  python provision.py <engine> --reset     # DELETE that output item first, then recreate empty
 
 The download happens once (in the `land` job); every engine job reads the same FILES_PATH
 and only provisions its own output item. Naming is prefixed `dbt_` so it never clashes with
 the other AEMO repos sharing this workspace.
+
+`--reset` (or RESET_OUTPUTS=1, which is how the workflow's `reset_outputs` input arrives) is
+the start-from-nothing lever: it deletes the engine's whole output ITEM — not tables inside it
+— so the following `ensure()` recreates it empty and dbt builds every model from scratch. It is
+scoped per leg by construction: each job only ever names its own item, so there is no path from
+one leg to another's data. `dbt_landing` is **excluded by name** and `drop()` refuses it outright
+— that lakehouse holds the downloaded AEMO archive, the one thing here that cannot be rebuilt
+from anything else in the workspace, and a `land` job running with RESET_OUTPUTS=1 set globally
+must skip the drop rather than fail. Costs of a reset, none of them errors: the dwh warehouse
+comes back with a new connectionString and no grants, and every item comes back with a new GUID,
+so anything bound to the old one (a Direct Lake semantic model, a shortcut) is pointing at an
+item that no longer exists. `benchmark/` survives it because it deletes and recreates its models
+per dispatch; nothing else in this repo holds a binding.
 """
 import os, sys, time, subprocess, requests
 
 mode = sys.argv[1]
+RESET = "--reset" in sys.argv[2:] or os.environ.get("RESET_OUTPUTS") == "1"
+LANDING = "dbt_landing"
 ws = os.environ["WS_ID"]
 FAB = "https://api.fabric.microsoft.com/v1"
 
@@ -60,7 +76,40 @@ def ensure_folder(name):
 FOLDER_ID = ensure_folder("dbt")
 
 
+def drop(kind, name):
+    """Delete an output item so the next ensure() recreates it empty.
+
+    Deletes the ITEM, never a folder under it: a `Tables/<schema>/<name>` directory removed by
+    hand leaves the catalog entry behind and dbt then emits DML against nothing (see CLAUDE.md).
+    Waits for the name to disappear before returning, because ensure() would otherwise find the
+    item mid-delete and hand back an id that is about to stop existing."""
+    if name == LANDING:
+        raise SystemExit(f"refusing to drop {name}: it holds the raw landing data")
+    it = find(kind, name)
+    if not it:
+        sys.stderr.write(f"  {kind}/{name} absent, nothing to drop\n")
+        return
+    sys.stderr.write(f"  DROPPING {kind}/{name} ({it['id']}) — reset requested\n")
+    r = requests.delete(f"{FAB}/workspaces/{ws}/items/{it['id']}", headers=H)
+    if r.status_code not in (200, 202, 204):
+        sys.stderr.write(r.text + "\n")
+        r.raise_for_status()
+    for _ in range(120):
+        if not find(kind, name):
+            sys.stderr.write(f"  {kind}/{name} dropped\n")
+            return
+        time.sleep(5)
+    raise SystemExit(f"timed out waiting for {kind}/{name} to disappear")
+
+
 def ensure(kind, name, payload=None):
+    # The landing exclusion is stated twice on purpose: ensure() never asks for it (so the
+    # `land` job runs unaffected when RESET_OUTPUTS is set workflow-wide, rather than failing),
+    # and drop() refuses it (so a direct call cannot get through either).
+    if RESET and name == LANDING:
+        sys.stderr.write(f"  reset requested but {name} is never dropped — keeping raw data\n")
+    elif RESET:
+        drop(kind, name)
     it = find(kind, name)
     if it:
         sys.stderr.write(f"  {kind}/{name} exists ({it['id']})\n")
@@ -103,7 +152,7 @@ lh_payload = {"creationPayload": {"enableSchemas": True}}
 out = []
 
 if mode == "land":
-    lh = ensure("lakehouses", "dbt_landing", lh_payload)
+    lh = ensure("lakehouses", LANDING, lh_payload)
     n = os.environ.get("CI_DOWNLOAD_LIMIT", "1000")   # one knob: same cap for daily + intraday
     out += [f"FILES_PATH={base}/{lh}/Files",
             f"download_limit={n}",

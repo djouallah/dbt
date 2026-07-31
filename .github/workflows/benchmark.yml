@@ -26,12 +26,12 @@ name: Direct Lake benchmark
 # moved to the render layer: each job uploads a report FRAGMENT, and `report` merges them and renders.
 #
 # Physical layout (files, row groups, size, v-order, compression) is already reported per engine by
-# .github/scripts/stats.py in the *Table layout* workflow, and is deliberately not re-derived here.
+# .github/scripts/stats.py in the `layout` job of the `dbt` workflow, and is deliberately not re-derived here.
 #
 # Nothing is read from OneLake and nothing is written anywhere: the only endpoints this job touches
-# are the Fabric control plane (deploy) and XMLA (query). ci.yml's parity dashboard is unaffected.
+# are the Fabric control plane (deploy) and XMLA (query). dbt.yml's parity dashboard is unaffected.
 #
-# ci.yml is the pipeline that produces the data; this grades how fast it is to QUERY. See
+# dbt.yml is the pipeline that produces the data; this grades how fast it is to QUERY. See
 # benchmark/README.md.
 on:
   workflow_dispatch:
@@ -61,9 +61,9 @@ on:
         type: string
         default: ""
 
-# SHARED with ci.yml on purpose, and load-bearing. Not for correctness — this run only reads — but
+# SHARED with dbt.yml on purpose, and load-bearing. Not for correctness — this run only reads — but
 # because a concurrent dbt build contends for the same Fabric capacity, and capacity contention is
-# the one thing a wall-clock benchmark cannot absorb. Not cancel-in-progress, matching ci.yml: a
+# the one thing a wall-clock benchmark cannot absorb. Not cancel-in-progress, matching dbt.yml: a
 # dispatch queues behind a push run instead of racing it.
 concurrency:
   group: onelake-${{ github.ref_name }}
@@ -163,7 +163,7 @@ jobs:
     # and use the scouting inputs in benchmark/README.md before committing to a full pass.
     timeout-minutes: 120
     env:
-      # The ONLY Azure inputs, same two secrets as ci.yml: the OIDC federated identity. duckrun mints
+      # The ONLY Azure inputs, same two secrets as dbt.yml: the OIDC federated identity. duckrun mints
       # every token it needs (storage, Fabric control plane, Power BI) and resolves the workspace and
       # items itself — so there is no azure/login and no `az` anywhere in this job. Each engine's job
       # exchanges its OWN fresh OIDC assertion, which is the whole reason the matrix exists.

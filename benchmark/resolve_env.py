@@ -1,7 +1,7 @@
 """Resolve the benchmark's workspace + per-engine Fabric items into $GITHUB_ENV via duckrun.
 
 No deploy_config.yml and no pyyaml: this project already carries the workspace as `WS_ID` (a
-workflow-level env in .github/workflows/ci.yml), and the engine -> item mapping lives in
+workflow-level env in .github/workflows/dbt.yml), and the engine -> item mapping lives in
 benchmark/engines.py alongside .github/scripts/stats.py's copy of it. The item GUIDs are resolved
 the same way .github/scripts/item_path.py does — the `duckrun` profile addresses items by GUID, not
 display name, and so does Direct Lake.

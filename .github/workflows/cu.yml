@@ -2,7 +2,7 @@ name: Capacity CU
 
 # MANUAL ONLY, non-gating, read-only. The third workflow in this repo, and the most disposable.
 #
-# ci.yml builds the data; benchmark.yml measures how fast it is to QUERY; this asks what that
+# dbt.yml builds the data; benchmark.yml measures how fast it is to QUERY; this asks what that
 # querying COST. Fabric exposes no per-operation CU REST API, so the only authoritative source is
 # the Capacity Metrics app's own semantic model, read by DAX.
 #
@@ -28,7 +28,7 @@ on:
         type: string
         default: "aemo_duckrun,aemo_iceberg,aemo_spark,aemo_dwh"
       workspace:
-        description: "Fabric workspace GUID the models live in — the same one ci.yml and benchmark.yml deploy to. Blank = every workspace on the capacity."
+        description: "Fabric workspace GUID the models live in — the same one dbt.yml and benchmark.yml deploy to. Blank = every workspace on the capacity."
         type: string
         default: "ea575278-bd81-459c-9680-47829898c902"
       metrics_workspace_id:
@@ -52,7 +52,7 @@ on:
         type: boolean
         default: false
       layout:
-        description: "show the physical layout of the mart beside the CU, from the `stats` artifact of the latest successful *Table layout* run. Reads no Delta log and spends no capacity — that workflow already did it. Dispatch *Table layout* first if there is no recent run."
+        description: "show the physical layout of the mart beside the CU, from the `stats` artifact of the latest successful *dbt* run. Reads no Delta log and spends no capacity — that run already did it."
         type: boolean
         default: true
       layout_table:
@@ -64,7 +64,7 @@ on:
         type: boolean
         default: false
 
-# Its OWN group, deliberately not ci.yml/benchmark.yml's `onelake-<ref>`. Those two share one
+# Its OWN group, deliberately not dbt.yml/benchmark.yml's `onelake-<ref>`. Those two share one
 # because a wall-clock benchmark cannot absorb capacity contention from a concurrent dbt build.
 # This measures nothing timing-sensitive — it reads a semantic model — so making it queue behind a
 # five-hour benchmark would only guarantee it runs after the 14-day retention question gets
@@ -76,7 +76,7 @@ concurrency:
 permissions:
   id-token: write
   contents: read
-  # To download the `stats` artifact from the latest *Table layout* run. Read-only, and the only
+  # To download the `stats` artifact from the latest *dbt* run. Read-only, and the only
   # reason this workflow touches the Actions API at all.
   actions: read
 
@@ -108,7 +108,7 @@ jobs:
       # talks to the Power BI executeQueries REST endpoint, which takes DAX as a JSON string.
       - run: pip install requests
 
-      # Same OIDC federated identity as ci.yml and benchmark.yml. allow-no-subscriptions because
+      # Same OIDC federated identity as dbt.yml and benchmark.yml. allow-no-subscriptions because
       # the fabric-github-deploy app is a workspace principal, not an Azure RBAC one.
       - uses: azure/login@v2
         with:
@@ -144,33 +144,38 @@ jobs:
       # tee rather than `>>`: the table lands in the step summary AND in the job log, so a run can
       # be reviewed with `gh run view --log` instead of only in a browser. pipefail because the
       # pipe would otherwise report tee's exit status and turn a failed read green.
-      # The layout beside the CU, without reading a single Delta log here: the *Table layout*
-      # workflow already did that and uploaded `stats.json`. Best-effort by construction — no recent
+      # The layout beside the CU, without reading a single Delta log here: `dbt` workflow's
+      # `layout` job already did that and uploaded `stats.json`. Best-effort by construction — no recent
       # run, no artifact, or a 404 leaves STATS_JSON unset and the CU report simply has no layout
       # table. It must never fail this job: a CU report is useful on its own, and the layout is
       # context.
       #
-      # `--name stats` off the latest SUCCESSFUL run of that workflow, not this repo's newest run of
-      # anything — a failed dashboard has no artifact and its run id would just 404.
-      - name: Fetch the layout from the latest Table layout run
+      # The `stats` artifact comes from the `layout` job of the `dbt` workflow, which runs only
+      # when all four legs are green — so a SUCCESSFUL dbt run is exactly the set that can carry
+      # one. Walk the last few newest-first and take the first that actually has it: a successful
+      # run can still lack the artifact (uploaded with continue-on-error, or expired after 90d),
+      # and its id would just 404.
+      - name: Fetch the layout from the latest dbt run
         if: inputs.layout
         continue-on-error: true
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -o pipefail
-          id=$(gh run list --workflow table-layout.yml --status success -L 1 \
-                 --json databaseId -q '.[0].databaseId' -R "$GITHUB_REPOSITORY" || true)
-          if [ -z "$id" ]; then
-            echo "no successful 'Table layout' run to read a layout from — dispatch it once" >&2
+          ids=$(gh run list --workflow dbt.yml --status success -L 5 \
+                  --json databaseId -q '.[].databaseId' -R "$GITHUB_REPOSITORY" || true)
+          if [ -z "$ids" ]; then
+            echo "no successful 'dbt' run to read a layout from" >&2
             exit 0
           fi
-          if gh run download "$id" -n stats -D "$RUNNER_TEMP/stats" -R "$GITHUB_REPOSITORY"; then
-            echo "STATS_JSON=$RUNNER_TEMP/stats/stats.json" >> "$GITHUB_ENV"
-            echo "layout from Table layout run $id" >&2
-          else
-            echo "run $id has no 'stats' artifact (expired after 90d, or it failed before upload)" >&2
-          fi
+          for id in $ids; do
+            if gh run download "$id" -n stats -D "$RUNNER_TEMP/stats" -R "$GITHUB_REPOSITORY"; then
+              echo "STATS_JSON=$RUNNER_TEMP/stats/stats.json" >> "$GITHUB_ENV"
+              echo "layout from dbt run $id" >&2
+              exit 0
+            fi
+            echo "run $id has no 'stats' artifact, trying older" >&2
+          done
 
       - name: Read CU from the Capacity Metrics model
         run: |

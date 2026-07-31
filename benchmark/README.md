@@ -1,7 +1,7 @@
 # benchmark — how fast is each engine's output to *query*?
 
-`ci.yml` proves the four engines produce the **same rows**, and the *Table layout* workflow
-(`.github/workflows/table-layout.yml`, dispatch-only) reports how each one physically wrote them. This adds the missing half: how long Power BI takes to answer the same
+`dbt.yml` proves the four engines produce the **same rows**, and its final `layout` job reports how
+each one physically wrote them. This adds the missing half: how long Power BI takes to answer the same
 DAX against each engine's own copy of `mart.fct_summary`.
 
 Three steps, and nothing else: **deploy a semantic model per engine, run the queries, report the
@@ -24,7 +24,7 @@ a Fabric Spark V-Order copy of one pristine fact, then benchmarked two semantic 
 
 Here they already exist. Four engines write the same table, and it *is* the same table — same rows,
 four genuinely different physical shapes. Measured once against the live workspace, to establish the
-premise (the live version of this is the *Table layout* workflow, not this run):
+premise (the live version of this is the `layout` job of the `dbt` workflow, not this run):
 
 | engine | item | files | row groups | avg RG rows | size MB | vorder |
 |---|---|---:|---:|---:|---:|---|
@@ -37,7 +37,7 @@ All four: **143,844,166 rows**. `dim_calendar` 3,197 and `dim_duid` 689 everywhe
 types are byte-identical across engines, *including case* — which is what lets one `.bim` template
 serve all of them.
 
-Two consequences of having nothing to build: `ci.yml`'s parity dashboard is untouched (no new table
+Two consequences of having nothing to build: `dbt.yml`'s parity dashboard is untouched (no new table
 can appear in its unscoped `get_stats()`, so it cannot read a benchmark run as drift), and re-running
 is cheap in everything except capacity.
 
@@ -46,7 +46,7 @@ set `spark.sql.parquet.vorder.default` on the dbt-fabricspark session, so all fo
 non-V-Order writers. `profiles.yml` now sets it in the spark target's `spark_config.conf`, which
 makes `spark` the V-Order reference the upstream benchmark had to manufacture — for the *files it
 writes from then on*. V-Order is a write-time layout: the numbers above describe parquet already on
-disk and will only move as `fct_summary` is rewritten. Read the *Table layout* workflow, not this
+disk and will only move as `fct_summary` is rewritten. Read the `layout` job of the `dbt` workflow, not this
 table, for the current state — its `vorder` column is the live answer.
 
 ## What is compared
@@ -340,7 +340,7 @@ model cannot serve. Prose counts. (That one was caught for real, by that test, i
 has since been deleted.)
 
 **Checking the premise still holds** — the tables are at parity and each engine wrote them
-differently — is the *Table layout* workflow, or the same read from a laptop
+differently — is the `layout` job of the `dbt` workflow, or the same read from a laptop
 (CLAUDE.md: *"Query the lakehouses directly before instrumenting CI"*):
 
 ```python
@@ -349,14 +349,14 @@ duckrun.connect("abfss://<ws>@onelake.dfs.fabric.microsoft.com/<item-guid>/Table
                 read_only=True).get_stats("mart.*")
 ```
 
-On Windows leave `CURL_CA_INFO` unset — ci.yml's Linux CA path makes the parquet footer read fail
+On Windows leave `CURL_CA_INFO` unset — dbt.yml's Linux CA path makes the parquet footer read fail
 with an SSL error that looks like a credentials problem.
 
 ## Prerequisites
 
 - The repo's federated identity (`AZURE_CLIENT_ID` / `AZURE_TENANT_ID`, the same two secrets
-  `ci.yml` uses) needs access to the workspace, and enough rights to create semantic models and run
+  `dbt.yml` uses) needs access to the workspace, and enough rights to create semantic models and run
   a TMSL refresh (cold timing needs write; without it the run silently falls back to hot-only).
 - `mart.fct_summary`, `mart.dim_duid` and `mart.dim_calendar` must already exist in each engine's
-  item — built by `ci.yml`. This reads them and never writes.
+  item — built by `dbt.yml`. This reads them and never writes.
 - XMLA read/write must be enabled on the capacity.

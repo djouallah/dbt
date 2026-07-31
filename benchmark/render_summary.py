@@ -221,7 +221,7 @@ def s5_pointers(rep):
       "one `report-fragment-<engine>` per engine, as each job wrote it.")
     w("- every number above recomputes from run_report.json (`timings.*`, `analysis.*`) — "
       "`RUN_REPORT=<file> python benchmark/render_report.py`, no credentials.")
-    w("- physical layout per engine, and row-count parity: the *Table layout* workflow.")
+    w("- physical layout per engine, and row-count parity: the `layout` job of the `dbt` workflow.")
     w()
 
 

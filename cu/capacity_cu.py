@@ -64,7 +64,7 @@ CAPACITY = os.environ.get("CU_CAPACITY_ID", "").strip()
 MODELS = [m.strip() for m in os.environ.get(
     "CU_MODELS", "aemo_duckrun,aemo_iceberg,aemo_spark,aemo_dwh").split(",") if m.strip()]
 
-# The workspace the models live in — the same one ci.yml and benchmark.yml deploy to. Applied ON
+# The workspace the models live in — the same one dbt.yml and benchmark.yml deploy to. Applied ON
 # TOP of the name filter, not instead of it: display names are not unique across a tenant, so a
 # stale `aemo_spark` in some other workspace would otherwise be silently added to this one's CU.
 # Blank = every workspace on the capacity.
@@ -144,7 +144,7 @@ MAX_RUN_COLS = int(os.environ.get("CU_RUN_COLS", "8") or 0)
 # WHY, and the answer is almost always the layout — 37,227 CU next to "386 files, 122k avg row group"
 # is a finding, while either number alone is trivia.
 #
-# The numbers are NOT read here. They come from `stats.py` in the *Table layout* workflow, which already
+# The numbers are NOT read here. They come from `stats.py` in the `layout` job of the `dbt` workflow, which already
 # reads all four Delta logs, via the `stats` artifact of the latest successful `dbt` run — the workflow
 # downloads it and points STATS_JSON at it. That keeps this directory's one hard property intact:
 # `requests` is still the whole dependency list, there is no duckrun, no storage token, no OneLake
@@ -645,10 +645,10 @@ def render_layout(doc, cu_by_model, table=LAYOUT_TABLE):
         writer = (meta.get(e) or {}).get("writer") or "—"
         print(f"| {e} | `{writer}` | {'—' if cu is None else f'{cu:,.1f}'} | "
               + " | ".join(cells) + f" | {'yes' if vo else 'no'} |")
-    print(f"\n<sub>Layout from the **Table layout** run `{run.get('id') or '?'}` "
+    print(f"\n<sub>Layout from the **layout** job of `dbt` run `{run.get('id') or '?'}` "
           f"(sha `{(run.get('sha') or '?')[:7]}`), written {run.get('written') or '?'} — **a different "
           f"run from the CU above**, so read it as \"the layout as of that dispatch\", and dispatch "
-          f"*Table layout* again if the tables have been rewritten since. The CU column is this "
+          f"`dbt` again if the tables have been rewritten since. The CU column is this "
           f"report's own total per engine. Nothing here re-read a Delta log; the full eight-table "
           f"dashboard is that run's own summary.</sub>")
 

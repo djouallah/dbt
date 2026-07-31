@@ -90,7 +90,7 @@ All four share `FILES_PATH` (the landing lakehouse) and `DBT_SCHEMA` (default `m
 
 ## CI — all four engines on real OneLake
 
-`.github/workflows/ci.yml` runs the pipeline on **all four engines against Microsoft Fabric /
+`.github/workflows/dbt.yml` runs the pipeline on **all four engines against Microsoft Fabric /
 OneLake**. It's a matrix job (one per engine) that, in the `testing` workspace:
 
 1. provisions the engine's Fabric item(s) **if missing** — a lakehouse for

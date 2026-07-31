@@ -21,8 +21,10 @@ import duckrun
 
 # Config the shipped project reads via env_var() — forwarded into the notebook if present.
 # Deliberately excludes tokens and the runner-only OneLake curl transport (AZURE_TRANSPORT_*).
+# REBUILD_SUMMARY was forwarded here; the input that set it is gone. SPARK_NATIVE_ENABLED does
+# not belong here either — it is a Livy conf, and there is no Livy session on this path.
 _FORWARD = ("FILES_PATH", "ONELAKE_TABLES_PATH", "WAREHOUSE_PATH", "ONELAKE_ENDPOINT",
-            "DBT_SCHEMA", "download_limit", "daily_download_limit", "REBUILD_SUMMARY")
+            "DBT_SCHEMA", "download_limit", "daily_download_limit")
 
 
 def main() -> int:

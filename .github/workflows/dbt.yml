@@ -9,11 +9,13 @@ name: dbt
 # (tests/duckdb, tests/dwh, tests/spark) and gated per folder in dbt_project.yml, the same way
 # models/ is. What is gone is the neutral reader: no test compares one engine to another, so a
 # green leg means that engine is self-consistent and nothing more. The mart parity table is the only
-# cross-engine signal there is — and it is no longer produced here: it moved to the dispatch-only
-# `Table layout` workflow (.github/workflows/table-layout.yml), so a green run of THIS workflow says
-# nothing about whether the four engines agree. It moved because it costs ~10 minutes of OneLake reads
-# (iceberg alone 12m+) to report a layout that only changes when the tables are rewritten — per-build
-# was paying that for numbers that had not moved. Dispatch it after a build you care about.
+# cross-engine signal there is, and the `layout` job at the bottom runs it as the last step of the
+# build — gated on all four legs being green, since a table with holes in it reads as drift that
+# isn't there. It costs ~10 minutes of OneLake reads (iceberg alone 12m+) per dispatch to report
+# numbers that only move when the tables are rewritten; that is what the build pays for ending
+# with a cross-engine check instead of nobody noticing drift until someone remembers to look.
+# There is no standalone copy any more: `Table layout` (workflows/table-layout.yml) was deleted,
+# so this job is the only producer of the parity table and of the `stats` artifact `cu/` reads.
 #
 # This comment used to say dwh and spark were "graded by their generic column tests alone". They
 # were graded by nothing: the gate sat on the project key, which also matches generic tests (their
@@ -45,8 +47,19 @@ on:
         type: choice
         options: ["4", "8", "16", "32", "64"]
         default: "8"
-      rebuild_summary:
-        description: "full-history rebuild of fct_summary (delete+insert, no DROP)"
+      # `rebuild_summary` was removed. The dwh model still honours REBUILD_SUMMARY /
+      # `--vars 'rebuild_summary: true'` by hand; nothing in CI sets it.
+      native_execution_engine:
+        description: "spark leg only: Fabric Native Execution Engine (NEE)"
+        type: boolean
+        default: false
+      spark_resource_profile:
+        description: "spark leg only: writeHeavy = workspace default (no V-Order); readHeavyForPBI turns V-Order on"
+        type: choice
+        options: ["writeHeavy", "readHeavyForPBI", "readHeavyForSpark"]
+        default: "writeHeavy"
+      reset_outputs:
+        description: "DESTRUCTIVE: delete the 4 output items and rebuild from scratch (landing data untouched)"
         type: boolean
         default: false
 
@@ -74,11 +87,34 @@ env:
   DUCKDB_TEMP_DIR: /tmp/duckdb_spill
   CI_DOWNLOAD_LIMIT: ${{ inputs.download_limit || '200' }}
   FABRIC_CORES: ${{ inputs.cores || '8' }}
-  # Drift-reconciliation lever (fabric_run.py forwards it into notebooks). '1' rebuilds
-  # fct_summary from scratch: --full-refresh on the merge engines (duckrun/iceberg/spark),
-  # and on dwh a full emit through its normal delete+insert, since a DROP there deadlocks
-  # Fabric's background maintenance and rebinds Direct Lake.
-  REBUILD_SUMMARY: ${{ inputs.rebuild_summary && '1' || '0' }}
+  # Spark leg only, off by default: profiles.yml puts spark.native.enabled into the Livy conf.
+  # That single key is Microsoft's current documented session-level recipe. NEE has documented
+  # semantic divergences (round(), DECIMAL→FLOAT), so expect small value differences against the
+  # other three engines while it is on.
+  SPARK_NATIVE_ENABLED: ${{ inputs.native_execution_engine && 'true' || 'false' }}
+  # Spark leg only. writeHeavy is the workspace default, so the default dispatch writes what a
+  # plain Fabric session writes — and therefore NO V-Order, which readHeavyForPBI alone enables.
+  # It was pinned to readHeavyForPBI in profiles.yml; making it an input means a layout change is
+  # something a dispatch asks for. Expect the next build's layout table to move.
+  SPARK_RESOURCE_PROFILE: ${{ inputs.spark_resource_profile || 'writeHeavy' }}
+  # Start-from-nothing lever, off by default. '1' makes each leg's provision.py DELETE its own
+  # output item (dbt_delta / dbt_iceberg / dbt_spark / dbt_dwh) and recreate it empty, so dbt
+  # builds every model from scratch — this is what to reach for when an engine's tables are
+  # wrong in a way no incremental write can repair, instead of --full-refresh (which DROPs on
+  # dwh and fails outright on iceberg; see CLAUDE.md).
+  #
+  # `dbt_landing` is NEVER dropped: provision.py excludes it by name in both ensure() and
+  # drop(), so the `land` job is unaffected by this flag. That lakehouse holds the downloaded
+  # AEMO archive — the only data here that cannot be rebuilt from the workspace itself — and
+  # re-landing it means re-downloading years of files a few hundred at a time.
+  #
+  # Two consequences of a reset, neither of which surfaces as an error: a recreated item has a
+  # NEW GUID, so anything bound to the old one (a Direct Lake semantic model, a shortcut) points
+  # at an item that is gone; and the recreated warehouse comes back with a fresh connectionString
+  # and no grants. `benchmark/` is fine — it deletes and recreates its models per dispatch.
+  # It is also what replaced the `rebuild_summary` input: one path to a clean table on all four
+  # engines, instead of three engine-specific ones of which the iceberg one never worked.
+  RESET_OUTPUTS: ${{ inputs.reset_outputs && '1' || '0' }}
 
 jobs:
   land:
@@ -184,15 +220,57 @@ jobs:
         # that scanned fct_summary whole, and those were deleted when the suite was cut back to
         # one grain check. A selector matching zero nodes is a warning and a lie about what runs.
         run: dbt build --target ${{ matrix.engine }} --profiles-dir . || dbt retry --target ${{ matrix.engine }} --profiles-dir .
-      # spark merges its summary, so its rebuild lever is --full-refresh. dwh needs no step:
-      # REBUILD_SUMMARY is in the env and its model reads it (merge, never a DROP).
-      # `build`, not `run`: the rebuild lands AFTER the main invocation already tested the
-      # pre-rebuild table, so the tests have to be re-run against what replaced it.
-      - name: Rebuild fct_summary
-        if: matrix.engine == 'spark' && env.REBUILD_SUMMARY == '1'
-        run: dbt build --select fct_summary --full-refresh --target spark --profiles-dir .
+      # The conditional `Rebuild fct_summary` step (spark, --full-refresh) went with the
+      # rebuild_summary input. By hand: dbt build --select fct_summary --full-refresh.
       - if: always()
         uses: actions/upload-artifact@v4
         with:
           name: dbt-target-${{ matrix.engine }}
           path: target/
+
+  # The cross-engine check, back as the last step of the build. `stats.py` reads all eight shared
+  # tables from each item's Delta log and puts the four side by side — no test compares one engine
+  # to another, so this is the only thing in the repo that can see drift.
+  #
+  # NO `if:` ON PURPOSE. The default is success(), so this runs only when every leg of `fabric`
+  # AND `server` is green — all four engines. That is the whole point of it being here rather than
+  # dispatched: a partial run publishes a table with holes in it, and holes read as drift that
+  # isn't there. `fail-fast: false` on both matrices means a failing leg still lets the others
+  # finish; it just means no dashboard for that run.
+  #
+  # It costs ~10 minutes per build and reports numbers that only move when tables are REWRITTEN —
+  # that cost is why it was once split out into a `Table layout` workflow. That workflow is gone:
+  # the layout is worth a green build's ten minutes, and a second copy was a second thing to keep
+  # in step. Reading the layout now means running a build.
+  # It only READS — nothing is written or provisioned.
+  layout:
+    name: table layout
+    needs: [fabric, server]
+    runs-on: ubuntu-latest
+    # get_stats() over OneLake is slow on the iceberg item (12m+ observed for that one engine);
+    # 15 minutes was cancelling stats.py mid-table and turning slowness into a red run.
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: {python-version: "3.11"}
+      - run: pip install duckrun requests
+      # `tee`, and STATS_JSON, so the result is not trapped on the run page: the markdown lands in
+      # the step summary AND the job log, and the same numbers land in stats.json for `cu/`.
+      # pipefail so a failed read cannot come out green through tee.
+      - name: Parity + layout dashboard
+        env:
+          STATS_JSON: ${{ github.workspace }}/stats.json
+        run: |
+          set -o pipefail
+          python .github/scripts/stats.py | tee -a "$GITHUB_STEP_SUMMARY"
+      # `cu/` downloads this to print the layout beside the CU — off the latest successful run of
+      # this workflow, which is the only place it comes from now.
+      - name: Upload stats.json
+        if: always()
+        continue-on-error: true
+        uses: actions/upload-artifact@v4
+        with:
+          name: stats
+          path: stats.json
+          if-no-files-found: warn

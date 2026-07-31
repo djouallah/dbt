@@ -13,7 +13,7 @@ which engine the reference was. Ratios are now stated against the FASTEST engine
 is a property of the measurement rather than of the input list.
 
 Deliberately NO parquet/geometry analysis. Physical layout (files, row groups, size, v-order,
-compression) is already reported per engine by `.github/scripts/stats.py` in the *Table layout* workflow;
+compression) is already reported per engine by `.github/scripts/stats.py` in the `layout` job of the `dbt` workflow;
 duplicating it here would mean a second, slower reader of the same Delta logs saying the same thing.
 This measures wall-clock and nothing else.
 
@@ -249,7 +249,7 @@ def _summary_table(rep, analysis):
     # No `mode` column: every model is Direct Lake, which is the premise rather than a variable —
     # four adapters, one way of reading what they wrote. `writer` is the axis under test.
     out += ["", "<sub>Physical layout per engine — files, row groups, size, v-order, compression — "
-                "is the *Table layout* workflow, not this run.</sub>"]
+                "is the `layout` job of the `dbt` workflow, not this run.</sub>"]
     _write("\n".join(out) + "\n")
 
 

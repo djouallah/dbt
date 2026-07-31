@@ -305,7 +305,7 @@ the Jinja produced text.
 ## `--full-refresh` is not a rebuild lever on every engine
 
 `REBUILD_SUMMARY=1` fans out to three different mechanisms: `fabric_build.py` appends
-`dbt run --select fct_summary --full-refresh` for **both** duckrun and iceberg, `ci.yml` adds its
+`dbt run --select fct_summary --full-refresh` for **both** duckrun and iceberg, `dbt.yml` adds its
 own `--full-refresh` step for spark, and the dwh model reads the env var and emits every date
 through its ordinary `delete+insert`. Only dwh's route is documented as special. The other three
 were assumed equivalent. Two of them are not.

@@ -87,7 +87,7 @@ aemo_electricity:
       # Deliberately NO session_idle_timeout: setting it forces Fabric to bypass starter pools
       # (cold on-demand cluster, slower startup) and it did NOT stop the observed session
       # deaths anyway — sessions ended at ~35-40 min BUSY, with and without it, so the cap is
-      # Fabric-side and not configurable here. The `|| dbt retry` in ci.yml heals the tail:
+      # Fabric-side and not configurable here. The `|| dbt retry` in dbt.yml heals the tail:
       # a fresh process gets a fresh session and re-runs only the failed models.
       # dbt-fabricspark requires spark_config.name (the Livy session/app name).
       # NOTE: compute sizing is NOT configurable from here — Livy API sessions take the WORKSPACE
@@ -123,7 +123,7 @@ aemo_electricity:
       # the key back BELOW the profile line and say so here.
       #
       # Cost: readHeavyForPBI changes write layout for the whole spark leg, not just V-Order —
-      # judge it in the `Table layout` workflow. Upside: this is the same profile the Fabric
+      # judge it in the `layout` job of the `dbt` workflow. Upside: this is the same profile the Fabric
       # ENVIRONMENT experiment was built to obtain and REVERTED for costing the starter pool (see
       # CLAUDE.md) — one line here gets it with no environment and no cold-start penalty.
       # If it ever stops being enough: a table property (`+tblproperties:
@@ -133,10 +133,31 @@ aemo_electricity:
       # To re-measure any of this, restore the probe: `git show df1e5ec -- macros/probe_spark_conf.sql`.
       # Never judge it from the Spark UI Environment tab — it shows the launch-time SparkContext
       # conf, not the SparkSession, so it reports nothing either way.
+      #
+      # BOTH KEYS BELOW ARE NOW DISPATCH INPUTS, and both default to the plain workspace
+      # behaviour — so a default run writes writeHeavy layout with NO V-Order, which is what the
+      # spark leg did before readHeavyForPBI was set here at all.
+      #
+      # NATIVE EXECUTION ENGINE (Gluten/Velox): off unless the native_execution_engine input is
+      # ticked. `spark.native.enabled` is the whole recipe — Microsoft's current session-level
+      # doc sets that one key and nothing else. (Earlier preview guidance, and most community
+      # posts, pair it with `spark.shuffle.manager=…ColumnarShuffleManager`; that is not in the
+      # current doc, so it is not set here.) It is an EXECUTION change with documented
+      # divergences (round(), DECIMAL→FLOAT), so expect small value differences against the
+      # other engines while it is on. Not in any resource profile's config set, so the profile
+      # cannot clobber it the way it clobbered vorder.default.
       spark_config:
         name: dl_vorder_build
         conf:
-          # Overrides the workspace's writeHeavy default. This single line is what enables V-Order;
-          # an explicit spark.sql.parquet.vorder.default alongside it is redundant at best and was
-          # a silent no-op on its own. See the note above before adding one back.
-          # spark.fabric.resourceProfile: "readHeavyForPBI"
+          # This line was briefly commented out (37ebff8) to stop forcing readHeavyForPBI; the
+          # input below is the same intent, kept selectable. Note the small difference: the key is
+          # now always SENT, at writeHeavy, rather than omitted — identical while writeHeavy is the
+          # workspace default, and a pin rather than a follow if that default ever changes.
+          # writeHeavy is the workspace default and therefore the no-op value. readHeavyForPBI is
+          # the ONLY profile that turns V-Order on (readHeavyForSpark does not set vorder at all)
+          # and it also flips optimizeWrite with a 1GB bin size, so it rewrites file layout well
+          # beyond V-Order — which is why it is now opt-in per dispatch rather than standing.
+          # An explicit spark.sql.parquet.vorder.default here is NOT a substitute: the profile is
+          # applied after the session conf and overwrote that key for three runs. See CLAUDE.md.
+          spark.fabric.resourceProfile: "{{ env_var('SPARK_RESOURCE_PROFILE', 'writeHeavy') }}"
+          spark.native.enabled: "{{ env_var('SPARK_NATIVE_ENABLED', 'false') }}"

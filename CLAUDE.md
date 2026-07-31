@@ -6,7 +6,7 @@ per dialect (`models/duckdb`, `models/dwh`, `models/spark`, gated by `+enabled` 
 `dbt_project.yml`) and every leg runs `dbt build`, so each engine writes and tests its own output
 in one DAG walk. `stats.py` reads all four items through Delta on OneLake and puts every shared table
 side by side — it is the only cross-engine check there is, and it is **no longer part of the build**:
-it is the dispatch-only `Table layout` workflow, because it costs ~10 minutes to report something that
+it is the dispatch-only `layout` job, because it costs ~10 minutes to report something that
 only changes when the tables are rewritten.
 
 **The test suite covers the mart and nothing else** — `fct_summary`, `dim_duid`, `dim_calendar`.
@@ -25,7 +25,7 @@ test declared in `models/_*.yml` gets fqn `['aemo_electricity', '<test_name>']` 
 segment, because the patch files sit at the root of `models/` — so a project-level `+enabled`
 matches it too. `data_tests: aemo_electricity: +enabled: "{{ target.type in ['duckrun','duckdb'] }}"`
 therefore disabled the four `unique`/`not_null` tests along with the DuckDB-SQL singular ones, and
-**dwh and spark ran zero tests** for as long as it stood — while this file and `ci.yml` both said
+**dwh and spark ran zero tests** for as long as it stood — while this file and `dbt.yml` both said
 the generic ones still applied. `dbt build --target dwh` was `dbt run` wearing a hat. Check a
 gating change with `dbt parse --target <name>` and read the manifest's `disabled` block; the
 adapters all install locally and parse needs no credentials, so it costs seconds and no capacity.
@@ -288,9 +288,12 @@ Rules that keep it honest:
   just a leaked-semaphore warning). On **iceberg it fails every time** —
   `Failed to commit Iceberg transaction: Table fct_summary__dbt_tmp does not exist`. That is
   dbt-duckdb's swap materialization, *not* an Iceberg limit: `CREATE`/`DROP`/`RENAME`/`MERGE` all
-  work against that catalog when issued directly. `fabric_build.py` fires the rebuild step for
-  duckrun **and** iceberg from one flag, so `REBUILD_SUMMARY=1` breaks the iceberg leg and leaves
-  a `fct_summary__dbt_backup` behind. See [LEARNINGS.md](LEARNINGS.md).
+  work against that catalog when issued directly. `fabric_build.py` used to fire the rebuild step
+  for duckrun **and** iceberg from one flag, so `REBUILD_SUMMARY=1` broke the iceberg leg and left
+  a `fct_summary__dbt_backup` behind — which is why the `rebuild_summary` workflow input and both
+  CI rebuild steps were removed. `REBUILD_SUMMARY` / `--vars 'rebuild_summary: true'` survives
+  only as a by-hand lever in the dwh model; CI's clean-table lever is `reset_outputs`.
+  See [LEARNINGS.md](LEARNINGS.md).
   This lever carries more weight now that both duckdb targets are insert-only on `fct_summary`: a
   **revised** `mw`/`price` cannot be repaired by any incremental run there, only by a rebuild.
 
@@ -387,7 +390,11 @@ still run it by hand to reproduce a CI failure. That is a debugging affordance, 
   Asking for the *profile* instead binds, and V-Order follows it.
   **`profiles.yml` therefore sets the profile and nothing else** — the explicit
   `spark.sql.parquet.vorder.default` was removed, because on its own it did nothing and alongside
-  the profile it made the two indistinguishable. Microsoft's
+  the profile it made the two indistinguishable.
+  **The profile is no longer pinned: it is the `spark_resource_profile` dispatch input, defaulting
+  to `writeHeavy`.** So a default run writes the plain workspace layout and **no V-Order** — the
+  measurements below still hold, they just describe what you get by dispatching with
+  `readHeavyForPBI` rather than what every run does. Microsoft's
   [resource profile reference](https://learn.microsoft.com/en-us/fabric/data-engineering/configure-resource-profile-configurations)
   confirms the key is redundant — it publishes each profile's exact config set:
 
@@ -404,14 +411,14 @@ still run it by hand to reproduce a CI failure. That is a debugging affordance, 
   with each other and against that sentence; trust them. Second, the profile also flips
   `optimizeWrite` on with a **1 GB bin size** against `writeHeavy`'s 128 MB, so it rewrites file
   layout far beyond V-Order — `fct_summary` at 19 files / 1.2 GB should collapse to very few files.
-  Expect the next `Table layout` run to move a lot, and read it as the profile working, not drift.
+  Expect the next build's layout table to move a lot, and read it as the profile working, not drift.
   Two dead hypotheses, recorded so they are not retried: the adapter is not dropping the conf, and
   REPL packing is not either (the canary reads `alive` on the worker, which is a packed acquire).
   Two earlier claims in this file were wrong and are retracted: that the conf was "inert / has
   never been in force" (delivery works; only the one key was losing), and that the conf was "the
   only thing switching V-Order on at all" (it switched nothing on until the profile changed).
   **Cost, and it is not free:** `readHeavyForPBI` changes write layout for the whole spark leg, not
-  just V-Order. Judge it in the *Table layout* workflow before treating it as settled — and note
+  just V-Order. Judge it in the `layout` job of the `dbt` workflow before treating it as settled — and note
   this is the same profile the reverted Fabric Environment was built to get, now obtained with one
   line in `profiles.yml` and no environment, so no starter-pool penalty.
   To re-measure, re-add the probe: `git show df1e5ec -- macros/probe_spark_conf.sql`.
@@ -538,6 +545,38 @@ still run it by hand to reproduce a CI failure. That is a debugging affordance, 
 ## CI etiquette
 
 - Cancel superseded runs immediately (`gh run cancel <id>`) — spark and Fabric legs cost money.
+- **`reset_outputs` is the start-from-nothing lever, off by default, and it never touches the
+  landing data.** The `dbt` workflow's dispatch input sets `RESET_OUTPUTS=1`, which each leg's
+  own `provision.py` step reads: it DELETEs that engine's output ITEM (`dbt_delta`,
+  `dbt_iceberg`, `dbt_spark`, `dbt_dwh`) and recreates it empty, so dbt then builds every model
+  from scratch. Scoping is by construction — a leg only ever names its own item — and
+  `dbt_landing` is excluded **twice**: `ensure()` skips it (so the `land` job is unaffected by a
+  workflow-level flag rather than failing) and `drop()` refuses it outright. That lakehouse holds
+  the downloaded AEMO archive, the one thing here that cannot be rebuilt from the workspace, and
+  re-landing it means re-downloading years of files `download_limit` at a time.
+  This is the lever to reach for when a table is wrong in a way no incremental write can repair —
+  a revised `mw`/`price` on the insert-only duckdb targets, say — because the per-engine
+  alternatives are all sharp: `--full-refresh` DROPs on dwh, fails every time on iceberg, and has
+  been killed outright on duckrun's 143M-row `fct_summary`. It deletes the item instead of a
+  folder, which is the difference between a rebuild and the `[DELTA_TABLE_NOT_FOUND]` trap.
+  Two costs, neither of which surfaces as an error: a recreated item has a **new GUID**, so
+  anything bound to the old one (a Direct Lake semantic model, a shortcut) points at something
+  gone — `benchmark/` survives because it deletes and recreates its models per dispatch — and the
+  recreated warehouse comes back with a fresh `connectionString` and **no grants**.
+  The reset path runs offline against stubbed HTTP in seconds; do that before dispatching, since
+  the flag's failure mode is deleting the wrong thing.
+- **`native_execution_engine` toggles Fabric's NEE on the spark leg, off by default.** It sets
+  `SPARK_NATIVE_ENABLED` → `spark.native.enabled` in the Livy conf, and that one key is the whole
+  recipe: Microsoft's current session-level doc sets nothing else. Earlier preview guidance and
+  most community posts pair it with
+  `spark.shuffle.manager=org.apache.spark.shuffle.sort.ColumnarShuffleManager` — that spelling is
+  **absent from the current doc**, so this repo does not set it; check the doc, not a blog, before
+  adding it. Read the NEE bullet above before using the toggle: execution-side semantic
+  divergences, silent JVM fallback for unsupported operators, and V-Order behaviour still unstated.
+- **`spark_resource_profile` is a dispatch choice, default `writeHeavy`** (the workspace default,
+  i.e. no V-Order). `readHeavyForPBI` is the only value that enables V-Order, and it also flips
+  `optimizeWrite` to a 1 GB bin size, so ticking it rewrites file layout broadly — judge it in the
+  `layout` job's table at the end of the run.
 - **Nothing runs on push. Both workflows are `workflow_dispatch` only.** Pushing to `main` used to
   trigger the four Fabric legs, which meant any code change — a script, a workflow file, a comment —
   spent paid capacity nobody asked for, and a batch of edits queued several such runs on the
@@ -548,14 +587,17 @@ still run it by hand to reproduce a CI failure. That is a debugging affordance, 
   its own conclusion, so `gh run view <id> --json jobs` reads straight: `failure` means that
   leg failed. Cancelling never saved the Fabric compute anyway — the notebook or Livy session
   keeps running workspace-side after the GitHub job dies — it only erased the evidence.
-- **The parity dashboard is not part of this workflow any more** — it is the dispatch-only
-  `Table layout` workflow, so a green `dbt` run reports nothing about cross-engine agreement, and
-  nobody sees drift until someone dispatches it. It used to be the `summary` job here, with no
-  `if: always()`, so that a partial run could not publish a table with holes in it that reads as drift
-  that isn't there. The same hazard now takes a different shape: dispatched by hand it can read four
-  lakehouses mid-build. It shares `onelake-<ref>` so it queues behind a build rather than racing one,
-  which covers the GitHub-side case but not a Fabric notebook still finishing after its job went
-  green.
+- **The parity dashboard is the last job of `dbt.yml` again (`layout`), and it exists in the
+  dispatch-only `layout` job too.** Same steps in both — change them together. In
+  `dbt.yml` it carries **no `if:`**, which is load-bearing: the default `success()` means it runs
+  only when every leg of `fabric` and `server` is green, so a partial run cannot publish a table
+  with holes in it that reads as drift that isn't there. The standalone copy is for asking the
+  question without spending four Fabric legs, and it keeps the hazard the split introduced —
+  dispatched by hand it can read four lakehouses mid-build. It shares `onelake-<ref>` so it queues
+  behind a build rather than racing one, which covers the GitHub-side case but not a Fabric
+  notebook still finishing after its job went green. The cost of having it back in the build is
+  ~10 minutes of OneLake reads per dispatch for numbers that only move when tables are rewritten;
+  that was the reason for the split, and it is now accepted so that drift cannot go unnoticed.
 - Every leg is `dbt build` — the engine tests its own output, in the same DAG walk that wrote it.
   This replaced a separate test job that graded all four items with one neutral duckrun reader.
   What was bought: a failure stops at the node that broke, and four jobs disappeared. What was
@@ -589,22 +631,19 @@ still run it by hand to reproduce a CI failure. That is a debugging affordance, 
   `fabric_build.py`). The retry ladder is for transient OneLake commit conflicts, which are a
   property of the write; a failed assertion is deterministic and would just re-scan on Fabric
   compute to reach the same verdict.
-- **The parity dashboard is its OWN workflow now (`Table layout`, `.github/workflows/table-layout.yml`),
-  dispatch-only — because it costs ~10 minutes and reports something that barely moves.** It was the
-  `summary` job of `ci.yml`. The iceberg item alone reads at 12m+ (386 files, 1,175 row groups over
-  OneLake), which is why its timeout is 40 minutes, while what it reports — files, row groups, size,
-  v-order — only changes when the tables are **rewritten**, and the facts are append-only
-  incrementals. Every `dbt` dispatch was buying a ten-minute re-read of numbers that had not moved
-  since the previous one. Two things fell out of the split: it can be asked *without* spending four
-  Fabric legs first, and its result became **reusable** — `stats.py` also writes `STATS_JSON`, the
-  workflow uploads it as the `stats` artifact, and `cu/` downloads it to print the layout beside the CU.
-  A cached reading is sound *because* the layout is near-static; that is the same property that made
-  running it per build wasteful. Hold onto the costs: no test compares one engine to another, so
-  **nothing notices drift until someone dispatches this**; and being manual it can be fired mid-build,
-  reading half-written tables and reporting drift that is a build in flight — which is why it shares
-  `onelake-<ref>` with `ci.yml` so a dispatch queues rather than races. The JSON is a data contract with
-  `cu/`: renaming a `DETAIL_KEYS` entry makes the layout table disappear over there with a note, not an
-  error, so change both together.
+- **There was a dispatch-only `Table layout` workflow. It is deleted — the `layout` job is the only
+  copy, and reading the layout now means running a build.** Keep its numbers in mind: the iceberg
+  item alone reads at 12m+ (386 files, 1,175 row groups over OneLake), which is why the timeout is
+  40 minutes and not 15, while what it reports — files, row groups, size, v-order — only changes
+  when the tables are **rewritten**, and the facts are append-only incrementals. That is the cost
+  every green dispatch now pays, and it was the argument for splitting it out; it lost to the fact
+  that nothing else compares the engines, so a dashboard nobody remembers to dispatch reports
+  nothing. What the split bought and is now gone: asking the question *without* spending four
+  Fabric legs. What survives is the **reusable** half — `stats.py` writes `STATS_JSON`, the job
+  uploads it as the `stats` artifact, and `cu/` downloads it from the latest successful `dbt` run
+  to print the layout beside the CU. A cached reading is sound *because* the layout is near-static.
+  The JSON is a data contract with `cu/`: renaming a `DETAIL_KEYS` entry makes the layout table
+  disappear over there with a note, not an error, so change both together.
 - It runs `stats.py` and nothing else, over **every shared table** in pipeline order —
   the staging view, the four facts, then `dim_calendar`/`dim_duid`/`fct_summary`. It was briefly
   cut to the three mart tables on the argument that the facts are inputs whose rows are implied by
@@ -617,7 +656,7 @@ still run it by hand to reproduce a CI failure. That is a debugging affordance, 
 
 ## The query benchmark is a second workflow, and it only reads
 
-`benchmark/` + `.github/workflows/benchmark.yml` ("Direct Lake benchmark") ask the question `ci.yml`
+`benchmark/` + `.github/workflows/benchmark.yml` ("Direct Lake benchmark") ask the question `dbt.yml`
 does not: the parity table says the four engines hold the *same rows*, this measures how long Power BI
 takes to **query** them. Ported from `djouallah/duckrun`'s `parquet_layout.yml`.
 [benchmark/README.md](benchmark/README.md) has the detail; what matters when touching this repo:
@@ -665,7 +704,7 @@ takes to **query** them. Ported from `djouallah/duckrun`'s `parquet_layout.yml`.
 - **Deploy models, run queries, report timings — that is the whole scope.** Upstream had to *build*
   the layouts it compared; here the four engines' own `mart.fct_summary` already are four layouts, at
   row-count parity. So there is no build phase, and deliberately **no stats phase either**: physical
-  layout is `stats.py`'s job in the *Table layout* workflow, and re-deriving it here would be a second, slower reader of
+  layout is `stats.py`'s job in the `layout` job of the `dbt` workflow, and re-deriving it here would be a second, slower reader of
   the same Delta logs. The only endpoints touched are the Fabric control plane and XMLA. Keep it that
   way — the moment this writes a table into a lakehouse, `stats.py`'s unscoped `get_stats()` starts
   counting it and the parity dashboard reads it as drift.
@@ -684,7 +723,7 @@ takes to **query** them. Ported from `djouallah/duckrun`'s `parquet_layout.yml`.
   — the laptop is not a supported way to spend this capacity, and a second orchestration shape kept
   alive to serve it meant two implementations answering the same question. `dbt`-style scouting is
   still a dispatch, just with `engines=duckrun,spark runs=3 think_seconds=0 gap_seconds=0`.
-- **It shares `ci.yml`'s concurrency group (`onelake-<ref>`) deliberately.** Not for correctness, but
+- **It shares `dbt.yml`'s concurrency group (`onelake-<ref>`) deliberately.** Not for correctness, but
   because a concurrent dbt build contends for the same capacity, and capacity contention is the one
   thing a wall-clock benchmark cannot absorb. So a benchmark dispatch queues behind a `dbt` dispatch
   rather than racing it. Do not give it its own group to make it start sooner.

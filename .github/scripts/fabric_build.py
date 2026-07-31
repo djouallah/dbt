@@ -3,7 +3,7 @@ the landed data, writing to that engine's OneLake lakehouse.
 
 CI always runs this inside a throwaway Fabric Python notebook, as the entry script fabric_run.py
 ships via duckrun.run_python — a fresh interpreter whose cwd is the unpacked project root, with
-duckrun / dbt-duckdb already pip-installed. ci.yml used to invoke it on the GitHub runner too for
+duckrun / dbt-duckdb already pip-installed. dbt.yml used to invoke it on the GitHub runner too for
 folds a pending-file count called small; that path is gone.
 
 Nothing below is location-specific, and it is worth keeping that way — it is what makes this
@@ -99,17 +99,10 @@ def main() -> int:
                   f"retrying in {backoff}s (transient OneLake commit conflicts)", flush=True)
             time.sleep(backoff)
 
-    # One-time drift reconciliation. fct_summary's incremental path is a MERGE whose source
-    # is only the handful of dates that can still be stale, so the rebuild lever has to be
-    # dbt's own --full-refresh (a streaming overwrite) — a var that made the incremental
-    # branch emit all history would hand delta_rs a 143M-row merge source instead.
-    # `build`, not `run`: the invocation above already tested the PRE-rebuild fct_summary, so the
-    # table the leg reports on is not the one that was graded unless the tests run again after.
-    if ok and os.environ.get("REBUILD_SUMMARY") == "1":
-        cmd = ["dbt", "build", "--select", "fct_summary", "--full-refresh", *base]
-        print(f"[fabric_build] $ {' '.join(cmd)}", flush=True)
-        ok = subprocess.run(cmd).returncode == 0
-
+    # A REBUILD_SUMMARY=1 step used to follow (dbt build --select fct_summary --full-refresh).
+    # Removed with the workflow input: it fired for BOTH duckdb engines, and --full-refresh on
+    # iceberg fails every time (`Table fct_summary__dbt_tmp does not exist`, dbt-duckdb's swap
+    # materialization) and leaves a __dbt_backup behind.
     print(f"[fabric_build] {engine} build success={ok}")
     return 0 if ok else 1
 

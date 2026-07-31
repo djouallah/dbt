@@ -1,5 +1,5 @@
 """Table layout + row-count parity: duckrun.get_stats() over EVERY engine's output, pivoted to
-$GITHUB_STEP_SUMMARY. Run by the `Table layout` workflow (.github/workflows/table-layout.yml).
+$GITHUB_STEP_SUMMARY. Run by the `layout` job of .github/workflows/dbt.yml.
 
 The project's thesis is: same raw data -> four engines (duckrun/Delta, iceberg, Fabric Warehouse,
 Spark) -> identical output. So the final row counts should line up column-for-column. get_stats reads
