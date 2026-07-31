@@ -139,4 +139,4 @@ aemo_electricity:
           # Overrides the workspace's writeHeavy default. This single line is what enables V-Order;
           # an explicit spark.sql.parquet.vorder.default alongside it is redundant at best and was
           # a silent no-op on its own. See the note above before adding one back.
-          spark.fabric.resourceProfile: "readHeavyForPBI"
+          # spark.fabric.resourceProfile: "readHeavyForPBI"
