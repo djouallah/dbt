@@ -808,17 +808,46 @@ takes to **query** them. Ported from `djouallah/duckrun`'s `parquet_layout.yml`.
 
 ## `cu/` is a third workflow, and it shares nothing with the other two
 
-`cu/` + `.github/workflows/cu.yml` ("Capacity CU") answer what the querying *cost*: CU per semantic
-model, read from the Fabric Capacity Metrics app's own semantic model by DAX over the Power BI
+`cu/` + `.github/workflows/cu.yml` ("Capacity CU") answer what the workspace *cost*: CU per item,
+read from the Fabric Capacity Metrics app's own semantic model by DAX over the Power BI
 `executeQueries` REST endpoint. Fabric exposes **no per-operation CU REST API** — that model is the
 only authoritative source, which is why this exists at all. [cu/README.md](cu/README.md) has the
 detail.
 
+- **It reports ETL and analytics, not semantic models alone — and that is a REVERSAL of an earlier
+  decision made for a real reason.** Every item in the workspace is classified by kind: `etl` (the
+  lakehouses, the warehouse, the notebooks and whatever Fabric bills Livy against) against
+  `analytics` (the semantic models), rolled up per class and per run, so a dbt build's cost sits
+  beside a benchmark's in the same units. The first attempt at this width was reverted because it was
+  genuinely unreadable — a dozen OneLake operation types per lakehouse and a row per throwaway
+  `duckrun-py-*` notebook — so re-widening it only works because three guards bound it:
+  `CLASS_BY_KIND` rolls every row up to a class, `CU_OP_COLS` (6) folds the operation tail into one
+  `other` column that is **named and counted**, and `CU_GROUP_PREFIXES` collapses the notebooks to
+  one row. Remove a guard and the earlier verdict comes straight back. `etl: false` restores the old
+  scope exactly, which is what makes an older dispatch's numbers still comparable.
+- **An unrecognised item kind lands in `other` and is logged, never dropped.** That log line
+  (`kind X: N CU -> other`) is the route by which a kind gets into `CLASS_BY_KIND` — most usefully
+  whichever item Fabric attributes dbt's **Livy sessions** to, which has never been read off a real
+  dispatch. Do not guess it into the mapping; dispatch once and read stderr.
 - **The isolation is the design, not an accident.** No imports from `benchmark/`, no
   `run_report.json`, no artifact, no `needs:`, no shared concurrency group, no ADOMD, no .NET, no
-  duckrun — `requests` is the whole dependency list. It is speculative tooling, so it is built to be
+  duckrun — `requests` is the whole runtime dependency list, plus `pytest` for `cu/`'s own offline
+  suite, which imports nothing but `capacity_cu.py`. It is speculative tooling, so it is built to be
   deleted by removing one directory and one workflow file. Do not "DRY it up" against
   `benchmark/xmla_compare.py`; the duplication is what keeps that deletion free.
+- **`FABRIC_TOKEN` is a SECOND token on a different audience, and it is for naming items only.** The
+  datasets endpoint `PBI_TOKEN` reaches lists semantic models and nothing else, so the ETL items
+  would otherwise be named from the metrics app's lagging `'Items'` snapshot alone — and the item it
+  is least likely to hold is a `duckrun-py-*` notebook created by the run being measured. Unnamed
+  means unclassified, i.e. a bare GUID in `other`. Minted from the same OIDC login,
+  `continue-on-error`, and the script degrades with a log line rather than failing.
+- **`python -m pytest cu/ -q` is the gate, and `cu.yml` runs it before the Azure login.** Offline, no
+  token, ~2s. It pins the two run-allocation rules (exact by GUID for a redeployed item, by hour for
+  one that outlives a run), that every (item, hour) pair lands in **exactly one** run, the class
+  rollup agreeing with the item rows it sits above, and the operation fold losing nothing. All of
+  those fail the same way when wrong — a plausible number, printed with confidence. It also pins
+  `render_empty`, which was *called and never defined* until this change: the whole empty-report
+  diagnosis raised `NameError`, and an empty report is precisely when you need it.
 - **It correlates nothing with a GitHub run, and that is still true after the per-run split.** It
   cannot say which *query* produced a number. It can now say which *run* and which *engine*, and
   neither needed coupling to `benchmark/`: an engine has its own semantic model, so it is already its
@@ -835,7 +864,15 @@ detail.
   benchmark dispatches printed **two** columns — one pair was 1h20m apart, and the other pair was ten
   minutes apart, i.e. inside one hour bucket, where no gap value could ever have separated them.
   Because `deploy_models.py` deletes and recreates each model, a dispatch mints a fresh GUID per
-  engine and a model cannot appear twice in one run, so a repeated model name IS the boundary. Two
+  engine and a model cannot appear twice in one run, so a repeated model name IS the boundary.
+  **That rule covers the semantic models and nothing else**, which is why runs are *formed* from
+  them alone: a lakehouse keeps one GUID for years and a `duckrun-py-*` notebook gets a fresh name
+  every time, so neither can ever fire it. Everything that is not a semantic model is allocated to
+  those windows **by hour** (containment, then adjacency within the gap), and hours belonging to no
+  window cluster into a run of their own — which is what gives a dbt build with no benchmark beside
+  it a column at all. The honest cost: ETL allocation is only as sharp as the hour bucket, so an ETL
+  hour shared by two overlapping runs goes to one of them rather than being split. Analytics
+  allocation stays exact. Two
   consequences: adjacent columns may **overlap by an hour** (allocation is by GUID, so this costs no
   accuracy), and `CU_RUN_GAP_HOURS` now only splits a model that was *not* redeployed. Do not reach
   for the timepoint detail table to sharpen this further — the dedup trap below is why, and this

@@ -2,9 +2,13 @@ name: Capacity CU
 
 # MANUAL ONLY, non-gating, read-only. The third workflow in this repo, and the most disposable.
 #
-# dbt.yml builds the data; benchmark.yml measures how fast it is to QUERY; this asks what that
-# querying COST. Fabric exposes no per-operation CU REST API, so the only authoritative source is
+# dbt.yml builds the data; benchmark.yml measures how fast it is to QUERY; this asks what both of
+# them COST. Fabric exposes no per-operation CU REST API, so the only authoritative source is
 # the Capacity Metrics app's own semantic model, read by DAX.
+#
+# It reports every item in the workspace, split into ETL (the lakehouses, the warehouse, the
+# notebooks and Livy sessions that WRITE the tables) and analytics (the semantic models that are
+# QUERIED) — per operation type, and per run. `etl: false` narrows it back to the semantic models.
 #
 # It shares NOTHING with benchmark.yml — no needs:, no artifact, no concurrency group, no code. It
 # reports CU per semantic model from a pinned `since` floor onward. See cu/README.md.
@@ -23,12 +27,16 @@ on:
         description: "count only from this instant, IN THE MODEL'S CLOCK (the app's own offset, not UTC — the run logs the hour range it saw). A pinned floor, not a rolling window. The default is the first dispatch measured the current way; widen it to reach older suites, whose CU is not comparable. Blank = everything retained (~14 days)."
         type: string
         default: "2026-07-31T16:00:00"
+      etl:
+        description: "report EVERY item in the workspace — lakehouses, the warehouse, notebooks, Livy sessions — classified into etl and analytics, not just the semantic models. With this on, `models` below stops filtering and only orders."
+        type: boolean
+        default: true
       models:
-        description: "semantic models to report, comma-separated and in this order. Blank = every semantic model in the workspace."
+        description: "semantic models to lead the report, comma-separated and in this order; they are printed even with no activity, so a 0.0 says 'deployed, never queried'. With `etl` off this is also a FILTER. Blank = order by CU."
         type: string
         default: "aemo_duckrun,aemo_iceberg,aemo_spark,aemo_dwh"
       workspace:
-        description: "Fabric workspace GUID the models live in — the same one dbt.yml and benchmark.yml deploy to. Blank = every workspace on the capacity."
+        description: "Fabric workspace GUID the items live in — the same one dbt.yml and benchmark.yml deploy to. With `etl` on this is the ONLY filter, which is the right one to be left with: everything in there is this repo's. Blank = every workspace on the capacity."
         type: string
         default: "ea575278-bd81-459c-9680-47829898c902"
       metrics_workspace_id:
@@ -44,7 +52,7 @@ on:
         type: string
         default: ""
       run_gap_hours:
-        description: "the report splits per RUN on the semantic model's item GUID — every dispatch redeploys, so even two dispatches in the same hour separate. This is the secondary rule, for a model that was NOT redeployed: it splits after this many idle hours. 0 = aggregate only."
+        description: "the report splits per RUN on the semantic model's item GUID — every dispatch redeploys, so even two dispatches in the same hour separate. This is the secondary rule, and it is what separates the ETL items, whose GUIDs outlive every run: it splits after this many idle hours. 0 = aggregate only."
         type: string
         default: "2"
       run_ops:
@@ -97,6 +105,7 @@ jobs:
       CU_CAPACITY_ID: ${{ inputs.capacity_id }}
       CU_WORKSPACE_FILTER: ${{ inputs.workspace }}
       CU_MODELS: ${{ inputs.models }}
+      CU_ETL: ${{ inputs.etl && '1' || '0' }}
       CU_SINCE: ${{ inputs.since }}
       CU_RUN_GAP_HOURS: ${{ inputs.run_gap_hours }}
       CU_RUN_OPS: ${{ inputs.run_ops }}
@@ -113,7 +122,15 @@ jobs:
 
       # The whole dependency list. No duckrun, no pythonnet, no ADOMD, no `dotnet publish` — this
       # talks to the Power BI executeQueries REST endpoint, which takes DAX as a JSON string.
-      - run: pip install requests
+      # pytest is for the offline suite below and nothing else imports it.
+      - run: pip install requests pytest
+
+      # Free, offline, no token, ~2s. It runs BEFORE the Azure login on purpose: everything it
+      # covers — the run split, the class rollup, the fold, the empty-report diagnosis — is pure
+      # post-processing of rows already in hand, so a break in it is worth catching before the job
+      # goes near the capacity.
+      - name: Test the report layer offline
+        run: python -m pytest cu/ -q
 
       # Same OIDC federated identity as dbt.yml and benchmark.yml. allow-no-subscriptions because
       # the fabric-github-deploy app is a workspace principal, not an Azure RBAC one.
@@ -143,6 +160,25 @@ jobs:
             --query accessToken -o tsv)
           echo "::add-mask::$TOKEN"
           echo "PBI_TOKEN=$TOKEN" >> "$GITHUB_ENV"
+
+      # A SECOND token, on a different audience, for naming items only — see fabric_items().
+      # The datasets endpoint PBI_TOKEN reaches lists semantic models and nothing else, so without
+      # this every lakehouse, warehouse and notebook depends on the metrics app's 'Items' snapshot,
+      # which lags exactly where it matters: a `duckrun-py-*` notebook created by the run being
+      # measured is not in it yet, and an unnamed item cannot be classified as ETL.
+      #
+      # continue-on-error, and the script degrades rather than fails: a report that names most items
+      # beats no report. It is the same OIDC login, so a failure here means the SP's Fabric access
+      # changed, not that a secret is missing.
+      - name: Acquire a Fabric token (item names only)
+        continue-on-error: true
+        run: |
+          set -euo pipefail
+          TOKEN=$(az account get-access-token \
+            --resource https://api.fabric.microsoft.com \
+            --query accessToken -o tsv)
+          echo "::add-mask::$TOKEN"
+          echo "FABRIC_TOKEN=$TOKEN" >> "$GITHUB_ENV"
 
       # stdout is the markdown table and nothing else; diagnostics are on stderr.
       #

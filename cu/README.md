@@ -1,21 +1,46 @@
-# `cu/` — CU per semantic model
+# `cu/` — CU per item, ETL against analytics
 
-One question: **what have the benchmark's four semantic models cost in capacity units?**
+One question: **what has this workspace cost in capacity units — to build the tables, and to query
+them?**
 
 Fabric has no per-operation CU REST API. The Capacity Metrics app's own semantic model is the only
-authoritative source, so this reads it by DAX and prints one table.
+authoritative source, so this reads it by DAX and prints it back split two ways: by **class** (`etl`
+is what writes the tables — the lakehouses, the warehouse, the notebooks and Livy sessions;
+`analytics` is what reads them — the semantic models) and by **run**.
 
 ```
-## Semantic model CU — since 2026-07-30 22:00 (model clock), as of 2026-07-30 14:10Z
+## Capacity CU — since 2026-07-31 16:00 (model clock), as of 2026-08-01 14:10Z
 
-| semantic model | XMLA Read Operation | Semantic model refresh | Query |    total |
-|----------------|--------------------:|-----------------------:|------:|---------:|
-| aemo_duckrun   |            12,000.0 |                  500.0 |   0.0 | 12,500.0 |
-| aemo_iceberg   |                 0.0 |                    0.0 |   0.0 |      0.0 |
-| aemo_spark     |             2,000.0 |                    0.0 |  75.0 |  2,075.0 |
-| aemo_dwh       |                 0.0 |                    0.0 |   0.0 |      0.0 |
-| **total**      |            14,000.0 |                  500.0 |  75.0 | 14,575.0 |
+| item          |   Query | Spark Job | OneLake Write | Warehouse Query | other (6 ops) |    total |
+|:--------------|--------:|----------:|--------------:|----------------:|--------------:|---------:|
+| aemo_duckrun  |   580.0 |       0.0 |           0.0 |             0.0 |          20.0 |    600.0 |
+| aemo_spark    |   490.0 |       0.0 |           0.0 |             0.0 |          20.0 |    510.0 |
+| **analytics** | 1,070.0 |       0.0 |           0.0 |             0.0 |          40.0 |  1,110.0 |
+| dbt_delta     |     0.0 |     210.0 |         120.0 |             0.0 |         134.0 |    464.0 |
+| dbt_dwh       |     0.0 |       0.0 |           0.0 |            88.0 |           0.0 |     88.0 |
+| duckrun-py-*  |     0.0 |       0.0 |           0.0 |             0.0 |          15.0 |     15.0 |
+| **etl**       |     0.0 |     210.0 |         120.0 |            88.0 |         149.0 |    567.0 |
+| **total**     | 1,070.0 |     210.0 |         120.0 |            88.0 |         189.0 |  1,677.0 |
 ```
+
+**Widening past the semantic models was tried once before and reverted**, and the reason was real:
+unfiltered, a lakehouse brings a dozen OneLake operation types, every throwaway `duckrun-py-*`
+notebook is a row of its own, and the table stops being readable — which was the whole point of the
+table. So the width is now bounded three ways rather than avoided:
+
+| guard | what it does | knob |
+|:--|:--|:--|
+| class rollup | every row totals into `etl` or `analytics`, printed as a subtotal row | `CLASS_BY_KIND` in the script |
+| operation fold | operation columns past the top few collapse into one `other`, **named and counted** in a footnote | `CU_OP_COLS`, default 6 |
+| prefix collapse | the throwaway notebooks become one `duckrun-py-*` row | `CU_GROUP_PREFIXES` |
+
+`etl: false` on the dispatch narrows it back to the semantic models exactly as before — worth having
+when comparing against an older dispatch's numbers.
+
+**An unrecognised item kind is kept, never dropped.** It lands in a third `other` class and its kind
+is named on stderr (`kind X: 1,234.0 CU -> other`), which is how a kind gets added to `CLASS_BY_KIND`.
+That matters most for Spark: dbt's Livy sessions bill against whichever item Fabric attributes them
+to, and which one that is has not been read off a real dispatch yet.
 
 **Time is a pinned floor, not a rolling window.** A window ("last 3h") moves with every dispatch
 and can slice one benchmark in half, making an engine look cheap for no reason but where the
@@ -38,18 +63,26 @@ run:
 ```
 ### Runs detected: 3
 
-| semantic model | run 1<br>07-30 12:00→15:00 | run 2<br>07-31 09:00→12:00 | run 3<br>07-31 20:00→20:00 |     total |
-|:---------------|---------------------------:|---------------------------:|---------------------------:|----------:|
-| aemo_duckrun   |                      160.0 |                      158.0 |                        0.0 |     318.0 |
-| aemo_iceberg   |                      170.0 |                      171.0 |                        0.0 |     341.0 |
-| aemo_spark     |                      180.0 |                      179.0 |                        0.0 |     359.0 |
-| aemo_dwh       |                      300.0 |                      295.0 |                      275.0 |     870.0 |
-| **total**      |                  **810.0** |                  **803.0** |                  **275.0** |**1,888.0**|
+| class         | run 1<br>08-01 10:00→10:00 | run 2<br>08-01 20:00→20:00 | run 3<br>08-02 16:00→16:00 |     total |
+|:--------------|---------------------------:|---------------------------:|---------------------------:|----------:|
+| **analytics** |                        0.0 |                      590.0 |                      520.0 |   1,110.0 |
+| **etl**       |                      519.0 |                       26.0 |                       22.0 |     567.0 |
+
+| item         | run 1<br>08-01 10:00→10:00 | run 2<br>08-01 20:00→20:00 | run 3<br>08-02 16:00→16:00 |     total |
+|:-------------|---------------------------:|---------------------------:|---------------------------:|----------:|
+| aemo_duckrun |                        0.0 |                      320.0 |                      280.0 |     600.0 |
+| aemo_spark   |                        0.0 |                      270.0 |                      240.0 |     510.0 |
+| dbt_delta    |                      416.0 |                       26.0 |                       22.0 |     464.0 |
+| dbt_dwh      |                       88.0 |                        0.0 |                        0.0 |      88.0 |
+| duckrun-py-* |                       15.0 |                        0.0 |                        0.0 |      15.0 |
+| **total**    |                  **519.0** |                  **616.0** |                  **542.0** |**1,677.0**|
 ```
 
-One row per model, one column per run — so "what did iceberg cost yesterday against today" is a
-single row read left to right. It is the same shape as the aggregate table above it, deliberately.
-Column 3 is a dwh-only dispatch, and it separates itself: nothing had to be told that it happened.
+The class table is the headline and it is printed rather than left to be summed by eye — run 1 there
+is a **dbt build** (all ETL, no model activity at all), runs 2 and 3 are benchmark dispatches whose
+ETL cost is only the OneLake reads Direct Lake did on their behalf. Underneath, one row per item, one
+column per run, so "what did iceberg cost yesterday against today" is a single row read left to
+right. It is the same shape as the aggregate table above it, deliberately.
 
 **A column is a whole run, never an hour.** A pass spread over 12:00→15:00 is one column carrying all
 four hours' CU. The per-run hour *count* is in the footnote rather than the table, so nothing invites
@@ -74,6 +107,18 @@ between two runs. That rule uses no clock at all, which is why it survives a dis
 `run_gap_hours` (default 2) is the second rule and applies to one GUID's own hours: a model that was
 *not* redeployed but is queried again days later splits there rather than dragging the later CU into
 the earlier column.
+
+**The ETL items cannot carry that rule, so they are allocated by HOUR.** A lakehouse has one GUID for
+years; a `duckrun-py-*` notebook has a fresh name every time, so a repeated name can never fire on it
+either. So runs are *formed* from the semantic models alone, exactly as before, and every other item's
+hours are then allocated to those windows — containment first, then adjacency within
+`run_gap_hours`. Hours belonging to no model's window cluster into a run of their own, which is what
+gives a dbt build with no benchmark beside it its own column (run 1 above). The cost, stated plainly:
+**ETL allocation is only as sharp as the hour bucket**, so an ETL hour shared by two overlapping runs
+is attributed to one of them rather than split. Analytics allocation stays exact, because it is still
+by GUID. `cu/test_capacity_cu.py` pins both rules, including that every (item, hour) pair lands in
+exactly one run — a duplicated pair double-counts CU and a dropped one makes the columns silently
+total less than the aggregate above them.
 
 **The hour bucket is no longer the floor on separating dispatches.** `Metrics By Item Operation And
 Hour` is still bucketed hourly, and this used to mean two dispatches inside one hour were one
@@ -132,15 +177,16 @@ benchmark queries; `dim_duid` at a few hundred rows explains nothing about a 143
 ## What it deliberately is not
 
 **It shares nothing with `benchmark/`.** No imports, no `run_report.json`, no `needs:`, no
-concurrency group, no ADOMD, no .NET, no duckrun. `requests` is the only dependency. It does read ONE
+concurrency group, no ADOMD, no .NET, no duckrun. `requests` is the only runtime dependency (`pytest`
+for the offline suite, which imports nothing but this script). It does read ONE
 artifact — `stats` from the `layout` job of the `dbt` workflow, for the layout table above — and that is a
 JSON file, not code: nothing is imported, and losing it costs one table.
 Deleting `cu/` and `.github/workflows/cu.yml` removes it completely and nothing else in the repo
 notices — which is the point, because this may not turn out to be useful. The four model names are
 spelled out here rather than imported from `benchmark/engines.py` for the same reason.
 
-**It correlates nothing.** CU per model over a wall-clock window. It cannot tell you which query or
-which benchmark run produced a number.
+**It correlates nothing.** CU per item over a wall-clock window. It cannot tell you which query, which
+model, or which GitHub run produced a number — only which *run* in its own sense, and which item.
 
 ## Running it
 
@@ -150,8 +196,9 @@ after the activity you want to measure** — see the lag note below.
 | input | default | notes |
 |---|---|---|
 | `since` | `2026-07-31T16:00:00` | floor, **in the model's clock** (see below) — the first dispatch measured the current way. Blank = everything retained |
-| `models` | the four `aemo_*` | comma-separated, in report order. Blank = every semantic model |
-| `workspace` | `ea575278-…` | the workspace dbt.yml and benchmark.yml deploy to. Blank = all |
+| `etl` | true | report every item in the workspace, classified into `etl`/`analytics`. Off = semantic models only, the old scope exactly |
+| `models` | the four `aemo_*` | comma-separated, leading the analytics rows and printed even at 0.0. With `etl` **on** this only orders; with `etl` off it also filters |
+| `workspace` | `ea575278-…` | the workspace dbt.yml and benchmark.yml deploy to. With `etl` on this is the only filter left. Blank = all |
 | `metrics_workspace_id` | `7f7f5d92-…` | where the Capacity Metrics app is installed |
 | `metrics_model_id` | `0fdedd3b-…` | the app's semantic model |
 | `capacity_id` | all | blank = every capacity the metrics model can see |
@@ -172,8 +219,27 @@ export CU_METRICS_MODEL_ID=0fdedd3b-1451-4499-9ed4-aa3658100ec1
 CU_SINCE=2026-07-31T16:00:00 CU_DEBUG=1 python cu/capacity_cu.py
 ```
 
-`CU_RUN_COLS` (default 8, `0` = unlimited) is env-only — how many runs get their own column before
-the oldest fold into one. It only matters against a widened `since`, which is a local thing.
+Three knobs are env-only, because each only matters in a local investigation and the dispatch form is
+long enough: `CU_RUN_COLS` (default 8, `0` = unlimited) — how many runs get their own column before
+the oldest fold into one; `CU_OP_COLS` (default 6, `0` = unlimited) — how many operation columns
+before the tail folds into `other`; and `CU_GROUP_PREFIXES` (default `duckrun-py-`) — item name
+prefixes that collapse to one row.
+
+`FABRIC_TOKEN` is optional and is for **naming items only**. The datasets endpoint `PBI_TOKEN`
+reaches lists semantic models and nothing else, so without a Fabric-audience token every lakehouse,
+warehouse and notebook depends on the metrics app's lagging `'Items'` snapshot — and an item it has
+not catalogued shows as a bare GUID in the `other` class. The workflow mints it from the same OIDC
+login, `continue-on-error`; locally:
+
+```bash
+export FABRIC_TOKEN=$(az account get-access-token \
+  --resource https://api.fabric.microsoft.com --query accessToken -o tsv)
+```
+
+The report layer has an offline test suite — `python -m pytest cu/ -q`, no token, no network, ~2s —
+and `cu.yml` runs it before the Azure login. It covers the run split, the class rollup, the operation
+fold and the empty-report diagnosis, all of which fail the same way when they are wrong: a plausible
+number, printed with confidence, off.
 
 ## The things that will bite
 
@@ -194,23 +260,27 @@ drilling into one timepoint's individual operations — which is not what this d
 report turned out to be, not an idle capacity: the metrics tables hold item **GUIDs**, the join to
 `'Items'` is the only route to a name, and a semantic model that was just created — or deleted and
 recreated — has a GUID that snapshot has not seen. It resolves to no name, fails the `models` filter,
-and its CU disappears while the report says "no activity". So names are resolved **live** from
-`GET /groups/{workspace}/datasets` first (one request, same host and token as `executeQueries`, no new
-dependency), with `'Items'` as the fallback for everything outside the workspace. If that call is
-refused the run still works, logs why, and the diagnostic below names the unresolved GUIDs.
+and its CU disappears while the report says "no activity". So names are resolved **live**, with
+`'Items'` as the fallback: `GET /v1/workspaces/{ws}/items` (every kind, needs `FABRIC_TOKEN`) first,
+then `GET /groups/{workspace}/datasets` (semantic models only, same host and token as
+`executeQueries`). The second is not redundant — it is what still works with no Fabric-audience
+token. If either call is refused the run still works, logs why, and the diagnostic below names the
+unresolved GUIDs. The lag bites hardest on the ETL side: a `duckrun-py-*` notebook created by the
+very run being measured is the item `'Items'` is least likely to hold.
 
-**An empty report explains itself.** "No semantic model activity" and "1,202 rows came back and every
+**An empty report explains itself.** "No item activity" and "1,202 rows came back and every
 one failed a filter" are opposite conclusions that used to print the same sentence. Now an empty
 result prints how many rows the table returned after the floor, which filter rejected them and how
 many, any item whose **name matched but workspace did not** (with its real workspace id), and the top
 CU spenders it did see — so one dispatch says which knob is wrong instead of the next three guessing.
 A bare GUID in that last table is the snapshot-lag trap above.
 
-**Both filters are needed, and they stack.** Display names are not unique across a tenant, so a
-stale `aemo_spark` in some other workspace would otherwise be silently added to this one's CU.
-`models` selects by name, `workspace` restricts to the workspace the benchmark deploys to, and both
-apply. Every requested model is printed even with no activity — a `0.0` row distinguishes "ran and
-cost nothing" from "vanished", which a missing row would not.
+**With `etl` on, `workspace` is the only filter — and that is the right one to be left with.** The
+name filter existed because display names are not unique across a tenant: a stale `aemo_spark` in
+some other workspace would otherwise be added to this one's CU. The workspace test alone still stops
+that, and everything inside `ea575278-…` is this repo's. `models` is then an ordering: the four are
+printed even with no activity, because a `0.0` row distinguishes "deployed and never queried" from
+"vanished", which a missing row would not. With `etl` **off** both filters stack as they always did.
 
 **`since` is in the model's clock, NOT UTC.** The metrics tables stamp everything in the offset
 configured inside the Capacity Metrics app — +10 here, so a benchmark that ran at 05:15Z sits under

@@ -1,8 +1,10 @@
-"""CU per semantic model, read from the Fabric Capacity Metrics app's semantic model.
+"""CU per item, read from the Fabric Capacity Metrics app's semantic model.
 
 Fabric exposes no per-operation CU REST API. The Capacity Metrics app's model is the only
 authoritative source, so this queries it by DAX over the Power BI `executeQueries` endpoint and
-prints one table: the benchmark's semantic models against the operation types they spent CU on.
+prints what the workspace's items spent, split into **ETL** (the lakehouses, the warehouse, the
+notebooks and Livy sessions that WRITE the tables) and **analytics** (the semantic models that are
+queried), per operation type and per run.
 
 Time is a pinned FLOOR (`since`), not a rolling window. A window moves with every dispatch and can
 slice one benchmark in half, making an engine look cheap for no reason but where the boundary fell;
@@ -10,11 +12,17 @@ a floor stays put and everything after it accumulates. Its purpose is to exclude
 dwh was DirectQuery rather than Direct Lake — still inside the app's ~14-day retention, and not the
 same experiment.
 
-Deliberately scoped to the semantic models. Widening it to every item in the workspace was tried
-and reverted: the lakehouses' OneLake read AND write operations bring a dozen operation types each,
-plus a row per throwaway `duckrun-py-*` notebook, and the table stopped being readable. The
-pipeline's own cost is a different question from what querying the four models costs, and mixing
-them in one table served neither.
+Scoped to every item in ONE workspace, classified. Widening past the semantic models was tried once
+before and reverted, and the reason was real rather than a matter of taste: unfiltered, a lakehouse
+brings a dozen OneLake read AND write operation types, every throwaway `duckrun-py-*` notebook is
+its own row, and the table stops being readable — which is the whole point of the table. So the
+width is bounded three ways instead of avoided: every row rolls up to a CLASS (`CLASS_BY_KIND`),
+operation columns past the top few FOLD into one (`MAX_OP_COLS`), and the throwaway notebooks
+COLLAPSE to a single row by prefix (`GROUP_PREFIXES`). `CU_ETL=0` restores the old
+semantic-models-only report exactly.
+
+Reporting both is the point: what a query costs is only half the bill, and the other half is the
+build that wrote the tables. They are still two questions, so they are two rows — never one number.
 
 Standalone on purpose. It shares NOTHING with benchmark/ — no imports, no run_report.json, no
 artifact, no ADOMD, no .NET. `requests` is the only dependency.
@@ -48,8 +56,12 @@ for _s in (sys.stdout, sys.stderr):
         pass
 
 PBI = "https://api.powerbi.com/v1.0/myorg"
+# Only for naming items — see fabric_items(). A DIFFERENT token audience from PBI_TOKEN, which is
+# why it is optional: without it the report still prints, it just names fewer items.
+FABRIC = "https://api.fabric.microsoft.com/v1"
 
 TOKEN = os.environ.get("PBI_TOKEN", "").strip()
+FABRIC_TOKEN = os.environ.get("FABRIC_TOKEN", "").strip()
 WS = os.environ.get("CU_METRICS_WORKSPACE_ID", "").strip()
 MODEL = os.environ.get("CU_METRICS_MODEL_ID", "").strip()
 CAPACITY = os.environ.get("CU_CAPACITY_ID", "").strip()
@@ -63,6 +75,54 @@ CAPACITY = os.environ.get("CU_CAPACITY_ID", "").strip()
 # always printed even when it has no activity. Set empty for every semantic model on the capacity.
 MODELS = [m.strip() for m in os.environ.get(
     "CU_MODELS", "aemo_duckrun,aemo_iceberg,aemo_spark,aemo_dwh").split(",") if m.strip()]
+
+# Report EVERY item in the workspace, not only the semantic models. ON by default.
+#
+# What it changes, precisely: with it on, `CU_MODELS` stops being a FILTER and becomes an ORDERING —
+# the named models still lead the analytics rows and still print a 0.0 when they had no activity,
+# but a lakehouse, a warehouse, a notebook or a Livy session is no longer thrown away for failing
+# to be in that list. `CU_WORKSPACE_FILTER` is then the only filter left, which is the right one to
+# be left with: everything in that workspace is this repo's, and nothing else is.
+#
+# Off restores the previous report byte for byte (name filter, then kind filter, semantic models
+# only) — worth having for a straight comparison against an older dispatch's numbers.
+ETL = os.environ.get("CU_ETL", "1").strip().lower() not in ("0", "false", "no", "")
+
+# Item kind -> class. Compared lower-cased with spaces removed, so "Semantic Model", "SemanticModel"
+# and "semanticmodel" are one key.
+#
+# `analytics` is what READS the tables, `etl` is what WRITES them. Anything unrecognised lands in
+# `other` and is printed rather than dropped — with its kind named in the stderr log, because that
+# log is how a kind gets added here. That matters most for Spark: dbt's Livy sessions bill against
+# whichever item Fabric attributes them to (the notebook that ran them, or the lakehouse), and which
+# one it is has never been read off a real dispatch. `other` means "this file has not seen that kind
+# yet", never "ignore it".
+CLASS_BY_KIND = {
+    # reads
+    "semanticmodel": "analytics", "dataset": "analytics", "report": "analytics",
+    "paginatedreport": "analytics", "dashboard": "analytics", "datamart": "analytics",
+    # writes
+    "lakehouse": "etl", "warehouse": "etl", "sqlendpoint": "etl",
+    "sqlanalyticsendpoint": "etl", "notebook": "etl", "sparkjobdefinition": "etl",
+    "sparkapplication": "etl", "datapipeline": "etl", "dataflow": "etl", "dataflowgen2": "etl",
+    "environment": "etl", "mirroreddatabase": "etl", "eventhouse": "etl", "kqldatabase": "etl",
+}
+CLASS_ORDER = ["analytics", "etl", "other"]
+
+# Items whose display name starts with one of these collapse into ONE row named `<prefix>*`.
+#
+# `duckrun-py-` is the reason this exists: `duckrun.run_python` creates a throwaway notebook per
+# call, so a week of dispatches is a week of one-row-each notebooks that are the same thing wearing
+# different GUIDs. Collapsing is display only — the run split below still allocates by GUID, so
+# nothing about WHICH run a notebook belongs to is lost.
+GROUP_PREFIXES = [p.strip() for p in os.environ.get(
+    "CU_GROUP_PREFIXES", "duckrun-py-").split(",") if p.strip()]
+
+# Operation columns to print before folding the rest into one `other` column. The semantic models
+# spend on three or four operation types; a lakehouse alone brings a dozen OneLake ones, and that is
+# what made the earlier attempt at this unreadable. Folded columns are counted in the header, never
+# silently dropped. 0 prints every operation type.
+MAX_OP_COLS = int(os.environ.get("CU_OP_COLS", "6") or 0)
 
 # The workspace the models live in — the same one dbt.yml and benchmark.yml deploy to. Applied ON
 # TOP of the name filter, not instead of it: display names are not unique across a tenant, so a
@@ -374,6 +434,59 @@ def datasets_in_workspace(ws):
     return out
 
 
+def fabric_items(ws):
+    """{item GUID: (display name, kind)} for EVERY item kind in the workspace, live.
+
+    The same trap `datasets_in_workspace()` exists for, one class worse. `'Items'` in the metrics
+    model is a lagging snapshot, and the items this report most wants to name are exactly the ones
+    least likely to be in it: a `duckrun-py-*` notebook that the very run being measured created
+    minutes ago. Unnamed means unclassified, which means it lands in `other` as a bare GUID — CU
+    kept, but nothing said about it.
+
+    The datasets endpoint cannot answer this: it lists semantic models only. The Fabric items API
+    lists every kind, but on a DIFFERENT audience (`api.fabric.microsoft.com`), so it needs its own
+    token — `cu.yml` mints one beside `PBI_TOKEN` from the same OIDC login. Optional by
+    construction: no token, a 401/403, or an unreachable host all fall back to `'Items'` with a
+    line saying so, because a report that names most items is worth far more than no report.
+    """
+    if not ws:
+        return {}
+    if not FABRIC_TOKEN:
+        log("  FABRIC_TOKEN unset — item names come from the metrics app's 'Items' snapshot alone, "
+            "so an item created by the run being measured may show as a raw GUID")
+        return {}
+    out, url = {}, f"{FABRIC}/workspaces/{ws}/items"
+    try:
+        while url:
+            r = requests.get(url, headers={"Authorization": f"Bearer {FABRIC_TOKEN}"}, timeout=60)
+            if r.status_code != 200:
+                log(f"  GET /workspaces/{ws}/items returned {r.status_code} — naming falls back to "
+                    f"'{ITEMS}' for whatever it did not return")
+                break
+            doc = r.json()
+            for it in doc.get("value") or []:
+                if it.get("id"):
+                    out[str(it["id"]).upper()] = (it.get("displayName") or "", it.get("type") or "")
+            url = doc.get("continuationUri") or ""
+    except Exception as ex:
+        log(f"  could not list items in {ws} ({type(ex).__name__}) — naming falls back to '{ITEMS}'")
+    log(f"  {len(out)} items of every kind resolved live from workspace {ws}")
+    return out
+
+
+def classify(kind):
+    """Item kind -> 'analytics' | 'etl' | 'other'. Unknown kinds are kept, never dropped."""
+    return CLASS_BY_KIND.get((kind or "").strip().lower().replace(" ", ""), "other")
+
+
+def display_label(name):
+    """Collapse the throwaway-item families to one row. Display only — see GROUP_PREFIXES."""
+    for p in GROUP_PREFIXES:
+        if name.lower().startswith(p.lower()):
+            return p + "*"
+    return name
+
+
 def items_for(cap, c):
     """Map item GUID -> (name, kind).
 
@@ -433,37 +546,85 @@ EVALUATE
 """.strip(), fatal=False))
 
 
-def _model_rows(cells):
-    """[(display name, total cu)] in report order.
+def _item_rows(cells, meta):
+    """[(display label, class, total cu)] in report order.
 
-    When specific models were asked for, every one of them appears in the order given, including the
-    ones with no activity: a model that silently vanishes from the table is indistinguishable from one
-    that was never deployed, and a 0.0 row says which."""
-    per_model = {}
-    for (m, _op), cu in cells.items():
-        per_model[m] = per_model.get(m, 0.0) + cu
-    return ([(m, per_model.get(m.lower(), 0.0)) for m in MODELS] if MODELS
-            else sorted(per_model.items(), key=lambda kv: -kv[1]))
+    Every model named in CU_MODELS appears, in the order given, including the ones with no activity:
+    a model that silently vanishes is indistinguishable from one that was never deployed, and a 0.0
+    row says which. Everything else follows by CU descending. The CLASS grouping is applied by the
+    printer, not here, so this order is only the order WITHIN a class.
+    """
+    per = {}
+    for (k, _op), cu in cells.items():
+        per[k] = per.get(k, 0.0) + cu
+    rows, seen = [], set()
+    for m in MODELS:
+        k = m.lower()
+        seen.add(k)
+        rows.append((m, (meta.get(k) or {}).get("cls", "analytics"), per.get(k, 0.0)))
+    for k, total in sorted(per.items(), key=lambda kv: -kv[1]):
+        if k in seen:
+            continue
+        info = meta.get(k) or {}
+        rows.append((info.get("label") or k, info.get("cls", "other"), total))
+    return rows
 
 
-def _op_table(cells):
-    """models x operation types, printed. Operation columns ordered by total CU, so the expensive one
-    is the first thing read."""
+def _ops_for(cells):
+    """Operation columns, most expensive first, with the tail folded into one. Returns
+    `(printed ops, folded ops)` — the fold is named in the header and counted, never silent."""
     per_op = {}
-    for (_m, op), cu in cells.items():
+    for (_k, op), cu in cells.items():
         per_op[op] = per_op.get(op, 0.0) + cu
-    ops = [op for op, _ in sorted(per_op.items(), key=lambda kv: -kv[1])]
-    models = _model_rows(cells)
+    ordered = [op for op, _ in sorted(per_op.items(), key=lambda kv: -kv[1])]
+    if MAX_OP_COLS > 0 and len(ordered) > MAX_OP_COLS + 1:
+        return ordered[:MAX_OP_COLS], ordered[MAX_OP_COLS:]
+    return ordered, []
 
-    print("| semantic model | " + " | ".join(ops) + " | total |")
-    print("|---|" + "---:|" * (len(ops) + 1))
-    for name, total in models:
-        vals = [cells.get((name.lower(), op), 0.0) for op in ops]
-        print(f"| {name} | " + " | ".join(f"{v:,.1f}" for v in vals) + f" | **{total:,.1f}** |")
-    grand = sum(t for _, t in models)
-    print("| **total** | "
-          + " | ".join(f"**{per_op[op]:,.1f}**" for op in ops)
-          + f" | **{grand:,.1f}** |")
+
+def _op_table(cells, meta):
+    """items x operation types, grouped by class with a subtotal per class.
+
+    The class subtotals are the answer to "what did the ETL cost against the analytics"; the item
+    rows underneath are why. One table rather than two, because the two halves are only comparable
+    if they are read in the same units on the same page.
+    """
+    ops, folded = _ops_for(cells)
+    rows = _item_rows(cells, meta)
+    by_class = {}
+    for label, cls, total in rows:
+        by_class.setdefault(cls, []).append((label, total))
+    headers = ops + ([f"other ({len(folded)} ops)"] if folded else [])
+
+    def cells_for(key):
+        vals = [cells.get((key, op), 0.0) for op in ops]
+        if folded:
+            vals.append(sum(cells.get((key, op), 0.0) for op in folded))
+        return vals
+
+    print(f"| item | " + " | ".join(headers) + " | total |")
+    print("|:--|" + "---:|" * (len(headers) + 1))
+    grand = [0.0] * len(headers)
+    for cls in CLASS_ORDER:
+        group = by_class.get(cls)
+        if not group:
+            continue
+        sub = [0.0] * len(headers)
+        for label, total in group:
+            vals = cells_for(label.lower())
+            sub = [a + b for a, b in zip(sub, vals)]
+            print(f"| {label} | " + " | ".join(f"{v:,.1f}" for v in vals)
+                  + f" | **{total:,.1f}** |")
+        grand = [a + b for a, b in zip(grand, sub)]
+        if len(by_class) > 1:
+            print(f"| **{cls}** | " + " | ".join(f"**{v:,.1f}**" for v in sub)
+                  + f" | **{sum(sub):,.1f}** |")
+    print("| **total** | " + " | ".join(f"**{v:,.1f}**" for v in grand)
+          + f" | **{sum(grand):,.1f}** |")
+    if folded:
+        print(f"\n<sub>The {len(folded)} smallest operation types are folded into `other`: "
+              + ", ".join(f"`{op}`" for op in folded)
+              + f". Raise `CU_OP_COLS` (currently {MAX_OP_COLS}) to give them columns.</sub>")
 
 
 def _cluster_hours(hours, gap_hours):
@@ -483,11 +644,41 @@ def _cluster_hours(hours, gap_hours):
     return blocks
 
 
+def _run_for_hour(wins, hour, gap_hours):
+    """Index of the run an item that was NOT redeployed belongs to for one hour, or None.
+
+    Containment first — and when two run windows overlap (they can, by an hour), the one that
+    started later, since that is the dispatch that hour actually belongs to. Then adjacency within
+    the gap, nearest edge wins, ties to the earlier run. Then None, meaning "this hour is not part
+    of any run formed so far" and the caller gives it a run of its own.
+    """
+    inside = [i for i, (lo, hi) in enumerate(wins) if lo <= hour <= hi]
+    if inside:
+        return max(inside, key=lambda i: wins[i][0])
+    near = [((lo - hour).total_seconds() if hour < lo else (hour - hi).total_seconds(), i)
+            for i, (lo, hi) in enumerate(wins)]
+    near = [(d, i) for d, i in near if d <= gap_hours * 3600]
+    return min(near)[1] if near else None
+
+
 def sessionize(events, gap_hours=RUN_GAP_HOURS):
-    """Group activity into runs. `events` is an iterable of `(item_id, model, hour)`; returns
-    `[{"items": {item_id, ...}, "models": {name, ...}, "hours": [datetime, ...],
+    """Group activity into runs. `events` is an iterable of `(item_id, label, hour, generational)`;
+    returns `[{"items": {item_id, ...}, "labels": {name, ...}, "hours": [datetime, ...],
        "pairs": {(item_id, hour), ...}}, ...]`, oldest run first. `pairs` is what the caller
-    allocates CU with; `items`/`hours`/`models` are for the header, the footnote and the log.
+    allocates CU with; `items`/`hours`/`labels` are for the header, the footnote and the log.
+
+    TWO KINDS OF ITEM, and only one of them can carry the exact rule. A semantic model is deleted
+    and recreated on every dispatch (`generational=True`), so its GUID dates it. A lakehouse, a
+    warehouse or a SQL endpoint lives for years and its GUID says nothing about when — while a
+    `duckrun-py-*` notebook is generational in fact but not in name, since a fresh name each time
+    means the repeat rule can never fire on it. So the runs are FORMED from the generational items
+    alone, exactly as before, and everything else is then allocated to them BY HOUR against those
+    fixed windows. Hours that fall in no window cluster into runs of their own by the gap rule —
+    which is what gives a dbt build with no benchmark beside it its own column.
+
+    The cost of that, stated plainly: ETL allocation is only as sharp as the hour bucket, so an ETL
+    hour shared by two overlapping runs is attributed to one of them by the rule above rather than
+    split. Analytics allocation stays exact, because it is still by GUID.
 
     A run is ONE DEPLOYMENT GENERATION. Every benchmark dispatch deletes and recreates each semantic
     model, so it mints a fresh GUID per engine, and a model cannot be deployed twice inside one
@@ -501,38 +692,72 @@ def sessionize(events, gap_hours=RUN_GAP_HOURS):
     later run's CU into the earlier column. `gap_hours <= 0` keeps its documented meaning — one
     cluster, i.e. aggregate only.
     """
-    by_item = {}
-    for iid, model, hour in events:
-        by_item.setdefault((iid, model), set()).add(hour)
-    if not by_item:
+    gen, stable = {}, {}
+    for iid, label, hour, generational in events:
+        (gen if generational else stable).setdefault((iid, label), set()).add(hour)
+    if not gen and not stable:
         return []
     if gap_hours <= 0:
-        return [{"items": {iid for iid, _m in by_item},
-                 "models": {m for _iid, m in by_item},
-                 "hours": sorted({h for hs in by_item.values() for h in hs}),
-                 "pairs": {(iid, h) for (iid, _m), hs in by_item.items() for h in hs}}]
+        both = {**gen, **stable}   # an item is one or the other, so the keys cannot collide
+        return [{"items": {iid for iid, _l in both},
+                 "labels": {l for _iid, l in both},
+                 "hours": sorted({h for hs in both.values() for h in hs}),
+                 "pairs": {(iid, h) for (iid, _l), hs in both.items() for h in hs}}]
 
-    # (first hour, model, iid, hours) per contiguous block of one GUID's activity. `model` and `iid`
+    # (first hour, label, iid, hours) per contiguous block of one GUID's activity. `label` and `iid`
     # are in the sort key only to make ties deterministic — two engines of one dispatch start in the
     # same hour, and which of them is read first must not depend on dict ordering.
-    segments = sorted((blk[0], model, iid, blk)
-                      for (iid, model), hs in by_item.items()
+    segments = sorted((blk[0], label, iid, blk)
+                      for (iid, label), hs in gen.items()
                       for blk in _cluster_hours(hs, gap_hours))
 
     runs = []
-    for first, model, iid, blk in segments:
+    for first, label, iid, blk in segments:
         cur = runs[-1] if runs else None
-        if cur is None or model in cur["models"] or (
+        if cur is None or label in cur["labels"] or (
                 (first - cur["hours"][-1]).total_seconds() > gap_hours * 3600):
-            runs.append({"items": set(), "models": set(), "hours": [], "pairs": set()})
+            runs.append({"items": set(), "labels": set(), "hours": [], "pairs": set()})
             cur = runs[-1]
         cur["items"].add(iid)
-        cur["models"].add(model)
+        cur["labels"].add(label)
         cur["hours"] = sorted(set(cur["hours"]) | set(blk))
         # (item, hour) is the allocation key, not the item alone: a GUID that was NOT redeployed but
         # queried again days later is split by the gap rule, so it belongs to two runs and only the
         # hour says which of its rows go where.
         cur["pairs"] |= {(iid, h) for h in blk}
+
+    # The long-lived items, allocated by hour against the windows just formed. The windows are
+    # FROZEN first and every hour is tested against the same set: allocating and widening in one
+    # pass would make the answer depend on the order the items happened to be read in.
+    wins = [(r["hours"][0], r["hours"][-1]) for r in runs]
+    extra, leftover = {}, []
+    for (iid, label), hs in sorted(stable.items()):
+        for h in sorted(hs):
+            ci = _run_for_hour(wins, h, gap_hours) if wins else None
+            if ci is None:
+                leftover.append((iid, label, h))
+                continue
+            runs[ci]["items"].add(iid)
+            runs[ci]["labels"].add(label)
+            runs[ci]["pairs"].add((iid, h))
+            extra.setdefault(ci, []).append(h)
+
+    # Activity belonging to no run so far is a run of its own — a dbt build with no benchmark beside
+    # it, which is most of them. Clustered across items rather than per item, because the items of
+    # one build are concurrent by construction.
+    for blk in _cluster_hours([h for _i, _l, h in leftover], gap_hours):
+        span = set(blk)
+        r = {"items": set(), "labels": set(), "hours": sorted(span), "pairs": set()}
+        for iid, label, h in leftover:
+            if h in span:
+                r["items"].add(iid)
+                r["labels"].add(label)
+                r["pairs"].add((iid, h))
+        runs.append(r)
+
+    for ci, hs in extra.items():
+        runs[ci]["hours"] = sorted(set(runs[ci]["hours"]) | set(hs))
+    runs.sort(key=lambda r: r["hours"][0])
     return runs
 
 
@@ -543,8 +768,8 @@ def _window(hrs, year=False):
             else f"{hrs[0]:{fmt}}→{hrs[-1]:%m-%d %H:%M}")
 
 
-def render_runs(hourly, runs, cells=None):
-    """One ROW per semantic model, one COLUMN per detected run.
+def render_runs(hourly, runs, meta, cells=None):
+    """One ROW per item, one COLUMN per detected run, with an ETL-against-analytics table above it.
 
     This is the whole point of the per-run split — the aggregate table sums every dispatch since the
     floor, so a model's number there is "all the benchmarking we have done", not "what one pass
@@ -560,19 +785,21 @@ def render_runs(hourly, runs, cells=None):
     four hours' CU. The per-run hour COUNT is in the footnote rather than the table for the same
     reason — it is diagnostic, and in a column it invited reading the table as hourly.
 
-    CU is assigned to a column by ITEM GUID, not by hour. That is what lets two dispatches share an
-    hour bucket and still land in their own columns, which the hour-only version could not do: the
-    metrics rows are per item, so the allocation is exact even where the windows overlap.
+    CU is assigned to a column by ITEM GUID for a redeployed item, and by HOUR for one that lives
+    across runs (see sessionize). The first is exact even where two windows overlap; the second is
+    as sharp as the hour bucket, which is the price of having the ETL items in the table at all.
     """
     if len(runs) < 2:
         # One run is not a separation, and printing a one-column "runs" table beside an identical
         # aggregate reads as two findings where there is one. Say why instead.
         span = "" if not runs else f" ({_window(runs[0]['hours'], year=True)})"
-        print(f"\n<sub>All activity belongs to a single deployment generation{span}, so there is "
+        print(f"\n<sub>All activity falls in a single run{span}, so there is "
               f"nothing to separate — the table above IS that run. Raise `since` to reach earlier "
               f"dispatches; each one redeployed the models, so each is its own column.</sub>")
         return
-    names = [m for m, _ in _model_rows({(k[0], k[1]): v for k, v in hourly.items()})]
+    rows = _item_rows({(k[0], k[1]): v for k, v in hourly.items()}, meta)
+    names = [label for label, _cls, _t in rows]
+    cls_of = {label.lower(): cls for label, cls, _t in rows}
 
     # Columns, oldest left. Run numbering always counts from the oldest run overall, so a folded
     # report still calls the newest run by the same number an unfolded one would.
@@ -596,30 +823,51 @@ def render_runs(hourly, runs, cells=None):
             per[(ci, m)] = per.get((ci, m), 0.0) + cu
 
     print(f"\n### Runs detected: {len(runs)}\n")
-    print("| semantic model | " + " | ".join(h for h, _ in cols) + " | total |")
+
+    # The headline: what each run cost to BUILD against what it cost to QUERY. Two or three rows,
+    # printed above the per-item table rather than derived from it by eye — a report whose top-line
+    # answer has to be summed out of twelve rows by the reader is a report that gets misquoted.
+    classes = [c for c in CLASS_ORDER if any(cls_of.get(n.lower()) == c for n in names)]
+    if len(classes) > 1:
+        per_cls = {}
+        for (ci, label), cu in per.items():
+            per_cls[(ci, cls_of.get(label, "other"))] = per_cls.get(
+                (ci, cls_of.get(label, "other")), 0.0) + cu
+        print("| class | " + " | ".join(h for h, _ in cols) + " | total |")
+        print("|:--|" + "---:|" * (len(cols) + 1))
+        for c in classes:
+            vals = [per_cls.get((ci, c), 0.0) for ci in range(len(cols))]
+            print(f"| **{c}** | " + " | ".join(f"{v:,.1f}" for v in vals)
+                  + f" | **{sum(vals):,.1f}** |")
+        print()
+
+    print("| item | " + " | ".join(h for h, _ in cols) + " | total |")
     print("|:--|" + "---:|" * (len(cols) + 1))
     col_tot = [0.0] * len(cols)
     grand = 0.0
-    for name in names:
-        vals = [per.get((ci, name.lower()), 0.0) for ci in range(len(cols))]
-        for ci, v in enumerate(vals):
-            col_tot[ci] += v
-        grand += sum(vals)
-        print(f"| {name} | " + " | ".join(f"{v:,.1f}" for v in vals)
-              + f" | **{sum(vals):,.1f}** |")
+    for c in classes:
+        for name in [n for n in names if cls_of.get(n.lower()) == c]:
+            vals = [per.get((ci, name.lower()), 0.0) for ci in range(len(cols))]
+            for ci, v in enumerate(vals):
+                col_tot[ci] += v
+            grand += sum(vals)
+            print(f"| {name} | " + " | ".join(f"{v:,.1f}" for v in vals)
+                  + f" | **{sum(vals):,.1f}** |")
     print("| **total** | " + " | ".join(f"**{v:,.1f}**" for v in col_tot)
           + f" | **{grand:,.1f}** |")
 
-    shape = ", ".join(f"run {i}: {len(r['models'])} models over {len(r['hours'])}h"
+    shape = ", ".join(f"run {i}: {len(r['items'])} items over {len(r['hours'])}h"
                       for i, r in enumerate(runs, start=1))
-    print(f"\n<sub>A run is one DEPLOYMENT GENERATION: every dispatch deletes and recreates the "
-          f"semantic models, so a model name repeating among the item GUIDs is the next run — which "
-          f"is why two dispatches inside the same hour are still two columns here, and why adjacent "
-          f"windows can overlap by an hour ({shape}; windows are the first and last active hour "
-          f"bucket, in the model's clock). CU is allocated by item GUID, not by hour, so an overlap "
-          f"costs nothing in accuracy. A model that was NOT redeployed splits only on more than "
-          f"{RUN_GAP_HOURS}h idle. Per-ENGINE separation does not depend on time at all — each engine "
-          f"has its own semantic model, so it is already its own row."
+    print(f"\n<sub>A run is formed from the SEMANTIC MODELS, which are deleted and recreated on "
+          f"every benchmark dispatch — so a model name repeating among the item GUIDs is the next "
+          f"run, which is why two dispatches inside the same hour are still two columns here, and "
+          f"why adjacent windows can overlap by an hour ({shape}; windows are the first and last "
+          f"active hour bucket, in the model's clock). Their CU is allocated by item GUID, so an "
+          f"overlap costs nothing in accuracy. **The ETL items live across runs**, so theirs is "
+          f"allocated by HOUR against those windows instead — as sharp as the hour bucket and no "
+          f"sharper — and hours belonging to no model's run (a dbt build with no benchmark beside "
+          f"it) form a run of their own. Anything not redeployed splits only on more than "
+          f"{RUN_GAP_HOURS}h idle."
           + (f" The {folded} oldest runs are folded into the `earlier` column; raise `CU_RUN_COLS` "
              f"(currently {MAX_RUN_COLS}) to give them their own." if folded else "") + "</sub>")
 
@@ -649,7 +897,7 @@ def render_runs(hourly, runs, cells=None):
                 if (iid, h) in inside:
                     ops[(m, op)] = ops.get((m, op), 0.0) + cu
             print(f"\n#### Run {i} — {_window(r['hours'], year=True)}, by operation\n")
-            _op_table(ops)
+            _op_table(ops, meta)
 
 
 def load_layout(path=None):
@@ -712,24 +960,67 @@ def render_layout(doc, cu_by_model, table=LAYOUT_TABLE):
           f"dashboard is that run's own summary.</sub>")
 
 
-def render(cells, hourly, since, asof, seen=0, dropped=None, active=None, near=None):
-    """cells is {(model, operation): cu}; hourly is {(model, operation, hour, item_id): cu}."""
+def render_empty(span, seen, dropped, active, near):
+    """No row survived the filters — say WHICH filter ate them.
+
+    This is the one outcome the report cannot explain from its own numbers: the query succeeded, the
+    floor bound, rows came back, and every one of them was thrown away locally. On the page that is
+    indistinguishable from an idle capacity, which is the opposite conclusion and the one that gets
+    drawn. So the drops are counted per reason and the biggest spenders that were dropped are named
+    — a bare GUID among them IS the lagging-'Items' trap, and a name in `near` is the workspace
+    filter pointing at the wrong workspace.
+    """
+    print(f"No item activity {span}.\n")
+    if not seen:
+        print("The metrics model returned **no rows at all** for that window — the capacity really "
+              "was idle, or `since` is ahead of the last hour it holds (stderr logs the range).")
+        return
+    print(f"The metrics model returned **{seen:,} rows**, and every one of them was dropped here:\n")
+    print("| filter | rows dropped |")
+    print("|:--|--:|")
+    print(f"| workspace ≠ `{WS_FILTER}` | {dropped.get('workspace', 0):,}"
+          + (f" (of which {dropped['workspace_blank']:,} had a blank workspace id)"
+             if dropped.get("workspace_blank") else "") + " |")
+    print(f"| name not in `CU_MODELS` | {dropped.get('name', 0):,} |")
+    print(f"| kind is not a semantic model | {dropped.get('kind', 0):,} |")
+    if near:
+        print("\nThese matched a requested NAME but sat in another workspace — the likeliest cause, "
+              "and the fix is `workspace`, not `models`:\n")
+        print("| item | kind | workspace id | CU |")
+        print("|:--|:--|:--|--:|")
+        for (name, kind, wsid), cu in sorted(near.items(), key=lambda kv: -kv[1])[:10]:
+            print(f"| {name} | {kind or '—'} | `{wsid}` | {cu:,.1f} |")
+    if active:
+        print("\nThe biggest spenders it did see and dropped. **A bare GUID here is an item the "
+              "metrics app has not catalogued yet** — a just-deployed model or a throwaway "
+              "notebook — not an unnamed item:\n")
+        print("| item | kind | workspace id | CU |")
+        print("|:--|:--|:--|--:|")
+        for (name, kind, wsid), cu in sorted(active.items(), key=lambda kv: -kv[1])[:10]:
+            print(f"| {name} | {kind or '—'} | `{wsid}` | {cu:,.1f} |")
+
+
+def render(cells, hourly, meta, since, asof, seen=0, dropped=None, active=None, near=None):
+    """cells is {(item, operation): cu}; hourly is {(item, operation, hour, item_id): cu};
+    meta is {item: {"label", "cls", "kind", "gen"}}."""
     span = (f"since {since:%Y-%m-%d %H:%M} (model clock)" if since else "over everything retained")
-    print(f"## Semantic model CU — {span}, as of {asof:%Y-%m-%d %H:%MZ}\n")
+    scope = "Capacity CU" if ETL else "Semantic model CU"
+    print(f"## {scope} — {span}, as of {asof:%Y-%m-%d %H:%MZ}\n")
     if not cells:
         render_empty(span, seen, dropped or {"workspace": 0, "workspace_blank": 0, "name": 0,
                                             "kind": 0}, active or {}, near or {})
         return
 
-    print(f"Every dispatch since the floor, summed:\n")
-    _op_table(cells)
-    runs = (sessionize((iid, m, h) for (m, _o, h, iid) in hourly)
+    print(f"Everything since the floor, summed:\n")
+    _op_table(cells, meta)
+    runs = (sessionize((iid, k, h, (meta.get(k) or {}).get("gen", False))
+                       for (k, _o, h, iid) in hourly)
             if (RUN_GAP_HOURS > 0 and hourly) else [])
     if runs:
-        render_runs(hourly, runs, cells)
+        render_runs(hourly, runs, meta, cells)
     doc = load_layout()
     if doc:
-        render_layout(doc, {m.lower(): t for m, t in _model_rows(cells)})
+        render_layout(doc, {label.lower(): t for label, _cls, t in _item_rows(cells, meta)})
 
 
 def main():
@@ -760,7 +1051,10 @@ def main():
     log(f"capacities={caps} since={SINCE or '(everything retained)'} "
         f"workspace={WS_FILTER or '(all)'} models={MODELS or '(every semantic model)'}")
 
-    # One request, before the per-capacity loop: the workspace is the same for every capacity.
+    # Two requests, before the per-capacity loop: the workspace is the same for every capacity.
+    # The items call covers every kind and the datasets call covers semantic models; the second is
+    # not redundant, it is what still works when there is no Fabric-audience token.
+    live_items = fabric_items(WS_FILTER) if ETL else {}
     live_names = datasets_in_workspace(WS_FILTER)
     missing = [m for m in MODELS if m.lower() not in {n.lower() for n in live_names.values()}]
     if MODELS and live_names and missing:
@@ -769,6 +1063,8 @@ def main():
 
     wanted = {m.lower() for m in MODELS}
     cells, hourly, unknown, seen_hours = {}, {}, 0, []
+    meta = {}       # display key -> {"label", "cls", "kind", "gen"}
+    kinds = {}      # item kind -> CU, logged so an unrecognised one can be classified next time
     unparsed = 0
     # Why rows were DROPPED, and what was active instead. An empty report is the one outcome this
     # tool cannot explain from its own output otherwise: the query succeeded, the floor bound, rows
@@ -795,12 +1091,16 @@ def main():
                 continue
             # Live REST names win over the metrics app's 'Items' snapshot: a just-deployed semantic
             # model has a GUID the snapshot has not seen yet, and resolving it from the snapshot alone
-            # is what made a redeploy read as an idle capacity.
-            live = live_names.get(iid)
+            # is what made a redeploy read as an idle capacity. The Fabric items call is checked
+            # first because it is the only one of the three that names a notebook or a lakehouse.
             name, kind = items.get(iid, ("", ""))
-            if live:
-                name, kind = live, (kind or "SemanticModel")
-            key = (name or iid).lower()
+            if live_names.get(iid):
+                name, kind = live_names[iid], (kind or "SemanticModel")
+            if live_items.get(iid):
+                name, kind = live_items[iid]
+            cls = classify(kind)
+            label = display_label(name) if name else iid
+            key = label.lower()
             # Resolve the name BEFORE the workspace test, purely so a rejection can be described.
             # The tests themselves are unchanged and still stack — see cu/README.md on why both are
             # needed — they just now say what they threw away.
@@ -812,15 +1112,24 @@ def main():
                 k = (name or iid, kind, wsid or "(blank)")
                 bucket[k] = bucket.get(k, 0.0) + float(cu)
                 continue
-            if wanted:
-                if key not in wanted:
-                    dropped["name"] += 1
-                    k = (name or iid, kind, wsid or "(blank)")
-                    active[k] = active.get(k, 0.0) + float(cu)
+            # With ETL on, the workspace test above is the ONLY filter: everything in that workspace
+            # is this repo's, and the name list is demoted to an ordering. Off, the two old filters
+            # stand unchanged, so a dispatch with CU_ETL=0 reproduces an older report exactly.
+            if not ETL:
+                if wanted:
+                    if key not in wanted:
+                        dropped["name"] += 1
+                        k = (name or iid, kind, wsid or "(blank)")
+                        active[k] = active.get(k, 0.0) + float(cu)
+                        continue
+                elif kind and kind.strip().lower() not in MODEL_KINDS:
+                    dropped["kind"] += 1
                     continue
-            elif kind and kind.strip().lower() not in MODEL_KINDS:
-                dropped["kind"] += 1
-                continue
+            kinds[kind or "(unknown)"] = kinds.get(kind or "(unknown)", 0.0) + float(cu)
+            meta.setdefault(key, {"label": label or iid, "cls": cls, "kind": kind,
+                                  # Only a semantic model is redeployed per dispatch, so only a
+                                  # semantic model can carry sessionize's exact generation rule.
+                                  "gen": (kind or "").strip().lower() in MODEL_KINDS})
             if not name:
                 # Keep it under its GUID rather than drop it: losing CU silently is worse than an
                 # ugly row. Counted so the log can say how much of the table is opaque.
@@ -844,7 +1153,12 @@ def main():
             hourly[hkey] = hourly.get(hkey, 0.0) + float(cu)
 
     if unknown:
-        log(f"  {unknown} item ids had no entry in '{ITEMS}' — shown as raw GUIDs")
+        log(f"  {unknown} item ids resolved to no name anywhere — shown as raw GUIDs")
+    # What kinds were seen, and how they were classified. This log line is the route by which an
+    # unrecognised kind gets into CLASS_BY_KIND — most usefully, whichever kind Fabric bills dbt's
+    # Livy sessions against, which has never been read off a real dispatch.
+    for kind, cu in sorted(kinds.items(), key=lambda kv: -kv[1]):
+        log(f"  kind {kind}: {cu:,.1f} CU -> {classify(kind)}")
     if unparsed:
         log(f"  {unparsed} rows had an unparseable timestamp — counted in the totals, excluded "
             f"from the per-run split")
@@ -864,14 +1178,15 @@ def main():
     for (name, op), cu in sorted(cells.items(), key=lambda kv: -kv[1]):
         log(f"  {name} / {op}: {cu:,.1f} CU")
 
-    runs = sessionize((iid, m, h) for (m, _o, h, iid) in hourly) if RUN_GAP_HOURS > 0 else []
+    runs = (sessionize((iid, k, h, (meta.get(k) or {}).get("gen", False))
+                       for (k, _o, h, iid) in hourly) if RUN_GAP_HOURS > 0 else [])
     for i, r in enumerate(runs, start=1):
         hrs = r["hours"]
-        # The models are named, not counted: a run holding three of the four dispatched engines is a
+        # The items are named, not counted: a run holding three of the four dispatched engines is a
         # deploy that failed, and in the table it is a 0.0 cell indistinguishable from an engine that
         # was never asked for.
         log(f"  run {i}: {hrs[0]:%Y-%m-%d %H:%M} .. {hrs[-1]:%H:%M} ({len(hrs)} active hours, "
-            f"{len(r['items'])} item GUIDs: {', '.join(sorted(r['models']))})")
+            f"{len(r['items'])} item GUIDs: {', '.join(sorted(r['labels']))})")
 
     if not cells and seen:
         log(f"  dropped: {dropped['workspace']} on workspace "
@@ -879,7 +1194,7 @@ def main():
             f"{dropped['kind']} on kind")
 
     render({k: round(v, 1) for k, v in cells.items()},
-           {k: round(v, 1) for k, v in hourly.items()}, since, asof,
+           {k: round(v, 1) for k, v in hourly.items()}, meta, since, asof,
            seen=seen, dropped=dropped, active=active, near=near)
 
 

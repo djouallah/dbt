@@ -1,0 +1,303 @@
+"""Offline tests for capacity_cu.py. No network, no token, no Fabric — `python -m pytest cu/ -q`.
+
+Why this exists at all, in a directory whose whole point is being deletable: the report is now built
+from two different run-allocation rules (exact by GUID for a redeployed item, by hour for one that
+outlives a run), and both of them fail the same way when they are wrong — a number that is plausible,
+printed with confidence, and off. Everything here is pure post-processing of rows already in hand, so
+it is testable without spending a single CU, and the alternative to testing it is dispatching against
+paid capacity to find out.
+
+It imports capacity_cu and nothing else, so `rm -rf cu/` still removes every trace.
+"""
+import importlib
+import os
+import sys
+from datetime import datetime, timedelta
+
+import pytest
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+H = datetime(2026, 8, 1, 10, 0)
+
+
+def load(**env):
+    """Import capacity_cu with a given environment. Its config is module-level, so a test that
+    changes CU_ETL has to reload rather than set an attribute."""
+    for k in [k for k in os.environ if k.startswith("CU_")] + ["PBI_TOKEN", "FABRIC_TOKEN",
+                                                               "STATS_JSON"]:
+        os.environ.pop(k, None)
+    os.environ.update({"PBI_TOKEN": "tok", "CU_METRICS_WORKSPACE_ID": "ws",
+                       "CU_METRICS_MODEL_ID": "mdl", "CU_CAPACITY_ID": "cap",
+                       "CU_REFRESH": "0", **env})
+    import capacity_cu
+    return importlib.reload(capacity_cu)
+
+
+def hours(*offsets):
+    return [H + timedelta(hours=o) for o in offsets]
+
+
+# --------------------------------------------------------------------------- sessionize
+
+def test_generational_items_still_split_inside_one_hour():
+    """The rule this file was built on: two benchmark dispatches in the same hour are two runs,
+    because each redeploys and so mints a new GUID for the same name."""
+    m = load()
+    runs = m.sessionize([
+        ("G1", "aemo_duckrun", H, True),
+        ("G2", "aemo_duckrun", H, True),   # same name, new GUID => next run
+    ], gap_hours=2)
+    assert len(runs) == 2
+    assert [r["items"] for r in runs] == [{"G1"}, {"G2"}]
+
+
+def test_long_lived_etl_item_is_split_across_runs_by_hour():
+    """A lakehouse has ONE GUID for years, so the generation rule can say nothing about it. Its
+    hours must follow the run windows instead — the failure mode being that all of its CU lands in
+    whichever run happened to be read first."""
+    m = load()
+    runs = m.sessionize([
+        ("G1", "aemo_duckrun", H, True),
+        ("G2", "aemo_duckrun", H + timedelta(hours=8), True),
+        ("LH", "dbt_delta", H, False),
+        ("LH", "dbt_delta", H + timedelta(hours=8), False),
+    ], gap_hours=2)
+    assert len(runs) == 2
+    assert ("LH", H) in runs[0]["pairs"]
+    assert ("LH", H + timedelta(hours=8)) in runs[1]["pairs"]
+    assert ("LH", H + timedelta(hours=8)) not in runs[0]["pairs"]
+
+
+def test_etl_only_activity_forms_its_own_run():
+    """A dbt build with no benchmark beside it — no semantic model activity at all, so no window to
+    attach to. It must still be a run, or the build's CU is reported in no column."""
+    m = load()
+    runs = m.sessionize([("LH", "dbt_delta", h, False) for h in hours(0, 1)]
+                        + [("WH", "dbt_dwh", h, False) for h in hours(0, 1)], gap_hours=2)
+    assert len(runs) == 1
+    assert runs[0]["labels"] == {"dbt_delta", "dbt_dwh"}
+    assert len(runs[0]["pairs"]) == 4
+
+
+def test_etl_only_activity_splits_on_the_gap():
+    m = load()
+    runs = m.sessionize([("LH", "dbt_delta", h, False) for h in hours(0, 1, 9, 10)], gap_hours=2)
+    assert len(runs) == 2
+    assert [len(r["hours"]) for r in runs] == [2, 2]
+
+
+def test_gap_zero_is_one_run_holding_everything():
+    m = load()
+    runs = m.sessionize([("G1", "aemo_duckrun", H, True), ("LH", "dbt_delta", H, False)],
+                        gap_hours=0)
+    assert len(runs) == 1
+    assert runs[0]["pairs"] == {("G1", H), ("LH", H)}
+
+
+def test_every_event_lands_in_exactly_one_run():
+    """The conservation property the two tables are read against: no pair dropped, none duplicated.
+    A duplicated pair double-counts CU; a dropped one makes the run columns silently total less than
+    the aggregate above them."""
+    m = load()
+    events = ([("G1", "aemo_duckrun", h, True) for h in hours(0, 1)]
+              + [("G2", "aemo_duckrun", h, True) for h in hours(9, 10)]
+              + [("LH", "dbt_delta", h, False) for h in hours(0, 1, 5, 9, 10, 30)]
+              + [("WH", "dbt_dwh", h, False) for h in hours(30,)])
+    runs = m.sessionize(events, gap_hours=2)
+    seen = [p for r in runs for p in r["pairs"]]
+    assert len(seen) == len(set(seen))
+    assert set(seen) == {(iid, h) for iid, _l, h, _g in events}
+
+
+def test_runs_come_back_oldest_first():
+    m = load()
+    runs = m.sessionize([("LH", "dbt_delta", h, False) for h in hours(30, 0, 60)], gap_hours=2)
+    assert [r["hours"][0] for r in runs] == sorted(r["hours"][0] for r in runs)
+
+
+# --------------------------------------------------------------------------- tables
+
+META = {
+    "aemo_duckrun": {"label": "aemo_duckrun", "cls": "analytics", "kind": "SemanticModel",
+                     "gen": True},
+    "dbt_delta": {"label": "dbt_delta", "cls": "etl", "kind": "Lakehouse", "gen": False},
+    "duckrun-py-*": {"label": "duckrun-py-*", "cls": "etl", "kind": "Notebook", "gen": False},
+}
+
+
+def _cells():
+    return {("aemo_duckrun", "Query"): 100.0, ("aemo_duckrun", "Refresh"): 10.0,
+            ("dbt_delta", "OneLake Write"): 50.0, ("dbt_delta", "OneLake Read"): 5.0,
+            ("duckrun-py-*", "Spark Job"): 25.0}
+
+
+def test_op_table_totals_and_class_subtotals(capsys):
+    m = load(CU_MODELS="", CU_ETL="1")
+    m._op_table(_cells(), META)
+    out = capsys.readouterr().out
+    assert "| **analytics** |" in out and "| **etl** |" in out
+    assert "**110.0**" in out          # analytics subtotal
+    assert "**80.0**" in out           # etl subtotal
+    assert "**190.0**" in out          # grand total
+
+
+def test_op_columns_fold_past_the_cap(capsys):
+    """The readability guard, and it must be honest: folded columns are named and counted."""
+    m = load(CU_MODELS="", CU_OP_COLS="2")
+    cells = {("dbt_delta", f"op{i}"): float(10 - i) for i in range(6)}
+    m._op_table(cells, {"dbt_delta": {"label": "dbt_delta", "cls": "etl", "kind": "Lakehouse",
+                                      "gen": False}})
+    out = capsys.readouterr().out
+    assert "other (4 ops)" in out
+    assert "folded into `other`" in out
+    assert "**45.0**" in out           # 10+9+8+7+6+5, nothing lost to the fold
+
+
+def test_named_models_are_printed_even_with_no_activity(capsys):
+    """A model that vanishes from the table looks identical to one that was never deployed."""
+    m = load(CU_MODELS="aemo_duckrun,aemo_spark")
+    m._op_table(_cells(), META)
+    out = capsys.readouterr().out
+    assert "| aemo_spark | " in out and "**0.0**" in out
+
+
+def test_display_label_collapses_the_throwaway_notebooks():
+    m = load()
+    assert m.display_label("duckrun-py-3f2a1b") == "duckrun-py-*"
+    assert m.display_label("dbt_delta") == "dbt_delta"
+
+
+def test_classify_is_case_and_space_insensitive_and_keeps_strangers():
+    m = load()
+    assert m.classify("Semantic Model") == "analytics"
+    assert m.classify("SemanticModel") == "analytics"
+    assert m.classify("Lakehouse") == "etl"
+    assert m.classify("Notebook") == "etl"
+    assert m.classify("Warehouse") == "etl"
+    assert m.classify("SomethingFabricInventedLastWeek") == "other"
+    assert m.classify("") == "other"
+
+
+def test_run_table_class_rows_agree_with_the_item_rows(capsys):
+    """The headline table is computed from the same `per` as the rows below it; if the two ever
+    disagree the report contradicts itself on one page."""
+    m = load(CU_MODELS="")
+    hourly = {}
+    for i, (key, iid, h, cu) in enumerate([
+            ("aemo_duckrun", "G1", H, 100.0),
+            ("aemo_duckrun", "G2", H + timedelta(hours=8), 120.0),
+            ("dbt_delta", "LH", H, 40.0),
+            ("dbt_delta", "LH", H + timedelta(hours=8), 60.0)]):
+        hourly[(key, "op", h, iid)] = cu
+    meta = {"aemo_duckrun": META["aemo_duckrun"], "dbt_delta": META["dbt_delta"]}
+    runs = m.sessionize(((iid, k, h, meta[k]["gen"]) for (k, _o, h, iid) in hourly), gap_hours=2)
+    m.render_runs(hourly, runs, meta, cells={k[:2]: v for k, v in hourly.items()})
+    out = capsys.readouterr().out
+    assert "Runs detected: 2" in out
+    # analytics 100 | 120, etl 40 | 60, totals 140 | 180 in run order.
+    assert "| **analytics** | 100.0 | 120.0 | **220.0** |" in out
+    assert "| **etl** | 40.0 | 60.0 | **100.0** |" in out
+    assert "| **total** | **140.0** | **180.0** | **320.0** |" in out
+
+
+# --------------------------------------------------------------------------- empty report
+
+def test_empty_report_explains_itself_instead_of_raising(capsys):
+    """render_empty was CALLED and never defined — the diagnosis path raised NameError. An empty
+    report and an idle capacity print the same otherwise, which is the wrong conclusion drawn
+    confidently."""
+    m = load()
+    m.render({}, {}, {}, None, datetime(2026, 8, 1, 12, 0), seen=7,
+             dropped={"workspace": 7, "workspace_blank": 0, "name": 0, "kind": 0},
+             active={("some-model", "SemanticModel", "OTHER-WS"): 12.0},
+             near={("aemo_spark", "SemanticModel", "OTHER-WS"): 30.0})
+    out = capsys.readouterr().out
+    assert "No item activity" in out
+    assert "7" in out and "aemo_spark" in out
+
+
+def test_empty_with_no_rows_at_all_says_the_capacity_was_idle(capsys):
+    m = load()
+    m.render({}, {}, {}, None, datetime(2026, 8, 1, 12, 0), seen=0)
+    assert "no rows at all" in capsys.readouterr().out
+
+
+# --------------------------------------------------------------------------- end to end
+
+SCHEMA = ([{"Table": "Metrics By Item Operation And Hour", "Name": n}
+           for n in ("Item Id", "Workspace Id", "Operation name", "CU (s)", "Datetime")]
+          + [{"Table": "Items", "Name": n} for n in ("Item Id", "Item name", "Item kind")])
+
+WS_ID = "AAAA1111-0000-0000-0000-000000000000"
+
+
+def _row(iid, op, cu, h):
+    return {"Item Id": iid, "Workspace Id": WS_ID, "Operation name": op, "CU": cu,
+            "Datetime": h.strftime("%Y-%m-%dT%H:%M:%S")}
+
+
+def _stub(m, rows, items):
+    def execute_dax(dax, tries=4, fatal=True):
+        if "INFO.VIEW.COLUMNS" in dax:
+            return SCHEMA
+        if "'Items'" in dax:
+            return items
+        return rows
+    m.execute_dax = execute_dax
+    m.datasets_in_workspace = lambda ws: {}
+    m.fabric_items = lambda ws: {}
+
+
+def test_end_to_end_reports_etl_and_analytics(capsys):
+    m = load(CU_WORKSPACE_FILTER=WS_ID, CU_MODELS="aemo_duckrun", CU_ETL="1")
+    rows = [_row("G1", "Query", 100.0, H),
+            _row("LH", "OneLake Write", 40.0, H),
+            _row("NB1", "Spark Job", 7.0, H),
+            _row("NB2", "Spark Job", 3.0, H)]
+    items = [{"Id": "G1", "Name": "aemo_duckrun", "Kind": "SemanticModel"},
+             {"Id": "LH", "Name": "dbt_delta", "Kind": "Lakehouse"},
+             {"Id": "NB1", "Name": "duckrun-py-aaa", "Kind": "Notebook"},
+             {"Id": "NB2", "Name": "duckrun-py-bbb", "Kind": "Notebook"}]
+    _stub(m, rows, items)
+    m.main()
+    out = capsys.readouterr().out
+    assert "Capacity CU" in out
+    assert "| aemo_duckrun |" in out and "| dbt_delta |" in out
+    assert "| duckrun-py-* |" in out          # the two notebooks collapsed to one row
+    assert "**10.0**" in out                  # ...and their CU summed, not dropped
+    assert "**150.0**" in out                 # grand total, nothing lost
+
+
+def test_end_to_end_etl_off_reproduces_the_old_scope(capsys):
+    """CU_ETL=0 has to be a true revert, or an older dispatch's numbers cannot be compared."""
+    m = load(CU_WORKSPACE_FILTER=WS_ID, CU_MODELS="aemo_duckrun", CU_ETL="0")
+    rows = [_row("G1", "Query", 100.0, H), _row("LH", "OneLake Write", 40.0, H)]
+    items = [{"Id": "G1", "Name": "aemo_duckrun", "Kind": "SemanticModel"},
+             {"Id": "LH", "Name": "dbt_delta", "Kind": "Lakehouse"}]
+    _stub(m, rows, items)
+    m.main()
+    out = capsys.readouterr().out
+    assert "Semantic model CU" in out
+    assert "dbt_delta" not in out
+    assert "**100.0**" in out
+
+
+def test_end_to_end_keeps_an_unnamed_item_under_its_guid(capsys):
+    """The lagging-'Items' trap from the other side: an item nothing can name must keep its CU."""
+    m = load(CU_WORKSPACE_FILTER=WS_ID, CU_MODELS="", CU_ETL="1")
+    _stub(m, [_row("MYSTERY-GUID", "Spark Job", 12.0, H)], [])
+    m.main()
+    out = capsys.readouterr().out
+    assert "mystery-guid" in out.lower()
+    assert "**12.0**" in out
+
+
+def test_end_to_end_dies_if_the_since_filter_did_not_bind(capsys):
+    """A DAX filter that is accepted and then ignored is this tool's worst failure: a plausible
+    wrong total. It has happened once already."""
+    m = load(CU_WORKSPACE_FILTER=WS_ID, CU_MODELS="", CU_SINCE="2026-08-01T09:00:00")
+    _stub(m, [_row("G1", "Query", 5.0, H - timedelta(hours=5))],
+          [{"Id": "G1", "Name": "aemo_duckrun", "Kind": "SemanticModel"}])
+    with pytest.raises(SystemExit):
+        m.main()
