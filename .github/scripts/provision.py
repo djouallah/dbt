@@ -118,10 +118,29 @@ def ensure(kind, name, payload=None):
     body = {"displayName": name, "folderId": FOLDER_ID}
     if payload:
         body.update(payload)
-    r = requests.post(f"{FAB}/workspaces/{ws}/{kind}", headers=H, json=body)
-    if r.status_code not in (200, 201, 202):
-        sys.stderr.write(r.text + "\n")
-        r.raise_for_status()
+    # A create straight after a drop hits `ItemDisplayNameNotAvailableYet` (409): Fabric frees the
+    # display NAME minutes after the item stops being listed, so drop()'s wait — which polls the
+    # item list — returns long before the name can be reused. Measured on run 30639018466, where
+    # three legs deleted in ~2s and were rejected, while the one whose delete took 36s to
+    # propagate got through. Fabric marks the error `isRetriable`, so poll until it clears rather
+    # than failing the leg; anything not retriable still raises on the first response.
+    for attempt in range(40):                      # ~10 minutes at 15s
+        r = requests.post(f"{FAB}/workspaces/{ws}/{kind}", headers=H, json=body)
+        if r.status_code in (200, 201, 202):
+            break
+        try:
+            err = r.json()
+        except ValueError:
+            err = {}
+        if not (err.get("errorCode") == "ItemDisplayNameNotAvailableYet" or err.get("isRetriable")):
+            sys.stderr.write(r.text + "\n")
+            r.raise_for_status()
+        if attempt == 0:
+            sys.stderr.write(f"  name '{name}' still reserved from the drop, waiting for Fabric "
+                             f"to release it ...\n")
+        time.sleep(15)
+    else:
+        raise SystemExit(f"gave up waiting for the name '{name}' to be reusable: {r.text}")
     for _ in range(120):
         it = find(kind, name)
         if it:
