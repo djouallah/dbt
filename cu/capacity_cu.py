@@ -114,12 +114,20 @@ CLASS_ORDER = ["analytics", "etl", "other"]
 
 # Items whose display name starts with one of these collapse into ONE row named `<prefix>*`.
 #
-# `duckrun-py-` is the reason this exists: `duckrun.run_python` creates a throwaway notebook per
-# call, so a week of dispatches is a week of one-row-each notebooks that are the same thing wearing
-# different GUIDs. Collapsing is display only — the run split below still allocates by GUID, so
-# nothing about WHICH run a notebook belongs to is lost.
+# Throwaway notebooks are the reason this exists: `duckrun.run_python` creates one per call and
+# deletes it afterwards, so a week of dispatches is a week of one-row-each notebooks that are the
+# same thing wearing different GUIDs. Collapsing is display only — the run split still allocates by
+# GUID, so nothing about WHICH run a notebook belongs to is lost.
+#
+# `fabric_run.py` names them `dbt-<engine>-<random>` precisely so this collapse can separate the two
+# DuckDB legs; the random suffix is what keeps Fabric's display-name reservation from 409ing the
+# next run, so the engine has to live in the prefix. `duckrun-py-` is duckrun's own default and
+# stays for the older rows still inside the app's ~14-day retention.
+#
+# A collapsed name is also the signal that an item is THROWAWAY, which the run split uses: an item
+# recreated per run carries the same exact generation rule as a semantic model. See main().
 GROUP_PREFIXES = [p.strip() for p in os.environ.get(
-    "CU_GROUP_PREFIXES", "duckrun-py-").split(",") if p.strip()]
+    "CU_GROUP_PREFIXES", "dbt-duckrun-,dbt-iceberg-,duckrun-py-").split(",") if p.strip()]
 
 # Operation columns to print before folding the rest into one `other` column. The semantic models
 # spend on three or four operation types; a lakehouse alone brings a dozen OneLake ones, and that is
@@ -1130,9 +1138,14 @@ def main():
                     continue
             kinds[kind or "(unknown)"] = kinds.get(kind or "(unknown)", 0.0) + float(cu)
             meta.setdefault(key, {"label": label or iid, "cls": cls, "kind": kind,
-                                  # Only a semantic model is redeployed per dispatch, so only a
-                                  # semantic model can carry sessionize's exact generation rule.
-                                  "gen": (kind or "").strip().lower() in MODEL_KINDS})
+                                  # sessionize's exact generation rule needs an item that is created
+                                  # fresh for every run. Two things qualify: a semantic model (the
+                                  # benchmark deletes and recreates them) and a COLLAPSED name (the
+                                  # collapse exists because those items are throwaway — a new GUID
+                                  # under a stable prefix every dbt build). Everything else lives
+                                  # across runs and is allocated by hour instead.
+                                  "gen": ((kind or "").strip().lower() in MODEL_KINDS
+                                          or (bool(name) and label != name))})
             if not name:
                 # Keep it under its GUID rather than drop it: losing CU silently is worse than an
                 # ugly row. Counted so the log can say how much of the table is opaque.

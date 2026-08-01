@@ -319,6 +319,12 @@ handles a small one slightly cheaper. That trade was never worth a decision that
 `fabric_build.py` stays location-agnostic — it resolves its own token either side — so you can
 still run it by hand to reproduce a CI failure. That is a debugging affordance, not a CI path.
 
+The notebook's NAME is load-bearing and is not duckrun's default: `dbt-<engine>-<random>`. Fabric
+bills this leg's compute against the notebook item, so the engine has to be in the name or `cu/`
+reports both DuckDB legs as one row — and it has to be in the *prefix*, because a deleted item's
+display name stays reserved for minutes and `_execute_notebook` creates the item with no retry. See
+the `cu/` section.
+
 ## Facts that are easy to get wrong
 
 - **XTable *does* convert Iceberg positional deletes** into Delta deletion vectors. Emitting
@@ -827,12 +833,19 @@ detail.
   scope exactly, which is what makes an older dispatch's numbers still comparable.
 - **Livy bills against the LAKEHOUSE. There is no Spark item of any kind.** So `dbt_spark`'s ETL row
   is its OneLake operations *and* the whole spark leg's compute added together, and the operation
-  column is the only thing that separates them. It also means the per-engine ETL rows have three
-  different attribution shapes and are **not** "compute for this leg": spark's compute is on its
-  lakehouse, the two DuckDB legs' compute is on the throwaway `duckrun.run_python` **notebooks**
-  (which `CU_GROUP_PREFIXES` collapses into one `duckrun-py-*` row shared by duckrun and iceberg),
-  and dwh's is warehouse queries. Compare them as "what this item spent", not as a like-for-like
-  engine benchmark — that is what `benchmark/` is for.
+  column is the only thing that separates them. Three attribution shapes in one table, so the ETL
+  rows are **not** "compute for this leg": spark's compute is on its lakehouse, the two DuckDB legs'
+  is on the throwaway `duckrun.run_python` notebook, dwh's is warehouse queries. Compare them as
+  "what this item spent", not as a like-for-like engine benchmark — that is what `benchmark/` is for.
+- **`fabric_run.py` names its throwaway notebook `dbt-<engine>-<random>`, and both halves of that
+  are load-bearing.** duckrun's default is `duckrun-py-<runid>`, identical for both DuckDB legs, so
+  their compute arrived as one undivided row; the engine has to be in the name or `cu/` cannot
+  separate them. It has to be in the **prefix** because the suffix cannot go: the notebook is deleted
+  after every run, Fabric keeps a deleted item's DISPLAY NAME reserved for minutes (the 409 that
+  killed three legs on run 30639018466), and duckrun's `_execute_notebook` creates the item with no
+  retry around it. A fixed name would 409 the next build to tidy up a report. `CU_GROUP_PREFIXES`
+  collapses on that prefix, and a collapsed name is also what marks an item as throwaway for the run
+  split — so renaming this changes two things, not one.
 - **An unrecognised item kind lands in `other` and is logged, never dropped.** That log line
   (`kind X: N CU -> other`) is the route by which a kind gets into `CLASS_BY_KIND`. Do not guess a
   kind into the mapping; dispatch once and read stderr.
@@ -872,14 +885,14 @@ detail.
   minutes apart, i.e. inside one hour bucket, where no gap value could ever have separated them.
   Because `deploy_models.py` deletes and recreates each model, a dispatch mints a fresh GUID per
   engine and a model cannot appear twice in one run, so a repeated model name IS the boundary.
-  **That rule covers the semantic models and nothing else**, which is why runs are *formed* from
-  them alone: a lakehouse keeps one GUID for years and a `duckrun-py-*` notebook gets a fresh name
-  every time, so neither can ever fire it. Everything that is not a semantic model is allocated to
-  those windows **by hour** (containment, then adjacency within the gap), and hours belonging to no
-  window cluster into a run of their own — which is what gives a dbt build with no benchmark beside
-  it a column at all. The honest cost: ETL allocation is only as sharp as the hour bucket, so an ETL
-  hour shared by two overlapping runs goes to one of them rather than being split. Analytics
-  allocation stays exact. Two
+  **The rule needs an item created fresh per run, which is the semantic models and the throwaway
+  notebooks** — a *collapsed* name is exactly that signal, so `dbt-duckrun-*` repeating dates a dbt
+  build the same way. Runs are formed from those; a lakehouse or warehouse keeps one GUID for years,
+  never repeats a name, and is instead allocated to the formed windows **by hour** (containment,
+  then adjacency within the gap), with hours belonging to no window clustering into a run of their
+  own. The honest cost: that allocation is only as sharp as the hour bucket, so an hour shared by two
+  overlapping runs goes to one of them rather than being split. Generational allocation stays exact.
+  Two
   consequences: adjacent columns may **overlap by an hour** (allocation is by GUID, so this costs no
   accuracy), and `CU_RUN_GAP_HOURS` now only splits a model that was *not* redeployed. Do not reach
   for the timepoint detail table to sharpen this further — the dedup trap below is why, and this

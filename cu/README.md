@@ -42,14 +42,24 @@ is named on stderr (`kind X: 1,234.0 CU -> other`), which is how a kind gets add
 `CLASS_BY_KIND`.
 
 **An ETL row does not mean the same thing for every engine, and this is the thing to hold onto when
-reading the table.** Fabric bills **Livy against the lakehouse** — there is no Spark item of any
-kind — so `dbt_spark`'s row is its OneLake operations *and* the entire spark leg's compute, added
-together, separable only by the operation column. The two DuckDB legs run through
-`duckrun.run_python`, so *their* compute is on the throwaway **notebook** items, which the prefix
-collapse merges into one `duckrun-py-*` row shared by duckrun and iceberg (set
-`CU_GROUP_PREFIXES=` to un-collapse them, though the names may not distinguish the legs anyway).
-`dbt_dwh` bills as warehouse queries. So the per-engine ETL rows are comparable in *total capacity
-spent by that item*, not in "compute for this leg" — three different attribution shapes.
+reading the table.** Three different attribution shapes:
+
+| leg | where its compute is billed | so its row is |
+|:--|:--|:--|
+| `spark` | **the lakehouse** — Fabric bills Livy against `dbt_spark`, there is no Spark item of any kind | OneLake operations *and* the whole leg's compute, separable only by the operation column |
+| `duckrun`, `iceberg` | the throwaway **notebook** `duckrun.run_python` creates | one row per leg — `dbt-duckrun-*`, `dbt-iceberg-*` — collapsed from a new GUID every build |
+| `dwh` | the **warehouse** | warehouse queries against `dbt_dwh` |
+
+The per-leg notebook rows exist because `fabric_run.py` names its notebook `dbt-<engine>-<random>`
+rather than taking duckrun's default `duckrun-py-<runid>`, which was identical for both DuckDB legs
+and made their compute one undivided row. **The random suffix has to stay**: the notebook is deleted
+after every run, Fabric keeps a deleted item's display name reserved for minutes afterwards, and
+`_execute_notebook` creates the item with no retry around it — so a fixed name would 409 the next
+build to tidy up a report. The engine lives in the prefix, which is what `CU_GROUP_PREFIXES`
+collapses on.
+
+Read the rows as *what this item spent*, not as a like-for-like engine comparison — that is what
+`benchmark/` is for.
 
 **Time is a pinned floor, not a rolling window.** A window ("last 3h") moves with every dispatch
 and can slice one benchmark in half, making an engine look cheap for no reason but where the
@@ -117,9 +127,15 @@ between two runs. That rule uses no clock at all, which is why it survives a dis
 *not* redeployed but is queried again days later splits there rather than dragging the later CU into
 the earlier column.
 
-**The ETL items cannot carry that rule, so they are allocated by HOUR.** A lakehouse has one GUID for
-years; a `duckrun-py-*` notebook has a fresh name every time, so a repeated name can never fire on it
-either. So runs are *formed* from the semantic models alone, exactly as before, and every other item's
+**The rule extends to the throwaway notebooks, and to nothing else.** An item that is created fresh
+for every run dates that run exactly the way a redeployed semantic model does — and a *collapsed*
+name is precisely the signal that an item is throwaway, so `dbt-duckrun-*` repeating among the GUIDs
+is the next dbt build. That is what gives a build with no benchmark beside it an exact boundary
+rather than one inferred from idle time.
+
+**A long-lived item cannot carry that rule, so it is allocated by HOUR.** A lakehouse or a warehouse
+keeps one GUID for years, so no name ever repeats. Runs are *formed* from the generational items —
+semantic models and throwaway notebooks — and every other item's
 hours are then allocated to those windows — containment first, then adjacency within
 `run_gap_hours`. Hours belonging to no model's window cluster into a run of their own, which is what
 gives a dbt build with no benchmark beside it its own column (run 1 above). The cost, stated plainly:

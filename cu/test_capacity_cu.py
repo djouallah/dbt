@@ -165,6 +165,8 @@ def test_named_models_are_printed_even_with_no_activity(capsys):
 def test_display_label_collapses_the_throwaway_notebooks():
     m = load()
     assert m.display_label("duckrun-py-3f2a1b") == "duckrun-py-*"
+    assert m.display_label("dbt-duckrun-9c1e") == "dbt-duckrun-*"
+    assert m.display_label("dbt-iceberg-9c1e") == "dbt-iceberg-*"
     assert m.display_label("dbt_delta") == "dbt_delta"
 
 
@@ -281,6 +283,39 @@ def test_end_to_end_etl_off_reproduces_the_old_scope(capsys):
     assert "Semantic model CU" in out
     assert "dbt_delta" not in out
     assert "**100.0**" in out
+
+
+def test_the_two_duckdb_legs_are_separate_rows(capsys):
+    """The point of naming the notebooks per engine: duckrun's default `duckrun-py-<runid>` was
+    identical for both legs, so their compute was one undivided row."""
+    m = load(CU_WORKSPACE_FILTER=WS_ID, CU_MODELS="", CU_ETL="1")
+    rows = [_row("NB1", "Notebook Run", 300.0, H), _row("NB2", "Notebook Run", 200.0, H)]
+    items = [{"Id": "NB1", "Name": "dbt-duckrun-aaaa", "Kind": "Notebook"},
+             {"Id": "NB2", "Name": "dbt-iceberg-bbbb", "Kind": "Notebook"}]
+    _stub(m, rows, items)
+    m.main()
+    out = capsys.readouterr().out
+    assert "| dbt-duckrun-* |" in out and "| dbt-iceberg-* |" in out
+    assert "**300.0**" in out and "**200.0**" in out
+
+
+def test_a_collapsed_name_repeating_is_the_next_run(capsys):
+    """A throwaway notebook is recreated per dbt build, so a repeated collapsed name dates a run
+    exactly the way a redeployed semantic model does — without it, two builds an hour apart would
+    be one column."""
+    m = load(CU_WORKSPACE_FILTER=WS_ID, CU_MODELS="", CU_ETL="1")
+    later = H + timedelta(hours=1)
+    rows = [_row("NB1", "Notebook Run", 300.0, H), _row("NB2", "Notebook Run", 200.0, later),
+            _row("LH", "OneLake Write", 10.0, H), _row("LH", "OneLake Write", 20.0, later)]
+    items = [{"Id": "NB1", "Name": "dbt-duckrun-aaaa", "Kind": "Notebook"},
+             {"Id": "NB2", "Name": "dbt-duckrun-bbbb", "Kind": "Notebook"},
+             {"Id": "LH", "Name": "dbt_delta", "Kind": "Lakehouse"}]
+    _stub(m, rows, items)
+    m.main()
+    out = capsys.readouterr().out
+    assert "Runs detected: 2" in out
+    # The lakehouse follows the windows the notebooks formed, an hour each.
+    assert "| dbt_delta | 10.0 | 20.0 | **30.0** |" in out
 
 
 def test_end_to_end_keeps_an_unnamed_item_under_its_guid(capsys):

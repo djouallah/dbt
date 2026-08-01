@@ -16,6 +16,7 @@ self-acquires the Fabric control-plane + OneLake tokens on the runner via GitHub
 """
 import os
 import sys
+import uuid
 
 import duckrun
 
@@ -39,6 +40,15 @@ def main() -> int:
         ".",                                    # ship this whole dbt project (cwd = project root)
         entry=".github/scripts/fabric_build.py",
         args=[engine],
+        # Name the throwaway notebook after the ENGINE, because Fabric bills this leg's compute
+        # against the notebook item and `cu/` can only report what the name says. duckrun's default
+        # is `duckrun-py-<runid>`, identical for both DuckDB legs, so their CU was one undivided
+        # row. The random suffix is NOT decoration and must stay: the notebook is deleted after
+        # every run and Fabric keeps a deleted item's DISPLAY NAME reserved for minutes afterwards
+        # (the 409 that killed three legs on run 30639018466), and `_execute_notebook` creates the
+        # item with no retry around it. So the engine goes in the PREFIX — which is also what
+        # cu/'s CU_GROUP_PREFIXES collapses on, giving one row per engine rather than one per run.
+        name=f"dbt-{engine}-{uuid.uuid4().hex[:8]}",
         lakehouse="dbt_landing",                # hosts the tiny result/log round-trip files
         env=env,
         cores=cores,
