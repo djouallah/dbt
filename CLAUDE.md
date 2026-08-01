@@ -814,7 +814,7 @@ takes to **query** them. Ported from `djouallah/duckrun`'s `parquet_layout.yml`.
 
 ## `cu/` is a third workflow, and it shares nothing with the other two
 
-`cu/` + `.github/workflows/cu.yml` ("Capacity CU") answer what the workspace *cost*: CU per item,
+`cu/` + `.github/workflows/cu.yml` ("Capacity units") answer what the workspace *cost*: CU per item,
 read from the Fabric Capacity Metrics app's own semantic model by DAX over the Power BI
 `executeQueries` REST endpoint. Fabric exposes **no per-operation CU REST API** — that model is the
 only authoritative source, which is why this exists at all. [cu/README.md](cu/README.md) has the

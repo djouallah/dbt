@@ -1,4 +1,4 @@
-name: Capacity CU
+name: Capacity units
 
 # MANUAL ONLY, non-gating, read-only. The third workflow in this repo, and the most disposable.
 #
@@ -11,7 +11,14 @@ name: Capacity CU
 # QUERIED) — per operation type, and per run. `etl: false` narrows it back to the semantic models.
 #
 # It shares NOTHING with benchmark.yml — no needs:, no artifact, no concurrency group, no code. It
-# reports CU per semantic model from a pinned `since` floor onward. See cu/README.md.
+# reports capacity units per engine from a pinned `since` floor onward. See cu/README.md.
+#
+# Output lands in four places, all from ONE run of the script: the job summary (markdown), the job
+# log, a `cu-report` artifact, and GitHub Pages — https://djouallah.github.io/dbt/, which is the
+# LATEST report and nothing else. Each dispatch overwrites it; the artifact is the per-run copy.
+#
+# The repo is PUBLIC, so that page is public. It carries capacity-unit totals per engine and item
+# names — no tokens, no ids, no data — but it is public, deliberately and with that understood.
 #
 # It DOES now separate runs, and note carefully what that is: a run here is a cluster of active hours
 # in the metrics model, inferred from idle gaps and identified by its own time window. It is still not
@@ -91,10 +98,12 @@ permissions:
   # To download the `stats` artifact from the latest *dbt* run. Read-only, and the only
   # reason this workflow touches the Actions API at all.
   actions: read
+  # To publish the report to Pages. Only the `publish` job actually uses it.
+  pages: write
 
 jobs:
   cu:
-    name: semantic model CU
+    name: capacity units
     runs-on: ubuntu-latest
     # 45, not 20: the pre-query refresh of the metrics model waits up to CU_REFRESH_TIMEOUT (15
     # min) before giving up, and the read itself is ~60 sequential timepoint requests.
@@ -218,7 +227,56 @@ jobs:
             echo "run $id has no 'stats' artifact, trying older" >&2
           done
 
+      # ONE read of the metrics model, three copies of its output: `cu-report.md` for the page and
+      # the artifact, the step summary, and the job log (so `gh run view --log` shows it too).
+      # pipefail because the pipe would otherwise report tee's exit status and turn a failed read
+      # green.
       - name: Read CU from the Capacity Metrics model
         run: |
           set -o pipefail
-          python cu/capacity_cu.py | tee -a "$GITHUB_STEP_SUMMARY"
+          python cu/capacity_cu.py | tee cu-report.md | tee -a "$GITHUB_STEP_SUMMARY"
+
+      # Markdown -> one self-contained HTML file. No network at render time and none at view time:
+      # the CSS is inline and there is no script, font or image, so the artifact copy opens off a
+      # local disk years later.
+      - name: Render the report as a page
+        run: |
+          set -euo pipefail
+          mkdir -p site
+          python cu/report_html.py cu-report.md \
+            "Fabric capacity units, read from the Capacity Metrics app's semantic model by \
+             \`cu/capacity_cu.py\`. Published by the \`Capacity units\` workflow, run \
+             ${{ github.run_id }} (\`${{ github.sha }}\`). Each dispatch replaces this page; the \
+             per-run copy is that run's \`cu-report\` artifact." > site/index.html
+
+      # The per-run copy. Pages only ever holds the latest, and a report is worth comparing against
+      # an older one.
+      - uses: actions/upload-artifact@v4
+        with:
+          name: cu-report
+          path: |
+            cu-report.md
+            site/index.html
+          if-no-files-found: error
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: site
+
+  # Separate job because `deploy-pages` needs the `github-pages` environment, and a deployment
+  # environment on the job that holds the Fabric tokens would put an approval gate in front of the
+  # capacity read rather than in front of the publish. It runs only when the read succeeded — a
+  # failed dispatch must not overwrite a good page with a half-written one.
+  publish:
+    name: publish the page
+    needs: cu
+    runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4

@@ -9,7 +9,7 @@ authoritative source, so this reads it by DAX and prints it back engine-major: f
 *queries* them — the semantic models) down the side, broken out by operation, then the same per run.
 
 ```
-## Capacity CU — since 2026-07-31 16:00 (model clock), as of 2026-08-01 14:10Z
+## Capacity units — since 2026-07-31 16:00 (model clock), as of 2026-08-01 14:10Z
 
 |                     | landing | duckrun | iceberg | spark |     dwh |   total |
 |:--------------------|--------:|--------:|--------:|------:|--------:|--------:|
@@ -228,7 +228,7 @@ model, or which GitHub run produced a number — only which *run* in its own sen
 
 ## Running it
 
-`gh workflow run "Capacity CU"` (or the Actions tab), `workflow_dispatch` only. **Wait ~10 minutes
+`gh workflow run "Capacity units"` (or the Actions tab), `workflow_dispatch` only. **Wait ~10 minutes
 after the activity you want to measure** — see the lag note below.
 
 | input | default | notes |

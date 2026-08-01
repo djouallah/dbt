@@ -1138,7 +1138,7 @@ def render(cells, hourly, meta, since, asof, seen=0, dropped=None, active=None, 
     """cells is {(item, operation): cu}; hourly is {(item, operation, hour, item_id): cu};
     meta is {item: {"label", "cls", "kind", "gen"}}."""
     span = (f"since {since:%Y-%m-%d %H:%M} (model clock)" if since else "over everything retained")
-    scope = "Capacity CU" if ETL else "Semantic model CU"
+    scope = "Capacity units" if ETL else "Capacity units — semantic models only"
     print(f"## {scope} — {span}, as of {asof:%Y-%m-%d %H:%MZ}\n")
     if not cells:
         render_empty(span, seen, dropped or {"workspace": 0, "workspace_blank": 0, "name": 0,

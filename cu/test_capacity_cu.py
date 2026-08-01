@@ -312,7 +312,7 @@ def test_end_to_end_reports_etl_and_analytics(capsys):
     _stub(m, rows, items)
     m.main()
     out = capsys.readouterr().out
-    assert "Capacity CU" in out
+    assert "Capacity units" in out
     # landing | duckrun's lakehouse (40) | ... | the two ambiguous notebooks (10, in `shared`).
     assert ("| **etl** | **0.0** | **40.0** | **0.0** | **0.0** | **0.0** | **10.0** | "
             "**50.0** |") in out
@@ -331,7 +331,7 @@ def test_end_to_end_etl_off_reproduces_the_old_scope(capsys):
     _stub(m, rows, items)
     m.main()
     out = capsys.readouterr().out
-    assert "Semantic model CU" in out
+    assert "Capacity units — semantic models only" in out
     assert "dbt_delta" not in out
     assert "**100.0**" in out
 
@@ -378,6 +378,58 @@ def test_end_to_end_keeps_an_unnamed_item_under_its_guid(capsys):
     out = capsys.readouterr().out
     assert "mystery-guid" in out.lower()
     assert "**12.0**" in out
+
+
+# --------------------------------------------------------------------------- the page
+
+def _html_of(md):
+    import report_html
+    return report_html.page(md, footer="run 1 (`abc123`)")
+
+
+def test_page_renders_the_report_and_needs_no_network():
+    """The page is a build artifact: it has to open off a local disk with no network, years later.
+    So nothing external — no CDN, no font, no image, no script."""
+    md = ("## Capacity units — since 2026-08-01 10:00\n\n"
+          "| | landing | duckrun | total |\n|:--|---:|---:|---:|\n"
+          "| **etl** | **300.0** | **215.0** | **515.0** |\n"
+          "| OneLake Write | 240.0 | 120.0 | 360.0 |\n")
+    out = _html_of(md)
+    assert "<h2>Capacity units — since 2026-08-01 10:00</h2>" in out
+    assert '<th class="right">landing</th>' in out
+    assert '<tr class="sub">' in out                       # the bold subtotal row is marked
+    assert '<td class="right">240.0</td>' in out           # numbers right-aligned, unreformatted
+    for forbidden in ("http://", "https://", "<script", "src=", "@import"):
+        assert forbidden not in out
+
+
+def test_page_escapes_before_it_formats():
+    """Item names come from a REST API. A `<` in one must not become markup."""
+    import report_html
+    out = report_html.to_html("| item |\n|:--|\n| <img src=x> |\n")
+    assert "&lt;img src=x&gt;" in out
+    assert "<img" not in out
+
+
+def test_page_keeps_multiline_notes_as_one_paragraph():
+    """The report wraps its <sub> notes at ~100 columns; the page must not print five paragraphs."""
+    import report_html
+    out = report_html.to_html("<sub>first line\nsecond line\nthird line</sub>\n")
+    assert out.count('<p class="note">') == 1
+    assert "first line second line third line" in out
+
+
+def test_page_survives_the_whole_report(capsys):
+    """End to end: the real renderer over the real report, not a hand-written fragment."""
+    m = load(CU_WORKSPACE_FILTER=WS_ID, CU_MODELS="", CU_ETL="1")
+    _stub(m, [_row("LH", "OneLake Write", 40.0, H)],
+          [{"Id": "LH", "Name": "dbt_landing", "Kind": "Lakehouse"}])
+    m.main()
+    out = _html_of(capsys.readouterr().out)
+    assert out.startswith("<!doctype html>")
+    assert "<table>" in out and "</html>" in out
+    assert "landing" in out and "STAGE, not an engine" in out
+    assert "<footer>" in out
 
 
 def test_end_to_end_dies_if_the_since_filter_did_not_bind(capsys):
