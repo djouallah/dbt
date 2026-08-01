@@ -380,11 +380,25 @@ STACK = {
 }
 
 
+# A column can be an engine (`spark`) or an engine under one CONFIGURATION (`spark·readHeavyForPBI`),
+# which is what lets `dashboard.py` put the same engine's two resource profiles side by side. Only
+# the lookups keyed on what an engine IS — STACK, and the per-engine branches of render_hardware —
+# have to see through it; the CU, the layout and the config all come keyed by the column id itself.
+# The separator is `·` and a tag never contains one (its own parts join with `+`), so the split is
+# unambiguous.
+COL_SEP = "·"
+
+
+def base_engine(col):
+    """The engine a column belongs to. `spark·readHeavyForPBI+NEE` → `spark`, `spark` → `spark`."""
+    return str(col).split(COL_SEP, 1)[0].strip()
+
+
 def engine_caption(cfg, e):
     """The one-line "what this bar actually is" for engine `e`: the adapter, then whatever the build
     RECORDED about the compute it was given. Never a default — an unrecorded profile is simply
     absent, because a filled-in one reads exactly like a measurement (see render_hardware)."""
-    adapter = (STACK.get(e) or ("",))[0]
+    adapter = (STACK.get(base_engine(e)) or ("",))[0]
     bits = [adapter] if adapter else []
     c = (cfg or {}).get(e) or {}
     if c.get("vcores"):
@@ -1330,13 +1344,18 @@ def render_tables(doc):
           "carries it.</sub>")
 
 
-def render_layout(doc, cu_by_engine, table=LAYOUT_TABLE):
+def render_layout(doc, cu_by_engine, table=LAYOUT_TABLE, heading=None, note=True):
     """The layout of `table` per engine, with that engine's ANALYTICS CU beside it.
 
     One table, so cost and shape are read together rather than in two browser tabs. The CU column is
     the engine's total from this run's report; the rest is `stats.py`'s reading of the Delta log. They
     come from different runs at different times — hence the provenance line, which is not decoration:
     quoting a layout from a dbt run three days older than the CU beside it is the way this misleads.
+
+    `heading` and `note` are for the caller that prints this for EVERY table rather than the mart
+    alone (`dashboard.py`): the CU column is one number per engine, so repeating it under eight
+    headings would read as eight measurements — pass `cu_by_engine={}` and it is not drawn — and the
+    provenance paragraph is a caveat about the whole section, so it is printed once, under the last.
     """
     stats = doc.get("stats") or {}
     engines = [e for e in (doc.get("engines") or stats) if (stats.get(e) or {}).get(table)]
@@ -1345,15 +1364,17 @@ def render_layout(doc, cu_by_engine, table=LAYOUT_TABLE):
         return
     run = doc.get("run") or {}
     meta = doc.get("engines") or {}
+    show_cu = bool(cu_by_engine)
 
     # Only the columns that say something about a scan. `schema` and `compression` are in the artifact
     # and deliberately not here — this is a cost table, not a duplicate of the parity dashboard.
     cols = [("total_rows", "rows", 0), ("num_files", "files", 0),
             ("num_row_groups", "row groups", 0), ("avg_row_group", "avg RG rows", 0),
             ("size_mb", "size MB", 1)]
-    print(f"\n#### `{table}` in detail — the mart the queries land on\n")
-    print("| engine | writer | CU | " + " | ".join(h for _k, h, _d in cols) + " | vorder |")
-    print("|:--|:--|--:|" + "--:|" * len(cols) + ":--|")
+    print(f"\n#### {heading or f'`{table}` in detail — the mart the queries land on'}\n")
+    print("| engine | writer | " + ("CU | " if show_cu else "")
+          + " | ".join(h for _k, h, _d in cols) + " | vorder |")
+    print("|:--|:--|" + ("--:|" if show_cu else "") + "--:|" * len(cols) + ":--|")
     for e in engines:
         d = stats[e][table]
         cu = cu_by_engine.get(e)
@@ -1363,8 +1384,11 @@ def render_layout(doc, cu_by_engine, table=LAYOUT_TABLE):
             cells.append("—" if v is None else f"{float(v):,.{dp}f}")
         vo = d.get("vorder")
         writer = (meta.get(e) or {}).get("writer") or "—"
-        print(f"| {e} | `{writer}` | {'—' if cu is None else f'{cu:,.1f}'} | "
+        print(f"| {e} | `{writer}` | " + (f"{'—' if cu is None else f'{cu:,.1f}'} | " if show_cu
+                                          else "")
               + " | ".join(cells) + f" | {'yes' if vo else 'no'} |")
+    if not note:
+        return
     print(f"\n<sub>The biggest table, broken out: the other {len(doc.get('tables') or []) - 1 or 7} "
           f"are in the table above. Layout from the **layout** job of `dbt` run `{run.get('id') or '?'}` "
           f"(sha `{(run.get('sha') or '?')[:7]}`), written {run.get('written') or '?'} — **a different "
@@ -1393,10 +1417,11 @@ def render_hardware(doc, engines=None):
     cfg = (doc.get("config") or {})
     run = doc.get("run") or {}
     rows = []
-    for e in (ENGINES if engines is None else engines):
+    for col in (ENGINES if engines is None else engines):
+        e = base_engine(col)
         if e == "landing":
             continue
-        c = cfg.get(e) or {}
+        c = cfg.get(col) or {}
         bits = []
         if e in ("duckrun", "iceberg"):
             v = c.get("vcores")
@@ -1410,14 +1435,14 @@ def render_hardware(doc, engines=None):
             bits.append("workspace default — Fabric Warehouse exposes no per-run knob")
         bits = [b for b in bits if b]
         adapter, writer = (STACK.get(e) or ("—", "—", "—"))[:2]
-        rows.append((e, adapter, writer, ", ".join(bits) if bits
+        rows.append((col, adapter, writer, ", ".join(bits) if bits
                      else f"not recorded by dbt run {run.get('id') or '?'}"))
     if not rows:
         return
     # The heading used to say "The four engines". It counts nothing now, because a record covering
     # two of them under a heading saying four is the same defect as a zero column for an engine that
     # was never measured: it describes the project instead of the document in front of the reader.
-    named = [e for e, _a, _w, _c in rows]
+    named = [base_engine(c) for c, _a, _w, _cfg in rows]
     print("\n### What each engine is, and what it ran on\n")
     print("| engine | dbt adapter | executes / writes | compute |")
     print("|:--|:--|:--|:--|")

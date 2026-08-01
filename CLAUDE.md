@@ -959,31 +959,41 @@ follows describes the measurement, and anything about the PAGE now lives in the 
   SVG. The same markdown goes to the GitHub job summary, which sanitises inline SVG, so a comment is
   the one form that is invisible there and drawable here. Do not "simplify" it into raw SVG in the
   markdown — the summary would carry a broken blob and the page would gain nothing.
-- **The hardware section is sourced, not asserted.** `stats.py` writes a `config` block from the env
-  the legs were actually given (`FABRIC_CORES`, `SPARK_RESOURCE_PROFILE`, `SPARK_NATIVE_ENABLED`)
-  and the page renders it. Anything the run did not record prints "not recorded by dbt run <id>" —
-  never a default, because a filled-in default reads exactly like a measurement. **dwh has a row
-  again**, reversing the version that dropped it. That removal was right for a table of *compute
-  only* — Fabric Warehouse exposes no per-run knob, so its line was identical in every report ever
-  printed — but the table now also carries the **adapter** and the **writer**, where dwh differs
-  from the other three in every column but the last. The table's job changed from "what the dispatch
-  chose" to "what is being compared"; the chart captions are the short version, this is the lookup.
-- **`stats.py`'s layout is rendered as ALL EIGHT tables plus a row total, not just the mart.**
-  `layout_table` now only picks which table gets the detailed files/row-groups row underneath. The
-  page showing one table's layout was read as "the pipeline produced three tables and this CU is the
-  cost of scanning one" — it produces eight, the benchmark's semantic models carry all eight, and
-  the total is over half a billion rows per engine. Row counts carry `stats.py`'s own ⚠️ parity
-  marker, so the one cross-engine signal in the repo survives being quoted in a cost table.
-- **`history/` is read back, not just written.** The report renders a *"the same numbers, dispatch
-  after dispatch"* table from the committed records — the only thing on the page that says whether a
-  number is normal, and it spends no capacity. Two rules keep it honest and both are load-bearing: a
-  column is a `since` **floor** and therefore cumulative from it, so two columns are two experiments
-  and there is deliberately no change column; and records sharing a floor **collapse to the latest**,
-  because they are re-reads of one accumulating window — `history/` holds three within fifteen
-  minutes, and as separate columns they read as three dispatches getting steadily more expensive.
-  The id printed under a column is the **dbt build** it measured, never the measurement's own run id.
-  The test suite points `CU_HISTORY_DIR` at an empty directory for every test that does not ask for
-  history, or the end-to-end assertions would silently read last week's committed CU.
+- **The PAGE's columns are each engine's LATEST measurement, one per config — composed from every
+  record, not read from the newest one.** `dashboard.py`'s `columns_for` keys on **(engine, config)**:
+  spark under `writeHeavy` and spark under `readHeavyForPBI` are two columns, because the profile is
+  the variable being tested and one number cannot answer for both, and an engine nobody has rebuilt
+  keeps its last real column instead of vanishing. Rendering the newest record alone was the previous
+  behaviour and it broke the moment dispatches went partial: `engines=spark` files a record naming one
+  engine, so the page came out with **one column** — a comparison page with nothing to compare.
+  What it costs is stated rather than smoothed: the columns are different dispatches on different
+  `since` floors, so a **provenance table** names the build, the date and the floor behind each, and
+  `CU_RECORD=<run id>` still renders one generation alone. `landing` and `shared` are **not** columns
+  here — neither is a thing being compared, so neither has an (engine, config) key to be latest for —
+  and both are still in `capacity_cu.py`'s own job summary. The column id is `engine·tag`, which is
+  why `base_engine()` exists in `capacity_cu.py`: `STACK` and `render_hardware`'s per-engine branches
+  are the only lookups that must see through it, since the CU, the layout and the config all arrive
+  keyed by the column id itself. A tag joins its parts with `+`, never `·`, or the split stops working.
+- **The MEASUREMENT still prints the hardware table and the dispatch-after-dispatch table; the PAGE
+  does not.** Both were dropped from `dashboard.py` when the columns became composed: the generations
+  table asked "is this number normal" by putting `since` floors across the top, which the composed
+  page now answers by construction, and the hardware table's compute column now rides in the column
+  id and in the chart captions. `render_hardware` and `render_history` are unchanged and still run in
+  `capacity_cu.py`'s report, which is a single window and where both still say something. Do not
+  wire them back into the page without deciding what a per-column config table would add over the
+  column id.
+- **The layout is ALL EIGHT tables in DETAIL, one block each, the mart first.** This replaced a pair
+  of sections — a `files · MB` summary of the eight, then the mart broken out. The summary was
+  dropped, not the detail: it said less per row than the table it sat above, and a reader comparing
+  engines wants rows, row groups and V-Order for whichever table they are looking at rather than for
+  the one the page chose. `LAYOUT_TABLE` now only decides which block leads and carries the **CU
+  column** — the analytics CU is one number per engine, not per table, so `render_layout` draws that
+  column only when it is passed a `cu_by_engine`, and printing it under eight headings would read as
+  eight measurements. `render_tables` is still there and still runs in the measurement's own report.
+- **`history/` is read back, not just written** — and since the page is composed from it, every
+  record is load-bearing rather than an archive. The test suite points `CU_HISTORY_DIR` at an empty
+  directory for every test that does not ask for history, or the end-to-end assertions would silently
+  read last week's committed CU.
 - **The `stats` artifact lookup tries THIS run before any run list, and that is a fix, not a
   shortcut.** `dbt.yml` normally runs as a `workflow_call` from `all.yml`, and a called workflow
   gets **no run of its own** — the run belongs to the caller and its artifacts are uploaded there.

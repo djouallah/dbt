@@ -59,8 +59,9 @@ def record(directory, name, *, since, written, build="b1", engines=("duckrun", "
 
 
 def test_a_two_engine_record_renders_two_columns(tmp_path, capsys):
-    """"It can be 1 engine, 2, whatever" is the contract. A record is a closed document: an engine
-    it never measured has no zero to print, so it must not get a column at all."""
+    """"It can be 1 engine, 2, whatever" is the contract. Nothing measured iceberg or dwh, so
+    neither has a zero to print — a column that appears anyway is a claim about an engine that was
+    never run."""
     record(tmp_path, "a.json", since="2026-08-01T10:00:00", written="2026-08-01T04:00")
     d = load(tmp_path)
     assert d.main() == 0
@@ -68,8 +69,62 @@ def test_a_two_engine_record_renders_two_columns(tmp_path, capsys):
     assert "| CU (s) | duckrun | spark |" in out
     assert "iceberg" not in out and "dwh" not in out
     assert "2 engines, one landed copy" in out
-    # …and the layout tables follow the same rule.
-    assert "| table | rows | duckrun | spark |" in out
+    # …and the layout blocks follow the same rule, in the same column order.
+    assert "| duckrun | `delta-rs` | 50.0 | 143,980,961 |" in out
+
+
+def test_every_engine_shows_its_latest_measurement(tmp_path, capsys):
+    """The page is the comparison, and dispatches are partial: `engines=spark` builds one leg. If
+    only the newest record renders, three engines vanish and the page stops being a comparison —
+    which is what it is for. Each engine keeps its last real measurement instead."""
+    record(tmp_path, "a.json", since="2026-08-01T10:00:00", written="2026-08-01T04:00",
+           build="old", engines=("duckrun", "iceberg", "spark", "dwh"))
+    record(tmp_path, "b.json", since="2026-08-01T15:00:00", written="2026-08-01T13:00",
+           build="new", engines=("spark",))
+    d = load(tmp_path)
+    d.main()
+    out = capsys.readouterr().out
+    assert "| CU (s) | duckrun | iceberg | spark | dwh |" in out
+    assert "4 engines, one landed copy" in out
+    # …and the provenance table says which dispatch each column came from, because they differ.
+    assert "| spark | [new]" in out and "| duckrun | [old]" in out
+
+
+def test_one_engine_under_two_configs_is_two_columns(tmp_path, capsys):
+    """A resource profile is the variable being tested, so spark under `writeHeavy` and spark under
+    `readHeavyForPBI` are two findings, not one engine measured twice. Keying the column on
+    (engine, config) is what keeps both on the page."""
+    record(tmp_path, "a.json", since="2026-08-01T10:00:00", written="2026-08-01T04:00",
+           engines=("spark",))
+    rec = record(tmp_path, "b.json", since="2026-08-01T15:00:00", written="2026-08-01T13:00",
+                 engines=("spark",))
+    rec["config"]["spark"] = {"resource_profile": "readHeavyForPBI",
+                              "native_execution_engine": "true"}
+    (tmp_path / "b.json").write_text(json.dumps(rec), encoding="utf-8")
+    d = load(tmp_path)
+    d.main()
+    out = capsys.readouterr().out
+    assert "| CU (s) | spark·readHeavyForPBI+NEE | spark·writeHeavy+noNEE |" in out
+    # One ENGINE, two columns — the headline counts engines, not columns.
+    assert "1 engine, one landed copy" in out
+
+
+def test_landing_and_shared_are_not_columns(tmp_path, capsys):
+    """Neither is one of the things being compared: `landing` is the archive every leg reads and
+    `shared` is CU nothing could attribute, so neither has an (engine, config) key to be the latest
+    for. Both stay in the measurement's own report."""
+    rec = record(tmp_path, "a.json", since="2026-08-01T10:00:00", written="2026-08-01T04:00")
+    rec["cu"]["etl"]["landing"] = {"OneLake Write": 40.0}
+    rec["cu"]["etl"]["shared"] = {"OneLake Write": 9.0}
+    (tmp_path / "a.json").write_text(json.dumps(rec), encoding="utf-8")
+    d = load(tmp_path)
+    d.main()
+    out = capsys.readouterr().out
+    assert "| CU (s) | duckrun | spark |" in out
+    # Asserted on the notes those columns would drag in, not on the words: a tmp_path can carry
+    # either one in its own name.
+    assert "is a STAGE, not an engine" not in out
+    assert "CU no engine can be given" not in out
 
 
 def test_one_engine_says_engine_not_engines(tmp_path, capsys):
@@ -82,21 +137,18 @@ def test_one_engine_says_engine_not_engines(tmp_path, capsys):
     assert "| CU (s) | duckrun |" in out
 
 
-def test_the_rendered_record_wins_its_own_floor(tmp_path, capsys):
-    """Two reads of one floor, and the OLDER is the one being rendered. It must still be the "this
-    record" column — a page whose generations table contradicts the page above it is worse than one
-    with no generations table."""
-    record(tmp_path, "a.json", since="2026-08-01T15:00:00", written="2026-08-01T07:39",
-           engines=("duckrun",))
-    record(tmp_path, "b.json", since="2026-08-01T15:00:00", written="2026-08-01T08:22",
-           engines=("duckrun",))
-    record(tmp_path, "c.json", since="2026-08-01T10:00:00", written="2026-08-01T04:26",
-           engines=("duckrun",))
-    d = load(tmp_path)
-    recs = d.load_records()
-    chosen = d.pick(recs, "a.json")
-    cols = d.history_cols(recs, chosen, ["duckrun"])
-    assert [c[0] for c in cols] == ["2026-08-01 10:00", "2026-08-01 15:00 · **this record**"]
+def test_a_pinned_record_renders_alone(tmp_path, capsys):
+    """`CU_RECORD` is the escape hatch from the composed page: one generation, exactly as it was
+    measured, which is what reproducing an old page means."""
+    record(tmp_path, "2026-08-01T0412Z-111.json", since="2026-08-01T10:00:00",
+           written="2026-08-01T04:12", engines=("duckrun", "iceberg"))
+    record(tmp_path, "2026-08-01T1300Z-222.json", since="2026-08-01T15:00:00",
+           written="2026-08-01T13:00", engines=("spark",))
+    d = load(tmp_path, CU_RECORD="111")
+    d.main()
+    out = capsys.readouterr().out
+    assert "| CU (s) | duckrun | iceberg |" in out
+    assert "spark" not in out
 
 
 def test_pick_takes_the_newest_or_a_named_run(tmp_path):
@@ -119,7 +171,7 @@ def test_a_schema_1_record_still_renders(tmp_path, capsys):
     d = load(tmp_path)
     d.main()
     out = capsys.readouterr().out
-    assert "`mart.fct_summary`" in out and "`mart.dim_duid`" in out
+    assert "`fct_summary` in detail" in out and "`mart.dim_duid`" in out
 
 
 def test_an_empty_history_says_the_contract(tmp_path, capsys):

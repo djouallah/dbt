@@ -23,8 +23,22 @@ fresh measurement is **not** live on the page until someone dispatches `Dashboar
 point, not a regression.
 
 A record need not cover four engines. One, two, or a build-only dispatch with no analytics CU at all:
-the dashboard's columns come from the record, never from a configured list, because a record is a
-closed document and an engine it never measured has no zero to print.
+a record is a closed document, and an engine it never measured has no zero to print.
+
+**So the page is composed from every record, one column per engine PER CONFIG — each engine's latest
+measurement.** A dispatch is increasingly partial (`engines=spark` builds one leg), and rendering the
+newest record alone therefore dropped the other three engines and stopped being a comparison, which
+is the only thing this page is for. The column key is (engine, config), so spark under `writeHeavy`
+and spark under `readHeavyForPBI` are two columns — two findings, not one engine measured twice — and
+an engine nobody has rebuilt keeps showing its last real number. What that costs is stated on the
+page rather than smoothed over: the columns come from different dispatches, so a provenance table
+names the build, the date and the `since` floor behind each one. `CU_RECORD=<run id>` renders a
+single generation on its own.
+
+`landing` and `shared` are not columns here. Neither is one of the things being compared — the first
+is the archive every leg reads, the second is CU nothing could attribute — so neither has an
+(engine, config) key to be the latest for. Both are still measured, still recorded, and still in
+`capacity_cu.py`'s own job summary.
 
 Fabric has no per-operation CU REST API. The Capacity Metrics app's own semantic model is the only
 authoritative source, so this reads it by DAX and prints it back engine-major: four columns, `etl`
@@ -66,7 +80,7 @@ that shortcut and nothing else. It is `_src` and not `_landing` on purpose: `eng
 undo the whole thing.
 
 The page leads with a **link back to this repo and to both runs it quotes**, then two **bar charts** —
-ETL and analytics CU per engine, lower is better — and ends with the **hardware** the build ran on.
+ETL and analytics CU per engine, lower is better — and ends with the layout those CU were spent on.
 Both charts are drawn from numbers on this page: no timings, no second source. One hue, because a
 single series needs no legend and four colours would encode what the axis labels already say.
 
@@ -250,39 +264,36 @@ That is the whole output and the whole scope.
 ## The layout beside the CU
 
 CU alone says which engine cost more, not why — and the answer is nearly always the physical layout.
-So the report puts them together, in two tables.
+So the report puts them together.
 
-The first lists **every table each engine wrote**, with the row total:
-
-```
-### What the CU was spent scanning — 8 tables, 519,377,319 rows per engine
-
-| table                   |        rows |     duckrun |      iceberg |        spark |         dwh |
-|:------------------------|------------:|------------:|-------------:|-------------:|------------:|
-| `landing.fct_scada`     | 370,021,502 | 17 · 4,154  | 2,849 · 4,612| 1,778 · 3,604| 195 · 3,120 |
-| `mart.fct_summary`      | 143,980,961 |  4 · 999    |   360 · 1,119|   100 · 1,162|  78 · 1,572 |
-| **8 tables**            | **519,377,319** | …       | …            | …            | …           |
-```
-
-This exists because the page used to show one table's layout and nothing else, and a reader who had
-not read the repo came away thinking the pipeline produced three tables and that the CU above was
-the cost of scanning one. It produces **eight**, the benchmark's semantic models carry all eight (a
-raw-tier query per raw table), and the total is over half a billion rows per engine. The cell is
-`files · MB`; `rows` is one column because the engines are meant to agree, and a ⚠️ on the table name
-says they do not — the same parity signal `stats.py`'s own dashboard carries.
-
-Then the mart in detail, with the engine's analytics CU beside it:
+On the published page it is **one block per table, the mart first**, each with the same detailed
+reading — rows, files, row groups, average row-group size, MB, V-Order:
 
 ```
+### The layout that CU was spent on
+
 #### `fct_summary` in detail — the mart the queries land on
 
-| engine  | writer             |       CU |        rows | files | row groups | avg RG rows | size MB | vorder |
-|:--------|:-------------------|---------:|------------:|------:|-----------:|------------:|--------:|:-------|
-| duckrun | `delta-rs`         | 18,000.0 | 143,844,166 |     7 |         94 |   1,530,257 | 1,035.0 | no     |
-| iceberg | `duckdb (iceberg)` | 37,227.3 | 143,844,166 |   386 |      1,175 |     122,420 | 1,107.0 | no     |
-| spark   | `spark`            |  9,000.0 | 143,844,166 |    20 |         20 |   7,192,208 | 1,217.0 | yes    |
-| dwh     | `warehouse`        | 12,000.0 | 143,844,166 |    79 |         79 |   1,820,812 | 1,567.0 | no     |
+| engine                    | writer      |      CU |        rows | files | row groups | avg RG rows | size MB | vorder |
+|:--------------------------|:------------|--------:|------------:|------:|-----------:|------------:|--------:|:-------|
+| duckrun                   | `delta-rs`  | 2,040.6 | 143,980,961 |     4 |         79 |   1,822,544 |   998.9 | no     |
+| spark·readHeavyForPBI+NEE | `spark`     | 1,513.4 | 143,980,961 |    11 |         11 |  13,089,178 | 1,056.2 | yes    |
+
+#### `landing.fct_scada`
+
+| engine                    | writer      |        rows | files | row groups | avg RG rows | size MB | vorder |
+|:--------------------------|:------------|------------:|------:|-----------:|------------:|--------:|:-------|
+| duckrun                   | `delta-rs`  | 370,021,502 |    17 |        380 |     973,741 | 4,154.5 | no     |
+| spark·readHeavyForPBI+NEE | `spark`     | 370,021,502 |    24 |         56 |   6,607,527 | 2,633.5 | yes    |
 ```
+
+There **was** a `files · MB` summary of all eight tables above this, and it is gone: it said less per
+row than the detail it sat over, and a reader comparing engines wants row groups and V-Order for
+whichever table they are looking at, not for the one the page chose. Every table now gets the
+detailed reading and nothing is summarised away. The **CU column is on the mart alone** — the
+analytics CU is one number per engine, not per table, so repeating it under eight headings would read
+as eight measurements of eight different things. `capacity_cu.py`'s own job summary still prints the
+old pair.
 
 **No Delta log is read here, and it would be wasteful to.** Reading four Delta logs over OneLake takes
 ~10 minutes (the iceberg item alone 12m+), and the layout only changes when the tables are REWRITTEN —
@@ -395,16 +406,14 @@ directory's "no `run_report.json`" isolation true. If timings are ever wanted hi
 Committing from CI is safe **because nothing in this repo runs on push**. That standing rule is load
 bearing here: give any workflow a `push:` trigger and CI starts paying for its own commits.
 
-**The records are read back into the report**, as a *"the same numbers, dispatch after dispatch"*
-table — engine down, generation across, the same orientation as the runs table. It is the only thing
-on the page that says whether a number is normal, and it costs no capacity: the records are in the
-checkout. Two rules make it honest. A column is a `since` **floor** and is cumulative from it, so two
-columns are two experiments and no percentage-change column is printed; and several records sharing
-one floor **collapse to the latest**, because they are re-reads of one accumulating window — three of
-them land within fifteen minutes and as separate columns they would read as three dispatches getting
-steadily more expensive. The id under each column is the **dbt build** it measured, not the
-measurement's own run. `CU_HISTORY_COLS` (default 6) bounds the width; `CU_HISTORY_DIR` moves the
-directory.
+**The records are read back — that is now the whole page**, not a table at the foot of one. The
+dashboard composes its columns from every record (see the top of this file), so a generation nobody
+has rebuilt still shows its last measurement. Two tables the page used to carry are gone with the
+composition: *"the same numbers, dispatch after dispatch"*, whose columns were `since` floors and
+whose rows were engines — the composed page IS that comparison, one column per engine per config —
+and *"what each engine is, and what it ran on"*, whose compute column now rides in the column id and
+in the chart captions. `capacity_cu.py`'s own job summary still prints both. `CU_HISTORY_DIR` moves
+the directory; `CU_RECORD` pins one record and renders it alone.
 
 `cu/report_html.py` does the markdown → HTML, over the report's own markdown subset and nothing
 wider. One self-contained file: inline CSS, no script, no font, no image, nothing the page FETCHES to
