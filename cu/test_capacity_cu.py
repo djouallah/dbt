@@ -181,26 +181,59 @@ def test_classify_is_case_and_space_insensitive_and_keeps_strangers():
     assert m.classify("") == "other"
 
 
-def test_run_table_class_rows_agree_with_the_item_rows(capsys):
-    """The headline table is computed from the same `per` as the rows below it; if the two ever
-    disagree the report contradicts itself on one page."""
+def test_run_table_class_rows_agree_with_the_engine_rows(capsys):
+    """The class subtotal is computed from the same `per` as the engine rows under it; if the two
+    ever disagree the report contradicts itself on one page."""
     m = load(CU_MODELS="")
     hourly = {}
-    for i, (key, iid, h, cu) in enumerate([
+    for key, iid, h, cu in [
             ("aemo_duckrun", "G1", H, 100.0),
             ("aemo_duckrun", "G2", H + timedelta(hours=8), 120.0),
             ("dbt_delta", "LH", H, 40.0),
-            ("dbt_delta", "LH", H + timedelta(hours=8), 60.0)]):
+            ("dbt_delta", "LH", H + timedelta(hours=8), 60.0)]:
         hourly[(key, "op", h, iid)] = cu
-    meta = {"aemo_duckrun": META["aemo_duckrun"], "dbt_delta": META["dbt_delta"]}
+    meta = {k: dict(v, engine=m.engine_of(k)) for k, v in META.items()}
     runs = m.sessionize(((iid, k, h, meta[k]["gen"]) for (k, _o, h, iid) in hourly), gap_hours=2)
     m.render_runs(hourly, runs, meta, cells={k[:2]: v for k, v in hourly.items()})
     out = capsys.readouterr().out
     assert "Runs detected: 2" in out
-    # analytics 100 | 120, etl 40 | 60, totals 140 | 180 in run order.
-    assert "| **analytics** | 100.0 | 120.0 | **220.0** |" in out
-    assert "| **etl** | 40.0 | 60.0 | **100.0** |" in out
+    assert "| **etl** | **40.0** | **60.0** | **100.0** |" in out
+    assert "| **analytics** | **100.0** | **120.0** | **220.0** |" in out
+    # Both the lakehouse and the model are duckrun's, so each class has exactly one engine row.
+    assert out.count("| duckrun | 40.0 | 60.0 | **100.0** |") == 1
+    assert out.count("| duckrun | 100.0 | 120.0 | **220.0** |") == 1
     assert "| **total** | **140.0** | **180.0** | **320.0** |" in out
+
+
+def test_engine_of_maps_every_item_this_repo_creates():
+    m = load()
+    assert m.engine_of("dbt_delta") == "duckrun"          # the alias that matters
+    assert m.engine_of("aemo_duckrun") == "duckrun"
+    assert m.engine_of("dbt-duckrun-*") == "duckrun"
+    assert m.engine_of("dbt_iceberg") == "iceberg"
+    assert m.engine_of("dbt_spark") == "spark"
+    assert m.engine_of("aemo_dwh") == "dwh"
+    # Shared or genuinely ambiguous — a wrong column is worse than an honest `shared`.
+    assert m.engine_of("dbt_landing") is None
+    assert m.engine_of("duckrun-py-*") is None
+    assert m.engine_of("") is None
+
+
+def test_engine_table_puts_operations_down_and_engines_across(capsys):
+    m = load(CU_MODELS="")
+    meta = {k: dict(v, engine=m.engine_of(k)) for k, v in META.items()}
+    m._engine_table(_cells(), meta)
+    out = capsys.readouterr().out
+    head = out.splitlines()[0]
+    assert head.startswith("| | duckrun | iceberg | spark | dwh | shared |")   # duckrun-py-* shared
+    assert "| **etl** |" in out and "| **analytics** |" in out
+    assert "| OneLake Write | 50.0 | 0.0 | 0.0 | 0.0 | 0.0 | 50.0 |" in out
+    assert "| Spark Job | 0.0 | 0.0 | 0.0 | 0.0 | 25.0 | 25.0 |" in out   # the ambiguous notebook
+    # duckrun 110 analytics + 55 etl, shared 25.
+    assert "| **total** | **165.0** | **0.0** | **0.0** | **0.0** | **25.0** | **190.0** |" in out
+    assert "`shared` is CU no engine can be given" in out
+    assert "genuinely ambiguous" in out          # the duckrun-py-* explanation, since it is present
+    assert "dbt_landing" not in out              # ...and not the one that is absent
 
 
 # --------------------------------------------------------------------------- empty report
@@ -265,10 +298,10 @@ def test_end_to_end_reports_etl_and_analytics(capsys):
     m.main()
     out = capsys.readouterr().out
     assert "Capacity CU" in out
-    assert "| aemo_duckrun |" in out and "| dbt_delta |" in out
-    assert "| duckrun-py-* |" in out          # the two notebooks collapsed to one row
-    assert "**10.0**" in out                  # ...and their CU summed, not dropped
-    assert "**150.0**" in out                 # grand total, nothing lost
+    # duckrun's lakehouse (40) + the two ambiguous notebooks (10, in `shared`), then the model.
+    assert "| **etl** | **40.0** | **0.0** | **0.0** | **0.0** | **10.0** | **50.0** |" in out
+    assert "| **analytics** | **100.0** | **0.0** | **0.0** | **0.0** | **0.0** | **100.0** |" in out
+    assert "| **total** | **140.0** | **0.0** | **0.0** | **0.0** | **10.0** | **150.0** |" in out
 
 
 def test_end_to_end_etl_off_reproduces_the_old_scope(capsys):
@@ -285,9 +318,9 @@ def test_end_to_end_etl_off_reproduces_the_old_scope(capsys):
     assert "**100.0**" in out
 
 
-def test_the_two_duckdb_legs_are_separate_rows(capsys):
+def test_the_two_duckdb_legs_land_in_their_own_columns(capsys):
     """The point of naming the notebooks per engine: duckrun's default `duckrun-py-<runid>` was
-    identical for both legs, so their compute was one undivided row."""
+    identical for both legs, so their compute could only ever be one undivided `shared` number."""
     m = load(CU_WORKSPACE_FILTER=WS_ID, CU_MODELS="", CU_ETL="1")
     rows = [_row("NB1", "Notebook Run", 300.0, H), _row("NB2", "Notebook Run", 200.0, H)]
     items = [{"Id": "NB1", "Name": "dbt-duckrun-aaaa", "Kind": "Notebook"},
@@ -295,8 +328,8 @@ def test_the_two_duckdb_legs_are_separate_rows(capsys):
     _stub(m, rows, items)
     m.main()
     out = capsys.readouterr().out
-    assert "| dbt-duckrun-* |" in out and "| dbt-iceberg-* |" in out
-    assert "**300.0**" in out and "**200.0**" in out
+    assert "| **etl** | **300.0** | **200.0** | **0.0** | **0.0** | **500.0** |" in out
+    assert "shared" not in out       # both attributable, so no shared column at all
 
 
 def test_a_collapsed_name_repeating_is_the_next_run(capsys):
@@ -314,8 +347,9 @@ def test_a_collapsed_name_repeating_is_the_next_run(capsys):
     m.main()
     out = capsys.readouterr().out
     assert "Runs detected: 2" in out
-    # The lakehouse follows the windows the notebooks formed, an hour each.
-    assert "| dbt_delta | 10.0 | 20.0 | **30.0** |" in out
+    # Notebook + lakehouse are both duckrun's, and the lakehouse follows the windows the notebooks
+    # formed — an hour each — so the column totals are 310 and 220, not 510 in one.
+    assert "| duckrun | 310.0 | 220.0 | **530.0** |" in out
 
 
 def test_end_to_end_keeps_an_unnamed_item_under_its_guid(capsys):

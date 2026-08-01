@@ -1,10 +1,15 @@
-"""CU per item, read from the Fabric Capacity Metrics app's semantic model.
+"""CU per ENGINE, read from the Fabric Capacity Metrics app's semantic model.
 
 Fabric exposes no per-operation CU REST API. The Capacity Metrics app's model is the only
 authoritative source, so this queries it by DAX over the Power BI `executeQueries` endpoint and
-prints what the workspace's items spent, split into **ETL** (the lakehouses, the warehouse, the
-notebooks and Livy sessions that WRITE the tables) and **analytics** (the semantic models that are
-queried), per operation type and per run.
+prints one engine-major table: four columns, `etl` (what WRITES the tables — lakehouses, warehouse,
+notebooks, Livy) against `analytics` (what QUERIES them — the semantic models) down the side, each
+class broken out by operation type, then the same thing per run.
+
+Engine-major because that is the repo's thesis — same data, four engines, side by side — and it is
+the only orientation in which "what did iceberg cost to build and to query" is one column read top
+to bottom. It is also what makes the width manageable: operations are ROWS, so a lakehouse's dozen
+OneLake operation types is a dozen rows rather than a dozen columns.
 
 Time is a pinned FLOOR (`since`), not a rolling window. A window moves with every dispatch and can
 slice one benchmark in half, making an engine look cheap for no reason but where the boundary fell;
@@ -12,14 +17,14 @@ a floor stays put and everything after it accumulates. Its purpose is to exclude
 dwh was DirectQuery rather than Direct Lake — still inside the app's ~14-day retention, and not the
 same experiment.
 
-Scoped to every item in ONE workspace, classified. Widening past the semantic models was tried once
-before and reverted, and the reason was real rather than a matter of taste: unfiltered, a lakehouse
-brings a dozen OneLake read AND write operation types, every throwaway `duckrun-py-*` notebook is
-its own row, and the table stops being readable — which is the whole point of the table. So the
-width is bounded three ways instead of avoided: every row rolls up to a CLASS (`CLASS_BY_KIND`),
-operation columns past the top few FOLD into one (`MAX_OP_COLS`), and the throwaway notebooks
-COLLAPSE to a single row by prefix (`GROUP_PREFIXES`). `CU_ETL=0` restores the old
-semantic-models-only report exactly.
+Scoped to every item in ONE workspace, classified and then attributed to an engine by NAME
+(`engine_of`) — the metrics model carries no item-to-engine relationship, so a name is all there is.
+An ambiguous name goes to `shared` rather than to a guess: a wrong column is worse than an honest
+one. Widening past the semantic models was tried once before and reverted because an item-major
+table of a dozen operation columns is unreadable; the orientation is what fixed that, with
+`CLASS_BY_KIND` rolling every item up to a class and `GROUP_PREFIXES` collapsing the throwaway
+notebooks. `CU_ETL=0` restores the old semantic-models-only report exactly, and `CU_ITEM_DETAIL=1`
+prints the item-major table underneath for debugging.
 
 Reporting both is the point: what a query costs is only half the bill, and the other half is the
 build that wrote the tables. They are still two questions, so they are two rows — never one number.
@@ -110,7 +115,36 @@ CLASS_BY_KIND = {
     "sparkapplication": "etl", "datapipeline": "etl", "dataflow": "etl", "dataflowgen2": "etl",
     "environment": "etl", "mirroreddatabase": "etl", "eventhouse": "etl", "kqldatabase": "etl",
 }
-CLASS_ORDER = ["analytics", "etl", "other"]
+CLASS_ORDER = ["etl", "analytics", "other"]
+
+# The report is ENGINE-MAJOR: four columns, one per engine, because that is this repo's whole
+# thesis — same data, four engines, side by side — and it is the only orientation in which "what did
+# iceberg cost to build and to query" is one column read top to bottom. Operations are ROWS, which is
+# also what makes the width problem go away: a dozen OneLake operation types is a dozen rows, and
+# markdown handles that fine.
+#
+# Every engine is printed even at 0.0, for the same reason every named model is: a column that
+# disappears is indistinguishable from an engine that spent nothing.
+ENGINES = [e.strip() for e in os.environ.get(
+    "CU_ENGINES", "duckrun,iceberg,spark,dwh").split(",") if e.strip()]
+
+# How an item NAME says which engine it belongs to. Matched as a substring of the lower-cased
+# display name, engines tried in CU_ENGINES order.
+#
+# `delta` is the alias that matters: duckrun's output lakehouse is `dbt_delta`, not `dbt_duckrun`.
+# Everything else is the engine's own name — `aemo_iceberg`, `dbt_spark`, `dbt-duckrun-<random>`.
+ENGINE_ALIASES = {"duckrun": ("duckrun", "delta")}
+
+# Names that contain an engine token but must NOT be attributed to it. `duckrun-py-` is duckrun's
+# DEFAULT notebook name, which both DuckDB legs used before `fabric_run.py` started naming its own —
+# so those rows are genuinely ambiguous, and guessing them into the duckrun column would be a wrong
+# number rather than a missing one. They land in `shared`, which is named in a footnote.
+UNATTRIBUTABLE = ("duckrun-py-",)
+
+# The old item x operation table, kept for debugging behind an env var. Off by default: the engine
+# table above answers the question, and the whole reason the first attempt at this width was
+# reverted is that item rows plus operation columns is too much table.
+ITEM_DETAIL = os.environ.get("CU_ITEM_DETAIL", "").strip().lower() in ("1", "true", "yes")
 
 # Items whose display name starts with one of these collapse into ONE row named `<prefix>*`.
 #
@@ -498,6 +532,22 @@ def display_label(name):
     return name
 
 
+def engine_of(label):
+    """Which engine's column an item belongs in, or None for `shared`.
+
+    Name-based, because the metrics model carries no such relationship and nothing else in the row
+    could supply it. That is a real limitation and it is why `UNATTRIBUTABLE` exists: an ambiguous
+    name goes to `shared` rather than to a guess, since a wrong column is worse than an honest one.
+    """
+    low = (label or "").lower()
+    if any(low.startswith(p.lower()) for p in UNATTRIBUTABLE):
+        return None
+    for e in ENGINES:
+        if any(a in low for a in ENGINE_ALIASES.get(e, (e,))):
+            return e
+    return None
+
+
 def items_for(cap, c):
     """Map item GUID -> (name, kind).
 
@@ -591,6 +641,70 @@ def _ops_for(cells):
     if MAX_OP_COLS > 0 and len(ordered) > MAX_OP_COLS + 1:
         return ordered[:MAX_OP_COLS], ordered[MAX_OP_COLS:]
     return ordered, []
+
+
+def _engine_cols(meta, keys):
+    """`(columns, shared items)`. Every engine always gets a column; `shared` only appears when
+    something actually landed there, and then it is named."""
+    shared = sorted({(meta.get(k) or {}).get("label", k) for k in keys
+                     if (meta.get(k) or {}).get("engine") is None})
+    return list(ENGINES) + (["shared"] if shared else []), shared
+
+
+# Why a given item cannot be given a column. Only the ones actually in `shared` are explained, so
+# the footnote describes the report in front of you rather than every case that could arise.
+SHARED_WHY = {
+    "dbt_landing": "the downloaded AEMO archive, which every leg reads",
+    "duckrun-py-*": "duckrun's DEFAULT notebook name, used by both DuckDB legs before "
+                    "`fabric_run.py` named its own — genuinely ambiguous",
+}
+
+
+def _shared_note(shared):
+    if not shared:
+        return
+    parts = [f"`{s}`" + (f" ({SHARED_WHY[s]})" if s in SHARED_WHY else "") for s in shared]
+    print(f"\n<sub>`shared` is CU no engine can be given: " + ", ".join(parts)
+          + ". Attribution is by item NAME — the metrics model carries no such relationship — so an "
+            "ambiguous name lands here rather than in a guessed column.</sub>")
+
+
+def _engine_table(cells, meta):
+    """Engines across, operations down, grouped by class — the shape the whole repo reads in.
+
+    The class row carries its own subtotal, so "what did the build cost against the querying" is two
+    bold rows rather than a sum the reader has to do. Operations are ordered by total CU within
+    their class, so the expensive one is the first thing under each heading.
+    """
+    cols, shared = _engine_cols(meta, {k for k, _op in cells})
+    per, cls_total, op_total = {}, {}, {}
+    for (k, op), cu in cells.items():
+        info = meta.get(k) or {}
+        cls, col = info.get("cls", "other"), info.get("engine") or "shared"
+        per[(cls, op, col)] = per.get((cls, op, col), 0.0) + cu
+        cls_total[(cls, col)] = cls_total.get((cls, col), 0.0) + cu
+        op_total[(cls, op)] = op_total.get((cls, op), 0.0) + cu
+
+    def row(label, vals, bold=False):
+        f = (lambda v: f"**{v:,.1f}**") if bold else (lambda v: f"{v:,.1f}")
+        print(f"| {'**' + label + '**' if bold else label} | " + " | ".join(f(v) for v in vals)
+              + f" | {f(sum(vals))} |")
+
+    print("| | " + " | ".join(cols) + " | total |")
+    print("|:--|" + "---:|" * (len(cols) + 1))
+    grand = [0.0] * len(cols)
+    for cls in CLASS_ORDER:
+        ops = sorted((op for (c, op) in op_total if c == cls),
+                     key=lambda op: -op_total[(cls, op)])
+        if not ops:
+            continue
+        sub = [cls_total.get((cls, c), 0.0) for c in cols]
+        grand = [a + b for a, b in zip(grand, sub)]
+        row(cls, sub, bold=True)
+        for op in ops:
+            row(op, [per.get((cls, op, c), 0.0) for c in cols])
+    row("total", grand, bold=True)
+    _shared_note(shared)
 
 
 def _op_table(cells, meta):
@@ -808,9 +922,8 @@ def render_runs(hourly, runs, meta, cells=None):
               f"nothing to separate — the table above IS that run. Raise `since` to reach earlier "
               f"dispatches; each one redeployed the models, so each is its own column.</sub>")
         return
-    rows = _item_rows({(k[0], k[1]): v for k, v in hourly.items()}, meta)
-    names = [label for label, _cls, _t in rows]
-    cls_of = {label.lower(): cls for label, cls, _t in rows}
+    keys = {k for (k, _o, _h, _i) in hourly}
+    engine_cols, shared = _engine_cols(meta, keys)
 
     # Columns, oldest left. Run numbering always counts from the oldest run overall, so a folded
     # report still calls the newest run by the same number an unfolded one would.
@@ -827,58 +940,53 @@ def render_runs(hourly, runs, meta, cells=None):
 
     # One pass over `hourly`, not one per run: map each (item, hour) to its column first.
     pair_col = {p: ci for ci, (_hdr, pairs) in enumerate(cols) for p in pairs}
-    per = {}
-    for (m, _op, h, iid), cu in hourly.items():
+    per, cls_tot = {}, {}
+    for (k, _op, h, iid), cu in hourly.items():
         ci = pair_col.get((iid, h))
-        if ci is not None:
-            per[(ci, m)] = per.get((ci, m), 0.0) + cu
+        if ci is None:
+            continue
+        info = meta.get(k) or {}
+        cls, col = info.get("cls", "other"), info.get("engine") or "shared"
+        per[(ci, cls, col)] = per.get((ci, cls, col), 0.0) + cu
+        cls_tot[(ci, cls)] = cls_tot.get((ci, cls), 0.0) + cu
 
     print(f"\n### Runs detected: {len(runs)}\n")
 
-    # The headline: what each run cost to BUILD against what it cost to QUERY. Two or three rows,
-    # printed above the per-item table rather than derived from it by eye — a report whose top-line
-    # answer has to be summed out of twelve rows by the reader is a report that gets misquoted.
-    classes = [c for c in CLASS_ORDER if any(cls_of.get(n.lower()) == c for n in names)]
-    if len(classes) > 1:
-        per_cls = {}
-        for (ci, label), cu in per.items():
-            per_cls[(ci, cls_of.get(label, "other"))] = per_cls.get(
-                (ci, cls_of.get(label, "other")), 0.0) + cu
-        print("| class | " + " | ".join(h for h, _ in cols) + " | total |")
-        print("|:--|" + "---:|" * (len(cols) + 1))
-        for c in classes:
-            vals = [per_cls.get((ci, c), 0.0) for ci in range(len(cols))]
-            print(f"| **{c}** | " + " | ".join(f"{v:,.1f}" for v in vals)
-                  + f" | **{sum(vals):,.1f}** |")
-        print()
-
-    print("| item | " + " | ".join(h for h, _ in cols) + " | total |")
+    # Same orientation as the aggregate above — class subtotal in bold, engines under it — so the
+    # two tables read the same way rather than making the eye re-learn the layout halfway down.
+    print("| | " + " | ".join(h for h, _ in cols) + " | total |")
     print("|:--|" + "---:|" * (len(cols) + 1))
     col_tot = [0.0] * len(cols)
-    grand = 0.0
-    for c in classes:
-        for name in [n for n in names if cls_of.get(n.lower()) == c]:
-            vals = [per.get((ci, name.lower()), 0.0) for ci in range(len(cols))]
-            for ci, v in enumerate(vals):
-                col_tot[ci] += v
-            grand += sum(vals)
-            print(f"| {name} | " + " | ".join(f"{v:,.1f}" for v in vals)
-                  + f" | **{sum(vals):,.1f}** |")
+    for cls in CLASS_ORDER:
+        vals = [cls_tot.get((ci, cls), 0.0) for ci in range(len(cols))]
+        if not any(vals):
+            continue
+        col_tot = [a + b for a, b in zip(col_tot, vals)]
+        print(f"| **{cls}** | " + " | ".join(f"**{v:,.1f}**" for v in vals)
+              + f" | **{sum(vals):,.1f}** |")
+        for e in engine_cols:
+            ev = [per.get((ci, cls, e), 0.0) for ci in range(len(cols))]
+            if any(ev):
+                print(f"| {e} | " + " | ".join(f"{v:,.1f}" for v in ev)
+                      + f" | **{sum(ev):,.1f}** |")
+    grand = sum(col_tot)
     print("| **total** | " + " | ".join(f"**{v:,.1f}**" for v in col_tot)
           + f" | **{grand:,.1f}** |")
+    # No shared note here: the aggregate table above this one has already printed it, and the same
+    # paragraph twice on one page reads as two different caveats.
 
     shape = ", ".join(f"run {i}: {len(r['items'])} items over {len(r['hours'])}h"
                       for i, r in enumerate(runs, start=1))
-    print(f"\n<sub>A run is formed from the SEMANTIC MODELS, which are deleted and recreated on "
-          f"every benchmark dispatch — so a model name repeating among the item GUIDs is the next "
-          f"run, which is why two dispatches inside the same hour are still two columns here, and "
-          f"why adjacent windows can overlap by an hour ({shape}; windows are the first and last "
-          f"active hour bucket, in the model's clock). Their CU is allocated by item GUID, so an "
-          f"overlap costs nothing in accuracy. **The ETL items live across runs**, so theirs is "
-          f"allocated by HOUR against those windows instead — as sharp as the hour bucket and no "
-          f"sharper — and hours belonging to no model's run (a dbt build with no benchmark beside "
-          f"it) form a run of their own. Anything not redeployed splits only on more than "
-          f"{RUN_GAP_HOURS}h idle."
+    print(f"\n<sub>A run is formed from the items that are RECREATED each time — the semantic "
+          f"models a benchmark dispatch redeploys, and the throwaway notebook each dbt leg runs in — "
+          f"so one of those names repeating among the item GUIDs is the next run, which is why two "
+          f"dispatches inside the same hour are still two columns here, and why adjacent windows "
+          f"can overlap by an hour ({shape}; windows are the first and last active hour bucket, in "
+          f"the model's clock). Their CU is allocated by item GUID, so an overlap costs nothing in "
+          f"accuracy. **The lakehouses and the warehouse live across runs**, so theirs is allocated "
+          f"by HOUR against those windows instead — as sharp as the hour bucket and no sharper — and "
+          f"hours belonging to no window at all form a run of their own. A long-lived item splits "
+          f"only on more than {RUN_GAP_HOURS}h idle."
           + (f" The {folded} oldest runs are folded into the `earlier` column; raise `CU_RUN_COLS` "
              f"(currently {MAX_RUN_COLS}) to give them their own." if folded else "") + "</sub>")
 
@@ -928,8 +1036,8 @@ def load_layout(path=None):
     return doc
 
 
-def render_layout(doc, cu_by_model, table=LAYOUT_TABLE):
-    """The layout of `table` per engine, with that engine's CU beside it.
+def render_layout(doc, cu_by_engine, table=LAYOUT_TABLE):
+    """The layout of `table` per engine, with that engine's ANALYTICS CU beside it.
 
     One table, so cost and shape are read together rather than in two browser tabs. The CU column is
     the engine's total from this run's report; the rest is `stats.py`'s reading of the Delta log. They
@@ -954,7 +1062,7 @@ def render_layout(doc, cu_by_model, table=LAYOUT_TABLE):
     print("|:--|:--|--:|" + "--:|" * len(cols) + ":--|")
     for e in engines:
         d = stats[e][table]
-        cu = cu_by_model.get(f"aemo_{e}".lower())
+        cu = cu_by_engine.get(e)
         cells = []
         for key, _h, dp in cols:
             v = d.get(key)
@@ -1023,7 +1131,10 @@ def render(cells, hourly, meta, since, asof, seen=0, dropped=None, active=None, 
         return
 
     print(f"Everything since the floor, summed:\n")
-    _op_table(cells, meta)
+    _engine_table(cells, meta)
+    if ITEM_DETAIL:
+        print("\n#### The same CU by item\n")
+        _op_table(cells, meta)
     runs = (sessionize((iid, k, h, (meta.get(k) or {}).get("gen", False))
                        for (k, _o, h, iid) in hourly)
             if (RUN_GAP_HOURS > 0 and hourly) else [])
@@ -1031,7 +1142,15 @@ def render(cells, hourly, meta, since, asof, seen=0, dropped=None, active=None, 
         render_runs(hourly, runs, meta, cells)
     doc = load_layout()
     if doc:
-        render_layout(doc, {label.lower(): t for label, _cls, t in _item_rows(cells, meta)})
+        # The layout table's CU column is what QUERYING that engine cost, not its build — it sits
+        # beside file counts and row groups to explain a scan, and the ETL cost explains nothing
+        # about one.
+        analytics = {}
+        for (k, _op), cu in cells.items():
+            info = meta.get(k) or {}
+            if info.get("cls") == "analytics" and info.get("engine"):
+                analytics[info["engine"]] = analytics.get(info["engine"], 0.0) + cu
+        render_layout(doc, analytics)
 
 
 def main():
@@ -1138,6 +1257,7 @@ def main():
                     continue
             kinds[kind or "(unknown)"] = kinds.get(kind or "(unknown)", 0.0) + float(cu)
             meta.setdefault(key, {"label": label or iid, "cls": cls, "kind": kind,
+                                  "engine": engine_of(label),
                                   # sessionize's exact generation rule needs an item that is created
                                   # fresh for every run. Two things qualify: a semantic model (the
                                   # benchmark deletes and recreates them) and a COLLAPSED name (the

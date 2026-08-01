@@ -820,17 +820,22 @@ read from the Fabric Capacity Metrics app's own semantic model by DAX over the P
 only authoritative source, which is why this exists at all. [cu/README.md](cu/README.md) has the
 detail.
 
-- **It reports ETL and analytics, not semantic models alone — and that is a REVERSAL of an earlier
-  decision made for a real reason.** Every item in the workspace is classified by kind: `etl` (the
-  lakehouses, the warehouse, the notebooks) against
-  `analytics` (the semantic models), rolled up per class and per run, so a dbt build's cost sits
-  beside a benchmark's in the same units. The first attempt at this width was reverted because it was
-  genuinely unreadable — a dozen OneLake operation types per lakehouse and a row per throwaway
-  `duckrun-py-*` notebook — so re-widening it only works because three guards bound it:
-  `CLASS_BY_KIND` rolls every row up to a class, `CU_OP_COLS` (6) folds the operation tail into one
-  `other` column that is **named and counted**, and `CU_GROUP_PREFIXES` collapses the notebooks to
-  one row. Remove a guard and the earlier verdict comes straight back. `etl: false` restores the old
-  scope exactly, which is what makes an older dispatch's numbers still comparable.
+- **The report is ENGINE-MAJOR, and that orientation is what makes the width work.** Four columns,
+  one per engine; `etl` (lakehouses, warehouse, notebooks, Livy) and `analytics` (semantic models)
+  as bold subtotal rows with their operation types broken out underneath; the same shape again per
+  run. Reporting anything beyond the semantic models was tried once and reverted because an
+  ITEM-major table needs a column per operation type and a lakehouse alone brings a dozen — turn it
+  ninety degrees and those are rows, which markdown handles fine. So do not "simplify" it back to
+  items-down/operations-across; that is the shape that failed. `CLASS_BY_KIND` and
+  `CU_GROUP_PREFIXES` do the rest of the bounding, `etl: false` restores the old scope exactly (which
+  is what keeps an older dispatch's numbers comparable), and `CU_ITEM_DETAIL=1` prints the item-major
+  table underneath when a column looks wrong.
+- **Attribution to an engine is by item NAME, and an ambiguous name goes to `shared`.** The metrics
+  model carries no item-to-engine relationship and nothing else in the row could supply one, so
+  `engine_of()` matches the display name — with `delta` as an alias for duckrun, because the output
+  lakehouse is `dbt_delta`. `dbt_landing` (every leg reads it) and the legacy `duckrun-py-*`
+  notebooks (both DuckDB legs used that name) land in `shared` and are named in a footnote. Do not
+  make it guess: a wrong column is worse than an honest one, and `shared` is the honest one.
 - **Livy bills against the LAKEHOUSE. There is no Spark item of any kind.** So `dbt_spark`'s ETL row
   is its OneLake operations *and* the whole spark leg's compute added together, and the operation
   column is the only thing that separates them. Three attribution shapes in one table, so the ETL

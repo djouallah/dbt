@@ -1,56 +1,62 @@
-# `cu/` — CU per item, ETL against analytics
+# `cu/` — CU per engine, ETL against analytics
 
-One question: **what has this workspace cost in capacity units — to build the tables, and to query
+One question: **what has each engine cost in capacity units — to build its tables, and to query
 them?**
 
 Fabric has no per-operation CU REST API. The Capacity Metrics app's own semantic model is the only
-authoritative source, so this reads it by DAX and prints it back split two ways: by **class** (`etl`
-is what writes the tables — the lakehouses, the warehouse, the notebooks and Livy sessions;
-`analytics` is what reads them — the semantic models) and by **run**.
+authoritative source, so this reads it by DAX and prints it back engine-major: four columns, `etl`
+(what *writes* the tables — lakehouses, warehouse, notebooks, Livy) against `analytics` (what
+*queries* them — the semantic models) down the side, broken out by operation, then the same per run.
 
 ```
 ## Capacity CU — since 2026-07-31 16:00 (model clock), as of 2026-08-01 14:10Z
 
-| item          |   Query | Spark Job | OneLake Write | Warehouse Query | other (6 ops) |    total |
-|:--------------|--------:|----------:|--------------:|----------------:|--------------:|---------:|
-| aemo_duckrun  |   580.0 |       0.0 |           0.0 |             0.0 |          20.0 |    600.0 |
-| aemo_spark    |   490.0 |       0.0 |           0.0 |             0.0 |          20.0 |    510.0 |
-| **analytics** | 1,070.0 |       0.0 |           0.0 |             0.0 |          40.0 |  1,110.0 |
-| dbt_delta     |     0.0 |     210.0 |         120.0 |             0.0 |         134.0 |    464.0 |
-| dbt_dwh       |     0.0 |       0.0 |           0.0 |            88.0 |           0.0 |     88.0 |
-| duckrun-py-*  |     0.0 |       0.0 |           0.0 |             0.0 |          15.0 |     15.0 |
-| **etl**       |     0.0 |     210.0 |         120.0 |            88.0 |         149.0 |    567.0 |
-| **total**     | 1,070.0 |     210.0 |         120.0 |            88.0 |         189.0 |  1,677.0 |
+|                        | duckrun | iceberg | spark |     dwh | shared |   total |
+|:-----------------------|--------:|--------:|------:|--------:|-------:|--------:|
+| **etl**                |   215.0 |     0.0 | 210.0 |   188.0 |   40.0 |   653.0 |
+| Spark Job              |     0.0 |     0.0 | 210.0 |     0.0 |    0.0 |   210.0 |
+| Warehouse Query        |     0.0 |     0.0 |   0.0 |   188.0 |    0.0 |   188.0 |
+| OneLake Write          |   120.0 |     0.0 |   0.0 |     0.0 |   40.0 |   160.0 |
+| Notebook Run           |    95.0 |     0.0 |   0.0 |     0.0 |    0.0 |    95.0 |
+| **analytics**          |   320.0 |     0.0 |   0.0 | 3,499.0 |    0.0 | 3,819.0 |
+| XMLA Read Operation    |   320.0 |     0.0 |   0.0 | 3,499.0 |    0.0 | 3,819.0 |
+| **total**              |   535.0 |     0.0 | 210.0 | 3,687.0 |   40.0 | 4,472.0 |
 ```
 
-**Widening past the semantic models was tried once before and reverted**, and the reason was real:
-unfiltered, a lakehouse brings a dozen OneLake operation types, every throwaway `duckrun-py-*`
-notebook is a row of its own, and the table stops being readable — which was the whole point of the
-table. So the width is now bounded three ways rather than avoided:
+**Engine-major, because that is the repo's thesis** — same data, four engines, side by side — and it
+is the only orientation in which "what did iceberg cost to build *and* to query" is one column read
+top to bottom. It is also what makes the width manageable: **operations are rows**, so a lakehouse's
+dozen OneLake operation types is a dozen rows, which markdown handles fine. An item-major table with
+those as *columns* was the shape that got this width reverted the first time.
 
-| guard | what it does | knob |
-|:--|:--|:--|
-| class rollup | every row totals into `etl` or `analytics`, printed as a subtotal row | `CLASS_BY_KIND` in the script |
-| operation fold | operation columns past the top few collapse into one `other`, **named and counted** in a footnote | `CU_OP_COLS`, default 6 |
-| prefix collapse | the throwaway notebooks become one `duckrun-py-*` row | `CU_GROUP_PREFIXES` |
+**Attribution is by item NAME**, because the metrics model carries no item-to-engine relationship
+and nothing else in the row could supply one — `dbt_delta` and `aemo_duckrun` and
+`dbt-duckrun-<random>` are duckrun's (`delta` is the alias that matters), `dbt_spark` is spark's, and
+so on. Anything ambiguous goes to **`shared`** rather than to a guess, named in a footnote: a wrong
+column is worse than an honest one. `dbt_landing` lives there because every leg reads it, and the
+legacy `duckrun-py-*` notebooks because both DuckDB legs used that name.
+
+Every engine gets a column even at 0.0 — a column that disappears is indistinguishable from an
+engine that spent nothing. `CU_ENGINES` sets the list and the order.
 
 `etl: false` on the dispatch narrows it back to the semantic models exactly as before — worth having
-when comparing against an older dispatch's numbers.
+when comparing against an older dispatch's numbers. `CU_ITEM_DETAIL=1` prints the item-major table
+underneath, for when a column looks wrong and you need to see which item fed it.
 
 **An unrecognised item kind is kept, never dropped.** It lands in a third `other` class and its kind
 is named on stderr (`kind X: 1,234.0 CU -> other`), which is how a kind gets added to
 `CLASS_BY_KIND`.
 
-**An ETL row does not mean the same thing for every engine, and this is the thing to hold onto when
-reading the table.** Three different attribution shapes:
+**An ETL number does not mean the same thing for every engine, and this is the thing to hold onto
+when reading the table.** Three different attribution shapes:
 
-| leg | where its compute is billed | so its row is |
+| leg | where its compute is billed | so its `etl` column is |
 |:--|:--|:--|
-| `spark` | **the lakehouse** — Fabric bills Livy against `dbt_spark`, there is no Spark item of any kind | OneLake operations *and* the whole leg's compute, separable only by the operation column |
-| `duckrun`, `iceberg` | the throwaway **notebook** `duckrun.run_python` creates | one row per leg — `dbt-duckrun-*`, `dbt-iceberg-*` — collapsed from a new GUID every build |
+| `spark` | **the lakehouse** — Fabric bills Livy against `dbt_spark`, there is no Spark item of any kind | OneLake operations *and* the whole leg's compute, separable only by the operation rows |
+| `duckrun`, `iceberg` | the throwaway **notebook** `duckrun.run_python` creates | `Notebook Run` against the leg's own column, because `fabric_run.py` names it `dbt-<engine>-<random>` |
 | `dwh` | the **warehouse** | warehouse queries against `dbt_dwh` |
 
-The per-leg notebook rows exist because `fabric_run.py` names its notebook `dbt-<engine>-<random>`
+The per-leg notebook attribution exists because `fabric_run.py` names its notebook `dbt-<engine>-<random>`
 rather than taking duckrun's default `duckrun-py-<runid>`, which was identical for both DuckDB legs
 and made their compute one undivided row. **The random suffix has to stay**: the notebook is deleted
 after every run, Fabric keeps a deleted item's display name reserved for minutes afterwards, and
@@ -80,28 +86,25 @@ is not the question you usually have — you want **what one pass cost**. So the
 run:
 
 ```
-### Runs detected: 3
+### Runs detected: 2
 
-| class         | run 1<br>08-01 10:00→10:00 | run 2<br>08-01 20:00→20:00 | run 3<br>08-02 16:00→16:00 |     total |
-|:--------------|---------------------------:|---------------------------:|---------------------------:|----------:|
-| **analytics** |                        0.0 |                      590.0 |                      520.0 |   1,110.0 |
-| **etl**       |                      519.0 |                       26.0 |                       22.0 |     567.0 |
-
-| item         | run 1<br>08-01 10:00→10:00 | run 2<br>08-01 20:00→20:00 | run 3<br>08-02 16:00→16:00 |     total |
-|:-------------|---------------------------:|---------------------------:|---------------------------:|----------:|
-| aemo_duckrun |                        0.0 |                      320.0 |                      280.0 |     600.0 |
-| aemo_spark   |                        0.0 |                      270.0 |                      240.0 |     510.0 |
-| dbt_delta    |                      416.0 |                       26.0 |                       22.0 |     464.0 |
-| dbt_dwh      |                       88.0 |                        0.0 |                        0.0 |      88.0 |
-| duckrun-py-* |                       15.0 |                        0.0 |                        0.0 |      15.0 |
-| **total**    |                  **519.0** |                  **616.0** |                  **542.0** |**1,677.0**|
+|               | run 1<br>08-01 10:00→10:00 | run 2<br>08-01 20:00→20:00 |     total |
+|:--------------|---------------------------:|---------------------------:|----------:|
+| **etl**       |                  **653.0** |                    **0.0** |     653.0 |
+| duckrun       |                      215.0 |                        0.0 |     215.0 |
+| spark         |                      210.0 |                        0.0 |     210.0 |
+| dwh           |                      188.0 |                        0.0 |     188.0 |
+| shared        |                       40.0 |                        0.0 |      40.0 |
+| **analytics** |                    **0.0** |                **3,819.0** |   3,819.0 |
+| duckrun       |                        0.0 |                      320.0 |     320.0 |
+| dwh           |                        0.0 |                    3,499.0 |   3,499.0 |
+| **total**     |                  **653.0** |                **3,819.0** | **4,472.0**|
 ```
 
-The class table is the headline and it is printed rather than left to be summed by eye — run 1 there
-is a **dbt build** (all ETL, no model activity at all), runs 2 and 3 are benchmark dispatches whose
-ETL cost is only the OneLake reads Direct Lake did on their behalf. Underneath, one row per item, one
-column per run, so "what did iceberg cost yesterday against today" is a single row read left to
-right. It is the same shape as the aggregate table above it, deliberately.
+Same orientation as the aggregate above — class subtotal in bold, engines under it — so the two read
+the same way rather than making the eye re-learn the layout halfway down. Run 1 there is a **dbt
+build** (all ETL, no model activity at all) and run 2 a benchmark dispatch, and neither had to be
+told the other happened.
 
 **A column is a whole run, never an hour.** A pass spread over 12:00→15:00 is one column carrying all
 four hours' CU. The per-run hour *count* is in the footnote rather than the table, so nothing invites
@@ -244,11 +247,16 @@ export CU_METRICS_MODEL_ID=0fdedd3b-1451-4499-9ed4-aa3658100ec1
 CU_SINCE=2026-07-31T16:00:00 CU_DEBUG=1 python cu/capacity_cu.py
 ```
 
-Three knobs are env-only, because each only matters in a local investigation and the dispatch form is
-long enough: `CU_RUN_COLS` (default 8, `0` = unlimited) — how many runs get their own column before
-the oldest fold into one; `CU_OP_COLS` (default 6, `0` = unlimited) — how many operation columns
-before the tail folds into `other`; and `CU_GROUP_PREFIXES` (default `duckrun-py-`) — item name
-prefixes that collapse to one row.
+Several knobs are env-only, because each only matters in a local investigation and the dispatch form
+is long enough:
+
+| env | default | what it does |
+|:--|:--|:--|
+| `CU_ENGINES` | `duckrun,iceberg,spark,dwh` | the columns, and their order |
+| `CU_ITEM_DETAIL` | off | also print the item-major table, for when a column looks wrong |
+| `CU_RUN_COLS` | `8` (`0` = unlimited) | runs with their own column before the oldest fold into `earlier` |
+| `CU_GROUP_PREFIXES` | `dbt-duckrun-,dbt-iceberg-,duckrun-py-` | item name prefixes that collapse to one item |
+| `CU_OP_COLS` | `6` (`0` = unlimited) | operation *columns* in the item-detail table only — the engine table has no column fold, since operations are rows there |
 
 `FABRIC_TOKEN` is optional and is for **naming items only**. The datasets endpoint `PBI_TOKEN`
 reaches lists semantic models and nothing else, so without a Fabric-audience token every lakehouse,
