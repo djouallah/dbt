@@ -41,8 +41,8 @@ on:
       etl: { type: boolean, required: false, default: true }
       models: { type: string, required: false, default: "aemo_duckrun,aemo_iceberg,aemo_spark,aemo_dwh" }
       workspace: { type: string, required: false, default: "" }
-      metrics_workspace_id: { type: string, required: false, default: "7f7f5d92-1603-4a02-a46a-0d90fe1ed119" }
-      metrics_model_id: { type: string, required: false, default: "0fdedd3b-1451-4499-9ed4-aa3658100ec1" }
+      metrics_workspace_id: { type: string, required: false, default: "" }
+      metrics_model_id: { type: string, required: false, default: "" }
       capacity_id: { type: string, required: false, default: "" }
       run_gap_hours: { type: string, required: false, default: "2" }
       run_ops: { type: boolean, required: false, default: false }
@@ -70,13 +70,13 @@ on:
         type: string
         default: ""
       metrics_workspace_id:
-        description: "workspace holding the Fabric Capacity Metrics app"
+        description: "workspace holding the Fabric Capacity Metrics app. Blank = the CU_METRICS_WORKSPACE_ID repo secret, which is where it normally comes from."
         type: string
-        default: "7f7f5d92-1603-4a02-a46a-0d90fe1ed119"
+        default: ""
       metrics_model_id:
-        description: "the app's semantic model GUID"
+        description: "the app's semantic model GUID. Blank = the CU_METRICS_MODEL_ID repo secret."
         type: string
-        default: "0fdedd3b-1451-4499-9ed4-aa3658100ec1"
+        default: ""
       capacity_id:
         description: "capacity GUID. Blank falls back to the CU_CAPACITY_ID secret, and only if that is unset too does it query every capacity the metrics model can see — which costs an extra DAX query to enumerate them plus two more per capacity beyond the first."
         type: string
@@ -141,8 +141,11 @@ jobs:
     # timepoint-detail design.
     timeout-minutes: 45
     env:
-      CU_METRICS_WORKSPACE_ID: ${{ inputs.metrics_workspace_id }}
-      CU_METRICS_MODEL_ID: ${{ inputs.metrics_model_id }}
+      # Same secret-fallback shape as the workspace below: no GUID is written into this repo, the
+      # input `default:` cannot hold one (a default takes no context), and `capacity_cu.py` keeps
+      # no default either — it dies if both are unset rather than guessing at a model.
+      CU_METRICS_WORKSPACE_ID: ${{ inputs.metrics_workspace_id || secrets.CU_METRICS_WORKSPACE_ID }}
+      CU_METRICS_MODEL_ID: ${{ inputs.metrics_model_id || secrets.CU_METRICS_MODEL_ID }}
       # Falls back to a SECRET, so the capacity GUID is not written down in this repo. Pinning it is
       # not only about that: unpinned, the script must first ask the model which capacities exist
       # and then read items + CU for each, so this tenant's two turn 3 DAX queries into 6. Against a

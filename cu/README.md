@@ -326,9 +326,9 @@ the artifact copy opens off a local disk with no network. Re-render any past rep
 | `etl` | true | report every item in the workspace, classified into `etl`/`analytics`. Off = semantic models only, the old scope exactly |
 | `models` | the four `aemo_*` | comma-separated, leading the analytics rows and printed even at 0.0. With `etl` **on** this only orders; with `etl` off it also filters |
 | `workspace` | the `FABRIC_WORKSPACE_ID` secret | the workspace dbt.yml and benchmark.yml deploy to. With `etl` on this is the only filter left. Blank here AND no secret = all |
-| `metrics_workspace_id` | `7f7f5d92-…` | where the Capacity Metrics app is installed |
-| `metrics_model_id` | `0fdedd3b-…` | the app's semantic model |
-| `capacity_id` | all | blank = every capacity the metrics model can see |
+| `metrics_workspace_id` | the `CU_METRICS_WORKSPACE_ID` secret | where the Capacity Metrics app is installed |
+| `metrics_model_id` | the `CU_METRICS_MODEL_ID` secret | the app's semantic model. Unset with no secret is fatal — the script refuses to guess at a model |
+| `capacity_id` | the `CU_CAPACITY_ID` secret | blank with no secret = every capacity the metrics model can see, which costs one DAX query to enumerate them plus two more per capacity beyond the first |
 | `run_gap_hours` | `2` | idle hours that split a model that was *not* redeployed. Runs themselves separate on the item GUID. 0 = aggregate only |
 | `run_ops` | false | per-run breakdown by operation type as well |
 | `layout` | true | fetch the layout from the latest *dbt* run |
@@ -341,8 +341,8 @@ Locally, with `PBI_TOKEN` set:
 ```bash
 export PBI_TOKEN=$(az account get-access-token \
   --resource https://analysis.windows.net/powerbi/api --query accessToken -o tsv)
-export CU_METRICS_WORKSPACE_ID=7f7f5d92-1603-4a02-a46a-0d90fe1ed119
-export CU_METRICS_MODEL_ID=0fdedd3b-1451-4499-9ed4-aa3658100ec1
+export CU_METRICS_WORKSPACE_ID=<workspace holding the Capacity Metrics app>
+export CU_METRICS_MODEL_ID=<that app's semantic model GUID>
 CU_SINCE=2026-08-01T10:00:00 CU_DEBUG=1 python cu/capacity_cu.py
 ```
 

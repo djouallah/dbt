@@ -1081,8 +1081,13 @@ detail.
   doubling, 5-minute ceiling), reaching the same 900s deadline in six requests; a test pins it at
   ≤8. An earlier version of this bullet said "~60 executeQueries per run"; that described the
   deleted timepoint-detail design and is retracted.
-- **The workspace and capacity GUIDs are SECRETS, and the fallback cannot live where you would put
-  it.** `FABRIC_WORKSPACE_ID` and `CU_CAPACITY_ID` are repo secrets; every workflow input defaults
+- **Every real GUID is a SECRET, and the fallback cannot live where you would put it.** Four:
+  `FABRIC_WORKSPACE_ID`, `CU_CAPACITY_ID`, `CU_METRICS_WORKSPACE_ID`, `CU_METRICS_MODEL_ID`. No
+  tracked file outside `history/` holds a real one — the `model.bim`'s Direct Lake URL carries a
+  zeros placeholder (`deploy()` rewrites both ids anyway, and the checked-in item id had already
+  gone stale when `reset_outputs` recreated `dbt_delta`), and `benchmark/.platform`'s `logicalId`
+  identifies the template, not anything in the tenant. Keep the `model.bim` URL's SHAPE though:
+  `_is_directlake_bim()` greps the raw bytes for a `onelake.dfs` URL. Every workflow input defaults
   to `""` and each **called workflow resolves the secret itself**. Two GitHub rules force that
   shape: an input's `default:` accepts no context at all, and `jobs.<id>.with.<id>` is the one
   place the `secrets` context is **not** available — so `all.yml` cannot pass either value down.

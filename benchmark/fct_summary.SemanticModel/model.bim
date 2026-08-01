@@ -13,10 +13,10 @@
       {
         "name": "DirectLake",
         "kind": "m",
-        "description": "Direct Lake connection to OneLake — reads the Delta tables directly, no SQL endpoint. The two GUIDs are workspace + item and are REWRITTEN at deploy time by duckrun's workspace.deploy(lakehouse=...) or deploy(warehouse=...) — which is how this ONE template serves all four engines, warehouse included, since deploy(mode=) made the storage mode independent of the item kind (duckrun 0.4.36). The checked-in pair is the duckrun leg (dbt_delta).",
+        "description": "Direct Lake connection to OneLake — reads the Delta tables directly, no SQL endpoint. The two GUIDs are workspace + item and are REWRITTEN at deploy time by duckrun's workspace.deploy(lakehouse=...) or deploy(warehouse=...) — which is how this ONE template serves all four engines, warehouse included, since deploy(mode=) made the storage mode independent of the item kind (duckrun 0.4.36). The checked-in pair is a PLACEHOLDER of zeros, not a real workspace and item: it is overwritten before this template is ever deployed, and the real ids live in repo secrets. What must NOT change is the shape - _is_directlake_bim() greps the raw bytes for a onelake.dfs URL to decide this is a Direct Lake model, so removing the URL, or the camelCase mode token, silently turns it into something deploy cannot serve.",
         "expression": [
           "let",
-          "    Source = AzureStorage.DataLake(\"https://onelake.dfs.fabric.microsoft.com/ea575278-bd81-459c-9680-47829898c902/270c2534-3e66-4d37-b238-74da59d0d6d0\", [HierarchicalNavigation=true])",
+          "    Source = AzureStorage.DataLake(\"https://onelake.dfs.fabric.microsoft.com/00000000-0000-0000-0000-000000000000/00000000-0000-0000-0000-000000000000\", [HierarchicalNavigation=true])",
           "in",
           "    Source"
         ]
