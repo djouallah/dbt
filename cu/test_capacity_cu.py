@@ -378,7 +378,7 @@ def test_history_record_round_trips_the_numbers(tmp_path, capsys):
     capsys.readouterr()
     import json as _json
     rec = _json.loads(out_file.read_text(encoding="utf-8"))
-    assert rec["schema"] == 1
+    assert rec["schema"] == 2
     assert rec["cu"]["etl"]["duckrun"]["OneLake Write"] == 40.0
     assert rec["cu"]["analytics"]["duckrun"]["XMLA Read Operation"] == 100.0
     assert "since" in rec and "runs" in rec

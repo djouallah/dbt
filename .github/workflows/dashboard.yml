@@ -1,0 +1,114 @@
+name: Dashboard
+
+# THE PAGE, and nothing else. It reads `history/` out of the checkout and publishes
+# https://djouallah.github.io/fabric-dbt-benchmark/. It does not measure, build, benchmark, or touch Fabric.
+#
+# **The contract is the JSON.** A measurement workflow does the expensive, credentialed work and
+# commits ONE record to `history/`; this renders those records. There is no other channel between
+# them — no artifact, no shared env, no `needs:`. Everything that follows from that is the point:
+#
+#   - No token, no Azure login, no `requests`, no duckrun, no ADOMD. `python` and the standard
+#     library. It cannot fail for a reason that has anything to do with Fabric, and it costs nothing
+#     to run — which is what makes republishing a free, repeatable act rather than a measurement.
+#   - It renders whatever a record CONTAINS. One engine, two, four; a build-only dispatch with no
+#     analytics CU at all. Columns come from the record, never from a configured list.
+#   - Any past generation can be republished by name, years later, from the file it came from. That
+#     is not true of anything depending on a 90-day artifact or the metrics app's ~14-day retention.
+#
+# **`workflow_dispatch` only, and that is the standing rule.** No `schedule`, no `push`, no
+# `workflow_run`, no `workflow_call` — this is deliberately NOT chained off `all.yml`, which is the
+# whole change: publishing is a decision. A page that republishes itself whenever a measurement
+# lands will eventually publish one nobody looked at, and the published page is the public face of
+# this repo. `cu.yml` still prints its own markdown into its job summary — that is the
+# measurement's log, not the dashboard.
+on:
+  workflow_dispatch:
+    inputs:
+      record:
+        description: "which record to render — a substring of its filename, so a run id (30691610866) or a date (2026-08-01) both work. Blank = the newest."
+        type: string
+        default: ""
+      history_cols:
+        description: "generations to show in the trend table, oldest folded away first"
+        type: string
+        default: "6"
+
+# Its own group. It shares nothing with the build or the benchmark and measures nothing
+# timing-sensitive, so it has no reason to queue behind them — and cancel-in-progress because a
+# superseded publish has nothing worth finishing.
+concurrency:
+  group: dashboard-${{ github.ref_name }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: render the page
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      CU_RECORD: ${{ inputs.record }}
+      CU_HISTORY_COLS: ${{ inputs.history_cols }}
+      PYTHONIOENCODING: utf-8
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      # pytest and nothing else — the renderer itself needs no package. `requests` is deliberately
+      # NOT installed here: `capacity_cu.py` imports it optionally so that this job proves, by
+      # running, that the render path never reaches the network.
+      - run: pip install pytest
+
+      - name: Test the render layer offline
+        run: python -m pytest cu/ -q
+
+      # stdout is the markdown; diagnostics (which record was chosen, what was folded) go to stderr.
+      - name: Render the dashboard
+        run: |
+          set -o pipefail
+          python cu/dashboard.py | tee dashboard.md | tee -a "$GITHUB_STEP_SUMMARY"
+
+      # Markdown -> one self-contained HTML file: inline CSS, no script, font or image, so the
+      # artifact copy opens off a local disk with no network years later.
+      - name: Render it as a page
+        run: |
+          set -euo pipefail
+          mkdir -p site
+          python cu/report_html.py dashboard.md \
+            "Rendered by the \`Dashboard\` workflow, run ${{ github.run_id }} \
+             (\`${{ github.sha }}\`), from a record committed under \`history/\` — no capacity was \
+             read to produce this page. Each dispatch replaces it; the per-run copy is that run's \
+             \`dashboard\` artifact." > site/index.html
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dashboard
+          path: |
+            dashboard.md
+            site/index.html
+          if-no-files-found: error
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: site
+
+  # Separate job because `deploy-pages` needs the `github-pages` environment. `needs: build` means a
+  # render that failed cannot overwrite a good page with a half-written one.
+  publish:
+    name: publish
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4

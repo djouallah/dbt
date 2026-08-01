@@ -49,7 +49,14 @@ import sys
 import time
 from datetime import datetime, timezone
 
-import requests
+# The one runtime dependency, and it is OPTIONAL at import time on purpose: `dashboard.py` imports
+# this module for its RENDERERS only — it reads `history/` and never touches a network — so the
+# dashboard workflow installs nothing at all. Anything that actually issues a request checks first
+# and dies with the install line rather than raising ImportError from the middle of a read.
+try:
+    import requests
+except ImportError:                                          # pragma: no cover - env-dependent
+    requests = None
 
 # Own the encoding rather than inherit it: this prints markdown that GitHub renders, and a Windows
 # console is cp1252, which mangles an em dash and would hard-fail on a semantic model whose name
@@ -320,6 +327,11 @@ HISTORY_JSON = os.environ.get("CU_HISTORY_JSON", "").strip()
 HISTORY_DIR = os.environ.get("CU_HISTORY_DIR", "history").strip()
 HISTORY_COLS = int(os.environ.get("CU_HISTORY_COLS", "6") or 0)
 
+# Record schemas this repo can still read. A version is added here, never swapped: the whole reason
+# `history/` exists is that these files outlive the app's retention, and a reader that silently
+# ignores last month's records is the same failure as not having written them.
+SCHEMAS = (1, 2)
+
 # Where this page came from. A published report with no route back to the code that made it is a
 # table of numbers nobody can check; the run links are the audit trail for the two ids the page
 # already quotes. GITHUB_REPOSITORY is set in Actions and the fallback is this repo, which is
@@ -343,12 +355,15 @@ def run_url(run_id):
 # it: they are the same DuckDB, one writing Delta through delta-rs and one writing to an Iceberg
 # REST catalog, on the same notebook size. The bar label alone made that look like an engine
 # difference rather than a writer difference.
+# (dbt adapter, what executes and writes, the writer name `stats.py` uses for the layout table).
+# The third is deliberately the SAME spelling as stats.py's WRITER map, so the layout table reads
+# identically whether it was rendered from that artifact or from a history record.
 STACK = {
-    "landing": ("download_aemo.py", "the shared AEMO archive every leg reads"),
-    "duckrun": ("dbt-duckrun", "DuckDB → delta-rs"),
-    "iceberg": ("dbt-duckdb", "DuckDB → Iceberg REST catalog"),
-    "spark": ("dbt-fabricspark", "Fabric Spark (Livy) → Delta"),
-    "dwh": ("dbt-fabric-samdebruyn", "Fabric Warehouse (T-SQL)"),
+    "landing": ("download_aemo.py", "the shared AEMO archive every leg reads", "—"),
+    "duckrun": ("dbt-duckrun", "DuckDB → delta-rs", "delta-rs"),
+    "iceberg": ("dbt-duckdb", "DuckDB → Iceberg REST catalog", "duckdb (iceberg)"),
+    "spark": ("dbt-fabricspark", "Fabric Spark (Livy) → Delta", "spark"),
+    "dwh": ("dbt-fabric-samdebruyn", "Fabric Warehouse (T-SQL)", "warehouse"),
 }
 
 
@@ -356,7 +371,7 @@ def engine_caption(cfg, e):
     """The one-line "what this bar actually is" for engine `e`: the adapter, then whatever the build
     RECORDED about the compute it was given. Never a default — an unrecorded profile is simply
     absent, because a filled-in one reads exactly like a measurement (see render_hardware)."""
-    adapter = (STACK.get(e) or ("", ""))[0]
+    adapter = (STACK.get(e) or ("",))[0]
     bits = [adapter] if adapter else []
     c = (cfg or {}).get(e) or {}
     if c.get("vcores"):
@@ -792,12 +807,19 @@ def _ops_for(cells):
     return ordered, []
 
 
-def _engine_cols(meta, keys):
+def _engine_cols(meta, keys, engines=None):
     """`(columns, shared items)`. Every engine always gets a column; `shared` only appears when
-    something actually landed there, and then it is named."""
+    something actually landed there, and then it is named.
+
+    `engines` overrides the configured list, and that is what lets `dashboard.py` render a record
+    covering ONE engine as one column. Here the fixed list is right — a column that disappears is
+    indistinguishable from one that spent nothing — but a record is a closed document: an engine it
+    never measured has no zero to print, it simply is not in it.
+    """
+    engines = list(ENGINES if engines is None else engines)
     shared = sorted({(meta.get(k) or {}).get("label", k) for k in keys
                      if (meta.get(k) or {}).get("engine") is None})
-    return list(ENGINES) + (["shared"] if shared else []), shared
+    return engines + (["shared"] if shared else []), shared
 
 
 # Why a given item cannot be given a column. Only the ones actually in `shared` are explained, so
@@ -850,7 +872,7 @@ def _chart(title, subtitle, rows):
     print(f"\n<!--chart:{json.dumps({'title': title, 'subtitle': subtitle, 'rows': rows})}-->")
 
 
-def _engine_table(cells, meta):
+def _engine_table(cells, meta, engines=None):
     """Engines across, operations down, grouped by class — the shape the whole repo reads in.
 
     The class row carries its own subtotal, so "what did the build cost against the querying" is two
@@ -862,7 +884,7 @@ def _engine_table(cells, meta):
     adding duckrun to dwh answers no question anyone has. The class subtotals stay because they sum
     DOWN a column, which is "what this engine spent building" — a real number.
     """
-    cols, shared = _engine_cols(meta, {k for k, _op in cells})
+    cols, shared = _engine_cols(meta, {k for k, _op in cells}, engines)
     per, cls_total, op_total = {}, {}, {}
     for (k, op), cu in cells.items():
         info = meta.get(k) or {}
@@ -1339,7 +1361,7 @@ def render_layout(doc, cu_by_engine, table=LAYOUT_TABLE):
           f"did. Nothing here re-read a Delta log.</sub>")
 
 
-def render_hardware(doc):
+def render_hardware(doc, engines=None):
     """What each engine IS and what it ran ON — the adapter and the writer from STACK, the compute
     from `stats.py`'s `config` block, never from this file's assumptions.
 
@@ -1358,7 +1380,7 @@ def render_hardware(doc):
     cfg = (doc.get("config") or {})
     run = doc.get("run") or {}
     rows = []
-    for e in ENGINES:
+    for e in (ENGINES if engines is None else engines):
         if e == "landing":
             continue
         c = cfg.get(e) or {}
@@ -1374,24 +1396,31 @@ def render_hardware(doc):
         if e == "dwh":
             bits.append("workspace default — Fabric Warehouse exposes no per-run knob")
         bits = [b for b in bits if b]
-        adapter, writer = STACK.get(e) or ("—", "—")
+        adapter, writer = (STACK.get(e) or ("—", "—", "—"))[:2]
         rows.append((e, adapter, writer, ", ".join(bits) if bits
                      else f"not recorded by dbt run {run.get('id') or '?'}"))
     if not rows:
         return
-    print("\n### The four engines — what each one is, and what it ran on\n")
+    # The heading used to say "The four engines". It counts nothing now, because a record covering
+    # two of them under a heading saying four is the same defect as a zero column for an engine that
+    # was never measured: it describes the project instead of the document in front of the reader.
+    named = [e for e, _a, _w, _c in rows]
+    print("\n### What each engine is, and what it ran on\n")
     print("| engine | dbt adapter | executes / writes | compute |")
     print("|:--|:--|:--|:--|")
     for e, adapter, writer, what in rows:
         print(f"| {e} | `{adapter}` | {writer} | {what} |")
+    # Both asides name engines, so both are printed only when those engines are on the page.
+    pair = ("`duckrun` and `iceberg` are the SAME DuckDB on the same notebook size and differ only "
+            "in what writes the table, which is why their two bars are the sharpest comparison "
+            "here. " if {"duckrun", "iceberg"} <= set(named) else "")
+    livy = ("spark runs on the workspace Livy pool, which this cannot see beyond the profile it "
+            "asked for." if "spark" in named else "")
     print(f"\n<sub>The adapter and writer are facts of this repo's `profiles.yml`; the compute is "
           f"read from the environment the build legs were actually given and recorded by "
           f"`stats.py` in dbt run `{run.get('id') or '?'}` — not from configuration this report "
           f"assumes. A value the run did not record says so rather than showing a default, because "
-          f"a filled-in default reads exactly like a measurement. `duckrun` and `iceberg` are the "
-          f"SAME DuckDB on the same notebook size and differ only in what writes the table, which "
-          f"is why their two bars are the sharpest comparison on this page. spark runs on the "
-          f"workspace Livy pool, which this cannot see beyond the profile it asked for.</sub>")
+          f"a filled-in default reads exactly like a measurement. {pair}{livy}</sub>")
 
 
 def load_history(cells, meta, since, build=None, directory=None, limit=None):
@@ -1423,7 +1452,7 @@ def load_history(cells, meta, since, build=None, directory=None, limit=None):
         except Exception as ex:
             log(f"  history: {n} unreadable ({type(ex).__name__})")
             continue
-        if rec.get("schema") != 1 or not rec.get("cu"):
+        if rec.get("schema") not in SCHEMAS or not rec.get("cu"):
             continue
         recs.append(rec)
     recs.sort(key=lambda r: r.get("written") or "")
@@ -1459,7 +1488,7 @@ def load_history(cells, meta, since, build=None, directory=None, limit=None):
     return out
 
 
-def render_history(cols):
+def render_history(cols, engines=None):
     """The committed generations beside this one — the only thing on this page that says whether a
     number is normal, and it costs no capacity to print.
 
@@ -1471,7 +1500,8 @@ def render_history(cols):
     """
     if len(cols) < 2:
         return
-    keys = [(c, e) for c in CLASS_ORDER for e in list(ENGINES) + ["shared"]
+    keys = [(c, e) for c in CLASS_ORDER
+            for e in list(ENGINES if engines is None else engines) + ["shared"]
             if any(per.get((c, e)) for _l, _b, per in cols)]
     if not keys:
         return
@@ -1481,7 +1511,7 @@ def render_history(cols):
     for cls, e in keys:
         print(f"| {e} · {cls} | "
               + " | ".join(f"{per.get((cls, e), 0.0):,.1f}" for _l, _b, per in cols) + " |")
-    builds = ", ".join(f"`{l.replace(' · **this run**', '')}` = dbt build "
+    builds = ", ".join(f"`{l.split(' · ')[0]}` = dbt build "
                        f"[{b}]({run_url(b)})" if b else f"`{l}` = build unrecorded"
                        for l, b, _p in cols)
     print(f"\n<sub>From `{HISTORY_DIR}/` in this repo — the records the super workflow commits, "
@@ -1513,7 +1543,10 @@ def write_history(path, cells, meta, since, asof, doc):
         cls, eng = info.get("cls", "other"), info.get("engine") or "shared"
         per.setdefault(cls, {}).setdefault(eng, {})[op] = round(cu, 1)
     rec = {
-        "schema": 1,
+        # 2 adds `tables` — the pipeline ORDER of the layout, which `json.dump(sort_keys=True)`
+        # destroys and which the dashboard cannot recover from the layout dict itself. A schema-1
+        # record still renders; its tables just come out alphabetically.
+        "schema": 2,
         # Stated in the record, not just on the page. A file read years from now must not need this
         # repo's README to know what its numbers are.
         "unit": "CU (s) — Fabric capacity-unit seconds",
@@ -1527,6 +1560,11 @@ def write_history(path, cells, meta, since, asof, doc):
                  "build_sha": (doc.get("run") or {}).get("sha")},
         "config": doc.get("config") or {},
         "cu": per,
+        "tables": list(doc.get("tables") or []),
+        # When the LAYOUT was read — the dbt build's clock, not this measurement's. Without it a
+        # dashboard rendering this record months later can only date the layout by the record, and
+        # the whole point of printing that date is that the two halves come from different runs.
+        "layout_written": (doc.get("run") or {}).get("written"),
         "layout": doc.get("stats") or {},
     }
     os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
@@ -1665,6 +1703,10 @@ def render(cells, hourly, meta, since, asof, seen=0, dropped=None, active=None, 
 
 
 def main():
+    if requests is None:
+        die("`requests` is not installed, and READING the metrics model needs it: "
+            "`pip install requests`. (Only the reader does — `cu/dashboard.py` renders from "
+            "`history/` on the standard library alone.)")
     if not TOKEN:
         die("PBI_TOKEN is empty — the workflow mints it from the OIDC login. "
             "See cu/README.md.")

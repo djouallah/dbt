@@ -13,12 +13,15 @@ name: Capacity units
 # It shares NOTHING with benchmark.yml — no needs:, no artifact, no concurrency group, no code. It
 # reports capacity units per engine from a pinned `since` floor onward. See cu/README.md.
 #
-# Output lands in four places, all from ONE run of the script: the job summary (markdown), the job
-# log, a `cu-report` artifact, and GitHub Pages — https://djouallah.github.io/fabric-dbt-benchmark/, which is the
-# LATEST report and nothing else. Each dispatch overwrites it; the artifact is the per-run copy.
+# **It does not publish anything, and that is deliberate.** Its output is the job summary, the job
+# log, a `cu-report` artifact — and, when called from `all.yml`, ONE record committed to `history/`.
+# That record is the contract: `dashboard.yml` reads it and publishes the page, dispatched by a
+# human. Measuring and publishing were one job here, which meant every measurement republished
+# whether or not anyone had looked at it, and meant the page could only ever show the window the
+# last dispatch happened to measure. Do not put `upload-pages-artifact` back in this file.
 #
-# The repo is PUBLIC, so that page is public. It carries capacity-unit totals per engine and item
-# names — no tokens, no ids, no data — but it is public, deliberately and with that understood.
+# The history record is therefore the thing this workflow EXISTS to produce, more than the markdown:
+# the markdown is a log of one read, the record is what survives the app's ~14-day retention.
 #
 # It DOES now separate runs, and note carefully what that is: a run here is a cluster of active hours
 # in the metrics model, inferred from idle gaps and identified by its own time window. It is still not
@@ -121,8 +124,6 @@ permissions:
   # To download the `stats` artifact from the latest *dbt* run. Read-only, and the only
   # reason this workflow touches the Actions API at all.
   actions: read
-  # To publish the report to Pages. Only the `publish` job actually uses it.
-  pages: write
 
 jobs:
   cu:
@@ -130,7 +131,7 @@ jobs:
     runs-on: ubuntu-latest
     # Spelled out per job rather than inherited, because this one needs `contents: write` to commit
     # the history record — and a job-level block REPLACES the workflow-level one, so every scope the
-    # job uses has to be listed. `publish` below keeps the workflow-level set.
+    # job uses has to be listed.
     permissions:
       id-token: write
       contents: write
@@ -303,32 +304,14 @@ jobs:
           set -o pipefail
           python cu/capacity_cu.py | tee cu-report.md | tee -a "$GITHUB_STEP_SUMMARY"
 
-      # Markdown -> one self-contained HTML file. No network at render time and none at view time:
-      # the CSS is inline and there is no script, font or image, so the artifact copy opens off a
-      # local disk years later.
-      - name: Render the report as a page
-        run: |
-          set -euo pipefail
-          mkdir -p site
-          python cu/report_html.py cu-report.md \
-            "Fabric capacity units, read from the Capacity Metrics app's semantic model by \
-             \`cu/capacity_cu.py\`. Published by the \`Capacity units\` workflow, run \
-             ${{ github.run_id }} (\`${{ github.sha }}\`). Each dispatch replaces this page; the \
-             per-run copy is that run's \`cu-report\` artifact." > site/index.html
-
-      # The per-run copy. Pages only ever holds the latest, and a report is worth comparing against
-      # an older one.
+      # The per-run copy of THIS read, and only the markdown. No HTML and no Pages upload:
+      # rendering the page is `dashboard.yml`'s job, from the record committed below. A second
+      # renderer here would publish a window nobody chose to publish.
       - uses: actions/upload-artifact@v4
         with:
           name: cu-report
-          path: |
-            cu-report.md
-            site/index.html
+          path: cu-report.md
           if-no-files-found: error
-
-      - uses: actions/upload-pages-artifact@v3
-        with:
-          path: site
 
       # The only storage here that outlives retention. Artifacts expire (90 days, the Pages one
       # sooner) and the Capacity Metrics model keeps ~14 days, so without this every number measured
@@ -353,20 +336,8 @@ jobs:
           git pull --rebase --autostash origin "${{ github.ref_name }}"
           git push origin "HEAD:${{ github.ref_name }}"
 
-  # Separate job because `deploy-pages` needs the `github-pages` environment, and a deployment
-  # environment on the job that holds the Fabric tokens would put an approval gate in front of the
-  # capacity read rather than in front of the publish. It runs only when the read succeeded — a
-  # failed dispatch must not overwrite a good page with a half-written one.
-  publish:
-    name: publish the page
-    needs: cu
-    runs-on: ubuntu-latest
-    permissions:
-      pages: write
-      id-token: write
-    environment:
-      name: github-pages
-      url: ${{ steps.deployment.outputs.page_url }}
-    steps:
-      - id: deployment
-        uses: actions/deploy-pages@v4
+      - name: Say where the page comes from
+        if: inputs.history
+        run: |
+          echo "Record committed. Publish it with the **Dashboard** workflow — it reads history/ and" >> "$GITHUB_STEP_SUMMARY"
+          echo "needs no token, no capacity and no rerun of this one." >> "$GITHUB_STEP_SUMMARY"

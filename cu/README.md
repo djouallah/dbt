@@ -3,6 +3,29 @@
 One question: **what has each engine cost in capacity units — to build its tables, and to query
 them?**
 
+**Two programs, one contract.** `capacity_cu.py` MEASURES: it reads the Capacity Metrics model by
+DAX, needs a token and a workspace, costs REST budget against a throttled endpoint, and files one
+JSON record in [`history/`](../history). `dashboard.py` PUBLISHES: it reads those records and
+renders the page, with no token, no network and no third-party package. Nothing else passes between
+them — no artifact, no shared env, no `needs:`.
+
+|                | `capacity_cu.py` (workflow `Capacity units`) | `dashboard.py` (workflow `Dashboard`) |
+|:---------------|:---------------------------------------------|:--------------------------------------|
+| reads          | the Capacity Metrics semantic model           | `history/*.json`                       |
+| needs          | OIDC, two tokens, `requests`                  | nothing                                |
+| writes         | a `history/` record (+ its own job summary)   | the published page                     |
+| triggered by   | `all.yml`, or dispatched                      | **dispatched by a human, always**      |
+
+They were one job. Splitting them buys three things: a measurement no longer republishes a page
+nobody asked for; any past generation can be republished by name, years later, from the file it came
+from; and the page can be fixed and re-rendered without spending a single CU. The cost is that a
+fresh measurement is **not** live on the page until someone dispatches `Dashboard` — which is the
+point, not a regression.
+
+A record need not cover four engines. One, two, or a build-only dispatch with no analytics CU at all:
+the dashboard's columns come from the record, never from a configured list, because a record is a
+closed document and an engine it never measured has no zero to print.
+
 Fabric has no per-operation CU REST API. The Capacity Metrics app's own semantic model is the only
 authoritative source, so this reads it by DAX and prints it back engine-major: four columns, `etl`
 (what *writes* the tables — lakehouses, warehouse, notebooks, Livy) against `analytics` (what
@@ -286,11 +309,13 @@ about a 143M-row scan). It does not narrow the table above it, which always list
 ## What it deliberately is not
 
 **It shares nothing with `benchmark/`.** No imports, no `run_report.json`, no `needs:`, no
-concurrency group, no ADOMD, no .NET, no duckrun. `requests` is the only runtime dependency (`pytest`
-for the offline suite, which imports nothing but this script). It does read ONE
-artifact — `stats` from the `layout` job of the `dbt` workflow, for the layout table above — and that is a
-JSON file, not code: nothing is imported, and losing it costs one table.
-Deleting `cu/` and `.github/workflows/cu.yml` removes it completely and nothing else in the repo
+concurrency group, no ADOMD, no .NET, no duckrun. `requests` is the only runtime dependency of the
+MEASUREMENT (`pytest` for the offline suite, which imports nothing but these two scripts) and the
+dashboard has none at all — `capacity_cu.py` imports `requests` optionally, so `dashboard.py` can
+import its renderers on the standard library alone and the `Dashboard` job proves it by installing
+nothing. It does read ONE artifact — `stats` from the `layout` job of the `dbt` workflow, for the
+layout table above — and that is a JSON file, not code: nothing is imported, and losing it costs one
+table. Deleting `cu/` and its two workflow files removes it completely and nothing else in the repo
 notices — which is the point, because this may not turn out to be useful. The four model names are
 spelled out here rather than imported from `benchmark/engines.py` for the same reason.
 
@@ -306,13 +331,19 @@ workflow stays independently dispatchable for a re-read of a window:
 `gh workflow run "Capacity units"`, `workflow_dispatch` only. **Wait ~10 minutes after the activity
 you want to measure** — see the lag note below.
 
-Every dispatch publishes the report to **<https://djouallah.github.io/fabric-dbt-benchmark/>**. Pages is set to build
-from Actions, so there is no `gh-pages` branch and nothing is committed to the repo. That page is the
-**latest** report only — each dispatch overwrites it — and the per-run copy is that run's `cu-report`
-artifact, carrying both the markdown and the HTML. The `publish` job is separate from the read
-because `deploy-pages` needs the `github-pages` environment, and an environment on the job holding
-the Fabric tokens would gate the capacity read rather than the publish; it runs only on success, so a
-failed dispatch cannot overwrite a good page with a half-written one.
+**This workflow publishes nothing.** Its output is the job summary, the job log, a `cu-report`
+artifact holding the markdown of that one read, and — when called from `all.yml` — the history
+record. `Dashboard` is what puts a page at **<https://djouallah.github.io/fabric-dbt-benchmark/>**,
+dispatched by a human, reading `history/` and nothing else. Pages is set to build from Actions, so
+there is no `gh-pages` branch and nothing is committed; the page is the **latest render** only, and
+the per-run copy is that run's `dashboard` artifact (markdown + HTML). The `publish` job is separate
+from the render because `deploy-pages` needs the `github-pages` environment, and it runs only on
+success, so a failed render cannot overwrite a good page with a half-written one.
+
+`Dashboard` takes two inputs: `record` — a substring of a record's filename, so a run id
+(`30691610866`) or a date (`2026-08-01`) both work, blank being the newest — and `history_cols`.
+Render any of them locally with `python cu/dashboard.py > page.md && python cu/report_html.py
+page.md > page.html`: no credentials, no network, ~50ms.
 
 **The repo is public, so the page is public.** It carries capacity-unit totals per engine and item
 names — no tokens, no ids, no data — but that is the trade, made deliberately.
@@ -324,17 +355,29 @@ days, so a number measured today is simply gone in a fortnight unless it is writ
 generation therefore commits `history/<UTC timestamp>-<run id>.json` into this repo:
 
 ```json
-{"schema": 1, "written": "…", "since": "…",
+{"schema": 2, "unit": "CU (s) — …", "written": "…", "since": "…",
  "runs": {"measure": "…", "build": "…", "build_sha": "…"},
  "config": {"duckrun": {"vcores": "64"}, …},
  "cu": {"etl": {"duckrun": {"OneLake Write": 395.0, …}, …}, "analytics": {…}},
+ "tables": ["stg_csv_archive_log", …, "fct_summary"],
+ "layout_written": "…",
  "layout": {"duckrun": {"fct_summary": {…}}, …}}
 ```
 
-Timestamp-first so the directory sorts chronologically without opening anything. `schema` is there
-from the first file, so a reader two years out can tell an old record from a new one by reading it
-rather than inferring from which keys exist. It holds the **numbers**, not the markdown or the HTML —
-those are renderings, and a renderer changes.
+**This is the contract `dashboard.py` renders**, so it is a published interface and not a private
+dump. Timestamp-first so the directory sorts chronologically without opening anything. `schema` is
+there from the first file, so a reader two years out can tell an old record from a new one by reading
+it rather than inferring from which keys exist — **2** added `tables` (the pipeline ORDER, which
+`sort_keys=True` destroys and which cannot be recovered from the layout dict) and `layout_written`
+(the dbt build's clock, so a page rendered months later still dates the layout honestly). A schema-1
+record still renders; its tables just come out alphabetically. Versions are ADDED to `SCHEMAS`,
+never swapped: a reader that silently ignores last month's records is the same failure as never
+having written them. It holds the **numbers**, not the markdown or the HTML — those are renderings,
+and a renderer changes.
+
+It carries **no engine list**: the engines are whatever `cu` and `layout` mention, which is what
+lets a one-engine or two-engine measurement render as one or two columns instead of four with zeros
+in them.
 
 Written **only** from `all.yml`. A standalone `Capacity units` dispatch measures whatever window it
 was handed, which is not a generation; filing that as one would fill the series with records that

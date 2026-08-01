@@ -1,9 +1,14 @@
 name: Build, benchmark, measure
 
 # THE dispatch. One run answers the whole question: build the tables on four engines, query them
-# through Direct Lake, then read what all of that cost in capacity units and publish the page.
+# through Direct Lake, then read what all of that cost in capacity units and FILE the record.
 #
-#   stamp → build (dbt.yml) → benchmark (benchmark.yml) → lag → measure + publish (cu.yml)
+#   stamp → build (dbt.yml) → benchmark (benchmark.yml) → lag → measure (cu.yml) → history/<record>.json
+#
+# **It does not publish a page**, and that is the contract: this produces the numbers, `dashboard.yml`
+# renders them, dispatched by a human afterwards. Chaining the publish onto the end of this meant
+# every measurement republished whether or not anyone had looked at it. Do not add a `dashboard`
+# job here.
 #
 # The three called workflows are unchanged and still dispatchable on their own — this composes them,
 # it does not replace them. Skipping a stage is an input, so a build-only dispatch spends no
@@ -26,7 +31,7 @@ on:
         type: boolean
         default: true
       measure:
-        description: "read capacity units and publish the page"
+        description: "read capacity units and commit the history record (the page is a separate, manual Dashboard dispatch)"
         type: boolean
         default: true
       reset_outputs:
@@ -76,7 +81,7 @@ on:
         type: string
         default: "10"
       since_override:
-        description: "measure from this instant instead of this run's own start, IN THE MODEL'S CLOCK. For re-measuring a generation that was built by an EARLIER dispatch — with build and benchmark off, that is a re-read and a republish for the price of one metrics query. Blank = this run's start hour, which is what you want when this run built the thing."
+        description: "measure from this instant instead of this run's own start, IN THE MODEL'S CLOCK. For re-measuring a generation that was built by an EARLIER dispatch — with build and benchmark off, that is a re-read for the price of one metrics query, filed as its own record. Blank = this run's start hour, which is what you want when this run built the thing."
         type: string
         default: ""
       refresh:
@@ -103,7 +108,6 @@ permissions:
   id-token: write     # OIDC to Fabric, every stage
   contents: write     # cu.yml commits history/
   actions: read       # cu.yml downloads the `stats` artifact from the dbt run
-  pages: write        # cu.yml publishes the page
 
 jobs:
   # Free, and it is what makes the report describe ONE generation. The CU floor is this run's own

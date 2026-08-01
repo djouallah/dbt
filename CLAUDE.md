@@ -604,7 +604,9 @@ the `cu/` section.
 - **`all.yml` ("Build, benchmark, measure") is the ordinary dispatch, and the other three are its
   stages.** `dbt.yml`, `benchmark.yml` and `cu.yml` gained `workflow_call` and are otherwise
   unchanged, so each still runs standalone for a targeted re-run. One dispatch is
-  build → benchmark → lag → measure + publish, with a per-stage skip input. Two things the composition
+  build → benchmark → lag → measure, ending in a committed `history/` record, with a per-stage skip
+  input. It does **not** publish: the page is `dashboard.yml`, dispatched separately by a human, and
+  the record is the only thing passing between them. Two things the composition
   buys that a hand-sequenced dispatch could not: the CU floor becomes **this run's own start hour**
   (so the report describes one generation with no pinned default to bump), and the lag before the CU
   read is enforced rather than remembered. `workflow_call` inputs cannot be `type: choice`, so
@@ -838,6 +840,12 @@ read from the Fabric Capacity Metrics app's own semantic model by DAX over the P
 only authoritative source, which is why this exists at all. [cu/README.md](cu/README.md) has the
 detail.
 
+**Two programs, one contract, and the contract is the JSON.** `capacity_cu.py` measures and files a
+record in `history/`; `cu/dashboard.py` + `.github/workflows/dashboard.yml` ("Dashboard") read those
+records and publish the page, dispatched by a human. Nothing else passes between them — no artifact,
+no shared env, no `needs:`. Read the split's bullets below before touching either side; most of what
+follows describes the measurement, and anything about the PAGE now lives in the dashboard.
+
 - **The report is ENGINE-MAJOR, and that orientation is what makes the width work.** Four columns,
   one per engine; `etl` (lakehouses, warehouse, notebooks, Livy) and `analytics` (semantic models)
   as bold subtotal rows with their operation types broken out underneath; the same shape again per
@@ -966,28 +974,52 @@ detail.
   workflow's artifacts has the same trap waiting.
 - **`history/` is the only storage that outlives retention.** Artifacts expire (90 days, the Pages
   one sooner) and the Capacity Metrics model keeps ~14 days, so every generation writes
-  `history/<timestamp>-<run id>.json`: `schema: 1`, the run ids, the `since` floor, the hardware
-  config, CU per class per engine per operation, and the layout. Written **only** from `all.yml`
+  `history/<timestamp>-<run id>.json`: `schema: 2`, the run ids, the `since` floor, the hardware
+  config, CU per class per engine per operation, the table ORDER, and the layout. **It is a published
+  interface now, not a private dump** — `dashboard.py` renders from it, so a key rename breaks the
+  page rather than a debugging aid. Schema versions are ADDED to `SCHEMAS`, never swapped: a reader
+  that ignores last month's records is the same failure as never having written them. 2 added
+  `tables` (pipeline order, which `sort_keys=True` destroys) and `layout_written` (the dbt build's
+  clock, so a page rendered months later still dates the layout honestly). Written **only** from `all.yml`
   (`history: true`), never from a standalone `cu.yml` dispatch — that measures an arbitrary window,
   and filing it as a generation would poison the series with records that mean something else. It
   deliberately holds no benchmark timings, which is what keeps the `run_report.json` isolation
   intact. `schema` is there from the first file so a later reader can tell records apart by reading
   one, rather than guessing from which keys are present.
-- **Every dispatch publishes to <https://djouallah.github.io/fabric-dbt-benchmark/>, and the repo is PUBLIC.** Pages
-  builds from Actions — no `gh-pages` branch, nothing committed — and holds the **latest** report
-  only; the per-run copy is that run's `cu-report` artifact (markdown + HTML). `publish` is its own
-  job because `deploy-pages` needs the `github-pages` environment, and an environment on the job
-  holding the Fabric tokens would gate the capacity read instead of the publish; `needs: cu` means a
-  failed read cannot overwrite a good page. `cu/report_html.py` renders it — a parser for the
-  report's own markdown subset, written a few lines away, which is why it is not a markdown
-  dependency in a directory whose whole property is `requests` and nothing else. The page is
-  self-contained by construction (inline CSS, no script/font/image/URL) because the artifact copy has
-  to open off a local disk years later.
+- **MEASURING and PUBLISHING are two workflows, and the contract between them is the JSON record.**
+  `cu.yml` reads the metrics model and commits one `history/` record; **`dashboard.yml`
+  (`cu/dashboard.py`) reads `history/` and publishes the page**, `workflow_dispatch` only, never
+  chained off `all.yml`. They were one job, which meant every measurement republished whether or not
+  anyone had looked at it, and meant the page could only show the window the last dispatch happened
+  to measure. What the split buys: any past generation republishes **by name** from the file it came
+  from, the page can be fixed and re-rendered for zero CU, and the dashboard **cannot fail for a
+  Fabric reason** — no token, no network, and no third-party package, which is why `capacity_cu.py`
+  imports `requests` inside a `try` and the `Dashboard` job installs only `pytest`. What it costs:
+  a fresh measurement is not live on the page until a human dispatches `Dashboard`. Do not put
+  `upload-pages-artifact` back in `cu.yml`, and do not add a `dashboard` job to `all.yml`.
+- **A record renders whatever it CONTAINS — one engine, two, or four.** The dashboard's columns come
+  from the record's own `cu`/`layout` keys, not from `CU_ENGINES`: a record is a closed document, and
+  an engine it never measured has no zero to print. That is why `_engine_cols`, `_engine_table`,
+  `render_hardware` and `render_history` all take an `engines=` override, why the hardware heading no
+  longer counts to four, and why its two asides (the duckrun/iceberg pairing, the Livy pool) print
+  only when those engines are on the page. A page that describes the project instead of the document
+  in front of the reader is the failure being avoided.
+- **The published page is PUBLIC** — <https://djouallah.github.io/fabric-dbt-benchmark/>, built from
+  Actions with no `gh-pages` branch and nothing committed, holding the **latest render** only; the
+  per-run copy is that run's `dashboard` artifact (markdown + HTML). `publish` is its own job because
+  `deploy-pages` needs the `github-pages` environment, and `needs: build` means a failed render
+  cannot overwrite a good page. `cu/report_html.py` renders it — a parser for the report's own
+  markdown subset, written a few lines away, which is why it is not a markdown dependency in a
+  directory whose whole property is having almost no dependencies. The page is self-contained by
+  construction (inline CSS, no script/font/image, nothing fetched to render) because the artifact
+  copy has to open off a local disk years later; the only URLs are links back to the repo and its
+  runs.
 - **The isolation is the design, not an accident.** No imports from `benchmark/`, no
   `run_report.json`, no `needs:` from another workflow, no shared concurrency group, no ADOMD, no
-  .NET, no duckrun — `requests` is the whole runtime dependency list, plus `pytest` for `cu/`'s own
-  offline suite, which imports nothing but `capacity_cu.py`. It is speculative tooling, so it is built to be
-  deleted by removing one directory and one workflow file. Do not "DRY it up" against
+  .NET, no duckrun — `requests` is the whole runtime dependency list of the MEASUREMENT and the
+  dashboard has none at all, plus `pytest` for `cu/`'s own offline suite, which imports nothing but
+  those two scripts. It is speculative tooling, so it is built to be deleted by removing one
+  directory and two workflow files. Do not "DRY it up" against
   `benchmark/xmla_compare.py`; the duplication is what keeps that deletion free.
 - **`FABRIC_TOKEN` is a SECOND token on a different audience, and it is for naming items only.** The
   datasets endpoint `PBI_TOKEN` reaches lists semantic models and nothing else, so the lakehouses and
@@ -1180,11 +1212,15 @@ detail.
   `secrets.PBI_TOKEN` branch that used to take precedence was deleted — it never fired and only
   produced "context access might be invalid" warnings for a secret that deliberately did not exist.
   A user token (~1h) remains the manual escape hatch if the SP is ever refused.
-- **`workflow_dispatch` only, same standing rule as the benchmark.** No `schedule`, no `push`, no
-  `workflow_run`, no `needs:` from another workflow. Interactive reads against shared capacity are
-  what a capacity admin notices. Its **own** concurrency group though, not `onelake-<ref>` — it
-  measures nothing timing-sensitive, and queueing it behind a five-hour benchmark would push it
-  toward the app's 14-day retention edge for no benefit.
+- **`workflow_dispatch` only, same standing rule as the benchmark** — for `cu.yml` (plus the
+  `workflow_call` from `all.yml`) and for `dashboard.yml` alike. No `schedule`, no `push`, no
+  `workflow_run`. For the measurement the reason is capacity: interactive reads against shared
+  capacity are what a capacity admin notices. For the dashboard it is different and just as firm —
+  publishing is a decision, and a page that republishes itself whenever a measurement lands will
+  eventually publish one nobody looked at, on a repo whose page is public. Both keep their **own**
+  concurrency group, not `onelake-<ref>`: neither measures anything timing-sensitive, and queueing
+  either behind a five-hour benchmark would push the read toward the app's 14-day retention edge for
+  no benefit.
 - 14-day retention, ~6 minute lag, 5–64 minute smoothing: dispatch it ~10 minutes *after* whatever
   you want to measure. And timepoints are stamped in the offset configured **in the app**, not
   yours — a wrong `utc_offset_hours` reads as "no activity" rather than an error.
