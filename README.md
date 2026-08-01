@@ -106,21 +106,40 @@ OneLake**. It's a matrix job (one per engine) that, in the `testing` workspace:
    four targets run the same assertions against the output they just wrote.
 
 Auth is **OIDC only** (the `fabric-github-deploy` app is Admin in the workspace) — the repo
-needs just `AZURE_CLIENT_ID` / `AZURE_TENANT_ID` secrets and a federated credential trusting
-`repo:djouallah/fabric-dbt-benchmark:ref:refs/heads/main`.
+needs just `AZURE_CLIENT_ID` / `AZURE_TENANT_ID` secrets and a federated credential.
 
-**Renaming this repo breaks OIDC until that credential is updated**, and it fails at
-`azure/login` with `AADSTS70021: No matching federated identity record found` — which names the
-subject, not the rename, so it reads like a secrets problem. The subject is built from the CURRENT
-repo name, so add a credential for the new one *before* the next dispatch:
+**This account presents the IMMUTABLE subject form, and it embeds the repo NAME**, so the credential
+this repo actually authenticates with is:
+
+```
+repo:djouallah@12554469/fabric-dbt-benchmark@1310610554:ref:refs/heads/main
+       ^owner  ^owner id  ^repo name        ^repo id
+```
+
+Two things follow, both learned the expensive way when this repo was renamed from `djouallah/dbt` on
+2026-08-01:
+
+- **A rename breaks OIDC even though the repo ID does not change.** The name sits in the middle of
+  that string, so "immutable" means the ids are pinned, not that the subject survives a rename. The
+  old `dbt_main_immutable` credential carries the *same* owner id and the *same* repo id
+  (`1310610554`) and still stopped matching.
+- **Adding the plain `repo:<owner>/<repo>:ref:...` form does not help**, because with immutable
+  identifiers enabled that form is never presented. A credential for it sits there looking correct
+  and matching nothing. `fabric_dbt_benchmark_main` is exactly that, kept only as a fallback if the
+  account setting is ever turned off.
+
+The failure is `AADSTS700213: No matching federated identity record found for presented assertion
+subject '…'` at the `azure/login` step. **Read the subject in that error and create a credential for
+it verbatim** — it is the authoritative statement of what GitHub is sending, and it reads like a
+missing secret if you skip it:
 
 ```bash
 az ad app federated-credential create --id <appId> --parameters @fic.json
 ```
 
-This repo was renamed from `djouallah/dbt` on 2026-08-01, and `fabric_dbt_benchmark_main` is that
-credential. The stale `dbt_main` one is still on the app: harmless while no repo of that name
-exists, but it is a standing trust for a name that could be created again, so it is worth deleting.
+The stale `dbt_main` and `dbt_main_immutable` credentials are still on the app. Harmless while no
+repo of those names exists, but `dbt_main` is a standing trust for a name that could be created
+again, so it is worth deleting.
 
 ### Where the DuckDB-family build actually runs
 
