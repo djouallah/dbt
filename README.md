@@ -107,7 +107,20 @@ OneLake**. It's a matrix job (one per engine) that, in the `testing` workspace:
 
 Auth is **OIDC only** (the `fabric-github-deploy` app is Admin in the workspace) — the repo
 needs just `AZURE_CLIENT_ID` / `AZURE_TENANT_ID` secrets and a federated credential trusting
-`repo:djouallah/dbt:ref:refs/heads/main`.
+`repo:djouallah/fabric-dbt-benchmark:ref:refs/heads/main`.
+
+**Renaming this repo breaks OIDC until that credential is updated**, and it fails at
+`azure/login` with `AADSTS70021: No matching federated identity record found` — which names the
+subject, not the rename, so it reads like a secrets problem. The subject is built from the CURRENT
+repo name, so add a credential for the new one *before* the next dispatch:
+
+```bash
+az ad app federated-credential create --id <appId> --parameters @fic.json
+```
+
+This repo was renamed from `djouallah/dbt` on 2026-08-01, and `fabric_dbt_benchmark_main` is that
+credential. The stale `dbt_main` one is still on the app: harmless while no repo of that name
+exists, but it is a standing trust for a name that could be created again, so it is worth deleting.
 
 ### Where the DuckDB-family build actually runs
 

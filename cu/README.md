@@ -85,7 +85,7 @@ switch from a per-query dehydrate to a user-session walk with think time (`8c037
 Those are different experiments and their CU must not be summed (see `benchmark/README.md`).
 
 The default floor is **`2026-08-01T10:00:00`** (model clock) — the from-scratch `dbt` run
-[30676635835](https://github.com/djouallah/dbt/actions/runs/30676635835), which started 00:53:23Z.
+[30676635835](https://github.com/djouallah/fabric-dbt-benchmark/actions/runs/30676635835), which started 00:53:23Z.
 That is a harder boundary than a methodology change: it ran with `reset_outputs`, so all four output
 items were **deleted and recreated**. Rows before it belong to items that no longer exist — same
 display names, new GUIDs — so summing across the floor adds two generations of `dbt_delta` into one
@@ -236,7 +236,7 @@ model, or which GitHub run produced a number — only which *run* in its own sen
 `gh workflow run "Capacity units"` (or the Actions tab), `workflow_dispatch` only. **Wait ~10 minutes
 after the activity you want to measure** — see the lag note below.
 
-Every dispatch publishes the report to **<https://djouallah.github.io/dbt/>**. Pages is set to build
+Every dispatch publishes the report to **<https://djouallah.github.io/fabric-dbt-benchmark/>**. Pages is set to build
 from Actions, so there is no `gh-pages` branch and nothing is committed to the repo. That page is the
 **latest** report only — each dispatch overwrites it — and the per-run copy is that run's `cu-report`
 artifact, carrying both the markdown and the HTML. The `publish` job is separate from the read

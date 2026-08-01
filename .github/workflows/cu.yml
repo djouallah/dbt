@@ -14,7 +14,7 @@ name: Capacity units
 # reports capacity units per engine from a pinned `since` floor onward. See cu/README.md.
 #
 # Output lands in four places, all from ONE run of the script: the job summary (markdown), the job
-# log, a `cu-report` artifact, and GitHub Pages — https://djouallah.github.io/dbt/, which is the
+# log, a `cu-report` artifact, and GitHub Pages — https://djouallah.github.io/fabric-dbt-benchmark/, which is the
 # LATEST report and nothing else. Each dispatch overwrites it; the artifact is the per-run copy.
 #
 # The repo is PUBLIC, so that page is public. It carries capacity-unit totals per engine and item

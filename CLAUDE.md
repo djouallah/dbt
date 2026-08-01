@@ -104,7 +104,7 @@ When a build does fail, the job uploads `target/` as an artifact. Read the *comp
 instead of guessing at the error:
 
 ```bash
-gh run download <run-id> -R djouallah/dbt -n dbt-target-dwh -D /tmp/t
+gh run download <run-id> -R djouallah/fabric-dbt-benchmark -n dbt-target-dwh -D /tmp/t
 cat /tmp/t/compiled/aemo_electricity/models/dwh/marts/fct_summary.sql
 ```
 
@@ -861,7 +861,7 @@ detail.
 - **An unrecognised item kind lands in `other` and is logged, never dropped.** That log line
   (`kind X: N CU -> other`) is the route by which a kind gets into `CLASS_BY_KIND`. Do not guess a
   kind into the mapping; dispatch once and read stderr.
-- **Every dispatch publishes to <https://djouallah.github.io/dbt/>, and the repo is PUBLIC.** Pages
+- **Every dispatch publishes to <https://djouallah.github.io/fabric-dbt-benchmark/>, and the repo is PUBLIC.** Pages
   builds from Actions — no `gh-pages` branch, nothing committed — and holds the **latest** report
   only; the per-run copy is that run's `cu-report` artifact (markdown + HTML). `publish` is its own
   job because `deploy-pages` needs the `github-pages` environment, and an environment on the job
