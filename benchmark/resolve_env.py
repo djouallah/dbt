@@ -80,6 +80,12 @@ def main():
     if gho:
         with open(gho, "a", encoding="utf-8") as f:
             for k, v in env.items():
+                # WS_ID is skipped: it is a repo SECRET, and GitHub evaluates job outputs on the
+                # runner and drops any value matching one — `Skip output ws_id since it may contain
+                # secret` — so the next job would read an empty string. The bench jobs resolve the
+                # secret themselves; this was only ever echoing back what it was given.
+                if k == "WS_ID":
+                    continue
                 f.write(f"{k.lower()}={v}\n")
             f.write(f"matrix={json.dumps(matrix, separators=(',', ':'))}\n")
     sys.stderr.write(f"  matrix: {', '.join(m['engine'] for m in matrix['include'])}\n")

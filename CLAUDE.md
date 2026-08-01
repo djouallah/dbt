@@ -1102,6 +1102,17 @@ detail.
   the env var arrived empty. Pinning the capacity is not only about secrecy — unpinned, the script
   asks the model which capacities exist and then reads items + CU for each, so this tenant's two
   turn 3 DAX queries into 6.
+  **A secret value can never travel as a JOB OUTPUT, and this nearly shipped broken.** GitHub
+  evaluates outputs on the runner and silently DROPS any whose value matches a secret — logging
+  `Skip output <key> since it may contain secret` and handing the next job an empty string.
+  `benchmark.yml`'s `resolve` job published `ws_id`, so every bench job would have run with a blank
+  `WS_ID`. That output is gone and the bench jobs resolve the secret themselves; it was only ever
+  echoing back what it was handed. `pbi_workspace` (a display NAME) and `bench_items` (item GUIDs,
+  which are not secrets) still pass through. Anything needing a secret in a later job must re-read
+  it from `secrets`, never receive it.
+  Two smaller consequences: the GUID now prints as `***` in logs, so a `FILES_PATH` line is less
+  readable when debugging; and `stats.py` no longer records `run.workspace`, because that document
+  ships as a **public-repo artifact** and nothing ever read the field back.
   **A wrong answer was recorded here first and is retracted:** that this was the shared-capacity
   *"maximum of eight requests per day, including scheduled refresh"* from the
   [refresh API limitations](https://learn.microsoft.com/en-us/rest/api/power-bi/datasets/refresh-dataset-in-group).

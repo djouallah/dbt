@@ -139,7 +139,12 @@ jobs:
       matrix: ${{ steps.resolve.outputs.matrix }}
       pbi_workspace: ${{ steps.resolve.outputs.pbi_workspace }}
       bench_items: ${{ steps.resolve.outputs.bench_items }}
-      ws_id: ${{ steps.resolve.outputs.ws_id }}
+      # NO ws_id output. The workspace GUID is a SECRET now, and GitHub evaluates job outputs on the
+      # runner and DROPS any whose value matches a secret — logging `Skip output ws_id since it may
+      # contain secret` and handing the next job an empty string. The bench jobs would have run with
+      # a blank WS_ID. They resolve the secret themselves instead, exactly as this job does; it was
+      # never a derived value, only an echo. pbi_workspace (a display NAME) and bench_items (item
+      # GUIDs, not secrets) pass through fine.
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -187,7 +192,7 @@ jobs:
       # exchanges its OWN fresh OIDC assertion, which is the whole reason the matrix exists.
       AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
       AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
-      WS_ID: ${{ needs.resolve.outputs.ws_id }}
+      WS_ID: ${{ inputs.workspace || secrets.FABRIC_WORKSPACE_ID }}
       PBI_WORKSPACE: ${{ needs.resolve.outputs.pbi_workspace }}
       BENCH_ITEMS: ${{ needs.resolve.outputs.bench_items }}
       # Narrowed to this engine: deploy_models.py deploys only it, and xmla_compare.py takes its

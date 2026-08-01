@@ -207,9 +207,11 @@ def write_json(per_engine, engines):
     if not path:
         return
     doc = {
+        # No `workspace` key. It was the WS_ID GUID, which is now a repo secret, and this document
+        # is uploaded as a public-repo ARTIFACT — anyone can download it. Nothing ever read it back
+        # (`cu/` takes `id` and `sha` only), so recording it only widened where the value lives.
         "run": {"id": os.environ.get("GITHUB_RUN_ID"),
                 "sha": os.environ.get("GITHUB_SHA"),
-                "workspace": WS,
                 "written": datetime.now(timezone.utc).isoformat()},
         # What the build actually ran ON, read from the env the legs were given rather than from a
         # doc that can drift. A layout number means little without it: "4 files, 999 MB" is a
