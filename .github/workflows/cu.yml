@@ -28,6 +28,29 @@ name: Capacity units
 # Run it ~10 minutes AFTER whatever you want to measure: operations land in the metrics model with
 # a ~6 minute lag and are smoothed over 5-64 minutes.
 on:
+  # Callable from `all.yml`, which is the ordinary way this runs: build → benchmark → lag → measure,
+  # one dispatch. The inputs mirror the dispatch ones below, minus the `type: choice` (a
+  # `workflow_call` input can only be string / boolean / number, so a choice arrives as a string).
+  #
+  # `history` exists ONLY here and is off by default: a standalone dispatch measures whatever window
+  # it was handed, which is not a generation, and filing it as one would poison `history/` with
+  # records that mean something else.
+  workflow_call:
+    inputs:
+      since: { type: string, required: false, default: "2026-08-01T10:00:00" }
+      etl: { type: boolean, required: false, default: true }
+      models: { type: string, required: false, default: "aemo_duckrun,aemo_iceberg,aemo_spark,aemo_dwh" }
+      workspace: { type: string, required: false, default: "ea575278-bd81-459c-9680-47829898c902" }
+      metrics_workspace_id: { type: string, required: false, default: "7f7f5d92-1603-4a02-a46a-0d90fe1ed119" }
+      metrics_model_id: { type: string, required: false, default: "0fdedd3b-1451-4499-9ed4-aa3658100ec1" }
+      capacity_id: { type: string, required: false, default: "" }
+      run_gap_hours: { type: string, required: false, default: "2" }
+      run_ops: { type: boolean, required: false, default: false }
+      layout: { type: boolean, required: false, default: true }
+      layout_table: { type: string, required: false, default: "fct_summary" }
+      refresh: { type: boolean, required: false, default: true }
+      debug: { type: boolean, required: false, default: false }
+      history: { type: boolean, required: false, default: false }
   workflow_dispatch:
     inputs:
       since:
@@ -105,6 +128,13 @@ jobs:
   cu:
     name: capacity units
     runs-on: ubuntu-latest
+    # Spelled out per job rather than inherited, because this one needs `contents: write` to commit
+    # the history record — and a job-level block REPLACES the workflow-level one, so every scope the
+    # job uses has to be listed. `publish` below keeps the workflow-level set.
+    permissions:
+      id-token: write
+      contents: write
+      actions: read
     # 45, not 20: the pre-query refresh of the metrics model waits up to CU_REFRESH_TIMEOUT (15
     # min) before giving up, and the read itself is ~60 sequential timepoint requests.
     timeout-minutes: 45
@@ -231,7 +261,18 @@ jobs:
       # the artifact, the step summary, and the job log (so `gh run view --log` shows it too).
       # pipefail because the pipe would otherwise report tee's exit status and turn a failed read
       # green.
+      # Timestamp-first so `history/` sorts chronologically in a directory listing, with the run id
+      # after it so a record can always be traced back to the run that wrote it. Computed in a step
+      # rather than at job level: a job-level `env` and a step-set one resolve in an order that is
+      # easy to get wrong, and this one decides whether a file is written at all.
+      - name: Name this generation's history record
+        id: hist
+        if: inputs.history
+        run: echo "path=history/$(date -u +%Y-%m-%dT%H%MZ)-${{ github.run_id }}.json" >> "$GITHUB_OUTPUT"
+
       - name: Read CU from the Capacity Metrics model
+        env:
+          CU_HISTORY_JSON: ${{ steps.hist.outputs.path }}
         run: |
           set -o pipefail
           python cu/capacity_cu.py | tee cu-report.md | tee -a "$GITHUB_STEP_SUMMARY"
@@ -262,6 +303,29 @@ jobs:
       - uses: actions/upload-pages-artifact@v3
         with:
           path: site
+
+      # The only storage here that outlives retention. Artifacts expire (90 days, the Pages one
+      # sooner) and the Capacity Metrics model keeps ~14 days, so without this every number measured
+      # is gone within a fortnight.
+      #
+      # Committing from CI is safe in THIS repo precisely because nothing runs on push — that
+      # standing rule is what stops a bot commit from starting a paid build. If any workflow is ever
+      # given a `push:` trigger, revisit this step in the same change.
+      #
+      # `pull --rebase` because a queued dispatch can have moved main since checkout; `|| exit 0` on
+      # the diff check because a re-run that produces an identical record must not fail the job.
+      - name: Commit the history record
+        if: inputs.history && steps.hist.outputs.path != ''
+        run: |
+          set -euo pipefail
+          test -f "${{ steps.hist.outputs.path }}" || { echo "no record written — nothing to commit" >&2; exit 0; }
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add "${{ steps.hist.outputs.path }}"
+          git diff --cached --quiet && { echo "record identical to HEAD" >&2; exit 0; }
+          git commit -m "history: capacity units for run ${{ github.run_id }}"
+          git pull --rebase --autostash origin "${{ github.ref_name }}"
+          git push origin "HEAD:${{ github.ref_name }}"
 
   # Separate job because `deploy-pages` needs the `github-pages` environment, and a deployment
   # environment on the job that holds the Fabric tokens would put an approval gate in front of the

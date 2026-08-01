@@ -19,8 +19,10 @@ duckrun or a storage token anywhere near `cu/`. A cached reading is sound precis
 is near-static.
 
 That JSON is a data contract with a consumer outside this file. Its shape is
-`{"run": {...}, "engines": {...}, "tables": [...], "stats": {engine: {table: {detail}}}}` and the
-detail keys are DETAIL_KEYS below. Adding a key is safe; renaming or removing one breaks `cu/`'s layout
+`{"run": {...}, "config": {...}, "engines": {...}, "tables": [...], "stats": {engine: {table:
+{detail}}}}` and the detail keys are DETAIL_KEYS below. `config` is what the build ran ON — vCores,
+Spark resource profile, native execution engine — read from the env the legs were actually given, so
+the page can state the hardware instead of asserting it. Adding a key is safe; renaming or removing one breaks `cu/`'s layout
 table, which degrades to a note rather than an error — so a rename fails QUIETLY over there. Change
 both together.
 """
@@ -209,6 +211,20 @@ def write_json(per_engine, engines):
                 "sha": os.environ.get("GITHUB_SHA"),
                 "workspace": WS,
                 "written": datetime.now(timezone.utc).isoformat()},
+        # What the build actually ran ON, read from the env the legs were given rather than from a
+        # doc that can drift. A layout number means little without it: "4 files, 999 MB" is a
+        # different achievement at 8 vCores than at 64.
+        #
+        # `None` where the workflow set nothing, and the reader must print that as "not recorded"
+        # rather than filling in a default — the whole point is that this reports the run, not the
+        # repo's intentions. dwh is absent on purpose: Fabric Warehouse exposes no knob here, and an
+        # invented row would imply one exists.
+        "config": {
+            "duckrun": {"vcores": os.environ.get("FABRIC_CORES") or None},
+            "iceberg": {"vcores": os.environ.get("FABRIC_CORES") or None},
+            "spark": {"resource_profile": os.environ.get("SPARK_RESOURCE_PROFILE") or None,
+                      "native_execution_engine": os.environ.get("SPARK_NATIVE_ENABLED") or None},
+        },
         "engines": {e: {"item": item, "kind": kind, "writer": WRITER.get(e, e)}
                     for e, item, kind in ENGINES},
         "tables": list(TABLES),

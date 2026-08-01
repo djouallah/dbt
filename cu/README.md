@@ -31,6 +31,21 @@ but it is a *shared input cost*, so do not add it to an engine's column, and it 
 between them: the metrics rows carry no consumer dimension, the legs read it concurrently, and they
 read it as the same service principal. Any allocation key would be invented.
 
+The page leads with two **bar charts** — ETL and analytics CU per engine, lower is better — and ends
+with the **hardware** the build ran on. Both are drawn from numbers on this page: no timings, no
+second source. One hue, because a single series needs no legend and four colours would encode what
+the axis labels already say; a fixed engine order rather than sorted by value, because the two
+charts are read against each other and re-sorting would move an engine between them.
+
+The chart travels through the markdown as an HTML **comment** that `report_html.py` turns into
+inline SVG. That is not a workaround to tidy away: the same markdown goes to the GitHub job summary,
+which sanitises inline SVG, so a comment is the one form that stays invisible there and still draws
+here.
+
+**There is no total row and no total column.** They summed across engines, and the engines are four
+alternatives to each other — adding duckrun to dwh answers nothing. The bold `etl` / `analytics`
+rows stay, because those sum *down* a column: what one engine spent.
+
 **Engine-major, because that is the repo's thesis** — same data, four engines, side by side — and it
 is the only orientation in which "what did iceberg cost to build *and* to query" is one column read
 top to bottom. It is also what makes the width manageable: **operations are rows**, so a lakehouse's
@@ -233,8 +248,12 @@ model, or which GitHub run produced a number — only which *run* in its own sen
 
 ## Running it
 
-`gh workflow run "Capacity units"` (or the Actions tab), `workflow_dispatch` only. **Wait ~10 minutes
-after the activity you want to measure** — see the lag note below.
+**The ordinary way this runs is `gh workflow run "Build, benchmark, measure"`** — `all.yml` calls
+build → benchmark → lag → measure in one dispatch, waits `cu_lag_minutes` (default 15) for the
+metrics model to catch up, passes its own start hour as `since`, and writes the history record. This
+workflow stays independently dispatchable for a re-read of a window:
+`gh workflow run "Capacity units"`, `workflow_dispatch` only. **Wait ~10 minutes after the activity
+you want to measure** — see the lag note below.
 
 Every dispatch publishes the report to **<https://djouallah.github.io/fabric-dbt-benchmark/>**. Pages is set to build
 from Actions, so there is no `gh-pages` branch and nothing is committed to the repo. That page is the
@@ -246,6 +265,34 @@ failed dispatch cannot overwrite a good page with a half-written one.
 
 **The repo is public, so the page is public.** It carries capacity-unit totals per engine and item
 names — no tokens, no ids, no data — but that is the trade, made deliberately.
+
+## `history/` — the only copy that outlives retention
+
+Artifacts expire (90 days, the Pages one sooner) and the Capacity Metrics model itself keeps ~14
+days, so a number measured today is simply gone in a fortnight unless it is written down. Every
+generation therefore commits `history/<UTC timestamp>-<run id>.json` into this repo:
+
+```json
+{"schema": 1, "written": "…", "since": "…",
+ "runs": {"measure": "…", "build": "…", "build_sha": "…"},
+ "config": {"duckrun": {"vcores": "64"}, …},
+ "cu": {"etl": {"duckrun": {"OneLake Write": 395.0, …}, …}, "analytics": {…}},
+ "layout": {"duckrun": {"fct_summary": {…}}, …}}
+```
+
+Timestamp-first so the directory sorts chronologically without opening anything. `schema` is there
+from the first file, so a reader two years out can tell an old record from a new one by reading it
+rather than inferring from which keys exist. It holds the **numbers**, not the markdown or the HTML —
+those are renderings, and a renderer changes.
+
+Written **only** from `all.yml`. A standalone `Capacity units` dispatch measures whatever window it
+was handed, which is not a generation; filing that as one would fill the series with records that
+mean something else. It deliberately carries no benchmark timings — that is what keeps this
+directory's "no `run_report.json`" isolation true. If timings are ever wanted historically,
+`benchmark/` should write its own record beside this one.
+
+Committing from CI is safe **because nothing in this repo runs on push**. That standing rule is load
+bearing here: give any workflow a `push:` trigger and CI starts paying for its own commits.
 
 `cu/report_html.py` does the markdown → HTML, over the report's own markdown subset and nothing
 wider. One self-contained file: inline CSS, no script, no font, no image, no external URL at all, so
@@ -410,9 +457,18 @@ benchmark does not yet include it. Retention is the outer boundary and `since` t
 CU from a benchmark older than ~14 days ages out regardless of `since`, so a total can fall between
 two dispatches without anything being wrong. `CU (s)` is a smoothed attribution, not an instantaneous measurement.
 
+**~15 minutes is the lag `all.yml` waits**, and it is enforced rather than remembered — the point of
+folding this into one dispatch. Below ~10 the newest work is simply absent, which reads as an engine
+that cost nothing rather than as a measurement taken too early.
+
 ## Never auto-trigger it
 
-`workflow_dispatch` only. No `schedule`, no `push`, no `workflow_run`, no `needs:` from another
-workflow — not even a nightly, not even behind an `if:`. Same standing rule
-`benchmark/README.md` carries, for the same reason: these are reads against shared Fabric capacity,
-and a run nobody chose to start is the one a capacity admin asks about.
+A **human starts every run**. No `schedule`, no `push`, no `workflow_run`, no `repository_dispatch` —
+not a nightly, not behind an `if:`. Same standing rule `benchmark/README.md` carries, for the same
+reason: these are reads against shared Fabric capacity, and a run nobody chose to start is the one a
+capacity admin asks about.
+
+`workflow_call` from `all.yml` is the one carve-out and it does not weaken that: `all.yml` is itself
+`workflow_dispatch` only, so a human chose every run that reaches here. The rule was always about
+*nobody chose it*, not about *another file naming it* — an earlier wording said "no `needs:` from
+another workflow", which would have banned the composition this now runs as.

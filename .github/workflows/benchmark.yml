@@ -34,6 +34,20 @@ name: Direct Lake benchmark
 # dbt.yml is the pipeline that produces the data; this grades how fast it is to QUERY. See
 # benchmark/README.md.
 on:
+  # Callable from `all.yml`. **This does NOT weaken the no-auto-trigger rule** — read it carefully
+  # before adding anything else here. The rule exists because the query passes are interactive CU on
+  # shared capacity, which is the usage a capacity admin notices and asks about, so a run nobody
+  # chose to start is the one that causes trouble. `all.yml` is `workflow_dispatch` only, so a human
+  # still chose every run that reaches this. What remains forbidden, here and there, without
+  # exception: `schedule`, `push`, `workflow_run`, `repository_dispatch`.
+  workflow_call:
+    inputs:
+      workspace: { type: string, required: false, default: "ea575278-bd81-459c-9680-47829898c902" }
+      engines: { type: string, required: false, default: "duckrun,iceberg,spark,dwh" }
+      runs: { type: string, required: false, default: "6" }
+      think_seconds: { type: string, required: false, default: "4" }
+      gap_seconds: { type: string, required: false, default: "600" }
+      top_duid: { type: string, required: false, default: "" }
   workflow_dispatch:
     inputs:
       workspace:

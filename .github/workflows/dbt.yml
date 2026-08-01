@@ -32,6 +32,18 @@ name: dbt
 #
 # Run it with `gh workflow run dbt` (or the Actions UI) when a build is actually wanted.
 on:
+  # Callable from `all.yml`, which is the ordinary way this runs. The inputs mirror the dispatch ones
+  # below; `cores` and `spark_resource_profile` arrive as plain strings because a `workflow_call`
+  # input cannot be a `choice`, so the dropdown exists on the dispatch form only. An invalid value
+  # therefore fails at the leg rather than at the form — the defaults are the same either way.
+  workflow_call:
+    inputs:
+      workspace: { type: string, required: false, default: "ea575278-bd81-459c-9680-47829898c902" }
+      download_limit: { type: string, required: false, default: "200" }
+      cores: { type: string, required: false, default: "8" }
+      native_execution_engine: { type: boolean, required: false, default: false }
+      spark_resource_profile: { type: string, required: false, default: "writeHeavy" }
+      reset_outputs: { type: boolean, required: false, default: false }
   workflow_dispatch:
     inputs:
       workspace:

@@ -1,0 +1,166 @@
+name: Build, benchmark, measure
+
+# THE dispatch. One run answers the whole question: build the tables on four engines, query them
+# through Direct Lake, then read what all of that cost in capacity units and publish the page.
+#
+#   stamp → build (dbt.yml) → benchmark (benchmark.yml) → lag → measure + publish (cu.yml)
+#
+# The three called workflows are unchanged and still dispatchable on their own — this composes them,
+# it does not replace them. Skipping a stage is an input, so a build-only dispatch spends no
+# benchmark CU.
+#
+# **`workflow_dispatch` only, and that is the standing rule, not a default.** No `schedule`, no
+# `push`, no `workflow_run`, no `repository_dispatch` — not here and not in the workflows this
+# calls. The benchmark's query passes are interactive CU on shared capacity, which is the usage a
+# capacity admin notices; a run nobody chose to start is the one that causes trouble. A
+# `workflow_call` from here satisfies that rule because a human dispatched THIS.
+on:
+  workflow_dispatch:
+    inputs:
+      build:
+        description: "run the dbt build (four engines, one landed copy of the data)"
+        type: boolean
+        default: true
+      benchmark:
+        description: "run the Direct Lake benchmark. Its query passes are what CREATE the analytics CU — with this off the report's analytics bars are empty, which is correct rather than broken."
+        type: boolean
+        default: true
+      measure:
+        description: "read capacity units and publish the page"
+        type: boolean
+        default: true
+      reset_outputs:
+        description: "DELETE and recreate all four output items before building. The start-from-nothing lever; never touches the landed data."
+        type: boolean
+        default: false
+      cores:
+        description: "Fabric Python-notebook vCores for the duckdb-family legs"
+        type: choice
+        options: ["4", "8", "16", "32", "64"]
+        default: "8"
+      spark_resource_profile:
+        description: "spark leg only: writeHeavy = workspace default (no V-Order); readHeavyForPBI turns V-Order on"
+        type: choice
+        options: ["writeHeavy", "readHeavyForPBI", "readHeavyForSpark"]
+        default: "writeHeavy"
+      native_execution_engine:
+        description: "spark leg only: Fabric Native Execution Engine"
+        type: boolean
+        default: false
+      download_limit:
+        description: "files to download per source"
+        type: string
+        default: "200"
+      engines:
+        description: "engines to benchmark, comma-separated"
+        type: string
+        default: "duckrun,iceberg,spark,dwh"
+      runs:
+        description: "benchmark passes over the query suite. 1 cold, 2 warm, 3+ hot."
+        type: string
+        default: "6"
+      think_seconds:
+        description: "idle seconds between benchmark queries"
+        type: string
+        default: "4"
+      gap_seconds:
+        description: "idle seconds between benchmark engines"
+        type: string
+        default: "600"
+      cu_lag_minutes:
+        description: "wait this long before reading capacity units. Operations reach the metrics model ~6 minutes late and are smoothed over 5-64; below ~10 the newest work is simply missing, and it reads as an engine that cost nothing."
+        type: string
+        default: "15"
+      model_clock_offset_hours:
+        description: "the Capacity Metrics app's own UTC offset, which is what its timestamps are in. +10 here. Used to turn this run's start into the `since` floor."
+        type: string
+        default: "10"
+      workspace:
+        description: "Fabric workspace GUID"
+        type: string
+        default: "ea575278-bd81-459c-9680-47829898c902"
+
+# Its own group: the called workflows keep `onelake-<ref>` between them, and they run in sequence
+# here, so they queue behind each other rather than deadlocking. Not cancel-in-progress — a half
+# finished build is worse than a queued one.
+concurrency:
+  group: all-${{ github.ref_name }}
+  cancel-in-progress: false
+
+permissions:
+  id-token: write
+  contents: read
+  actions: read
+  pages: write
+
+jobs:
+  # Free, and it is what makes the report describe ONE generation. The CU floor is this run's own
+  # start, so nothing earlier — a previous build, an older benchmark, items that have since been
+  # deleted and recreated — can be summed into it. Floored to the hour because the metrics table is
+  # hourly and a finer floor would silently exclude the run's own first rows.
+  stamp:
+    name: stamp the window
+    runs-on: ubuntu-latest
+    outputs:
+      since: ${{ steps.s.outputs.since }}
+    steps:
+      - id: s
+        run: |
+          set -euo pipefail
+          SINCE=$(date -u -d "+${{ inputs.model_clock_offset_hours }} hours" +%Y-%m-%dT%H:00:00)
+          echo "since=$SINCE" >> "$GITHUB_OUTPUT"
+          echo "CU floor: $SINCE (model clock, UTC+${{ inputs.model_clock_offset_hours }})" >&2
+
+  build:
+    name: build
+    needs: stamp
+    if: inputs.build
+    uses: ./.github/workflows/dbt.yml
+    secrets: inherit
+    with:
+      workspace: ${{ inputs.workspace }}
+      download_limit: ${{ inputs.download_limit }}
+      cores: ${{ inputs.cores }}
+      native_execution_engine: ${{ inputs.native_execution_engine }}
+      spark_resource_profile: ${{ inputs.spark_resource_profile }}
+      reset_outputs: ${{ inputs.reset_outputs }}
+
+  # `always()` so a skipped build does not skip the benchmark, but `!failure() && !cancelled()` so a
+  # FAILED build does: benchmarking tables that did not finish writing measures nothing.
+  benchmark:
+    name: benchmark
+    needs: [stamp, build]
+    if: inputs.benchmark && !failure() && !cancelled()
+    uses: ./.github/workflows/benchmark.yml
+    secrets: inherit
+    with:
+      workspace: ${{ inputs.workspace }}
+      engines: ${{ inputs.engines }}
+      runs: ${{ inputs.runs }}
+      think_seconds: ${{ inputs.think_seconds }}
+      gap_seconds: ${{ inputs.gap_seconds }}
+
+  # The lag is its own job so the wait is visible in the run graph rather than buried in a step, and
+  # so the measure stage's timeout still describes the measurement.
+  lag:
+    name: wait for the metrics model
+    needs: [build, benchmark]
+    if: inputs.measure && !failure() && !cancelled()
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - run: |
+          echo "waiting ${{ inputs.cu_lag_minutes }}m for operations to reach the Capacity Metrics model" >&2
+          sleep $(( ${{ inputs.cu_lag_minutes }} * 60 ))
+
+  measure:
+    name: measure
+    needs: [stamp, lag]
+    if: inputs.measure && !failure() && !cancelled()
+    uses: ./.github/workflows/cu.yml
+    secrets: inherit
+    with:
+      workspace: ${{ inputs.workspace }}
+      since: ${{ needs.stamp.outputs.since }}
+      # The permanent record, written only from here — see cu.yml.
+      history: true

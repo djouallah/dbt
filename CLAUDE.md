@@ -589,12 +589,24 @@ the `cu/` section.
   i.e. no V-Order). `readHeavyForPBI` is the only value that enables V-Order, and it also flips
   `optimizeWrite` to a 1 GB bin size, so ticking it rewrites file layout broadly — judge it in the
   `layout` job's table at the end of the run.
-- **Nothing runs on push. Both workflows are `workflow_dispatch` only.** Pushing to `main` used to
+- **Nothing runs on push, and that rule now carries a second load.** Pushing to `main` used to
   trigger the four Fabric legs, which meant any code change — a script, a workflow file, a comment —
   spent paid capacity nobody asked for, and a batch of edits queued several such runs on the
   concurrency group. `paths-ignore` did not fix that: it is per-PUSH, not per-file, so a commit
   touching a doc *and* anything else still ran. Commit and push freely; start a build with
-  `gh workflow run dbt` when you actually want one.
+  `gh workflow run "Build, benchmark, measure"` when you actually want one.
+  The second load: **`cu.yml` commits a history record back to the repo**, and that is only safe
+  because no workflow answers a push. Give any workflow a `push:` trigger and CI starts paying for
+  its own commits — revisit that step in the same change, not afterwards.
+- **`all.yml` ("Build, benchmark, measure") is the ordinary dispatch, and the other three are its
+  stages.** `dbt.yml`, `benchmark.yml` and `cu.yml` gained `workflow_call` and are otherwise
+  unchanged, so each still runs standalone for a targeted re-run. One dispatch is
+  build → benchmark → lag → measure + publish, with a per-stage skip input. Two things the composition
+  buys that a hand-sequenced dispatch could not: the CU floor becomes **this run's own start hour**
+  (so the report describes one generation with no pinned default to bump), and the lag before the CU
+  read is enforced rather than remembered. `workflow_call` inputs cannot be `type: choice`, so
+  `cores` and `spark_resource_profile` are plain strings across that boundary — the dropdown lives
+  on the dispatch form, and a bad value now fails at the leg instead of at the form.
 - Jobs no longer cancel the run when they fail, and no matrix is `fail-fast`. Every leg runs to
   its own conclusion, so `gh run view <id> --json jobs` reads straight: `failure` means that
   leg failed. Cancelling never saved the Fabric compute anyway — the notebook or Livy session
@@ -673,13 +685,16 @@ does not: the parity table says the four engines hold the *same rows*, this meas
 takes to **query** them. Ported from `djouallah/duckrun`'s `parquet_layout.yml`.
 [benchmark/README.md](benchmark/README.md) has the detail; what matters when touching this repo:
 
-- **`workflow_dispatch` only, and nothing depends on it.** Never triggered by a push, never a gate.
-  Do not add `schedule`, `push`, `workflow_run`, `repository_dispatch` or a `needs:` from another
-  workflow — not even a nightly, not even behind an `if:`. This is a standing instruction, not a
-  default to be weighed against convenience. The benchmark's query passes are
-  **interactive CU** on shared Fabric capacity, which is the class of usage a capacity admin sees
-  and asks about; a run nobody chose to start is the one that causes trouble. A human dispatches
-  it, or it does not run.
+- **A HUMAN starts every run, and that is the standing instruction.** Do not add `schedule`, `push`,
+  `workflow_run` or `repository_dispatch` — not a nightly, not behind an `if:`. This is not a
+  default to be weighed against convenience. The benchmark's query passes are **interactive CU** on
+  shared Fabric capacity, which is the class of usage a capacity admin sees and asks about; a run
+  nobody chose to start is the one that causes trouble.
+  **`workflow_call` from `all.yml` is the one carve-out, and it does not weaken the rule**: `all.yml`
+  is itself `workflow_dispatch` only, so a human still chose every run that reaches this. What the
+  rule was always about is *nobody chose it*, not *another file mentioned it* — an earlier wording
+  said "no `needs:` from another workflow", which read as forbidding composition and is now stated
+  as the trigger list above. The old wording would also have banned the ordinary way this now runs.
 - **It measures a USER SESSION, and nothing is ever cleared. The pass number is the tier.**
   `deploy_models.py` **deletes and recreates** each semantic model, so it starts with an empty
   VertiPaq store; `xmla_compare.py` then walks the whole 25-query suite `runs` times — pass 1 **cold**,
@@ -861,6 +876,32 @@ detail.
 - **An unrecognised item kind lands in `other` and is logged, never dropped.** That log line
   (`kind X: N CU -> other`) is the route by which a kind gets into `CLASS_BY_KIND`. Do not guess a
   kind into the mapping; dispatch once and read stderr.
+- **The page leads with CU bar charts and ends with the hardware, and there are no totals.** Two
+  charts — ETL and analytics per engine, lower is better — drawn as inline SVG with one hue, because
+  a single series needs no legend and colouring four bars differently would encode what the axis
+  labels already say. The engine order is FIXED (the table's column order), not sorted by value: the
+  two charts are read against each other and re-sorting would move an engine between them. The
+  grand-total row and the total column are gone: they summed ACROSS engines, which is the one sum on
+  this page that answers nothing, since the engines are four alternatives to each other. Class
+  subtotals stay — those sum down a column.
+  **The chart travels as an HTML comment** (`<!--chart:{…}-->`) that `report_html.py` turns into
+  SVG. The same markdown goes to the GitHub job summary, which sanitises inline SVG, so a comment is
+  the one form that is invisible there and drawable here. Do not "simplify" it into raw SVG in the
+  markdown — the summary would carry a broken blob and the page would gain nothing.
+- **The hardware section is sourced, not asserted.** `stats.py` writes a `config` block from the env
+  the legs were actually given (`FABRIC_CORES`, `SPARK_RESOURCE_PROFILE`, `SPARK_NATIVE_ENABLED`)
+  and the page renders it. Anything the run did not record prints "not recorded by dbt run <id>" —
+  never a default, because a filled-in default reads exactly like a measurement. dwh says "workspace
+  default" explicitly rather than leaving a blank that looks like missing data.
+- **`history/` is the only storage that outlives retention.** Artifacts expire (90 days, the Pages
+  one sooner) and the Capacity Metrics model keeps ~14 days, so every generation writes
+  `history/<timestamp>-<run id>.json`: `schema: 1`, the run ids, the `since` floor, the hardware
+  config, CU per class per engine per operation, and the layout. Written **only** from `all.yml`
+  (`history: true`), never from a standalone `cu.yml` dispatch — that measures an arbitrary window,
+  and filing it as a generation would poison the series with records that mean something else. It
+  deliberately holds no benchmark timings, which is what keeps the `run_report.json` isolation
+  intact. `schema` is there from the first file so a later reader can tell records apart by reading
+  one, rather than guessing from which keys are present.
 - **Every dispatch publishes to <https://djouallah.github.io/fabric-dbt-benchmark/>, and the repo is PUBLIC.** Pages
   builds from Actions — no `gh-pages` branch, nothing committed — and holds the **latest** report
   only; the per-run copy is that run's `cu-report` artifact (markdown + HTML). `publish` is its own

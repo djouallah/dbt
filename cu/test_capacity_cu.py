@@ -191,7 +191,8 @@ def test_a_collapsed_group_takes_the_known_class_not_the_first_one(capsys):
     m.main()
     out = capsys.readouterr().out
     assert "| **etl** |" in out and "| **other** |" not in out
-    assert "**150.0**" in out
+    # Both notebooks are `duckrun-py-*`, which no engine can claim, so the whole 150 is `shared`.
+    assert "| **etl** | **0.0** | **0.0** | **0.0** | **0.0** | **0.0** | **150.0** |" in out
 
 
 def test_classify_is_case_and_space_insensitive_and_keeps_strangers():
@@ -221,12 +222,12 @@ def test_run_table_class_rows_agree_with_the_engine_rows(capsys):
     m.render_runs(hourly, runs, meta, cells={k[:2]: v for k, v in hourly.items()})
     out = capsys.readouterr().out
     assert "Runs detected: 2" in out
-    assert "| **etl** | **40.0** | **60.0** | **100.0** |" in out
-    assert "| **analytics** | **100.0** | **120.0** | **220.0** |" in out
+    assert "| **etl** | **40.0** | **60.0** |" in out
+    assert "| **analytics** | **100.0** | **120.0** |" in out
     # Both the lakehouse and the model are duckrun's, so each class has exactly one engine row.
-    assert out.count("| duckrun | 40.0 | 60.0 | **100.0** |") == 1
-    assert out.count("| duckrun | 100.0 | 120.0 | **220.0** |") == 1
-    assert "| **total** | **140.0** | **180.0** | **320.0** |" in out
+    assert out.count("| duckrun | 40.0 | 60.0 |") == 1
+    assert out.count("| duckrun | 100.0 | 120.0 |") == 1
+    assert "**total**" not in out          # summing across runs answers nothing
 
 
 def test_engine_of_maps_every_item_this_repo_creates():
@@ -263,16 +264,73 @@ def test_engine_table_puts_operations_down_and_engines_across(capsys):
     m._engine_table(_cells(), meta)
     out = capsys.readouterr().out
     head = out.splitlines()[0]
-    assert head.startswith("| | landing | duckrun | iceberg | spark | dwh | shared |")
+    assert head == "| | landing | duckrun | iceberg | spark | dwh | shared |"
     assert "| **etl** |" in out and "| **analytics** |" in out
-    assert "| OneLake Write | 0.0 | 50.0 | 0.0 | 0.0 | 0.0 | 0.0 | 50.0 |" in out
-    assert "| Spark Job | 0.0 | 0.0 | 0.0 | 0.0 | 0.0 | 25.0 | 25.0 |" in out   # ambiguous notebook
-    # duckrun 110 analytics + 55 etl, shared 25.
-    assert ("| **total** | **0.0** | **165.0** | **0.0** | **0.0** | **0.0** | **25.0** | "
-            "**190.0** |") in out
+    assert "| OneLake Write | 0.0 | 50.0 | 0.0 | 0.0 | 0.0 | 0.0 |" in out
+    assert "| Spark Job | 0.0 | 0.0 | 0.0 | 0.0 | 0.0 | 25.0 |" in out   # ambiguous notebook
+    # duckrun 110 analytics + 55 etl, shared 25 — as class subtotals, never as a grand total.
+    assert "| **analytics** | **0.0** | **110.0** | **0.0** | **0.0** | **0.0** | **0.0** |" in out
+    assert "| **etl** | **0.0** | **55.0** | **0.0** | **0.0** | **0.0** | **25.0** |" in out
+    assert "**total**" not in out           # summing across engines answers nothing
     assert "`shared` is CU no engine can be given" in out
     assert "genuinely ambiguous" in out          # the duckrun-py-* explanation, since it is present
     assert "dbt_landing" not in out              # ...and not the one that is absent
+
+
+# --------------------------------------------------------------------------- hardware
+
+def test_hardware_reports_what_the_run_recorded(capsys):
+    m = load(CU_MODELS="")
+    m.render_hardware({"run": {"id": "123"}, "config": {
+        "duckrun": {"vcores": "64"}, "iceberg": {"vcores": "64"},
+        "spark": {"resource_profile": "readHeavyForPBI", "native_execution_engine": "true"}}})
+    out = capsys.readouterr().out
+    assert "| duckrun | 64 vCores (Fabric Python notebook) |" in out
+    assert "resource profile `readHeavyForPBI`, native execution engine ON" in out
+    assert "Fabric Warehouse exposes no per-run compute knob" in out
+
+
+def test_hardware_says_not_recorded_rather_than_guessing(capsys):
+    """A default filled in here would read exactly like a measurement — which is the whole failure
+    this section exists to avoid."""
+    m = load(CU_MODELS="")
+    m.render_hardware({"run": {"id": "123"}, "config": {}})
+    out = capsys.readouterr().out
+    assert out.count("not recorded by dbt run 123") == 3      # duckrun, iceberg, spark
+    assert "64" not in out and "writeHeavy" not in out
+
+
+# --------------------------------------------------------------------------- history
+
+def test_history_record_round_trips_the_numbers(tmp_path, capsys):
+    """The record is what survives retention, so it has to hold the same numbers the page printed —
+    not a rendering of them. Written, read back, compared against the table."""
+    out_file = tmp_path / "h" / "rec.json"
+    m = load(CU_WORKSPACE_FILTER=WS_ID, CU_MODELS="", CU_ETL="1",
+             CU_HISTORY_JSON=str(out_file))
+    rows = [_row("LH", "OneLake Write", 40.0, H), _row("G1", "XMLA Read Operation", 100.0, H)]
+    items = [{"Id": "LH", "Name": "dbt_delta", "Kind": "Lakehouse"},
+             {"Id": "G1", "Name": "aemo_duckrun", "Kind": "SemanticModel"}]
+    _stub(m, rows, items)
+    m.main()
+    capsys.readouterr()
+    import json as _json
+    rec = _json.loads(out_file.read_text(encoding="utf-8"))
+    assert rec["schema"] == 1
+    assert rec["cu"]["etl"]["duckrun"]["OneLake Write"] == 40.0
+    assert rec["cu"]["analytics"]["duckrun"]["XMLA Read Operation"] == 100.0
+    assert "since" in rec and "runs" in rec
+
+
+def test_no_history_is_written_without_the_env(tmp_path, capsys):
+    """A standalone dispatch measures an arbitrary window; filing that as a generation would poison
+    the history with records that mean something else."""
+    m = load(CU_WORKSPACE_FILTER=WS_ID, CU_MODELS="", CU_ETL="1")
+    _stub(m, [_row("LH", "OneLake Write", 40.0, H)],
+          [{"Id": "LH", "Name": "dbt_delta", "Kind": "Lakehouse"}])
+    m.main()
+    capsys.readouterr()
+    assert not list(tmp_path.iterdir())
 
 
 # --------------------------------------------------------------------------- empty report
@@ -338,12 +396,9 @@ def test_end_to_end_reports_etl_and_analytics(capsys):
     out = capsys.readouterr().out
     assert "Capacity units" in out
     # landing | duckrun's lakehouse (40) | ... | the two ambiguous notebooks (10, in `shared`).
-    assert ("| **etl** | **0.0** | **40.0** | **0.0** | **0.0** | **0.0** | **10.0** | "
-            "**50.0** |") in out
-    assert ("| **analytics** | **0.0** | **100.0** | **0.0** | **0.0** | **0.0** | **0.0** | "
-            "**100.0** |") in out
-    assert ("| **total** | **0.0** | **140.0** | **0.0** | **0.0** | **0.0** | **10.0** | "
-            "**150.0** |") in out
+    assert "| **etl** | **0.0** | **40.0** | **0.0** | **0.0** | **0.0** | **10.0** |" in out
+    assert "| **analytics** | **0.0** | **100.0** | **0.0** | **0.0** | **0.0** | **0.0** |" in out
+    assert "**total**" not in out
 
 
 def test_end_to_end_etl_off_reproduces_the_old_scope(capsys):
@@ -370,7 +425,7 @@ def test_the_two_duckdb_legs_land_in_their_own_columns(capsys):
     _stub(m, rows, items)
     m.main()
     out = capsys.readouterr().out
-    assert "| **etl** | **0.0** | **300.0** | **200.0** | **0.0** | **0.0** | **500.0** |" in out
+    assert "| **etl** | **0.0** | **300.0** | **200.0** | **0.0** | **0.0** |" in out
     assert "shared" not in out       # both attributable, so no shared column at all
 
 
@@ -391,7 +446,7 @@ def test_a_collapsed_name_repeating_is_the_next_run(capsys):
     assert "Runs detected: 2" in out
     # Notebook + lakehouse are both duckrun's, and the lakehouse follows the windows the notebooks
     # formed — an hour each — so the column totals are 310 and 220, not 510 in one.
-    assert "| duckrun | 310.0 | 220.0 | **530.0** |" in out
+    assert "| duckrun | 310.0 | 220.0 |" in out
 
 
 def test_end_to_end_keeps_an_unnamed_item_under_its_guid(capsys):
@@ -425,6 +480,37 @@ def test_page_renders_the_report_and_needs_no_network():
     assert '<td class="right">240.0</td>' in out           # numbers right-aligned, unreformatted
     for forbidden in ("http://", "https://", "<script", "src=", "@import"):
         assert forbidden not in out
+
+
+def test_chart_marker_is_invisible_in_markdown_but_draws_in_html(capsys):
+    """The same markdown goes to the GitHub job summary, which sanitises inline SVG. A comment
+    keeps the summary clean and still carries the numbers to the page."""
+    m = load(CU_MODELS="")
+    m._chart("ETL", "lower is better", [["duckrun", 10.0], ["dwh", 5.0]])
+    md = capsys.readouterr().out
+    assert md.strip().startswith("<!--chart:") and md.strip().endswith("-->")
+
+    import report_html
+    svg = report_html.to_html(md)
+    assert "<svg" in svg and 'class="bar"' in svg
+    # Bars start at zero and carry their value at the tip; the tooltip needs no script.
+    assert svg.count('<path class="bar" d="M0,0') == 2
+    assert ">10.0<" in svg and "<title>duckrun: 10.0 CU</title>" in svg
+
+
+def test_a_chart_of_all_zeros_is_not_drawn(capsys):
+    """Four bars of length zero is a picture of nothing, and it reads as a broken chart rather than
+    as an idle engine. The table still carries the zeros."""
+    m = load(CU_MODELS="")
+    m._chart("ETL", "lower is better", [["duckrun", 0.0], ["dwh", 0.0]])
+    assert capsys.readouterr().out.strip() == ""
+
+
+def test_bar_geometry_is_square_at_the_baseline_and_rounded_at_the_tip():
+    import report_html
+    assert report_html._bar_path(100, 18).startswith("M0,0 H96.0 A4,4")
+    # Shorter than the corner radius: no arc, or the path would curl back on itself.
+    assert "A" not in report_html._bar_path(2, 18)
 
 
 def test_page_escapes_before_it_formats():

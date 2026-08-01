@@ -10,9 +10,17 @@ timings.** No table is built, no Delta log is read, no layout statistic is re-de
 slower reader of the same files. The only endpoints this touches are the Fabric control plane (to
 deploy) and XMLA (to query).
 
-**Manual only, non-gating.** `workflow_dispatch` on *Direct Lake benchmark*
-([benchmark.yml](../.github/workflows/benchmark.yml)). It is never triggered by a push, and no other
-workflow depends on it.
+**A human starts every run, and nothing gates on it.** `workflow_dispatch` on *Direct Lake benchmark*
+([benchmark.yml](../.github/workflows/benchmark.yml)), plus `workflow_call` so
+[all.yml](../.github/workflows/all.yml) can run it as the second stage of one dispatch —
+build → benchmark → lag → measure. Never `schedule`, `push`, `workflow_run` or `repository_dispatch`:
+the query passes are interactive CU on shared capacity, and a run nobody chose to start is the one a
+capacity admin asks about. `all.yml` is itself dispatch-only, so that condition still holds.
+
+**The timings are not what the published page reports.** `cu/` measures what the querying *cost* in
+capacity units, and reads none of this directory's output — the engines are all fast, so the CU is
+the interesting number. This still has to RUN for that report to have an analytics side at all: the
+Direct Lake passes are what create the CU being measured.
 
 Ported from `djouallah/duckrun`'s `tests/parquet_layout/aemo/` (workflow `parquet_layout.yml`), which
 in turn says it came from the AEMO project's own `benchmark/` — so this is where it started.

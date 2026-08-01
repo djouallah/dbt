@@ -14,6 +14,7 @@ Numbers are right-aligned and never re-formatted — they arrive already rounded
 from the report, and a renderer that reformats numbers is a renderer that can change them.
 """
 import html
+import json
 import re
 import sys
 
@@ -32,6 +33,61 @@ def _cells(line):
     return [c.strip() for c in line.strip().strip("|").split("|")]
 
 
+# Horizontal bars, one series, drawn as inline SVG.
+#
+# Bars because the job is magnitude across a handful of named categories; HORIZONTAL because the
+# categories are words. ONE series per chart, so there is no legend and no categorical palette to
+# validate — the engine names are on the axis, and colouring each bar differently would encode
+# nothing the label does not already say. Colour by RANK would be worse: it repaints when the
+# numbers move.
+#
+# Geometry follows the mark spec: bar ≤ 24px thick, square at the baseline, 4px rounded data-end,
+# and a gap between bands wider than the 2px surface-gap minimum. No gridlines — every bar carries
+# its value at the tip, so ticks would be a second copy of the same number.
+#
+# The value label wears text ink, never the bar colour, and each bar carries a <title> so hovering
+# gives a native tooltip with NO script — which is the only kind of interactivity a page under this
+# repo's no-external-anything rule can have.
+BAR_H, BAND, PAD_T, LABEL_W, VALUE_W, WIDTH = 18, 30, 26, 96, 74, 660
+
+
+def _bar_path(w, h, r=4):
+    """Square at the baseline, rounded at the data end — so the bar reads as growing from zero."""
+    if w <= r:
+        return f"M0,0 h{w:.1f} v{h} h-{w:.1f} Z"
+    return (f"M0,0 H{w - r:.1f} A{r},{r} 0 0 1 {w:.1f},{r} V{h - r} "
+            f"A{r},{r} 0 0 1 {w - r:.1f},{h} H0 Z")
+
+
+def chart_svg(spec):
+    rows = [(str(l), float(v)) for l, v in spec.get("rows") or []]
+    if not rows:
+        return ""
+    top = max(v for _l, v in rows) or 1.0
+    plot = WIDTH - LABEL_W - VALUE_W
+    height = PAD_T + len(rows) * BAND + 6
+    out = [f'<figure class="chart"><figcaption><span class="chart-title">'
+           f'{html.escape(spec.get("title", ""))}</span>'
+           f'<span class="chart-sub">{html.escape(spec.get("subtitle", ""))}</span></figcaption>',
+           f'<svg viewBox="0 0 {WIDTH} {height}" width="100%" height="{height}" role="img" '
+           f'aria-label="{html.escape(spec.get("title", ""))}">']
+    for i, (label, value) in enumerate(rows):
+        y = PAD_T + i * BAND
+        w = plot * (value / top)
+        out.append(f'<g transform="translate(0,{y})">'
+                   f'<title>{html.escape(label)}: {value:,.1f} CU</title>'
+                   f'<text class="bar-label" x="{LABEL_W - 10}" y="{BAR_H / 2 + 4:.0f}" '
+                   f'text-anchor="end">{html.escape(label)}</text>'
+                   f'<g transform="translate({LABEL_W},0)">'
+                   f'<path class="bar" d="{_bar_path(w, BAR_H)}"/></g>'
+                   f'<text class="bar-value" x="{LABEL_W + w + 8:.1f}" '
+                   f'y="{BAR_H / 2 + 4:.0f}">{value:,.1f}</text></g>')
+    out.append(f'<line class="axis" x1="{LABEL_W}" y1="{PAD_T - 6}" x2="{LABEL_W}" '
+               f'y2="{PAD_T + len(rows) * BAND - BAND + BAR_H + 4}"/>')
+    out.append("</svg></figure>")
+    return "\n".join(out)
+
+
 def _is_rule(line):
     """A markdown alignment row — `|:--|---:|` — which is what proves the line above was a header."""
     return bool(re.fullmatch(r"\|(\s*:?-{2,}:?\s*\|)+", line.strip()))
@@ -45,6 +101,16 @@ def to_html(md):
     while i < len(lines):
         line = lines[i].rstrip()
         if not line.strip():
+            i += 1
+            continue
+        # The chart marker. It is an HTML comment so the same markdown stays clean in the GitHub job
+        # summary, where inline SVG is sanitised away anyway.
+        m = re.match(r"^<!--chart:(.*)-->$", line.strip())
+        if m:
+            try:
+                out.append(chart_svg(json.loads(m.group(1))))
+            except Exception as ex:   # a malformed spec must not cost the whole report
+                out.append(f'<p class="note">chart skipped ({type(ex).__name__})</p>')
             i += 1
             continue
         m = re.match(r"^(#{2,4})\s+(.*)", line)
@@ -93,10 +159,16 @@ def to_html(md):
 CSS = """
 :root { color-scheme: light dark;
   --bg:#fff; --fg:#1a1a1a; --dim:#5b6472; --line:#e3e6ea; --head:#f6f7f9; --sub:#eef1f5;
-  --code:#f2f3f5; }
+  --code:#f2f3f5;
+  /* Series hue, validated against both surfaces with the dataviz palette validator: lightness
+     band, chroma floor and contrast all pass. The dark value is a SELECTED step for the dark
+     surface, not an automatic flip of the light one. */
+  --series:#2a78d6; }
 @media (prefers-color-scheme: dark) {
   :root { --bg:#14171a; --fg:#e8eaed; --dim:#9aa4b2; --line:#2a2f36; --head:#1c2025; --sub:#20252b;
-    --code:#22262c; } }
+    --code:#22262c; --series:#3987e5; } }
+:root[data-theme="dark"] { --bg:#14171a; --fg:#e8eaed; --dim:#9aa4b2; --line:#2a2f36;
+  --head:#1c2025; --sub:#20252b; --code:#22262c; --series:#3987e5; }
 * { box-sizing: border-box; }
 body { margin:0; padding:2rem 1.25rem 4rem; background:var(--bg); color:var(--fg);
   font:15px/1.55 ui-sans-serif, -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; }
@@ -118,6 +190,18 @@ tbody tr:last-child td { border-bottom:none; }
 .left { text-align:left; } .right { text-align:right; }
 footer { color:var(--dim); font-size:.78rem; margin-top:3rem; padding-top:1rem;
   border-top:1px solid var(--line); }
+/* Charts. The bar is the only thing wearing the series colour — labels and values stay in text ink,
+   so identity never depends on being able to see the hue. */
+figure.chart { margin:1.25rem 0 1.75rem; }
+figure.chart figcaption { display:flex; flex-wrap:wrap; align-items:baseline; gap:.6rem;
+  margin-bottom:.35rem; }
+.chart-title { font-weight:600; font-size:.95rem; }
+.chart-sub { color:var(--dim); font-size:.78rem; }
+figure.chart svg { max-width:100%; height:auto; display:block; overflow:visible; }
+.bar { fill:var(--series); }
+.bar-label { fill:var(--fg); font-size:12px; font-weight:500; }
+.bar-value { fill:var(--dim); font-size:12px; font-variant-numeric:tabular-nums; }
+.axis { stroke:var(--line); stroke-width:1; }
 """
 
 

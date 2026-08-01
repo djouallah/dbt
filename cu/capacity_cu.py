@@ -293,6 +293,11 @@ STATS_JSON = os.environ.get("STATS_JSON", "").strip()
 # nothing about a 143M-row scan.
 LAYOUT_TABLE = os.environ.get("CU_LAYOUT_TABLE", "fct_summary").strip()
 
+# Where to write this generation's permanent record, or blank for none. Set only by the super
+# workflow: a standalone `cu.yml` dispatch measures whatever window it was given, which is not a
+# generation and must not be filed as one. See write_history().
+HISTORY_JSON = os.environ.get("CU_HISTORY_JSON", "").strip()
+
 # Item x operation x hour. The hour axis supports SINCE and the per-run split below.
 # Mind the spelling: the model also has 'Metrics By Item And Operation' (no time axis) and 'Metrics
 # By Item And Hour' (no operation split). This is the one with both.
@@ -694,12 +699,35 @@ def _shared_note(shared):
             "ambiguous name lands here rather than in a guessed column.</sub>")
 
 
+def _chart(title, subtitle, rows):
+    """Emit a chart spec for the HTML renderer, as an HTML COMMENT.
+
+    One data path, two outputs. The same markdown goes to the GitHub job summary and to the page,
+    and GitHub sanitises inline SVG — so the chart cannot be drawn here. A comment is invisible in
+    the summary (no stray code block, no junk) and `report_html.py` picks it up and draws the bars.
+    The numbers below it in the tables are the same numbers, so the summary loses nothing but the
+    picture.
+
+    `rows` is [(label, value)] in a FIXED order — the table's column order — deliberately not sorted
+    by value: the two charts are read against each other, and re-sorting each one would move an
+    engine between them.
+    """
+    if not any(v for _l, v in rows):
+        return
+    print(f"\n<!--chart:{json.dumps({'title': title, 'subtitle': subtitle, 'rows': rows})}-->")
+
+
 def _engine_table(cells, meta):
     """Engines across, operations down, grouped by class — the shape the whole repo reads in.
 
     The class row carries its own subtotal, so "what did the build cost against the querying" is two
     bold rows rather than a sum the reader has to do. Operations are ordered by total CU within
     their class, so the expensive one is the first thing under each heading.
+
+    **No total column and no grand-total row**, deliberately. Both summed ACROSS engines, and that is
+    the one sum on this page that means nothing: the engines are four alternatives to each other, so
+    adding duckrun to dwh answers no question anyone has. The class subtotals stay because they sum
+    DOWN a column, which is "what this engine spent building" — a real number.
     """
     cols, shared = _engine_cols(meta, {k for k, _op in cells})
     per, cls_total, op_total = {}, {}, {}
@@ -712,24 +740,23 @@ def _engine_table(cells, meta):
 
     def row(label, vals, bold=False):
         f = (lambda v: f"**{v:,.1f}**") if bold else (lambda v: f"{v:,.1f}")
-        print(f"| {'**' + label + '**' if bold else label} | " + " | ".join(f(v) for v in vals)
-              + f" | {f(sum(vals))} |")
+        print(f"| {'**' + label + '**' if bold else label} | " + " | ".join(f(v) for v in vals) + " |")
 
-    print("| | " + " | ".join(cols) + " | total |")
-    print("|:--|" + "---:|" * (len(cols) + 1))
-    grand = [0.0] * len(cols)
+    print("| | " + " | ".join(cols) + " |")
+    print("|:--|" + "---:|" * len(cols))
+    landing_cu = 0.0
     for cls in CLASS_ORDER:
         ops = sorted((op for (c, op) in op_total if c == cls),
                      key=lambda op: -op_total[(cls, op)])
         if not ops:
             continue
         sub = [cls_total.get((cls, c), 0.0) for c in cols]
-        grand = [a + b for a, b in zip(grand, sub)]
+        if "landing" in cols:
+            landing_cu += sub[cols.index("landing")]
         row(cls, sub, bold=True)
         for op in ops:
             row(op, [per.get((cls, op, c), 0.0) for c in cols])
-    row("total", grand, bold=True)
-    if "landing" in cols and grand[cols.index("landing")]:
+    if landing_cu:
         print("\n<sub>`landing` is a STAGE, not an engine: one lakehouse holding the downloaded "
               "AEMO archive that all four legs read and `download_aemo.py` writes. It is a shared "
               "input cost, so do not add it to an engine's column — and it cannot be split between "
@@ -985,24 +1012,24 @@ def render_runs(hourly, runs, meta, cells=None):
 
     # Same orientation as the aggregate above — class subtotal in bold, engines under it — so the
     # two tables read the same way rather than making the eye re-learn the layout halfway down.
-    print("| | " + " | ".join(h for h, _ in cols) + " | total |")
-    print("|:--|" + "---:|" * (len(cols) + 1))
+    # No total column and no grand-total row, for the same reason as up there: a run's columns are
+    # separate passes and a row's cells are separate engines, so neither direction sums to anything
+    # anyone asked for. `grand` is still computed — the conservation check below needs it — it is
+    # just not printed.
+    print("| | " + " | ".join(h for h, _ in cols) + " |")
+    print("|:--|" + "---:|" * len(cols))
     col_tot = [0.0] * len(cols)
     for cls in CLASS_ORDER:
         vals = [cls_tot.get((ci, cls), 0.0) for ci in range(len(cols))]
         if not any(vals):
             continue
         col_tot = [a + b for a, b in zip(col_tot, vals)]
-        print(f"| **{cls}** | " + " | ".join(f"**{v:,.1f}**" for v in vals)
-              + f" | **{sum(vals):,.1f}** |")
+        print(f"| **{cls}** | " + " | ".join(f"**{v:,.1f}**" for v in vals) + " |")
         for e in engine_cols:
             ev = [per.get((ci, cls, e), 0.0) for ci in range(len(cols))]
             if any(ev):
-                print(f"| {e} | " + " | ".join(f"{v:,.1f}" for v in ev)
-                      + f" | **{sum(ev):,.1f}** |")
+                print(f"| {e} | " + " | ".join(f"{v:,.1f}" for v in ev) + " |")
     grand = sum(col_tot)
-    print("| **total** | " + " | ".join(f"**{v:,.1f}**" for v in col_tot)
-          + f" | **{grand:,.1f}** |")
     # No shared note here: the aggregate table above this one has already printed it, and the same
     # paragraph twice on one page reads as two different caveats.
 
@@ -1110,6 +1137,96 @@ def render_layout(doc, cu_by_engine, table=LAYOUT_TABLE):
           f"dashboard is that run's own summary.</sub>")
 
 
+def render_hardware(doc):
+    """What the build ran ON, from `stats.py`'s `config` block — never from this file's assumptions.
+
+    A CU number is not comparable without it: 26,000 CU at 64 vCores and at 8 are different findings,
+    and the same is true of a Spark leg with a different resource profile. Anything the run did not
+    record prints as "not recorded", because a default filled in here would read exactly like a
+    measurement.
+
+    dwh carries no row of its own knobs deliberately — Fabric Warehouse exposes none — so it says so
+    rather than leaving a blank that looks like missing data.
+    """
+    cfg = (doc.get("config") or {})
+    run = doc.get("run") or {}
+    rows = []
+    for e in ENGINES:
+        if e == "landing":
+            continue
+        c = cfg.get(e) or {}
+        if e == "dwh":
+            rows.append((e, "workspace default — Fabric Warehouse exposes no per-run compute knob"))
+            continue
+        bits = []
+        if e in ("duckrun", "iceberg"):
+            v = c.get("vcores")
+            bits.append(f"{v} vCores (Fabric Python notebook)" if v else None)
+        if e == "spark":
+            p, n = c.get("resource_profile"), c.get("native_execution_engine")
+            bits.append(f"resource profile `{p}`" if p else None)
+            bits.append("native execution engine ON" if str(n).lower() == "true"
+                        else ("native execution engine off" if n else None))
+        bits = [b for b in bits if b]
+        rows.append((e, ", ".join(bits) if bits
+                     else f"not recorded by dbt run {run.get('id') or '?'}"))
+    if not rows:
+        return
+    print("\n### The hardware it ran on\n")
+    print("| engine | compute |")
+    print("|:--|:--|")
+    for e, what in rows:
+        print(f"| {e} | {what} |")
+    print(f"\n<sub>Read from the environment the build legs were actually given and recorded by "
+          f"`stats.py` in dbt run `{run.get('id') or '?'}` — not from configuration this report "
+          f"assumes. A value the run did not record says so rather than showing a default, because "
+          f"a filled-in default reads exactly like a measurement. The duckdb-family legs run in one "
+          f"Fabric Python notebook each, so their vCores are that notebook's size; spark runs on the "
+          f"workspace Livy pool, which this cannot see beyond the profile it asked for.</sub>")
+
+
+def write_history(path, cells, meta, since, asof, doc):
+    """One JSON per generation, committed INTO the repo. The only storage here that outlives
+    retention: artifacts expire (90 days, the Pages one sooner) and the Capacity Metrics model keeps
+    ~14 days, so without this every number on the page is gone within a fortnight of being measured.
+
+    Deliberately NOT the markdown or the HTML — those are renderings, and a renderer changes. This is
+    the numbers, keyed so a later reader can group them the same way the page did.
+
+    `schema` is here from the first file written. A reader two years from now must be able to tell an
+    old record from a new one by reading it, rather than by guessing from which keys are present.
+
+    Deliberately excludes benchmark timings: `cu/` does not read `run_report.json` and this is not
+    the place to start. If timings are ever wanted historically, `benchmark/` should write its own
+    record beside this one.
+    """
+    per = {}
+    for (k, op), cu in cells.items():
+        info = meta.get(k) or {}
+        cls, eng = info.get("cls", "other"), info.get("engine") or "shared"
+        per.setdefault(cls, {}).setdefault(eng, {})[op] = round(cu, 1)
+    rec = {
+        "schema": 1,
+        "written": asof.replace(microsecond=0).isoformat(),
+        "since": since.isoformat() if since else None,
+        "runs": {"measure": os.environ.get("GITHUB_RUN_ID"),
+                 "measure_sha": os.environ.get("GITHUB_SHA"),
+                 # Which dbt build these tables came from — the layout and config are that run's,
+                 # not this one's, and a record that conflates them is worse than one that omits.
+                 "build": (doc.get("run") or {}).get("id"),
+                 "build_sha": (doc.get("run") or {}).get("sha")},
+        "config": doc.get("config") or {},
+        "cu": per,
+        "layout": doc.get("stats") or {},
+    }
+    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(rec, f, indent=1, sort_keys=True)
+    log(f"  wrote {path}: {sum(len(v) for c in per.values() for v in c.values())} (engine, op) "
+        f"entries")
+    return rec
+
+
 def render_empty(span, seen, dropped, active, near):
     """No row survived the filters — say WHICH filter ate them.
 
@@ -1161,6 +1278,22 @@ def render(cells, hourly, meta, since, asof, seen=0, dropped=None, active=None, 
                                             "kind": 0}, active or {}, near or {})
         return
 
+    # Charts first: two bars per engine — what building cost, what querying cost. `landing` and
+    # `shared` are excluded from the bars because neither is an engine, and a bar beside four
+    # engines is read as a fifth competitor whatever the caption says. Both keep their table column.
+    per_cls = {}
+    for (k, _op), cu in cells.items():
+        info = meta.get(k) or {}
+        if info.get("engine") in (None, "landing"):
+            continue
+        per_cls[(info.get("cls"), info["engine"])] = per_cls.get(
+            (info.get("cls"), info["engine"]), 0.0) + cu
+    bars = [e for e in ENGINES if e != "landing"]
+    _chart("ETL — what building the tables cost", "capacity units, lower is better",
+           [[e, round(per_cls.get(("etl", e), 0.0), 1)] for e in bars])
+    _chart("Analytics — what querying them cost", "capacity units, lower is better",
+           [[e, round(per_cls.get(("analytics", e), 0.0), 1)] for e in bars])
+
     print(f"Everything since the floor, summed:\n")
     _engine_table(cells, meta)
     if ITEM_DETAIL:
@@ -1182,6 +1315,11 @@ def render(cells, hourly, meta, since, asof, seen=0, dropped=None, active=None, 
             if info.get("cls") == "analytics" and info.get("engine"):
                 analytics[info["engine"]] = analytics.get(info["engine"], 0.0) + cu
         render_layout(doc, analytics)
+        # Last on the page, deliberately: it is the caveat you check a number against once the
+        # number has surprised you, not something to read on the way in.
+        render_hardware(doc)
+    if HISTORY_JSON:
+        write_history(HISTORY_JSON, cells, meta, since, asof, doc)
 
 
 def main():
