@@ -142,3 +142,11 @@ SELECT
   -- populated) to avoid a schema change that would force a DROP here.
   (SELECT cutoff FROM cutoff_calc) AS cutoff
 FROM daily_summary
+-- Parity with the duckdb and spark copies, which both end with the same sort. It makes NO claim
+-- about physical layout: this SQL is a merge SOURCE on all three engines, so nothing about the
+-- ordering reaches the stored table. It is here so the three legs pay the same cost — deleting it
+-- from one tree is a fairness regression, not a cleanup. Lands in the outer SELECT of a Fabric
+-- CTAS (dbt-fabric builds `CREATE TABLE <temp> AS <model sql>` and merges from that relation, it
+-- does NOT wrap this in `MERGE ... USING (<sql>)`), so the derived-table ORDER BY restriction
+-- does not apply here.
+ORDER BY [date]

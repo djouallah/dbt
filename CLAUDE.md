@@ -187,6 +187,19 @@ in `dbt/include/fabric{,spark}/macros/materializations/models/incremental/`.
 
 ### A keyed write reads the target — the literal file predicate is what bounds it
 
+**`month_key` is gone from ALL FOUR ENGINES now, not just the duckdb tree.** dwh kept it for a
+while after the duckdb facts dropped it, and that was an oversight rather than a decision — Fabric
+Warehouse has no partitioning to attach it to, so on dwh it was a plain computed column that
+**nothing read**: no model, test, macro, `stats.py` or `model.bim`. It survived only because
+**duckrun forces this cleanup and dbt-fabric does not** — duckrun refuses a batch missing a column
+the target has, dbt-fabric's merge does not check, so nothing broke and it sat there costing two
+extra `TRY_CAST` + `YEAR`/`MONTH` per row on 369M-row `fct_scada` and a stored column in every
+parquet file, on one engine, in a benchmark comparing write cost. Dropping it needed
+`on_schema_change='sync_all_columns'` on the two dwh facts: with dbt's default `ignore`,
+`dest_columns` comes from the **existing** relation, so the merge would still select `[month_key]`
+from a temp relation that no longer has it (*Invalid column name*). Do not reintroduce the column
+on any engine — the paragraphs below are why it existed, not an argument for it.
+
 **Current state first, history second:** the duckdb facts declare **no `partition_by` and carry no
 `month_key`**, and this is not a preference — **dbt-duckdb cannot express partitioning at all**
 (the string appears nowhere in its materializations; a `partition_by` is silently dropped, see
@@ -263,6 +276,16 @@ test and a row-count difference between engines in the `summary` parity table.
 
 Rules that keep it honest:
 
+- **All three trees end with `ORDER BY date`, and that is a FAIRNESS invariant, not a layout
+  claim.** The sort reaches no stored table — this SQL is a merge *source* on every engine — so
+  its only real effect is cost. It was on duckdb and spark and missing from dwh, i.e. two legs
+  paying for something the third did not, in a benchmark that compares their cost. Parity could
+  have been reached by deleting two lines instead of adding one; adding it was the call. Either
+  way the rule is **all three or none** — dropping it from one tree is a fairness regression
+  wearing the costume of a cleanup. On dwh it lands in the outer SELECT of a Fabric CTAS
+  (dbt-fabric builds `CREATE TABLE <temp> AS <model sql>` and merges from that relation; it does
+  **not** wrap the model in `MERGE … USING (<sql>)`), so the derived-table ORDER BY restriction
+  does not apply and this is legal there.
 - The incremental source emits the **complete recomputation** for every date that could still
   be stale — never a partial top-up.
 - The stale set is: dates absent from the target, plus a **trailing 7-day window**, plus dates
@@ -551,6 +574,23 @@ the `cu/` section.
 ## CI etiquette
 
 - Cancel superseded runs immediately (`gh run cancel <id>`) — spark and Fabric legs cost money.
+- **The two DuckDB legs run on IDENTICAL DuckDB settings, and keeping them that way is the point
+  of the pair.** `duckrun` and `iceberg` are the same DuckDB on the same notebook at the same
+  `FABRIC_CORES`, which is what makes their two CU bars the sharpest comparison on the dashboard —
+  so any `on-run-start` hook or `profiles.yml` setting given to one must be given to the other.
+  This was violated for a long time: `dbt_project.yml` set `memory_limit = 4GB` for
+  `target.name == 'duckrun'` alone while iceberg ran at DuckDB's default (~80% of node RAM), and
+  the cap could not even be dispatched around because `DUCKDB_MEMORY_LIMIT` was never in
+  `fabric_run.py`'s `_FORWARD` tuple. Its comment justified it as stopping an OOM on "the runner",
+  which described the deleted GitHub-runner path, not the Fabric notebook this has run on since.
+  The line is gone. Note the knock-on: duckrun's merge budget is a **0.3 share of the global
+  limit** (`set_merge_memory_limit`), so the routed anti-join now gets 0.3 × default instead of
+  0.3 × 4GB. Spill is unaffected — `temp_directory` is still set for both.
+  **The one difference that CANNOT be equalised is `threads`**: duckrun's adapter hard-pins
+  `config.threads = 1` (`impl.py`, and it *raises* if the pin fails) because its Delta write path
+  is not thread-safe, against iceberg's 8. That is stated in the dashboard's own caption rather
+  than claimed away — the caption used to say the two "differ only in what writes the table",
+  which was wrong on both counts.
 - **A default dispatch is now REPRODUCIBLE: `reset_outputs` and `skip_download` are both ON.** The
   pair is the point — reset means no incremental history carries over, `skip_download` means the
   input archive does not move, so two dispatches of the same commit differ by nothing but what was

@@ -2,6 +2,7 @@
     materialized='incremental',
     incremental_strategy='merge',
     unique_key=['[file]', '[REGIONID]', '[SETTLEMENTDATE]', '[INTERVENTION]'],
+    on_schema_change='sync_all_columns',
     schema='landing'
 ) }}
 
@@ -22,8 +23,19 @@
      fct_summary already uses here.
 
      Key columns are bracketed: dbt interpolates them raw into the ON clause and `file` is a
-     reserved word. No partition_by — Fabric Warehouse has no table partitioning; month_key is
-     kept as a plain column. --#}
+     reserved word. No partition_by — Fabric Warehouse has no table partitioning.
+
+     There is no month_key here any more, and it should not come back. It was a partitioning
+     experiment: a low-cardinality month column so a duckrun merge could prune its target read.
+     Measured, it pruned nothing (60/60 files scanned even with the table partitioned), and
+     dbt-duckdb cannot express partition_by at all, so it was deleted from the duckdb tree. This
+     engine never had a partitioning story to attach it to — Fabric has none — so the column was
+     computed and stored and read by NOTHING: no model, test, macro, stats.py or model.bim. It
+     survived the cleanup only because duckrun refuses a batch missing a column the target has
+     (`insert: ... Missing: ['month_key']`) and dbt-fabric has no such check, so nothing broke.
+     That is also why on_schema_change='sync_all_columns' is set above: with dbt's default of
+     'ignore', dest_columns comes from the EXISTING relation, so dropping a column from this SQL
+     would make the merge select [month_key] from a temp relation that no longer has it. --#}
 
 {%- set read_cols = [
   'I','UNIT','XX','VERSION','SETTLEMENTDATE','RUNNO','REGIONID','INTERVENTION','RRP','EEP',
@@ -67,11 +79,7 @@ SELECT
   {{ parse_filename('src.filepath()') }} AS [file],
   TRY_CAST([SETTLEMENTDATE] AS DATETIME2(6)) AS [SETTLEMENTDATE],
   TRY_CAST([SETTLEMENTDATE] AS DATE) AS [DATE],
-  YEAR(TRY_CAST([SETTLEMENTDATE] AS DATETIME2(6))) AS [YEAR],
-  -- Monthly partition key (YYYYMM): low-cardinality column kept for downstream pruning
-  -- (Fabric has no native partitioning, but the column is still useful as a filter).
-  YEAR(TRY_CAST([SETTLEMENTDATE] AS DATETIME2(6))) * 100
-    + MONTH(TRY_CAST([SETTLEMENTDATE] AS DATETIME2(6))) AS [month_key]
+  YEAR(TRY_CAST([SETTLEMENTDATE] AS DATETIME2(6))) AS [YEAR]
 FROM {{ openrowset_csv_files(new_files, read_cols) }} AS src
 WHERE [I] = 'D' AND [UNIT] = 'DREGION' AND [VERSION] = '3'
 {#-- Dedup guard, rendered ONLY on the wildcard fallback (pending > 1024): T-SQL rejects

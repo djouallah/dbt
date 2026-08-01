@@ -1449,9 +1449,15 @@ def render_hardware(doc, engines=None):
     for e, adapter, writer, what in rows:
         print(f"| {e} | `{adapter}` | {writer} | {what} |")
     # Both asides name engines, so both are printed only when those engines are on the page.
-    pair = ("`duckrun` and `iceberg` are the SAME DuckDB on the same notebook size and differ only "
-            "in what writes the table, which is why their two bars are the sharpest comparison "
-            "here. " if {"duckrun", "iceberg"} <= set(named) else "")
+    # Two differences, not one. The claim was "differ only in what writes the table", which was
+    # wrong twice: dbt_project.yml capped duckrun's DuckDB at 4GB while iceberg ran at the default
+    # (removed — they are on identical DuckDB settings now), and duckrun's adapter hard-pins
+    # threads=1 because its Delta write path is not thread-safe, against iceberg's 8. The thread
+    # count cannot be equalised, so it is stated instead of claimed away.
+    pair = ("`duckrun` and `iceberg` are the SAME DuckDB on the same notebook size and the same "
+            "DuckDB settings, so their two bars are the sharpest comparison here — but they "
+            "differ in two things, not one: the writer, and dbt threads (duckrun's adapter pins "
+            "1, iceberg runs 8). " if {"duckrun", "iceberg"} <= set(named) else "")
     livy = ("spark runs on the workspace Livy pool, which this cannot see beyond the profile it "
             "asked for." if "spark" in named else "")
     print(f"\n<sub>The adapter and writer are facts of this repo's `profiles.yml`; the compute is "

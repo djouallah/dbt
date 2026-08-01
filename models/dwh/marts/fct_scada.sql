@@ -2,6 +2,7 @@
     materialized='incremental',
     incremental_strategy='merge',
     unique_key=['[file]', '[DUID]', '[SETTLEMENTDATE]', '[INTERVENTION]'],
+    on_schema_change='sync_all_columns',
     schema='landing'
 ) }}
 
@@ -11,7 +12,13 @@
      list still does the selection, but it is computed before the write, so merge on the natural
      key is what actually guards against two overlapping runs both inserting the same file. See
      the fct_price.sql header for why this merge cannot be insert-only on dbt-fabric, and for the
-     delete+insert fallback. No partition_by in Fabric; month_key kept as a plain column. --#}
+     delete+insert fallback. No partition_by in Fabric.
+
+     No month_key either — see the fct_price.sql header for the full story (a partitioning
+     experiment that pruned nothing, deleted everywhere else, kept here only because dbt-fabric
+     never complained). on_schema_change='sync_all_columns' above is what lets the column be
+     dropped from an EXISTING table; with dbt's default 'ignore' the merge would still select it
+     from a temp relation that no longer has it. --#}
 
 {%- set read_cols = [
   'I','UNIT','XX','VERSION','SETTLEMENTDATE','RUNNO','DUID','INTERVENTION','DISPATCHMODE','AGCSTATUS',
@@ -39,9 +46,7 @@ SELECT
   {{ parse_filename('src.filepath()') }} AS [file],
   TRY_CAST([SETTLEMENTDATE] AS DATETIME2(6)) AS [SETTLEMENTDATE],
   TRY_CAST([SETTLEMENTDATE] AS DATE) AS [DATE],
-  YEAR(TRY_CAST([SETTLEMENTDATE] AS DATETIME2(6))) AS [YEAR],
-  YEAR(TRY_CAST([SETTLEMENTDATE] AS DATETIME2(6))) * 100
-    + MONTH(TRY_CAST([SETTLEMENTDATE] AS DATETIME2(6))) AS [month_key]
+  YEAR(TRY_CAST([SETTLEMENTDATE] AS DATETIME2(6))) AS [YEAR]
 FROM {{ openrowset_csv_files(new_files, read_cols) }} AS src
 WHERE [I] = 'D' AND [UNIT] = 'DUNIT' AND [VERSION] = '3'
 {#-- Dedup guard, rendered ONLY on the wildcard fallback (pending > 1024): T-SQL rejects

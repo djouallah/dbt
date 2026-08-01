@@ -21,8 +21,18 @@ on-run-start:
   - "{% if target.name in ['duckrun', 'iceberg'] and env_var('AZURE_TRANSPORT_OPTION_TYPE', 'default') != 'default' %}SET GLOBAL azure_transport_option_type = '{{ env_var('AZURE_TRANSPORT_OPTION_TYPE') }}'{% endif %}"
   # Iceberg spills large aggregations; set the temp dir once before anything spills.
   - "{% if target.name == 'iceberg' %}SET GLOBAL temp_directory = '{{ env_var('DUCKDB_TEMP_DIR', '/tmp/duckdb_spill') }}'{% endif %}"
-  # duckrun: cap DuckDB memory and spill to disk so a big fact build can't OOM the runner.
-  - "{% if target.name == 'duckrun' %}SET GLOBAL memory_limit = '{{ env_var('DUCKDB_MEMORY_LIMIT', '4GB') }}'{% endif %}"
+  # duckrun: match what iceberg already gets from profiles.yml (`settings:` + the temp_directory
+  # hook above), so the two DuckDB legs run on IDENTICAL DuckDB settings and the only differences
+  # left between them are the writer and duckrun's adapter-forced threads=1.
+  # There was a `SET GLOBAL memory_limit = 4GB` here, on duckrun ONLY. It capped one half of the
+  # pair the CU dashboard calls "the sharpest comparison" while iceberg — the same DuckDB, same
+  # notebook, same FABRIC_CORES — ran at DuckDB's default (~80% of node RAM). Its comment said the
+  # cap stopped a big fact build OOMing "the runner", which described the deleted GitHub-runner
+  # path, not the Fabric notebook this runs on now; and DUCKDB_MEMORY_LIMIT was never in
+  # fabric_run.py's _FORWARD tuple, so the 4GB default always applied in CI and could not be
+  # dispatched around. Removing it also lifts duckrun's MERGE budget, which is a 0.3 share of the
+  # global limit (set_merge_memory_limit): 0.3 x default instead of 0.3 x 4GB. Spill is unaffected
+  # — temp_directory below still applies.
   - "{% if target.name == 'duckrun' %}SET GLOBAL preserve_insertion_order = false{% endif %}"
   - "{% if target.name == 'duckrun' %}SET GLOBAL temp_directory = '{{ env_var('DUCKDB_TEMP_DIR', '/tmp/duckdb_spill') }}'{% endif %}"
   # Fabric Warehouse has no implicit schemas — create them before any model runs.
