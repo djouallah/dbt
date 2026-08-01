@@ -42,10 +42,18 @@ that shortcut and nothing else. It is `_src` and not `_landing` on purpose: `eng
 `CU_ENGINES` in order, `landing` comes first, and `dbt_dwh_landing` would substring-match it and
 undo the whole thing.
 
-The page leads with two **bar charts** — ETL and analytics CU per engine, lower is better — and ends
-with the **hardware** the build ran on. Both are drawn from numbers on this page: no timings, no
-second source. One hue, because a single series needs no legend and four colours would encode what
-the axis labels already say. **Sorted cheapest first** — "lower is better" makes the ranking the
+The page leads with a **link back to this repo and to both runs it quotes**, then two **bar charts** —
+ETL and analytics CU per engine, lower is better — and ends with the **hardware** the build ran on.
+Both charts are drawn from numbers on this page: no timings, no second source. One hue, because a
+single series needs no legend and four colours would encode what the axis labels already say.
+
+**Each bar carries a caption naming the adapter and the compute** — `iceberg` reads
+`dbt-duckdb · 64 vCores`, `spark` reads `dbt-fabricspark · writeHeavy · NEE on`. Without it the two
+DuckDB bars look like an engine difference, and they are not: same DuckDB, same notebook size, one
+writing Delta through delta-rs and one writing to an Iceberg REST catalog. The adapter comes from
+`STACK` in `capacity_cu.py` (a static fact of `profiles.yml`, so old artifacts can still be
+labelled); the config beside it comes from the build's own `stats.py` record and is **absent rather
+than defaulted** when a run did not record it. **Sorted cheapest first** — "lower is better" makes the ranking the
 finding, so the chart answers "who cost least" before any two bar lengths are compared. The price is
 that an engine sits at a different height in the two charts; the tables below keep the fixed column
 order and are the lookup. A **zero sorts to the bottom**, never the top: it means the engine did no
@@ -212,10 +220,31 @@ That is the whole output and the whole scope.
 ## The layout beside the CU
 
 CU alone says which engine cost more, not why — and the answer is nearly always the physical layout.
-So the report ends with one table putting them together:
+So the report puts them together, in two tables.
+
+The first lists **every table each engine wrote**, with the row total:
 
 ```
-### Layout of `fct_summary` — what the CU was spent scanning
+### What the CU was spent scanning — 8 tables, 519,377,319 rows per engine
+
+| table                   |        rows |     duckrun |      iceberg |        spark |         dwh |
+|:------------------------|------------:|------------:|-------------:|-------------:|------------:|
+| `landing.fct_scada`     | 370,021,502 | 17 · 4,154  | 2,849 · 4,612| 1,778 · 3,604| 195 · 3,120 |
+| `mart.fct_summary`      | 143,980,961 |  4 · 999    |   360 · 1,119|   100 · 1,162|  78 · 1,572 |
+| **8 tables**            | **519,377,319** | …       | …            | …            | …           |
+```
+
+This exists because the page used to show one table's layout and nothing else, and a reader who had
+not read the repo came away thinking the pipeline produced three tables and that the CU above was
+the cost of scanning one. It produces **eight**, the benchmark's semantic models carry all eight (a
+raw-tier query per raw table), and the total is over half a billion rows per engine. The cell is
+`files · MB`; `rows` is one column because the engines are meant to agree, and a ⚠️ on the table name
+says they do not — the same parity signal `stats.py`'s own dashboard carries.
+
+Then the mart in detail, with the engine's analytics CU beside it:
+
+```
+#### `fct_summary` in detail — the mart the queries land on
 
 | engine  | writer             |       CU |        rows | files | row groups | avg RG rows | size MB | vorder |
 |:--------|:-------------------|---------:|------------:|------:|-----------:|------------:|--------:|:-------|
@@ -250,8 +279,9 @@ dispatch `dbt` again after anything that rewrites the tables (`REBUILD_SUMMARY=1
 it is not useful if a missing artifact fails the job. The flip side is that a `stats.py` rename shows up
 here as a *missing table*, so change both together.
 
-`layout=false` skips the download. `layout_table` picks the table (default `fct_summary` — the mart the
-benchmark queries; `dim_duid` at a few hundred rows explains nothing about a 143M-row scan).
+`layout=false` skips the download. `layout_table` picks which table gets the DETAILED row (default
+`fct_summary` — the mart the benchmark queries; `dim_duid` at a few hundred rows explains nothing
+about a 143M-row scan). It does not narrow the table above it, which always lists all of them.
 
 ## What it deliberately is not
 
@@ -315,8 +345,20 @@ directory's "no `run_report.json`" isolation true. If timings are ever wanted hi
 Committing from CI is safe **because nothing in this repo runs on push**. That standing rule is load
 bearing here: give any workflow a `push:` trigger and CI starts paying for its own commits.
 
+**The records are read back into the report**, as a *"the same numbers, dispatch after dispatch"*
+table — engine down, generation across, the same orientation as the runs table. It is the only thing
+on the page that says whether a number is normal, and it costs no capacity: the records are in the
+checkout. Two rules make it honest. A column is a `since` **floor** and is cumulative from it, so two
+columns are two experiments and no percentage-change column is printed; and several records sharing
+one floor **collapse to the latest**, because they are re-reads of one accumulating window — three of
+them land within fifteen minutes and as separate columns they would read as three dispatches getting
+steadily more expensive. The id under each column is the **dbt build** it measured, not the
+measurement's own run. `CU_HISTORY_COLS` (default 6) bounds the width; `CU_HISTORY_DIR` moves the
+directory.
+
 `cu/report_html.py` does the markdown → HTML, over the report's own markdown subset and nothing
-wider. One self-contained file: inline CSS, no script, no font, no image, no external URL at all, so
+wider. One self-contained file: inline CSS, no script, no font, no image, nothing the page FETCHES to
+render itself — the only URLs are the links back to this repo and its runs, followed only on a click, so
 the artifact copy opens off a local disk with no network. Re-render any past report offline with
 `python cu/report_html.py cu-report.md > page.html`.
 

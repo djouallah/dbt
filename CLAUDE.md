@@ -908,10 +908,16 @@ detail.
 - **An unrecognised item kind lands in `other` and is logged, never dropped.** That log line
   (`kind X: N CU -> other`) is the route by which a kind gets into `CLASS_BY_KIND`. Do not guess a
   kind into the mapping; dispatch once and read stderr.
-- **The page leads with CU bar charts and ends with the hardware, and there are no totals.** Two
-  charts — ETL and analytics per engine, lower is better — drawn as inline SVG with one hue, because
-  a single series needs no legend and colouring four bars differently would encode what the axis
-  labels already say. **Sorted cheapest first**: "lower is better" makes the ranking the finding, so
+- **The page leads with a source link and CU bar charts, and ends with the hardware; there are no
+  totals.** Two charts — ETL and analytics per engine, lower is better — drawn as inline SVG with one
+  hue, because a single series needs no legend and colouring four bars differently would encode what
+  the axis labels already say. **Each bar carries a second line naming the adapter and the compute**
+  (`dbt-duckdb · 64 vCores`, `dbt-fabricspark · writeHeavy · NEE on`), because `iceberg` beside
+  `duckrun` reads as an engine difference and it is a *writer* difference — same DuckDB, same
+  notebook size. The adapter comes from `STACK` in `capacity_cu.py`, deliberately not from
+  `stats.py`'s artifact: it is a static fact of `profiles.yml`, and recording it per run would only
+  mean older artifacts could not be labelled. The config beside it does come from the artifact and
+  is **absent rather than defaulted** when the run did not record it. **Sorted cheapest first**: "lower is better" makes the ranking the finding, so
   the chart answers "who cost least" before any two bars are compared. The cost is that an engine
   sits at a different height in the two charts — the tables keep the fixed column order and are the
   lookup. A **zero sorts to the bottom**, never the top: zero means the engine did no such work, and
@@ -926,10 +932,28 @@ detail.
 - **The hardware section is sourced, not asserted.** `stats.py` writes a `config` block from the env
   the legs were actually given (`FABRIC_CORES`, `SPARK_RESOURCE_PROFILE`, `SPARK_NATIVE_ENABLED`)
   and the page renders it. Anything the run did not record prints "not recorded by dbt run <id>" —
-  never a default, because a filled-in default reads exactly like a measurement. **dwh has no row**:
-  Fabric Warehouse exposes no per-run knob, so its line ("workspace default …") was identical in
-  every report ever printed — a constant taking a quarter of a table whose only job is to say what
-  the dispatch CHOSE.
+  never a default, because a filled-in default reads exactly like a measurement. **dwh has a row
+  again**, reversing the version that dropped it. That removal was right for a table of *compute
+  only* — Fabric Warehouse exposes no per-run knob, so its line was identical in every report ever
+  printed — but the table now also carries the **adapter** and the **writer**, where dwh differs
+  from the other three in every column but the last. The table's job changed from "what the dispatch
+  chose" to "what is being compared"; the chart captions are the short version, this is the lookup.
+- **`stats.py`'s layout is rendered as ALL EIGHT tables plus a row total, not just the mart.**
+  `layout_table` now only picks which table gets the detailed files/row-groups row underneath. The
+  page showing one table's layout was read as "the pipeline produced three tables and this CU is the
+  cost of scanning one" — it produces eight, the benchmark's semantic models carry all eight, and
+  the total is over half a billion rows per engine. Row counts carry `stats.py`'s own ⚠️ parity
+  marker, so the one cross-engine signal in the repo survives being quoted in a cost table.
+- **`history/` is read back, not just written.** The report renders a *"the same numbers, dispatch
+  after dispatch"* table from the committed records — the only thing on the page that says whether a
+  number is normal, and it spends no capacity. Two rules keep it honest and both are load-bearing: a
+  column is a `since` **floor** and therefore cumulative from it, so two columns are two experiments
+  and there is deliberately no change column; and records sharing a floor **collapse to the latest**,
+  because they are re-reads of one accumulating window — `history/` holds three within fifteen
+  minutes, and as separate columns they read as three dispatches getting steadily more expensive.
+  The id printed under a column is the **dbt build** it measured, never the measurement's own run id.
+  The test suite points `CU_HISTORY_DIR` at an empty directory for every test that does not ask for
+  history, or the end-to-end assertions would silently read last week's committed CU.
 - **The `stats` artifact lookup tries THIS run before any run list, and that is a fix, not a
   shortcut.** `dbt.yml` normally runs as a `workflow_call` from `all.yml`, and a called workflow
   gets **no run of its own** — the run belongs to the caller and its artifacts are uploaded there.

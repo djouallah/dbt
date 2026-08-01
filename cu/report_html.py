@@ -20,10 +20,17 @@ import sys
 
 
 def _inline(text):
-    """`**bold**`, `` `code` ``, `<br>`, and nothing else. Escaped first, so a stray `<` in an item
-    name cannot inject markup."""
+    """`**bold**`, `` `code` ``, `[text](url)`, `<br>`, and nothing else. Escaped first, so a stray
+    `<` in an item name cannot inject markup.
+
+    Links are restricted to `http(s)://` — the report only ever emits GitHub URLs, and a scheme
+    allowlist is what keeps that true even if an item NAME ever reaches this function looking like
+    markdown. A non-matching link is left as literal text rather than dropped.
+    """
     out = html.escape(text, quote=False)
     out = out.replace("&lt;br&gt;", "<br>").replace("&lt;sub&gt;", "").replace("&lt;/sub&gt;", "")
+    out = re.sub(r"\[([^\]]+)\]\((https?://[^\s)]+)\)",
+                 lambda m: f'<a href="{html.escape(m.group(2), quote=True)}">{m.group(1)}</a>', out)
     out = re.sub(r"\*\*(.+?)\*\*", r"<strong>\1</strong>", out)
     out = re.sub(r"`(.+?)`", r"<code>\1</code>", out)
     return out
@@ -48,7 +55,14 @@ def _cells(line):
 # The value label wears text ink, never the bar colour, and each bar carries a <title> so hovering
 # gives a native tooltip with NO script — which is the only kind of interactivity a page under this
 # repo's no-external-anything rule can have.
+#
+# A row may carry a CAPTION — the adapter and the compute the engine ran on — drawn as a second,
+# dimmer line under the name. It is the difference between "iceberg cost 2.3x duckrun" and "the same
+# DuckDB writing to an Iceberg catalog instead of through delta-rs, at the same notebook size, cost
+# 2.3x". The label gutter widens and the band grows only when a caption is actually present, so a
+# plain chart keeps the geometry it had.
 BAR_H, BAND, PAD_T, LABEL_W, VALUE_W, WIDTH = 18, 30, 26, 96, 74, 660
+SUB_BAND, SUB_LABEL_W = 36, 224
 
 
 def _bar_path(w, h, r=4):
@@ -60,30 +74,40 @@ def _bar_path(w, h, r=4):
 
 
 def chart_svg(spec):
-    rows = [(str(l), float(v)) for l, v in spec.get("rows") or []]
+    rows = [(str(r[0]), float(r[1]), str(r[2]) if len(r) > 2 and r[2] else "")
+            for r in spec.get("rows") or []]
     if not rows:
         return ""
-    top = max(v for _l, v in rows) or 1.0
-    plot = WIDTH - LABEL_W - VALUE_W
-    height = PAD_T + len(rows) * BAND + 6
+    subs = any(s for _l, _v, s in rows)
+    band, label_w = (SUB_BAND, SUB_LABEL_W) if subs else (BAND, LABEL_W)
+    top = max(v for _l, v, _s in rows) or 1.0
+    plot = WIDTH - label_w - VALUE_W
+    height = PAD_T + len(rows) * band + 6
     out = [f'<figure class="chart"><figcaption><span class="chart-title">'
            f'{html.escape(spec.get("title", ""))}</span>'
            f'<span class="chart-sub">{html.escape(spec.get("subtitle", ""))}</span></figcaption>',
            f'<svg viewBox="0 0 {WIDTH} {height}" width="100%" height="{height}" role="img" '
            f'aria-label="{html.escape(spec.get("title", ""))}">']
-    for i, (label, value) in enumerate(rows):
-        y = PAD_T + i * BAND
+    for i, (label, value, sub) in enumerate(rows):
+        y = PAD_T + i * band
         w = plot * (value / top)
+        # With a caption the name sits on the bar's upper half and the caption under it, so the pair
+        # reads as one block against the bar rather than as two columns.
+        ly = (BAR_H / 2 if subs else BAR_H / 2 + 4)
         out.append(f'<g transform="translate(0,{y})">'
-                   f'<title>{html.escape(label)}: {value:,.1f} CU</title>'
-                   f'<text class="bar-label" x="{LABEL_W - 10}" y="{BAR_H / 2 + 4:.0f}" '
-                   f'text-anchor="end">{html.escape(label)}</text>'
-                   f'<g transform="translate({LABEL_W},0)">'
-                   f'<path class="bar" d="{_bar_path(w, BAR_H)}"/></g>'
-                   f'<text class="bar-value" x="{LABEL_W + w + 8:.1f}" '
-                   f'y="{BAR_H / 2 + 4:.0f}">{value:,.1f}</text></g>')
-    out.append(f'<line class="axis" x1="{LABEL_W}" y1="{PAD_T - 6}" x2="{LABEL_W}" '
-               f'y2="{PAD_T + len(rows) * BAND - BAND + BAR_H + 4}"/>')
+                   f'<title>{html.escape(label)}'
+                   + (f' ({html.escape(sub)})' if sub else "")
+                   + f': {value:,.1f} CU</title>'
+                     f'<text class="bar-label" x="{label_w - 10}" y="{ly:.0f}" '
+                     f'text-anchor="end">{html.escape(label)}</text>'
+                   + (f'<text class="bar-caption" x="{label_w - 10}" y="{ly + 13:.0f}" '
+                      f'text-anchor="end">{html.escape(sub)}</text>' if sub else "")
+                   + f'<g transform="translate({label_w},0)">'
+                     f'<path class="bar" d="{_bar_path(w, BAR_H)}"/></g>'
+                     f'<text class="bar-value" x="{label_w + w + 8:.1f}" '
+                     f'y="{BAR_H / 2 + 4:.0f}">{value:,.1f}</text></g>')
+    out.append(f'<line class="axis" x1="{label_w}" y1="{PAD_T - 6}" x2="{label_w}" '
+               f'y2="{PAD_T + len(rows) * band - band + BAR_H + 4}"/>')
     out.append("</svg></figure>")
     return "\n".join(out)
 
@@ -177,6 +201,8 @@ h2 { font-size:1.5rem; line-height:1.25; margin:0 0 1.25rem; letter-spacing:-0.0
 h3 { font-size:1.1rem; margin:2.5rem 0 .85rem; }
 h4 { font-size:.95rem; margin:2rem 0 .6rem; color:var(--dim); }
 p { margin:.75rem 0; }
+a { color:var(--series); text-decoration:none; border-bottom:1px solid var(--line); }
+a:hover { border-bottom-color:var(--series); }
 p.note { color:var(--dim); font-size:.82rem; line-height:1.5; margin:.7rem 0 0; }
 code { background:var(--code); border-radius:4px; padding:.08em .32em; font-size:.88em;
   font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
@@ -199,7 +225,8 @@ figure.chart figcaption { display:flex; flex-wrap:wrap; align-items:baseline; ga
 .chart-sub { color:var(--dim); font-size:.78rem; }
 figure.chart svg { max-width:100%; height:auto; display:block; overflow:visible; }
 .bar { fill:var(--series); }
-.bar-label { fill:var(--fg); font-size:12px; font-weight:500; }
+.bar-label { fill:var(--fg); font-size:12px; font-weight:600; }
+.bar-caption { fill:var(--dim); font-size:10px; }
 .bar-value { fill:var(--dim); font-size:12px; font-variant-numeric:tabular-nums; }
 .axis { stroke:var(--line); stroke-width:1; }
 """

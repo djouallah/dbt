@@ -301,15 +301,75 @@ MAX_RUN_COLS = int(os.environ.get("CU_RUN_COLS", "8") or 0)
 # not as an error. stats.py's docstring carries the same warning from its side.
 STATS_JSON = os.environ.get("STATS_JSON", "").strip()
 
-# Which table's layout to show. One table, not all eight: this is the mart the benchmark queries and
-# the CU was spent on. `dim_duid`/`dim_calendar` are a few hundred rows and their layout explains
-# nothing about a 143M-row scan.
+# Which table gets the DETAILED layout row (files, row groups, avg RG). One table, because that
+# detail is only worth reading for the big one — `dim_duid` is 689 rows and its row-group count
+# explains nothing. It is NOT the only table shown: `render_tables()` above it lists every table
+# each engine wrote, with the total, precisely because a page that showed one table read as though
+# the pipeline produced one table. The benchmark's semantic models carry all eight, so the CU on
+# this page was spent scanning all eight.
 LAYOUT_TABLE = os.environ.get("CU_LAYOUT_TABLE", "fct_summary").strip()
 
 # Where to write this generation's permanent record, or blank for none. Set only by the super
 # workflow: a standalone `cu.yml` dispatch measures whatever window it was given, which is not a
 # generation and must not be filed as one. See write_history().
 HISTORY_JSON = os.environ.get("CU_HISTORY_JSON", "").strip()
+
+# Where the committed generation records live, and how many columns of them to print. Reading them
+# back is free — they are in the checkout — and it is the only way this page can say whether a
+# number is normal without spending another dispatch. See render_history() for the collapse rule.
+HISTORY_DIR = os.environ.get("CU_HISTORY_DIR", "history").strip()
+HISTORY_COLS = int(os.environ.get("CU_HISTORY_COLS", "6") or 0)
+
+# Where this page came from. A published report with no route back to the code that made it is a
+# table of numbers nobody can check; the run links are the audit trail for the two ids the page
+# already quotes. GITHUB_REPOSITORY is set in Actions and the fallback is this repo, which is
+# public — no secret is involved, unlike every GUID on this page.
+REPO = os.environ.get("GITHUB_REPOSITORY", "djouallah/fabric-dbt-benchmark").strip()
+SERVER = os.environ.get("GITHUB_SERVER_URL", "https://github.com").strip().rstrip("/")
+
+
+def run_url(run_id):
+    return f"{SERVER}/{REPO}/actions/runs/{run_id}" if run_id else None
+
+
+# What each engine IS — the adapter that ran the models and the thing that wrote the parquet.
+#
+# It lives here rather than in `stats.py`'s artifact on purpose: it is a static fact of this repo's
+# `profiles.yml`, not a measurement, so recording it per run would only mean older artifacts could
+# not be labelled. What DOES come from the artifact is the config beside it (vCores, resource
+# profile, native execution engine) — that varies per dispatch and must never be assumed here.
+#
+# The point of putting it on the CHART is that "iceberg cost 2.3x duckrun" is unreadable without
+# it: they are the same DuckDB, one writing Delta through delta-rs and one writing to an Iceberg
+# REST catalog, on the same notebook size. The bar label alone made that look like an engine
+# difference rather than a writer difference.
+STACK = {
+    "landing": ("download_aemo.py", "the shared AEMO archive every leg reads"),
+    "duckrun": ("dbt-duckrun", "DuckDB → delta-rs"),
+    "iceberg": ("dbt-duckdb", "DuckDB → Iceberg REST catalog"),
+    "spark": ("dbt-fabricspark", "Fabric Spark (Livy) → Delta"),
+    "dwh": ("dbt-fabric-samdebruyn", "Fabric Warehouse (T-SQL)"),
+}
+
+
+def engine_caption(cfg, e):
+    """The one-line "what this bar actually is" for engine `e`: the adapter, then whatever the build
+    RECORDED about the compute it was given. Never a default — an unrecorded profile is simply
+    absent, because a filled-in one reads exactly like a measurement (see render_hardware)."""
+    adapter = (STACK.get(e) or ("", ""))[0]
+    bits = [adapter] if adapter else []
+    c = (cfg or {}).get(e) or {}
+    if c.get("vcores"):
+        bits.append(f"{c['vcores']} vCores")
+    if c.get("resource_profile"):
+        bits.append(str(c["resource_profile"]))
+    nee = c.get("native_execution_engine")
+    if nee is not None:
+        bits.append("NEE on" if str(nee).lower() == "true" else "NEE off")
+    # Deliberately nothing for dwh beyond the adapter: Fabric Warehouse exposes no per-run knob, and
+    # saying so takes more room in the gutter than the longest real config. The table at the foot of
+    # the page carries it.
+    return " · ".join(bits)
 
 # Item x operation x hour. The hour axis supports SINCE and the per-run split below.
 # Mind the spelling: the model also has 'Metrics By Item And Operation' (no time axis) and 'Metrics
@@ -777,9 +837,15 @@ def _chart(title, subtitle, rows):
     A ZERO sorts to the BOTTOM, not the top. Zero here means "this engine did no such work" — a
     benchmark that skipped it, say — and at the top, under a "lower is better" caption, that reads
     as the winner. It is the one value whose rank would lie.
+
+    A row is `[label, cu]` or `[label, cu, caption]`; the caption is the adapter and the compute
+    (see engine_caption) and the renderer draws it as a second, dimmer line under the label. It is
+    on the chart rather than only in a table at the bottom because the bar is where the comparison
+    is actually made, and `iceberg` beside `duckrun` says nothing about them being the same DuckDB
+    at the same notebook size.
     """
     rows = sorted(rows, key=lambda r: (r[1] == 0, r[1]))
-    if not any(v for _l, v in rows):
+    if not any(r[1] for r in rows):
         return
     print(f"\n<!--chart:{json.dumps({'title': title, 'subtitle': subtitle, 'rows': rows})}-->")
 
@@ -1165,6 +1231,70 @@ def load_layout(path=None):
     return doc
 
 
+def render_tables(doc):
+    """EVERY table each engine wrote, with the row total — not just the mart.
+
+    This exists because the page used to show one layout row per engine, for `fct_summary` alone,
+    and a reader who had not read the repo came away thinking the pipeline produced three tables and
+    that the CU above was the cost of scanning one. It produces EIGHT, the benchmark's semantic
+    models carry all eight (a raw-tier query per raw table, so none is dead weight), and the total
+    is over half a billion rows per engine. That is the scale the CU on this page belongs to, and
+    nothing else on the page states it.
+
+    Row counts carry the parity check they carry in `stats.py`'s own dashboard: a ⚠️ on a table name
+    means the engines do not agree about it, which is the one signal that the four outputs are not
+    the same data. The per-engine cell is `files · MB`, because those are the two numbers that say
+    what a scan of that table has to move; the detailed row-group reading stays on the mart below.
+    """
+    stats = doc.get("stats") or {}
+    engines = [e for e in (doc.get("engines") or stats) if stats.get(e)]
+    if not engines:
+        return
+    tables = doc.get("tables") or sorted({t for e in engines for t in stats[e]})
+    tables = [t for t in tables if any((stats[e] or {}).get(t) for e in engines)]
+    if not tables:
+        return
+
+    def get(e, t, key):
+        return ((stats.get(e) or {}).get(t) or {}).get(key)
+
+    rows_total, per_engine_files, per_engine_mb = 0, {e: 0 for e in engines}, {e: 0.0 for e in engines}
+    body = []
+    for t in tables:
+        counts = [get(e, t, "total_rows") for e in engines]
+        present = [c for c in counts if c is not None]
+        agree = len(present) == len(engines) and len(set(present)) == 1
+        rows_total += present[0] if present else 0
+        schema = next((get(e, t, "schema") for e in engines if get(e, t, "schema")), None)
+        cells = []
+        for e in engines:
+            f, mb = get(e, t, "num_files"), get(e, t, "size_mb")
+            per_engine_files[e] += f or 0
+            per_engine_mb[e] += float(mb or 0)
+            cells.append("—" if f is None and mb is None
+                         else f"{(f or 0):,} · {float(mb or 0):,.0f}")
+        label = f"`{schema + '.' if schema else ''}{t}`" + ("" if agree else " ⚠️")
+        body.append((label, present[0] if present else None, cells))
+
+    print(f"\n### What the CU was spent scanning — {len(tables)} tables, "
+          f"{rows_total:,} rows per engine\n")
+    print("| table | rows | " + " | ".join(engines) + " |")
+    print("|:--|--:|" + "--:|" * len(engines))
+    for label, rows, cells in body:
+        print(f"| {label} | {'—' if rows is None else f'{rows:,}'} | " + " | ".join(cells) + " |")
+    print(f"| **{len(tables)} tables** | **{rows_total:,}** | "
+          + " | ".join(f"**{per_engine_files[e]:,} · {per_engine_mb[e]:,.0f}**" for e in engines)
+          + " |")
+    print("\n<sub>Every shared table the project writes, in pipeline order — the same eight the "
+          "benchmark's semantic models carry, so the analytics CU above was spent across all of "
+          "them and not on the mart alone. Each engine's cell is **files · MB**; `rows` is one "
+          "column because the engines are supposed to agree, and a ⚠️ says they do not. Sizes are "
+          "CUMULATIVE — what the tables hold today — while the CU above is what one window's "
+          "dispatches spent, which for an incremental build is not the cost of the rows below. "
+          "Where a ⚠️ says the engines disagree, `rows` is the first engine's count and the total "
+          "carries it.</sub>")
+
+
 def render_layout(doc, cu_by_engine, table=LAYOUT_TABLE):
     """The layout of `table` per engine, with that engine's ANALYTICS CU beside it.
 
@@ -1186,7 +1316,7 @@ def render_layout(doc, cu_by_engine, table=LAYOUT_TABLE):
     cols = [("total_rows", "rows", 0), ("num_files", "files", 0),
             ("num_row_groups", "row groups", 0), ("avg_row_group", "avg RG rows", 0),
             ("size_mb", "size MB", 1)]
-    print(f"\n### Layout of `{table}` — what the CU was spent scanning\n")
+    print(f"\n#### `{table}` in detail — the mart the queries land on\n")
     print("| engine | writer | CU | " + " | ".join(h for _k, h, _d in cols) + " | vorder |")
     print("|:--|:--|--:|" + "--:|" * len(cols) + ":--|")
     for e in engines:
@@ -1200,33 +1330,36 @@ def render_layout(doc, cu_by_engine, table=LAYOUT_TABLE):
         writer = (meta.get(e) or {}).get("writer") or "—"
         print(f"| {e} | `{writer}` | {'—' if cu is None else f'{cu:,.1f}'} | "
               + " | ".join(cells) + f" | {'yes' if vo else 'no'} |")
-    print(f"\n<sub>Layout from the **layout** job of `dbt` run `{run.get('id') or '?'}` "
+    print(f"\n<sub>The biggest table, broken out: the other {len(doc.get('tables') or []) - 1 or 7} "
+          f"are in the table above. Layout from the **layout** job of `dbt` run `{run.get('id') or '?'}` "
           f"(sha `{(run.get('sha') or '?')[:7]}`), written {run.get('written') or '?'} — **a different "
           f"run from the CU above**, so read it as \"the layout as of that dispatch\", and dispatch "
           f"`dbt` again if the tables have been rewritten since. The CU column is this "
-          f"report's own total per engine. Nothing here re-read a Delta log; the full eight-table "
-          f"dashboard is that run's own summary.</sub>")
+          f"report's own ANALYTICS total per engine — what querying it cost, not what building it "
+          f"did. Nothing here re-read a Delta log.</sub>")
 
 
 def render_hardware(doc):
-    """What the build ran ON, from `stats.py`'s `config` block — never from this file's assumptions.
+    """What each engine IS and what it ran ON — the adapter and the writer from STACK, the compute
+    from `stats.py`'s `config` block, never from this file's assumptions.
 
     A CU number is not comparable without it: 26,000 CU at 64 vCores and at 8 are different findings,
     and the same is true of a Spark leg with a different resource profile. Anything the run did not
     record prints as "not recorded", because a default filled in here would read exactly like a
     measurement.
 
-    **dwh has no row at all**, and that is a change from a version that gave it one reading
-    "workspace default — Fabric Warehouse exposes no per-run compute knob". Fabric Warehouse
-    exposes no knob, so that row said the same thing on every run ever printed and could never
-    differ between two reports — a constant occupying a quarter of a table whose only job is to
-    say what varied. The table is what the dispatch CHOSE; dwh chooses nothing.
+    **dwh has a row again**, reversing a version that dropped it. The argument for dropping it was
+    that "workspace default — no per-run knob" said the same thing on every report ever printed, in
+    a table whose only job was to say what the dispatch CHOSE. That argument holds for the compute
+    column and only for it: with the adapter and writer beside it the table's job is now "what is
+    being compared", and there dwh differs from the other three in every column but the last. The
+    chart labels carry the short version, so this is the lookup, not the legend.
     """
     cfg = (doc.get("config") or {})
     run = doc.get("run") or {}
     rows = []
     for e in ENGINES:
-        if e in ("landing", "dwh"):
+        if e == "landing":
             continue
         c = cfg.get(e) or {}
         bits = []
@@ -1238,22 +1371,125 @@ def render_hardware(doc):
             bits.append(f"resource profile `{p}`" if p else None)
             bits.append("native execution engine ON" if str(n).lower() == "true"
                         else ("native execution engine off" if n else None))
+        if e == "dwh":
+            bits.append("workspace default — Fabric Warehouse exposes no per-run knob")
         bits = [b for b in bits if b]
-        rows.append((e, ", ".join(bits) if bits
+        adapter, writer = STACK.get(e) or ("—", "—")
+        rows.append((e, adapter, writer, ", ".join(bits) if bits
                      else f"not recorded by dbt run {run.get('id') or '?'}"))
     if not rows:
         return
-    print("\n### The hardware it ran on\n")
-    print("| engine | compute |")
-    print("|:--|:--|")
-    for e, what in rows:
-        print(f"| {e} | {what} |")
-    print(f"\n<sub>Read from the environment the build legs were actually given and recorded by "
+    print("\n### The four engines — what each one is, and what it ran on\n")
+    print("| engine | dbt adapter | executes / writes | compute |")
+    print("|:--|:--|:--|:--|")
+    for e, adapter, writer, what in rows:
+        print(f"| {e} | `{adapter}` | {writer} | {what} |")
+    print(f"\n<sub>The adapter and writer are facts of this repo's `profiles.yml`; the compute is "
+          f"read from the environment the build legs were actually given and recorded by "
           f"`stats.py` in dbt run `{run.get('id') or '?'}` — not from configuration this report "
           f"assumes. A value the run did not record says so rather than showing a default, because "
-          f"a filled-in default reads exactly like a measurement. The duckdb-family legs run in one "
-          f"Fabric Python notebook each, so their vCores are that notebook's size; spark runs on the "
+          f"a filled-in default reads exactly like a measurement. `duckrun` and `iceberg` are the "
+          f"SAME DuckDB on the same notebook size and differ only in what writes the table, which "
+          f"is why their two bars are the sharpest comparison on this page. spark runs on the "
           f"workspace Livy pool, which this cannot see beyond the profile it asked for.</sub>")
+
+
+def load_history(cells, meta, since, build=None, directory=None, limit=None):
+    """Earlier generation records from `history/`, plus this run, as `[(label, {(cls, engine): cu})]`
+    oldest first. `[]` when there is nothing to compare against — never an exception.
+
+    **Records are collapsed by `since` floor, keeping the latest.** That rule is not tidiness: the
+    floor is a floor, not a window, so every record sharing one is a re-measurement of the same
+    accumulating window — `history/` holds three within fifteen minutes, differing only by what had
+    landed in the metrics model since the last read. Printed as separate columns they would read as
+    three dispatches getting steadily more expensive. The latest read of a floor is the most complete
+    one, so it wins, and this run wins its own floor outright.
+    """
+    # Resolved at CALL time, not bound as a default: the module-level values are read once at import
+    # and a test (or a caller pointing at another checkout) must be able to move them.
+    directory = HISTORY_DIR if directory is None else directory
+    limit = HISTORY_COLS if limit is None else limit
+    recs = []
+    try:
+        names = sorted(os.listdir(directory))
+    except OSError:
+        names = []
+    for n in names:
+        if not n.endswith(".json"):
+            continue
+        try:
+            with open(os.path.join(directory, n), encoding="utf-8") as f:
+                rec = json.load(f)
+        except Exception as ex:
+            log(f"  history: {n} unreadable ({type(ex).__name__})")
+            continue
+        if rec.get("schema") != 1 or not rec.get("cu"):
+            continue
+        recs.append(rec)
+    recs.sort(key=lambda r: r.get("written") or "")
+
+    mine = since.isoformat() if since else None
+    by_floor = {}
+    for rec in recs:
+        floor = rec.get("since")
+        if floor == mine:      # a re-read of the window this report IS — the live numbers win
+            continue
+        per = {}
+        for cls, engines in (rec.get("cu") or {}).items():
+            for eng, ops in (engines or {}).items():
+                per[(cls, eng)] = per.get((cls, eng), 0.0) + sum(ops.values())
+        by_floor[floor] = (floor, rec, per)
+
+    out = []
+    for floor, rec, per in sorted(by_floor.values(), key=lambda t: t[1].get("written") or ""):
+        label = (floor or "everything retained").replace("T", " ")[:16]
+        out.append((label, rec.get("runs", {}).get("build"), per))
+    if limit > 0 and len(out) > limit - 1:
+        out = out[-(limit - 1):]
+
+    per_now = {}
+    for (k, _op), cu in cells.items():
+        info = meta.get(k) or {}
+        per_now[(info.get("cls", "other"), info.get("engine") or "shared")] = per_now.get(
+            (info.get("cls", "other"), info.get("engine") or "shared"), 0.0) + cu
+    # The id under a column is the dbt BUILD it measured, never the measurement's own run id — the
+    # columns exist to say what changed about the tables, and two reads of one build are one column.
+    out.append(((mine or "everything retained").replace("T", " ")[:16] + " · **this run**",
+                build, per_now))
+    return out
+
+
+def render_history(cols):
+    """The committed generations beside this one — the only thing on this page that says whether a
+    number is normal, and it costs no capacity to print.
+
+    Engine down, generation across, same orientation as the runs table above: "what has iceberg's
+    ETL done over the last few dispatches" is one row read left to right. A column is a `since`
+    FLOOR, so it is cumulative from that instant — two columns are two experiments, not two deltas,
+    which is why no percentage-change column is printed. The build ids under it are what say whether
+    a jump is the data or the code.
+    """
+    if len(cols) < 2:
+        return
+    keys = [(c, e) for c in CLASS_ORDER for e in list(ENGINES) + ["shared"]
+            if any(per.get((c, e)) for _l, _b, per in cols)]
+    if not keys:
+        return
+    print("\n### The same numbers, dispatch after dispatch\n")
+    print("| CU (s) | " + " | ".join(l for l, _b, _p in cols) + " |")
+    print("|:--|" + "--:|" * len(cols))
+    for cls, e in keys:
+        print(f"| {e} · {cls} | "
+              + " | ".join(f"{per.get((cls, e), 0.0):,.1f}" for _l, _b, per in cols) + " |")
+    builds = ", ".join(f"`{l.replace(' · **this run**', '')}` = dbt build "
+                       f"[{b}]({run_url(b)})" if b else f"`{l}` = build unrecorded"
+                       for l, b, _p in cols)
+    print(f"\n<sub>From `{HISTORY_DIR}/` in this repo — the records the super workflow commits, "
+          f"which is the only storage that outlives the metrics app's ~14 days and the artifacts' "
+          f"90. Each column is a `since` FLOOR and is CUMULATIVE from it, so read two columns as two "
+          f"experiments rather than as a change: {builds}. Several reads of one floor collapse to "
+          f"the latest, which is the most complete. Raise `CU_HISTORY_COLS` "
+          f"(currently {HISTORY_COLS}) for more.</sub>")
 
 
 def write_history(path, cells, meta, since, asof, doc):
@@ -1356,8 +1592,26 @@ def render(cells, hourly, meta, since, asof, seen=0, dropped=None, active=None, 
     # is CU, and a page of unlabelled thousands gets quoted back as "26,128" with no idea of what.
     print("**Every number on this page is capacity units (CU-seconds)** — Fabric's own billing "
           "measure, read from the Capacity Metrics model's `CU (s)` column. Not milliseconds and "
-          "not rows: what the work COST, which is what the four engines are being compared on "
-          "here.\n")
+          "not rows: what the work COST. One dbt project, four engines, one landed copy of the "
+          "data: this is what each engine charged to build the same tables and to answer the same "
+          "queries.\n")
+
+    # The layout artifact is loaded HERE rather than at the layout section, because the bar captions
+    # need its `config` block — an engine label without the compute it ran on is not comparable, and
+    # the chart is where the comparison actually gets made.
+    doc = load_layout()
+
+    # Where this came from. A published page with no route back to the source is a table of numbers
+    # nobody can check, and the two run ids are already quoted further down — as bare ids, which are
+    # a search away from useless.
+    links = [f"[source]({SERVER}/{REPO})"]
+    build = (doc.get("run") or {}).get("id")
+    if build:
+        links.append(f"[dbt build {build}]({run_url(build)})")
+    if os.environ.get("GITHUB_RUN_ID"):
+        links.append(f"[this measurement {os.environ['GITHUB_RUN_ID']}]"
+                     f"({run_url(os.environ['GITHUB_RUN_ID'])})")
+    print(" · ".join(links) + "\n")
 
     # Charts first: two bars per engine — what building cost, what querying cost. `landing` and
     # `shared` are excluded from the bars because neither is an engine, and a bar beside four
@@ -1370,10 +1624,12 @@ def render(cells, hourly, meta, since, asof, seen=0, dropped=None, active=None, 
         per_cls[(info.get("cls"), info["engine"])] = per_cls.get(
             (info.get("cls"), info["engine"]), 0.0) + cu
     bars = [e for e in ENGINES if e != "landing"]
+    cfg = doc.get("config") or {}
     _chart("ETL — what building the tables cost", "capacity units, lower is better",
-           [[e, round(per_cls.get(("etl", e), 0.0), 1)] for e in bars])
+           [[e, round(per_cls.get(("etl", e), 0.0), 1), engine_caption(cfg, e)] for e in bars])
     _chart("Analytics — what querying them cost", "capacity units, lower is better",
-           [[e, round(per_cls.get(("analytics", e), 0.0), 1)] for e in bars])
+           [[e, round(per_cls.get(("analytics", e), 0.0), 1), engine_caption(cfg, e)]
+            for e in bars])
 
     print(f"Everything since the floor, summed:\n")
     _engine_table(cells, meta)
@@ -1385,7 +1641,6 @@ def render(cells, hourly, meta, since, asof, seen=0, dropped=None, active=None, 
             if (RUN_GAP_HOURS > 0 and hourly) else [])
     if runs:
         render_runs(hourly, runs, meta, cells)
-    doc = load_layout()
     if doc:
         # The layout table's CU column is what QUERYING that engine cost, not its build — it sits
         # beside file counts and row groups to explain a scan, and the ETL cost explains nothing
@@ -1395,7 +1650,13 @@ def render(cells, hourly, meta, since, asof, seen=0, dropped=None, active=None, 
             info = meta.get(k) or {}
             if info.get("cls") == "analytics" and info.get("engine"):
                 analytics[info["engine"]] = analytics.get(info["engine"], 0.0) + cu
+        render_tables(doc)
         render_layout(doc, analytics)
+    # After the layout, before the hardware: "is this number normal" is the question a reader has
+    # once they have seen what the number was spent on, and it is the one question this page can
+    # answer without spending another dispatch.
+    render_history(load_history(cells, meta, since, (doc.get("run") or {}).get("id")))
+    if doc:
         # Last on the page, deliberately: it is the caveat you check a number against once the
         # number has surprised you, not something to read on the way in.
         render_hardware(doc)

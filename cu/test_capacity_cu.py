@@ -10,6 +10,7 @@ paid capacity to find out.
 It imports capacity_cu and nothing else, so `rm -rf cu/` still removes every trace.
 """
 import importlib
+import json
 import os
 import sys
 from datetime import datetime, timedelta
@@ -21,6 +22,25 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 H = datetime(2026, 8, 1, 10, 0)
 
 
+# Set by the autouse fixture below and used as load()'s default, because load() CLEARS every CU_*
+# var before reloading — an env var set by a fixture would not survive it.
+_HISTORY_DIR = "no-such-history"
+
+
+@pytest.fixture(autouse=True)
+def _no_repo_history(tmp_path):
+    """Point the generation records at an EMPTY directory for every test that does not ask for them.
+
+    `history/` is a real directory in this checkout and `render()` reads it, so without this the
+    end-to-end tests would render whatever CU was committed last week into their assertions — which
+    is exactly the class of hidden input this suite exists to keep out. A test that wants history
+    passes `CU_HISTORY_DIR` to load()."""
+    global _HISTORY_DIR
+    _HISTORY_DIR, previous = str(tmp_path / "no-history"), _HISTORY_DIR
+    yield
+    _HISTORY_DIR = previous
+
+
 def load(**env):
     """Import capacity_cu with a given environment. Its config is module-level, so a test that
     changes CU_ETL has to reload rather than set an attribute."""
@@ -29,7 +49,7 @@ def load(**env):
         os.environ.pop(k, None)
     os.environ.update({"PBI_TOKEN": "tok", "CU_METRICS_WORKSPACE_ID": "ws",
                        "CU_METRICS_MODEL_ID": "mdl", "CU_CAPACITY_ID": "cap",
-                       "CU_REFRESH": "0", **env})
+                       "CU_REFRESH": "0", "CU_HISTORY_DIR": _HISTORY_DIR, **env})
     import capacity_cu
     return importlib.reload(capacity_cu)
 
@@ -296,11 +316,14 @@ def test_hardware_reports_what_the_run_recorded(capsys):
         "duckrun": {"vcores": "64"}, "iceberg": {"vcores": "64"},
         "spark": {"resource_profile": "readHeavyForPBI", "native_execution_engine": "true"}}})
     out = capsys.readouterr().out
-    assert "| duckrun | 64 vCores (Fabric Python notebook) |" in out
+    assert "| duckrun | `dbt-duckrun` | DuckDB → delta-rs | 64 vCores (Fabric Python notebook) |" in out
     assert "resource profile `readHeavyForPBI`, native execution engine ON" in out
-    # dwh has NO row. It exposes no per-run compute knob, so its line was identical in every report
-    # ever printed — a constant in a table whose only job is to say what the dispatch chose.
-    assert "dwh" not in out
+    # The two DuckDB legs differ in ONE column, and that is the finding the table exists to make
+    # readable — same adapter family, same notebook size, different writer.
+    assert "| iceberg | `dbt-duckdb` | DuckDB → Iceberg REST catalog |" in out
+    # dwh has a row again: with the adapter and writer columns the table says what is being
+    # COMPARED, and there dwh differs everywhere except the compute cell.
+    assert "| dwh | `dbt-fabric-samdebruyn` |" in out
 
 
 def test_hardware_says_not_recorded_rather_than_guessing(capsys):
@@ -311,6 +334,32 @@ def test_hardware_says_not_recorded_rather_than_guessing(capsys):
     out = capsys.readouterr().out
     assert out.count("not recorded by dbt run 123") == 3      # duckrun, iceberg, spark
     assert "64" not in out and "writeHeavy" not in out
+    # dwh is the exception and must NOT read "not recorded": there is nothing to record.
+    assert "no per-run knob" in out
+
+
+def test_the_bar_caption_names_the_adapter_and_the_compute():
+    """`iceberg` beside `duckrun` on a bar chart reads as an engine difference. It is not — same
+    DuckDB, same notebook size, different writer — and the caption is the only thing that says so."""
+    m = load(CU_MODELS="")
+    cfg = {"duckrun": {"vcores": "64"}, "iceberg": {"vcores": "64"},
+           "spark": {"resource_profile": "writeHeavy", "native_execution_engine": "true"}}
+    assert m.engine_caption(cfg, "duckrun") == "dbt-duckrun · 64 vCores"
+    assert m.engine_caption(cfg, "iceberg") == "dbt-duckdb · 64 vCores"
+    assert m.engine_caption(cfg, "spark") == "dbt-fabricspark · writeHeavy · NEE on"
+    # Nothing recorded -> the adapter alone. A guessed vCore count would read like a measurement.
+    assert m.engine_caption({}, "spark") == "dbt-fabricspark"
+
+
+def test_the_charts_carry_the_config(capsys):
+    """The captions have to reach the CHART, not just the table at the foot of the page — the bar
+    is where the comparison actually gets made."""
+    m = load(CU_MODELS="", STATS_JSON="")
+    m._chart("ETL", "lower is better", [["duckrun", 10.0, "dbt-duckrun · 64 vCores"],
+                                        ["iceberg", 5.0, "dbt-duckdb · 64 vCores"]])
+    spec = json.loads(capsys.readouterr().out.strip()[len("<!--chart:"):-len("-->")])
+    assert spec["rows"] == [["iceberg", 5.0, "dbt-duckdb · 64 vCores"],
+                            ["duckrun", 10.0, "dbt-duckrun · 64 vCores"]]
 
 
 # --------------------------------------------------------------------------- history
@@ -333,6 +382,105 @@ def test_history_record_round_trips_the_numbers(tmp_path, capsys):
     assert rec["cu"]["etl"]["duckrun"]["OneLake Write"] == 40.0
     assert rec["cu"]["analytics"]["duckrun"]["XMLA Read Operation"] == 100.0
     assert "since" in rec and "runs" in rec
+
+
+def _record(since, written, build, etl, analytics):
+    return {"schema": 1, "since": since, "written": written,
+            "runs": {"build": build},
+            "cu": {"etl": {e: {"OneLake Write": v} for e, v in etl.items()},
+                   "analytics": {e: {"XMLA Read Operation": v} for e, v in analytics.items()}}}
+
+
+def test_history_collapses_re_reads_of_one_floor(tmp_path, capsys):
+    """Three records fifteen minutes apart, all on ONE floor, are three READS of the same
+    accumulating window — not three dispatches getting steadily more expensive. Printed as separate
+    columns that is exactly how they read, so the latest (most complete) read wins the floor."""
+    d = tmp_path / "history"
+    d.mkdir()
+    for i, (written, cu) in enumerate([("2026-08-01T04:12", 100.0), ("2026-08-01T04:21", 110.0),
+                                       ("2026-08-01T04:26", 120.0)]):
+        (d / f"{i}.json").write_text(json.dumps(
+            _record("2026-08-01T10:00:00", written, "b1", {"duckrun": cu}, {})), encoding="utf-8")
+    m = load(CU_MODELS="")
+    cols = m.load_history({("aemo_duckrun", "Query"): 5.0},
+                          {"aemo_duckrun": {"cls": "analytics", "engine": "duckrun"}},
+                          datetime(2026, 8, 1, 15, 0), build="b2", directory=str(d))
+    assert [c[0] for c in cols] == ["2026-08-01 10:00", "2026-08-01 15:00 · **this run**"]
+    assert cols[0][2][("etl", "duckrun")] == 120.0          # the LAST read of that floor
+    m.render_history(cols)
+    out = capsys.readouterr().out
+    assert "| duckrun · etl | 120.0 | 0.0 |" in out
+    assert "| duckrun · analytics | 0.0 | 5.0 |" in out
+    # The id under a column is the dbt BUILD it measured, never this measurement's own run id.
+    assert "dbt build [b1]" in out and "dbt build [b2]" in out
+
+
+def test_history_drops_an_earlier_read_of_this_run_s_own_floor(tmp_path, capsys):
+    """A record on the floor this report IS measuring is a re-read of these very numbers. The live
+    ones win, or the page prints its own window twice and invites a reader to diff it against
+    itself."""
+    d = tmp_path / "history"
+    d.mkdir()
+    (d / "a.json").write_text(json.dumps(
+        _record("2026-08-01T15:00:00", "2026-08-01T08:08", "b1", {"duckrun": 99.0}, {})),
+        encoding="utf-8")
+    m = load(CU_MODELS="")
+    cols = m.load_history({}, {}, datetime(2026, 8, 1, 15, 0), directory=str(d))
+    assert len(cols) == 1 and "this run" in cols[0][0]
+    m.render_history(cols)
+    assert capsys.readouterr().out == ""      # one column compares with nothing
+
+
+def test_history_is_skipped_when_the_directory_is_not_there(capsys):
+    """Reading `history/` must never be able to fail the report — it is context, and a checkout
+    without it (or a `cu/` copied elsewhere) is a normal thing to be."""
+    m = load(CU_MODELS="")
+    cols = m.load_history({}, {}, None, directory="no-such-dir-at-all")
+    assert len(cols) == 1
+    m.render_history(cols)
+    assert capsys.readouterr().out == ""
+
+
+# --------------------------------------------------------------------------- layout
+
+def _stats_doc():
+    def t(schema, rows, files, mb):
+        return {"schema": schema, "total_rows": rows, "num_files": files, "num_row_groups": files,
+                "avg_row_group": rows, "size_mb": mb, "vorder": False}
+    return {"run": {"id": "999", "sha": "abc1234", "written": "2026-08-01T07:10:00"},
+            "tables": ["dim_duid", "fct_scada", "fct_summary"],
+            "engines": {"duckrun": {"writer": "delta-rs"}, "spark": {"writer": "spark"}},
+            "stats": {"duckrun": {"dim_duid": t("mart", 689, 1, 0.02),
+                                  "fct_scada": t("landing", 370_021_502, 17, 4154.49),
+                                  "fct_summary": t("mart", 143_980_961, 4, 998.91)},
+                      "spark": {"dim_duid": t("mart", 689, 1, 0.02),
+                                "fct_scada": t("landing", 370_021_502, 1778, 3603.87),
+                                "fct_summary": t("mart", 143_980_961, 100, 1161.88)}}}
+
+
+def test_every_table_is_listed_with_the_row_total(capsys):
+    """The page used to show ONE table's layout, and a reader came away thinking the pipeline
+    produced three tables and that the CU was the cost of scanning one. It produces eight, the
+    benchmark's models carry all eight, and the total is half a billion rows."""
+    m = load(CU_MODELS="")
+    m.render_tables(_stats_doc())
+    out = capsys.readouterr().out
+    assert "3 tables, 514,003,152 rows per engine" in out
+    for t in ("dim_duid", "fct_scada", "fct_summary"):
+        assert f"`{'mart' if t != 'fct_scada' else 'landing'}.{t}`" in out
+    assert "| **3 tables** | **514,003,152** | **22 · 5,153** | **1,879 · 4,766** |" in out
+
+
+def test_a_row_count_disagreement_is_marked_not_averaged(capsys):
+    """A ⚠️ on the row count is the one signal that the four outputs are not the same data. It must
+    survive being put in a cost table, and the cost table must not quietly pick a winner."""
+    m = load(CU_MODELS="")
+    doc = _stats_doc()
+    doc["stats"]["spark"]["fct_summary"]["total_rows"] = 143_980_000
+    m.render_tables(doc)
+    out = capsys.readouterr().out
+    assert "`mart.fct_summary` ⚠️" in out
+    assert "`mart.dim_duid` |" in out          # the agreeing rows keep their clean label
 
 
 def test_no_history_is_written_without_the_env(tmp_path, capsys):
@@ -483,6 +631,7 @@ def test_page_renders_the_report_and_needs_no_network():
     """The page is a build artifact: it has to open off a local disk with no network, years later.
     So nothing external — no CDN, no font, no image, no script."""
     md = ("## Capacity units — since 2026-08-01 10:00\n\n"
+          "[source](https://github.com/o/r)\n\n"
           "| | landing | duckrun | total |\n|:--|---:|---:|---:|\n"
           "| **etl** | **300.0** | **215.0** | **515.0** |\n"
           "| OneLake Write | 240.0 | 120.0 | 360.0 |\n")
@@ -491,7 +640,9 @@ def test_page_renders_the_report_and_needs_no_network():
     assert '<th class="right">landing</th>' in out
     assert '<tr class="sub">' in out                       # the bold subtotal row is marked
     assert '<td class="right">240.0</td>' in out           # numbers right-aligned, unreformatted
-    for forbidden in ("http://", "https://", "<script", "src=", "@import"):
+    # A LINK is fine — it is followed only if the reader clicks. What must not appear is anything the
+    # page FETCHES on its own to render: a script, a stylesheet, an image, a font.
+    for forbidden in ("<script", "src=", "@import", "<img", "<link"):
         assert forbidden not in out
 
 
@@ -528,6 +679,38 @@ def test_a_chart_of_all_zeros_is_not_drawn(capsys):
     m = load(CU_MODELS="")
     m._chart("ETL", "lower is better", [["duckrun", 0.0], ["dwh", 0.0]])
     assert capsys.readouterr().out.strip() == ""
+
+
+def test_a_caption_draws_a_second_line_and_widens_the_gutter():
+    """The caption is the whole reason the labels changed: `iceberg` beside `duckrun` reads as an
+    engine difference, and it is a writer difference. It needs its own line and its own room."""
+    import report_html
+    svg = report_html.chart_svg({"title": "ETL", "subtitle": "lower is better",
+                                 "rows": [["iceberg", 5.0, "dbt-duckdb · 64 vCores"],
+                                          ["duckrun", 10.0, "dbt-duckrun · 64 vCores"]]})
+    assert 'class="bar-caption"' in svg and "dbt-duckdb · 64 vCores" in svg
+    # The bars start after the WIDER gutter, and the tooltip carries the caption too.
+    assert f'translate({report_html.SUB_LABEL_W},0)' in svg
+    assert "<title>iceberg (dbt-duckdb · 64 vCores): 5.0 CU</title>" in svg
+
+
+def test_a_chart_without_captions_keeps_its_old_geometry():
+    """A caption is optional and its absence must not move anything — the two charts on the page are
+    read against each other."""
+    import report_html
+    svg = report_html.chart_svg({"title": "ETL", "rows": [["duckrun", 10.0], ["dwh", 5.0]]})
+    assert f'translate({report_html.LABEL_W},0)' in svg
+    assert "bar-caption" not in svg
+
+
+def test_the_page_links_back_to_its_source():
+    """A published table of numbers with no route back to the code that made it cannot be checked.
+    Links are the one markup the report emits that the renderer did not used to understand."""
+    import report_html
+    out = report_html.to_html("[source](https://github.com/o/r) · [run 5](https://github.com/o/r/x)")
+    assert '<a href="https://github.com/o/r">source</a>' in out
+    # A scheme allowlist, so an item NAME that happens to look like markdown cannot inject a link.
+    assert "<a" not in report_html.to_html("[click](javascript:alert(1))")
 
 
 def test_bar_geometry_is_square_at_the_baseline_and_rounded_at_the_tip():
