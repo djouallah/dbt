@@ -91,11 +91,15 @@ concurrency:
   group: all-${{ github.ref_name }}
   cancel-in-progress: false
 
+# A called workflow can never hold MORE than its caller grants, so this is the union of what the
+# three stages need — not a wish list. `contents: write` is here for exactly one reason: `cu.yml`
+# commits the history record. Without it the whole run fails to COMPILE (startup_failure, no jobs,
+# no log), which reads like a broken file rather than a permission that is one level too low.
 permissions:
-  id-token: write
-  contents: read
-  actions: read
-  pages: write
+  id-token: write     # OIDC to Fabric, every stage
+  contents: write     # cu.yml commits history/
+  actions: read       # cu.yml downloads the `stats` artifact from the dbt run
+  pages: write        # cu.yml publishes the page
 
 jobs:
   # Free, and it is what makes the report describe ONE generation. The CU floor is this run's own
