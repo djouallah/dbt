@@ -13,6 +13,7 @@ import importlib
 import json
 import os
 import sys
+import types
 from datetime import datetime, timedelta
 
 import pytest
@@ -51,7 +52,18 @@ def load(**env):
                        "CU_METRICS_MODEL_ID": "mdl", "CU_CAPACITY_ID": "cap",
                        "CU_REFRESH": "0", "CU_HISTORY_DIR": _HISTORY_DIR, **env})
     import capacity_cu
-    return importlib.reload(capacity_cu)
+    m = importlib.reload(capacity_cu)
+    if m.requests is None:
+        # `requests` is an OPTIONAL import there, so that `dashboard.py` can pull in the renderers
+        # with nothing installed — and the `Dashboard` job installs nothing, which is what PROVES
+        # the render path never reaches the network. This suite still has to run in that job, so it
+        # supplies its own stand-in: every test that reaches a request either replaces these or
+        # never gets that far, and one that slips through fails loudly here instead of silently
+        # skipping the check. Result: `python -m pytest cu/ -q` passes with or without the package.
+        def unstubbed(*_a, **_k):
+            raise AssertionError("a test reached the network — stub execute_dax or requests.*")
+        m.requests = types.SimpleNamespace(post=unstubbed, get=unstubbed)
+    return m
 
 
 def hours(*offsets):
@@ -336,6 +348,17 @@ def test_hardware_says_not_recorded_rather_than_guessing(capsys):
     assert "64" not in out and "writeHeavy" not in out
     # dwh is the exception and must NOT read "not recorded": there is nothing to record.
     assert "no per-run knob" in out
+
+
+def test_measuring_without_requests_dies_with_the_install_line(capsys):
+    """`requests` is optional at IMPORT so the dashboard can borrow these renderers with nothing
+    installed. The reader must not inherit that leniency: it has to stop at the top with the fix,
+    not fail later inside a call with an AttributeError on None."""
+    m = load(CU_MODELS="")
+    m.requests = None
+    with pytest.raises(SystemExit):
+        m.main()
+    assert "pip install requests" in capsys.readouterr().err
 
 
 def test_the_bar_caption_names_the_adapter_and_the_compute():
