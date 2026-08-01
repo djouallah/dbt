@@ -252,7 +252,7 @@ def test_landing_column_says_it_is_a_stage_not_an_engine(capsys):
                             "gen": False, "engine": m.engine_of("dbt_landing")}}
     m._engine_table({("dbt_landing", "OneLake Write"): 40.0}, meta)
     out = capsys.readouterr().out
-    assert out.splitlines()[0].startswith("| | landing | duckrun |")
+    assert out.splitlines()[0].startswith("| CU (s) | landing | duckrun |")
     assert "| **etl** | **40.0** |" in out
     assert "`landing` is a STAGE, not an engine" in out
     assert "cannot be split between them" in out
@@ -264,7 +264,7 @@ def test_engine_table_puts_operations_down_and_engines_across(capsys):
     m._engine_table(_cells(), meta)
     out = capsys.readouterr().out
     head = out.splitlines()[0]
-    assert head == "| | landing | duckrun | iceberg | spark | dwh | shared |"
+    assert head == "| CU (s) | landing | duckrun | iceberg | spark | dwh | shared |"
     assert "| **etl** |" in out and "| **analytics** |" in out
     assert "| OneLake Write | 0.0 | 50.0 | 0.0 | 0.0 | 0.0 | 0.0 |" in out
     assert "| Spark Job | 0.0 | 0.0 | 0.0 | 0.0 | 0.0 | 25.0 |" in out   # ambiguous notebook

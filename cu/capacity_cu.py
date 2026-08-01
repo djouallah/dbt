@@ -749,7 +749,9 @@ def _engine_table(cells, meta):
         f = (lambda v: f"**{v:,.1f}**") if bold else (lambda v: f"{v:,.1f}")
         print(f"| {'**' + label + '**' if bold else label} | " + " | ".join(f(v) for v in vals) + " |")
 
-    print("| | " + " | ".join(cols) + " |")
+    # The corner cell names the measure. Every number in the table is one, and a matrix whose values
+    # carry no unit gets quoted as "26,128" with no idea what of.
+    print("| CU (s) | " + " | ".join(cols) + " |")
     print("|:--|" + "---:|" * len(cols))
     landing_cu = 0.0
     for cls in CLASS_ORDER:
@@ -1023,7 +1025,7 @@ def render_runs(hourly, runs, meta, cells=None):
     # separate passes and a row's cells are separate engines, so neither direction sums to anything
     # anyone asked for. `grand` is still computed — the conservation check below needs it — it is
     # just not printed.
-    print("| | " + " | ".join(h for h, _ in cols) + " |")
+    print("| CU (s) | " + " | ".join(h for h, _ in cols) + " |")
     print("|:--|" + "---:|" * len(cols))
     col_tot = [0.0] * len(cols)
     for cls in CLASS_ORDER:
@@ -1214,6 +1216,9 @@ def write_history(path, cells, meta, since, asof, doc):
         per.setdefault(cls, {}).setdefault(eng, {})[op] = round(cu, 1)
     rec = {
         "schema": 1,
+        # Stated in the record, not just on the page. A file read years from now must not need this
+        # repo's README to know what its numbers are.
+        "unit": "CU (s) — Fabric capacity-unit seconds",
         "written": asof.replace(microsecond=0).isoformat(),
         "since": since.isoformat() if since else None,
         "runs": {"measure": os.environ.get("GITHUB_RUN_ID"),
@@ -1284,6 +1289,13 @@ def render(cells, hourly, meta, since, asof, seen=0, dropped=None, active=None, 
         render_empty(span, seen, dropped or {"workspace": 0, "workspace_blank": 0, "name": 0,
                                             "kind": 0}, active or {}, near or {})
         return
+
+    # Say the unit once, plainly, BEFORE the first number — charts included. Everything on this page
+    # is CU, and a page of unlabelled thousands gets quoted back as "26,128" with no idea of what.
+    print("**Every number on this page is capacity units (CU-seconds)** — Fabric's own billing "
+          "measure, read from the Capacity Metrics model's `CU (s)` column. Not milliseconds and "
+          "not rows: what the work COST, which is what the four engines are being compared on "
+          "here.\n")
 
     # Charts first: two bars per engine — what building cost, what querying cost. `landing` and
     # `shared` are excluded from the bars because neither is an engine, and a bar beside four
