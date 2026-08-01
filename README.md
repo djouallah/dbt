@@ -137,9 +137,11 @@ missing secret if you skip it:
 az ad app federated-credential create --id <appId> --parameters @fic.json
 ```
 
-The stale `dbt_main` and `dbt_main_immutable` credentials are still on the app. Harmless while no
-repo of those names exists, but `dbt_main` is a standing trust for a name that could be created
-again, so it is worth deleting.
+The old `dbt_main` and `dbt_main_immutable` credentials were **deleted** on 2026-08-01, right after
+the new ones were verified green. `dbt_main` in particular was a standing trust for a repo name that
+could be created again, and the app is Admin in the workspace — so the trust list should carry
+nothing that does not currently authenticate something. Keep it that way: when a repo is renamed or
+retired, remove its credential in the same pass that adds the replacement.
 
 ### Where the DuckDB-family build actually runs
 
