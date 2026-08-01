@@ -213,10 +213,24 @@ def test_engine_of_maps_every_item_this_repo_creates():
     assert m.engine_of("dbt_iceberg") == "iceberg"
     assert m.engine_of("dbt_spark") == "spark"
     assert m.engine_of("aemo_dwh") == "dwh"
-    # Shared or genuinely ambiguous — a wrong column is worse than an honest `shared`.
-    assert m.engine_of("dbt_landing") is None
+    assert m.engine_of("dbt_landing") == "landing"        # a stage, not an engine, but a column
+    # Genuinely ambiguous — a wrong column is worse than an honest `shared`.
     assert m.engine_of("duckrun-py-*") is None
     assert m.engine_of("") is None
+
+
+def test_landing_column_says_it_is_a_stage_not_an_engine(capsys):
+    """It gets a column so the download's cost is visible, not so it can be compared with an
+    engine's — nothing splits it, and the table has to say so where the number is read."""
+    m = load(CU_MODELS="")
+    meta = {"dbt_landing": {"label": "dbt_landing", "cls": "etl", "kind": "Lakehouse",
+                            "gen": False, "engine": m.engine_of("dbt_landing")}}
+    m._engine_table({("dbt_landing", "OneLake Write"): 40.0}, meta)
+    out = capsys.readouterr().out
+    assert out.splitlines()[0].startswith("| | landing | duckrun |")
+    assert "| **etl** | **40.0** |" in out
+    assert "`landing` is a STAGE, not an engine" in out
+    assert "cannot be split between them" in out
 
 
 def test_engine_table_puts_operations_down_and_engines_across(capsys):
@@ -225,12 +239,13 @@ def test_engine_table_puts_operations_down_and_engines_across(capsys):
     m._engine_table(_cells(), meta)
     out = capsys.readouterr().out
     head = out.splitlines()[0]
-    assert head.startswith("| | duckrun | iceberg | spark | dwh | shared |")   # duckrun-py-* shared
+    assert head.startswith("| | landing | duckrun | iceberg | spark | dwh | shared |")
     assert "| **etl** |" in out and "| **analytics** |" in out
-    assert "| OneLake Write | 50.0 | 0.0 | 0.0 | 0.0 | 0.0 | 50.0 |" in out
-    assert "| Spark Job | 0.0 | 0.0 | 0.0 | 0.0 | 25.0 | 25.0 |" in out   # the ambiguous notebook
+    assert "| OneLake Write | 0.0 | 50.0 | 0.0 | 0.0 | 0.0 | 0.0 | 50.0 |" in out
+    assert "| Spark Job | 0.0 | 0.0 | 0.0 | 0.0 | 0.0 | 25.0 | 25.0 |" in out   # ambiguous notebook
     # duckrun 110 analytics + 55 etl, shared 25.
-    assert "| **total** | **165.0** | **0.0** | **0.0** | **0.0** | **25.0** | **190.0** |" in out
+    assert ("| **total** | **0.0** | **165.0** | **0.0** | **0.0** | **0.0** | **25.0** | "
+            "**190.0** |") in out
     assert "`shared` is CU no engine can be given" in out
     assert "genuinely ambiguous" in out          # the duckrun-py-* explanation, since it is present
     assert "dbt_landing" not in out              # ...and not the one that is absent
@@ -298,10 +313,13 @@ def test_end_to_end_reports_etl_and_analytics(capsys):
     m.main()
     out = capsys.readouterr().out
     assert "Capacity CU" in out
-    # duckrun's lakehouse (40) + the two ambiguous notebooks (10, in `shared`), then the model.
-    assert "| **etl** | **40.0** | **0.0** | **0.0** | **0.0** | **10.0** | **50.0** |" in out
-    assert "| **analytics** | **100.0** | **0.0** | **0.0** | **0.0** | **0.0** | **100.0** |" in out
-    assert "| **total** | **140.0** | **0.0** | **0.0** | **0.0** | **10.0** | **150.0** |" in out
+    # landing | duckrun's lakehouse (40) | ... | the two ambiguous notebooks (10, in `shared`).
+    assert ("| **etl** | **0.0** | **40.0** | **0.0** | **0.0** | **0.0** | **10.0** | "
+            "**50.0** |") in out
+    assert ("| **analytics** | **0.0** | **100.0** | **0.0** | **0.0** | **0.0** | **0.0** | "
+            "**100.0** |") in out
+    assert ("| **total** | **0.0** | **140.0** | **0.0** | **0.0** | **0.0** | **10.0** | "
+            "**150.0** |") in out
 
 
 def test_end_to_end_etl_off_reproduces_the_old_scope(capsys):
@@ -328,7 +346,7 @@ def test_the_two_duckdb_legs_land_in_their_own_columns(capsys):
     _stub(m, rows, items)
     m.main()
     out = capsys.readouterr().out
-    assert "| **etl** | **300.0** | **200.0** | **0.0** | **0.0** | **500.0** |" in out
+    assert "| **etl** | **0.0** | **300.0** | **200.0** | **0.0** | **0.0** | **500.0** |" in out
     assert "shared" not in out       # both attributable, so no shared column at all
 
 

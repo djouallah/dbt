@@ -833,9 +833,16 @@ detail.
 - **Attribution to an engine is by item NAME, and an ambiguous name goes to `shared`.** The metrics
   model carries no item-to-engine relationship and nothing else in the row could supply one, so
   `engine_of()` matches the display name — with `delta` as an alias for duckrun, because the output
-  lakehouse is `dbt_delta`. `dbt_landing` (every leg reads it) and the legacy `duckrun-py-*`
-  notebooks (both DuckDB legs used that name) land in `shared` and are named in a footnote. Do not
-  make it guess: a wrong column is worse than an honest one, and `shared` is the honest one.
+  lakehouse is `dbt_delta`. What is left in `shared` is the legacy `duckrun-py-*` notebooks (both
+  DuckDB legs used that name) and anything nothing could name. Do not make it guess: a wrong column
+  is worse than an honest one, and `shared` is the honest one.
+- **`landing` is a column but NOT an engine, and the table says so under itself.** `dbt_landing`
+  holds the downloaded AEMO archive — `download_aemo.py` writes it, all four legs read it — so its
+  CU is a shared input cost that must not be added to an engine's column. It has a column because
+  "the download cost X" is a real answer where `shared` was a shrug, not because it is comparable.
+  It **cannot** be split per engine and this is not a limitation of the code: the hourly metrics
+  rows carry no consumer dimension, the legs read it concurrently, and they read it as the same
+  service principal, so any allocation key would be invented.
 - **Livy bills against the LAKEHOUSE. There is no Spark item of any kind.** So `dbt_spark`'s ETL row
   is its OneLake operations *and* the whole spark leg's compute added together, and the operation
   column is the only thing that separates them. Three attribution shapes in one table, so the ETL

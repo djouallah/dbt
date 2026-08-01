@@ -123,16 +123,24 @@ CLASS_ORDER = ["etl", "analytics", "other"]
 # also what makes the width problem go away: a dozen OneLake operation types is a dozen rows, and
 # markdown handles that fine.
 #
-# Every engine is printed even at 0.0, for the same reason every named model is: a column that
-# disappears is indistinguishable from an engine that spent nothing.
+# Every column is printed even at 0.0, for the same reason every named model is: a column that
+# disappears is indistinguishable from one that spent nothing.
+#
+# `landing` leads and is NOT an engine — it is the stage every engine reads from: `dbt_landing` holds
+# the downloaded AEMO archive, `download_aemo.py` writes it, and all four legs read it. It gets a
+# column because "the download and the source reads cost X" is a real answer, where folding it into
+# `shared` was a shrug. It is still not splittable per engine and that has not changed — see
+# `_shared_note` and cu/README.md — this just stops the one item that dominates `shared` from
+# looking like an accounting failure.
 ENGINES = [e.strip() for e in os.environ.get(
-    "CU_ENGINES", "duckrun,iceberg,spark,dwh").split(",") if e.strip()]
+    "CU_ENGINES", "landing,duckrun,iceberg,spark,dwh").split(",") if e.strip()]
 
 # How an item NAME says which engine it belongs to. Matched as a substring of the lower-cased
 # display name, engines tried in CU_ENGINES order.
 #
 # `delta` is the alias that matters: duckrun's output lakehouse is `dbt_delta`, not `dbt_duckrun`.
-# Everything else is the engine's own name — `aemo_iceberg`, `dbt_spark`, `dbt-duckrun-<random>`.
+# Everything else matches its own name — `aemo_iceberg`, `dbt_spark`, `dbt-duckrun-<random>`, and
+# `dbt_landing` for the `landing` column.
 ENGINE_ALIASES = {"duckrun": ("duckrun", "delta")}
 
 # Names that contain an engine token but must NOT be attributed to it. `duckrun-py-` is duckrun's
@@ -654,6 +662,7 @@ def _engine_cols(meta, keys):
 # Why a given item cannot be given a column. Only the ones actually in `shared` are explained, so
 # the footnote describes the report in front of you rather than every case that could arise.
 SHARED_WHY = {
+    # Only reachable if CU_ENGINES is set without `landing`; by default it has its own column.
     "dbt_landing": "the downloaded AEMO archive, which every leg reads",
     "duckrun-py-*": "duckrun's DEFAULT notebook name, used by both DuckDB legs before "
                     "`fabric_run.py` named its own — genuinely ambiguous",
@@ -704,6 +713,12 @@ def _engine_table(cells, meta):
         for op in ops:
             row(op, [per.get((cls, op, c), 0.0) for c in cols])
     row("total", grand, bold=True)
+    if "landing" in cols and grand[cols.index("landing")]:
+        print("\n<sub>`landing` is a STAGE, not an engine: one lakehouse holding the downloaded "
+              "AEMO archive that all four legs read and `download_aemo.py` writes. It is a shared "
+              "input cost, so do not add it to an engine's column — and it cannot be split between "
+              "them, because the metrics rows carry no consumer dimension, the legs read it "
+              "concurrently, and they read it as the same service principal.</sub>")
     _shared_note(shared)
 
 

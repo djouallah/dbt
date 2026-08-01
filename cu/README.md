@@ -11,17 +11,25 @@ authoritative source, so this reads it by DAX and prints it back engine-major: f
 ```
 ## Capacity CU — since 2026-07-31 16:00 (model clock), as of 2026-08-01 14:10Z
 
-|                        | duckrun | iceberg | spark |     dwh | shared |   total |
-|:-----------------------|--------:|--------:|------:|--------:|-------:|--------:|
-| **etl**                |   215.0 |     0.0 | 210.0 |   188.0 |   40.0 |   653.0 |
-| Spark Job              |     0.0 |     0.0 | 210.0 |     0.0 |    0.0 |   210.0 |
-| Warehouse Query        |     0.0 |     0.0 |   0.0 |   188.0 |    0.0 |   188.0 |
-| OneLake Write          |   120.0 |     0.0 |   0.0 |     0.0 |   40.0 |   160.0 |
-| Notebook Run           |    95.0 |     0.0 |   0.0 |     0.0 |    0.0 |    95.0 |
-| **analytics**          |   320.0 |     0.0 |   0.0 | 3,499.0 |    0.0 | 3,819.0 |
-| XMLA Read Operation    |   320.0 |     0.0 |   0.0 | 3,499.0 |    0.0 | 3,819.0 |
-| **total**              |   535.0 |     0.0 | 210.0 | 3,687.0 |   40.0 | 4,472.0 |
+|                     | landing | duckrun | iceberg | spark |     dwh |   total |
+|:--------------------|--------:|--------:|--------:|------:|--------:|--------:|
+| **etl**             |   300.0 |   215.0 |   178.0 | 210.0 |   188.0 | 1,091.0 |
+| OneLake Write       |   240.0 |   120.0 |    90.0 |   0.0 |     0.0 |   450.0 |
+| Spark Job           |     0.0 |     0.0 |     0.0 | 210.0 |     0.0 |   210.0 |
+| Warehouse Query     |     0.0 |     0.0 |     0.0 |   0.0 |   188.0 |   188.0 |
+| Notebook Run        |     0.0 |    95.0 |    88.0 |   0.0 |     0.0 |   183.0 |
+| OneLake Read        |    60.0 |     0.0 |     0.0 |   0.0 |     0.0 |    60.0 |
+| **analytics**       |     0.0 |   320.0 |     0.0 |   0.0 | 3,499.0 | 3,819.0 |
+| XMLA Read Operation |     0.0 |   320.0 |     0.0 |   0.0 | 3,499.0 | 3,819.0 |
+| **total**           |   300.0 |   535.0 |   178.0 | 210.0 | 3,687.0 | 4,910.0 |
 ```
+
+**`landing` is a STAGE, not an engine**, and the table says so under itself. `dbt_landing` holds the
+downloaded AEMO archive: `download_aemo.py` writes it and all four legs read it. It has its own
+column because "the download cost X" is a real answer, where folding it into `shared` was a shrug —
+but it is a *shared input cost*, so do not add it to an engine's column, and it **cannot** be split
+between them: the metrics rows carry no consumer dimension, the legs read it concurrently, and they
+read it as the same service principal. Any allocation key would be invented.
 
 **Engine-major, because that is the repo's thesis** — same data, four engines, side by side — and it
 is the only orientation in which "what did iceberg cost to build *and* to query" is one column read
@@ -33,11 +41,12 @@ those as *columns* was the shape that got this width reverted the first time.
 and nothing else in the row could supply one — `dbt_delta` and `aemo_duckrun` and
 `dbt-duckrun-<random>` are duckrun's (`delta` is the alias that matters), `dbt_spark` is spark's, and
 so on. Anything ambiguous goes to **`shared`** rather than to a guess, named in a footnote: a wrong
-column is worse than an honest one. `dbt_landing` lives there because every leg reads it, and the
-legacy `duckrun-py-*` notebooks because both DuckDB legs used that name.
+column is worse than an honest one. What ends up there is the legacy `duckrun-py-*` notebooks (both
+DuckDB legs used that name, so they cannot be told apart) and any item nothing could name — a bare
+GUID in `shared` is the snapshot-lag trap below, not an item called that.
 
-Every engine gets a column even at 0.0 — a column that disappears is indistinguishable from an
-engine that spent nothing. `CU_ENGINES` sets the list and the order.
+Every column is printed even at 0.0 — one that disappears is indistinguishable from one that spent
+nothing. `CU_ENGINES` sets the list and the order.
 
 `etl: false` on the dispatch narrows it back to the semantic models exactly as before — worth having
 when comparing against an older dispatch's numbers. `CU_ITEM_DETAIL=1` prints the item-major table
@@ -88,17 +97,18 @@ run:
 ```
 ### Runs detected: 2
 
-|               | run 1<br>08-01 10:00→10:00 | run 2<br>08-01 20:00→20:00 |     total |
-|:--------------|---------------------------:|---------------------------:|----------:|
-| **etl**       |                  **653.0** |                    **0.0** |     653.0 |
-| duckrun       |                      215.0 |                        0.0 |     215.0 |
-| spark         |                      210.0 |                        0.0 |     210.0 |
-| dwh           |                      188.0 |                        0.0 |     188.0 |
-| shared        |                       40.0 |                        0.0 |      40.0 |
-| **analytics** |                    **0.0** |                **3,819.0** |   3,819.0 |
-| duckrun       |                        0.0 |                      320.0 |     320.0 |
-| dwh           |                        0.0 |                    3,499.0 |   3,499.0 |
-| **total**     |                  **653.0** |                **3,819.0** | **4,472.0**|
+|               | run 1<br>08-01 10:00→10:00 | run 2<br>08-01 20:00→20:00 |      total |
+|:--------------|---------------------------:|---------------------------:|-----------:|
+| **etl**       |                **1,091.0** |                    **0.0** |    1,091.0 |
+| landing       |                      300.0 |                        0.0 |      300.0 |
+| duckrun       |                      215.0 |                        0.0 |      215.0 |
+| iceberg       |                      178.0 |                        0.0 |      178.0 |
+| spark         |                      210.0 |                        0.0 |      210.0 |
+| dwh           |                      188.0 |                        0.0 |      188.0 |
+| **analytics** |                    **0.0** |                **3,819.0** |    3,819.0 |
+| duckrun       |                        0.0 |                      320.0 |      320.0 |
+| dwh           |                        0.0 |                    3,499.0 |    3,499.0 |
+| **total**     |                **1,091.0** |                **3,819.0** |**4,910.0** |
 ```
 
 Same orientation as the aggregate above — class subtotal in bold, engines under it — so the two read
@@ -252,7 +262,7 @@ is long enough:
 
 | env | default | what it does |
 |:--|:--|:--|
-| `CU_ENGINES` | `duckrun,iceberg,spark,dwh` | the columns, and their order |
+| `CU_ENGINES` | `landing,duckrun,iceberg,spark,dwh` | the columns, and their order. Drop `landing` and `dbt_landing` falls back into `shared` |
 | `CU_ITEM_DETAIL` | off | also print the item-major table, for when a column looks wrong |
 | `CU_RUN_COLS` | `8` (`0` = unlimited) | runs with their own column before the oldest fold into `earlier` |
 | `CU_GROUP_PREFIXES` | `dbt-duckrun-,dbt-iceberg-,duckrun-py-` | item name prefixes that collapse to one item |
