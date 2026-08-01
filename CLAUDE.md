@@ -1008,6 +1008,20 @@ follows describes the measurement, and anything about the PAGE now lives in the 
   deliberately holds no benchmark timings, which is what keeps the `run_report.json` isolation
   intact. `schema` is there from the first file so a later reader can tell records apart by reading
   one, rather than guessing from which keys are present.
+- **A record covers the ENGINES THAT DISPATCH BUILT, in all three of its halves.** `layout` and
+  `config` come from `stats.py`, which cuts itself to `BUILD_ENGINES`; `cu` is cut by
+  `write_history()` against the same set, read off the stats doc's `engines` keys. Before that it
+  was not, and an `engines=spark` dispatch filed a record naming all four — the CU was **real**
+  (the other three items still exist and OneLake still bills background reads against them, 1,578
+  for iceberg on run 30699626723), it just answered a different question than the document it sat
+  in, and a reader saw four columns from a run that compared nothing. Two things this pins.
+  `landing` and `shared` are never dropped — neither is an engine a dispatch could have selected —
+  which is what `BUILDABLE` in `capacity_cu.py` is for. And the drop is **logged with its CU
+  total**, because leaving real spend out of the series is a decision, not a filter. The measured
+  half of `cu.yml`'s own job summary is deliberately still unscoped: that is a capacity read over a
+  window, and a standalone dispatch has no build to scope to. The one record written before this
+  (`2026-08-01T1314Z-30699626723.json`) was rewritten in place by the same rule rather than deleted
+  — its spark numbers are sound, only its columns were wrong.
 - **MEASURING and PUBLISHING are two workflows, and the contract between them is the JSON record.**
   `cu.yml` reads the metrics model and commits one `history/` record; **`dashboard.yml`
   (`cu/dashboard.py`) reads `history/` and publishes the page**, `workflow_dispatch` only, never

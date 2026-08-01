@@ -158,6 +158,12 @@ ENGINES = [e.strip() for e in os.environ.get(
 # `dbt_landing` for the `landing` column.
 ENGINE_ALIASES = {"duckrun": ("duckrun", "delta")}
 
+# The engine columns a dbt BUILD produces, and therefore the only ones a `BUILD_ENGINES` selection
+# can scope. `landing` and `shared` are deliberately absent: the first is a stage every dispatch
+# reads from and the second is what nothing could name, so neither is ever "an engine this run did
+# not build". Used by write_history() only — see the note there.
+BUILDABLE = ("duckrun", "iceberg", "spark", "dwh")
+
 # Names that contain an engine token but must NOT be attributed to it. `duckrun-py-` is duckrun's
 # DEFAULT notebook name, which both DuckDB legs used before `fabric_run.py` started naming its own —
 # so those rows are genuinely ambiguous, and guessing them into the duckrun column would be a wrong
@@ -1549,6 +1555,23 @@ def write_history(path, cells, meta, since, asof, doc):
         info = meta.get(k) or {}
         cls, eng = info.get("cls", "other"), info.get("engine") or "shared"
         per.setdefault(cls, {}).setdefault(eng, {})[op] = round(cu, 1)
+    # SCOPED to the engines the build covered, which the stats doc already carries (`stats.py` cuts
+    # its own `engines`/`stats`/`config` to `BUILD_ENGINES`). Without this a `engines=spark` dispatch
+    # filed a record naming all four: the CU is real — the other three items still exist and OneLake
+    # still bills background reads against them — but a generation record is a document about ONE
+    # dispatch, and a column for an engine that dispatch never ran reads as "spark cost 30k, iceberg
+    # cost 1.4k", i.e. a comparison, from a run that compared nothing. The layout was already scoped
+    # this way and the two halves have to agree, or the dashboard prints a CU column with no table
+    # under it. Dropped CU is LOGGED with its total: it is being left out of the series on purpose,
+    # and a silent drop of real spend is the failure this repo keeps not making.
+    built = set(doc.get("engines") or ()) if doc else set()
+    if built:
+        for cls, engs in per.items():
+            for eng in [e for e in engs if e in BUILDABLE and e not in built]:
+                log(f"  history: dropping {eng} {cls} "
+                    f"({sum(engs[eng].values()):,.1f} CU) — this build ran {','.join(sorted(built))}")
+                del engs[eng]
+        per = {cls: engs for cls, engs in per.items() if engs}
     rec = {
         # 2 adds `tables` — the pipeline ORDER of the layout, which `json.dump(sort_keys=True)`
         # destroys and which the dashboard cannot recover from the layout dict itself. A schema-1

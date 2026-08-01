@@ -1,11 +1,5 @@
 {
  "config": {
-  "duckrun": {
-   "vcores": "8"
-  },
-  "iceberg": {
-   "vcores": "8"
-  },
   "spark": {
    "native_execution_engine": "true",
    "resource_profile": "readHeavyForPBI"
@@ -21,30 +15,6 @@
    }
   },
   "etl": {
-   "duckrun": {
-    "OneLake Iterative Read via Proxy": 19.5,
-    "OneLake Other Operations Via Redirect": 70.4,
-    "OneLake Write via Proxy": 6.8,
-    "OneLake Write via Redirect": 3.4,
-    "SQL Endpoint Query": 4.9
-   },
-   "dwh": {
-    "OneLake Iterative Read via Proxy": 1.5,
-    "OneLake Other Operations Via Redirect": 0.2,
-    "OneLake Write via Proxy": 6.8,
-    "OneLake Write via Redirect": 3.4,
-    "SQL Endpoint Query": 19.3,
-    "Warehouse Query": 11.0
-   },
-   "iceberg": {
-    "OneLake Iterative Read via Proxy": 1351.0,
-    "OneLake Other Operations": 85.2,
-    "OneLake Other Operations Via Redirect": 0.8,
-    "OneLake Read via Proxy": 85.1,
-    "OneLake Write via Proxy": 6.8,
-    "OneLake Write via Redirect": 3.4,
-    "SQL Endpoint Query": 45.7
-   },
    "landing": {
     "OneLake Iterative Read via Proxy": 13.7,
     "OneLake Other Operations Via Redirect": 0.3,

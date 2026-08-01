@@ -512,6 +512,24 @@ def test_a_row_count_disagreement_is_marked_not_averaged(capsys):
     assert "`mart.dim_duid` |" in out          # the agreeing rows keep their clean label
 
 
+def test_history_records_only_the_engines_the_build_ran(tmp_path, capsys):
+    """A `engines=spark` dispatch filed a record naming all four. The other three items still exist
+    and still bill background OneLake reads, so the CU is real — but a generation record documents
+    ONE dispatch, and an iceberg column beside a spark one reads as a comparison the run never made.
+    The layout half was already scoped, so an unscoped `cu` also left columns with no table under
+    them. `landing` and `shared` survive: neither is an engine the build could have selected."""
+    m = load(CU_MODELS="")
+    path = tmp_path / "rec.json"
+    meta = {k: {"cls": "etl", "engine": e}
+            for k, e in (("a", "spark"), ("b", "iceberg"), ("c", "landing"), ("d", None))}
+    cells = {(k, "OneLake Write"): 10.0 for k in meta}
+    doc = _stats_doc()
+    doc["engines"] = {"spark": {"writer": "spark"}}
+    rec = m.write_history(str(path), cells, meta, None, datetime(2026, 8, 1, 13, 0), doc)
+    assert sorted(rec["cu"]["etl"]) == ["landing", "shared", "spark"]
+    assert json.loads(path.read_text(encoding="utf-8"))["cu"] == rec["cu"]
+
+
 def test_no_history_is_written_without_the_env(tmp_path, capsys):
     """A standalone dispatch measures an arbitrary window; filing that as a generation would poison
     the history with records that mean something else."""

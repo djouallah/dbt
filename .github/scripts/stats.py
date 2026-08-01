@@ -229,12 +229,16 @@ def write_json(per_engine, engines):
         # rather than filling in a default — the whole point is that this reports the run, not the
         # repo's intentions. dwh is absent on purpose: Fabric Warehouse exposes no knob here, and an
         # invented row would imply one exists.
-        "config": {
-            "duckrun": {"vcores": os.environ.get("FABRIC_CORES") or None},
-            "iceberg": {"vcores": os.environ.get("FABRIC_CORES") or None},
-            "spark": {"resource_profile": os.environ.get("SPARK_RESOURCE_PROFILE") or None,
-                      "native_execution_engine": os.environ.get("SPARK_NATIVE_ENABLED") or None},
-        },
+        # Scoped to ENGINES, like `stats` and `engines` above: a `BUILD_ENGINES=spark` dispatch
+        # never set `FABRIC_CORES` for a notebook it did not run, so recording a vCore count under
+        # `duckrun` there states a hardware choice that no leg made. The reader prints this as the
+        # hardware the run RAN ON, and an engine the run did not build has none.
+        "config": {e: cfg for e, cfg in (
+            ("duckrun", {"vcores": os.environ.get("FABRIC_CORES") or None}),
+            ("iceberg", {"vcores": os.environ.get("FABRIC_CORES") or None}),
+            ("spark", {"resource_profile": os.environ.get("SPARK_RESOURCE_PROFILE") or None,
+                       "native_execution_engine": os.environ.get("SPARK_NATIVE_ENABLED") or None}),
+        ) if any(e == n for n, _i, _k in ENGINES)},
         "engines": {e: {"item": item, "kind": kind, "writer": WRITER.get(e, e)}
                     for e, item, kind in ENGINES},
         "tables": list(TABLES),
