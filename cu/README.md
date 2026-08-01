@@ -25,11 +25,22 @@ authoritative source, so this reads it by DAX and prints it back engine-major: f
 ```
 
 **`landing` is a STAGE, not an engine**, and the table says so under itself. `dbt_landing` holds the
-downloaded AEMO archive: `download_aemo.py` writes it and all four legs read it. It has its own
-column because "the download cost X" is a real answer, where folding it into `shared` was a shrug —
-but it is a *shared input cost*, so do not add it to an engine's column, and it **cannot** be split
-between them: the metrics rows carry no consumer dimension, the legs read it concurrently, and they
-read it as the same service principal. Any allocation key would be invented.
+downloaded AEMO archive, written by `download_aemo.py`. It has its own column because "the download
+cost X" is a real answer, where folding it into `shared` was a shrug — and it is a *shared input
+cost*, so do not add it to an engine's column.
+
+What it no longer holds is the legs' **reads**. Those used to arrive as one undivided
+`OneLake Read` row — the largest single number in the report — that nothing could attribute, and
+this file used to say it could never be split, because the metrics rows carry no consumer dimension
+and all four legs read as the same service principal. Both facts are still true; the fix was to stop
+needing a consumer dimension. Each leg now reads the same bytes through a **`Files/landing` shortcut
+in its own lakehouse** (`provision.py`), and OneLake accounts a transaction against the **requested
+path**, so the read is booked to the item hosting the shortcut. For duckrun, iceberg and spark that
+is the output lakehouse they already had — no new item. dwh is the exception: a warehouse has no
+`Files` section and cannot host a shortcut, so it reads through `dbt_dwh_src`, a lakehouse holding
+that shortcut and nothing else. It is `_src` and not `_landing` on purpose: `engine_of` tries
+`CU_ENGINES` in order, `landing` comes first, and `dbt_dwh_landing` would substring-match it and
+undo the whole thing.
 
 The page leads with two **bar charts** — ETL and analytics CU per engine, lower is better — and ends
 with the **hardware** the build ran on. Both are drawn from numbers on this page: no timings, no

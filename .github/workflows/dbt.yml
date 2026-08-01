@@ -156,18 +156,17 @@ jobs:
     needs: reset
     runs-on: ubuntu-latest
     timeout-minutes: 30
-    outputs:
-      files_path: ${{ steps.prov.outputs.files_path }}
+    # No `outputs:` any more. This job used to export FILES_PATH for every leg to share; each leg
+    # now gets its own from `provision.py <engine>`, pointing at the `Files/landing` shortcut in
+    # its own lakehouse. The FILES_PATH this job sets is the DIRECT dbt_landing path and is for
+    # download_aemo.py, which writes the archive — that write CU belongs to `dbt_landing`.
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with: {python-version: "3.11"}
       - run: pip install duckrun
       - name: Provision landing lakehouse
-        id: prov
-        run: |
-          python .github/scripts/provision.py land | tee /tmp/land.env >> "$GITHUB_ENV"
-          echo "files_path=$(grep '^FILES_PATH=' /tmp/land.env | cut -d= -f2-)" >> "$GITHUB_OUTPUT"
+        run: python .github/scripts/provision.py land >> "$GITHUB_ENV"
       - name: Download AEMO data (obstore -> OneLake)
         run: python download_aemo.py
 
@@ -197,8 +196,12 @@ jobs:
         include:
           - {engine: duckrun, label: delta_rs}
           - {engine: iceberg, label: iceberg}
-    env:
-      FILES_PATH: ${{ needs.land.outputs.files_path }}
+    # No job-level FILES_PATH. `provision.py <engine>` prints one pointing at the `Files/landing`
+    # shortcut in THIS engine's own lakehouse, which is what splits the landing read CU per engine
+    # — and a job-level `env` outranks anything a later step writes to $GITHUB_ENV, so a leftover
+    # `FILES_PATH: ${{ needs.land.outputs.files_path }}` here would silently keep both legs on the
+    # shared direct path and the split would look like it simply did not work. `needs: land` still
+    # stands: the download has to have happened before anything reads it.
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -223,8 +226,8 @@ jobs:
         include:
           - {engine: dwh, install: "dbt-fabric-samdebruyn dbt-core==1.11.10 dbt-adapters==1.23.0"}
           - {engine: spark, install: "dbt-fabricspark"}
-    env:
-      FILES_PATH: ${{ needs.land.outputs.files_path }}
+    # No job-level FILES_PATH — same reason as the `fabric` job above: it would outrank the one
+    # `provision.py <engine>` writes to $GITHUB_ENV and both legs would stay on the shared path.
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5

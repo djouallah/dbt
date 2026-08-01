@@ -563,7 +563,10 @@ the `cu/` section.
   tell you the name is free, which is why the fix is the download-long gap and not a longer poll.
   `ensure()` does still ride out that 409 as a backstop, for a by-hand reset followed straight
   away by a build. `dbt_landing` is never dropped — `drop()` refuses it by name, and the `reset`
-  mode's item list does not contain it. That lakehouse holds
+  mode's item list does not contain it. Neither is `dbt_dwh_src`, the shortcut-only lakehouse dwh
+  reads landing through: it is an input, it holds no data, and dropping it would only cost a name
+  reservation. The other three legs' shortcuts DO go down with their lakehouse and are recreated
+  by the leg on the way in. That lakehouse holds
   the downloaded AEMO archive, the one thing here that cannot be rebuilt from the workspace, and
   re-landing it means re-downloading years of files `download_limit` at a time.
   This is the lever to reach for when a table is wrong in a way no incremental write can repair —
@@ -852,12 +855,41 @@ detail.
   DuckDB legs used that name) and anything nothing could name. Do not make it guess: a wrong column
   is worse than an honest one, and `shared` is the honest one.
 - **`landing` is a column but NOT an engine, and the table says so under itself.** `dbt_landing`
-  holds the downloaded AEMO archive — `download_aemo.py` writes it, all four legs read it — so its
-  CU is a shared input cost that must not be added to an engine's column. It has a column because
-  "the download cost X" is a real answer where `shared` was a shrug, not because it is comparable.
-  It **cannot** be split per engine and this is not a limitation of the code: the hourly metrics
-  rows carry no consumer dimension, the legs read it concurrently, and they read it as the same
-  service principal, so any allocation key would be invented.
+  holds the downloaded AEMO archive — `download_aemo.py` writes it — so its CU is a shared input
+  cost that must not be added to an engine's column. It has a column because "the download cost X"
+  is a real answer where `shared` was a shrug, not because it is comparable.
+- **The legs' READS of landing are split per engine now, by a shortcut each, and this file used to
+  say that was impossible.** It said the split could not be made because the hourly metrics rows
+  carry no consumer dimension, the legs read concurrently, and they read as the same service
+  principal. All three are still true. The fix was to stop needing a consumer dimension: **OneLake
+  accounts a transaction against the REQUESTED PATH**, so a read through a shortcut is booked to
+  the item hosting the shortcut. Each leg therefore reads the same bytes through a `Files/landing`
+  → `dbt_landing/Files` shortcut **inside its own lakehouse**, and `engine_of` maps that item to a
+  column as it already did. What is left in the `landing` column is the download's write plus
+  `fabric_run.py`'s result/log round-trip. Four things are load-bearing rather than stylistic:
+  - **No new items, except one.** duckrun/iceberg/spark put the shortcut in the output lakehouse
+    they already have, so a leg's landing reads land in the same column as its writes. **dwh
+    cannot host a shortcut at all** — a Fabric Warehouse has no `Files` section — so it alone gets
+    a lakehouse, `dbt_dwh_src`, holding that shortcut and nothing else.
+  - **`dbt_dwh_src`, never `dbt_dwh_landing`.** `engine_of` substring-matches `CU_ENGINES` **in
+    order** and `landing` is first, so the `_landing` spelling matches `landing` and puts dwh's
+    reads straight back where they came from. Pinned by a test.
+  - **The shortcut is ensured in each ENGINE's provision mode, not in `land`.** `reset` deletes
+    `dbt_delta`/`dbt_iceberg`/`dbt_spark` and takes their shortcut with them, and it runs *before*
+    `land` — so at `land` time those lakehouses may not exist. The leg that recreates the item
+    recreates the shortcut, find-or-create, on the way in. `dbt_dwh_src` is **not** in `OUTPUTS`
+    and is never dropped: it holds no data, and a deleted-then-recreated item is the
+    `ItemDisplayNameNotAvailableYet` 409 from run 30639018466.
+  - **`dbt.yml` must not set a job-level `FILES_PATH`.** It outranks what `provision.py <engine>`
+    writes to `$GITHUB_ENV`, so a leftover `FILES_PATH: ${{ needs.land.outputs.files_path }}` keeps
+    every leg on the shared direct path and the split silently does not happen. The `land` job's
+    `outputs:` block was removed for the same reason.
+  Verified against the live warehouse before shipping: parquet `OPENROWSET`, the explicit
+  multi-file `BULK (…)` CSV list `openrowset_csv_files` builds, and the `*.CSV` + `filepath(1)`
+  fallback all return byte-identical results through the shortcut and direct. `[file]` is
+  untouched — `parse_filename` stores the stem, not the path, so no merge key moves. What is still
+  unproven is the attribution itself: read the first dispatch's report, and if `landing` still
+  holds the read row, the item does not follow the shortcut and this bought nothing.
 - **Livy bills against the LAKEHOUSE. There is no Spark item of any kind.** So `dbt_spark`'s ETL row
   is its OneLake operations *and* the whole spark leg's compute added together, and the operation
   column is the only thing that separates them. Three attribution shapes in one table, so the ETL

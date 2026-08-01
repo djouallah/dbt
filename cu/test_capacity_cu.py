@@ -239,14 +239,24 @@ def test_engine_of_maps_every_item_this_repo_creates():
     assert m.engine_of("dbt_spark") == "spark"
     assert m.engine_of("aemo_dwh") == "dwh"
     assert m.engine_of("dbt_landing") == "landing"        # a stage, not an engine, but a column
+    # dwh reads the landed CSVs through a shortcut in this lakehouse — the only item the shortcut
+    # scheme adds, because a warehouse has no `Files` of its own (provision.py DWH_SRC). The other
+    # three legs put the shortcut inside the output lakehouse they already have, so they need no
+    # new name here. THIS is why it is `_src` and not `_landing`: engine_of tries CU_ENGINES in
+    # order, `landing` is first, and `dbt_dwh_landing` would put dwh's landing reads straight back
+    # into the `landing` column — the exact hole the shortcut exists to close.
+    assert m.engine_of("dbt_dwh_src") == "dwh"
+    assert m.engine_of("dbt_dwh_landing") == "landing"    # the trap, pinned so it stays known
     # Genuinely ambiguous — a wrong column is worse than an honest `shared`.
     assert m.engine_of("duckrun-py-*") is None
     assert m.engine_of("") is None
 
 
 def test_landing_column_says_it_is_a_stage_not_an_engine(capsys):
-    """It gets a column so the download's cost is visible, not so it can be compared with an
-    engine's — nothing splits it, and the table has to say so where the number is read."""
+    """It gets a column so the download's WRITE is visible, not so it can be compared with an
+    engine's, and the table has to say so where the number is read. The note used to claim the
+    column could never be split; the legs' reads now sit in the engine columns, via a shortcut
+    each, so it has to say where they went instead of repeating a fact that stopped being one."""
     m = load(CU_MODELS="")
     meta = {"dbt_landing": {"label": "dbt_landing", "cls": "etl", "kind": "Lakehouse",
                             "gen": False, "engine": m.engine_of("dbt_landing")}}
@@ -255,7 +265,8 @@ def test_landing_column_says_it_is_a_stage_not_an_engine(capsys):
     assert out.splitlines()[0].startswith("| CU (s) | landing | duckrun |")
     assert "| **etl** | **40.0** |" in out
     assert "`landing` is a STAGE, not an engine" in out
-    assert "cannot be split between them" in out
+    assert "cannot be split between them" not in out
+    assert "`Files/landing` shortcut in its own lakehouse" in out
 
 
 def test_engine_table_puts_operations_down_and_engines_across(capsys):

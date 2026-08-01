@@ -7,9 +7,12 @@ Usage:
   python provision.py land                 # the ONE shared landing lakehouse (holds Files)
   python provision.py {duckrun|iceberg|dwh|spark}   # that engine's OUTPUT item
 
-The download happens once (in the `land` job); every engine job reads the same FILES_PATH
-and only provisions its own output item. Naming is prefixed `dbt_` so it never clashes with
-the other AEMO repos sharing this workspace.
+The download happens once (in the `land` job) and every engine job provisions only its own output
+item. The legs no longer share one FILES_PATH: each reads the SAME landed bytes through a
+`Files/landing` shortcut in its own lakehouse (dwh through `dbt_dwh_src`, having no `Files` of its
+own), so the read CU is attributed per engine instead of arriving as one undivided `dbt_landing`
+row. See DWH_SRC. Naming is prefixed `dbt_` so it never clashes with the other AEMO repos sharing
+this workspace.
 
 `reset` is the start-from-nothing lever (the workflow's `reset_outputs` input), and it is a
 **separate mode run in its own job before `land`** rather than something each leg does to its
@@ -36,6 +39,33 @@ LANDING = "dbt_landing"
 # below, which must name the same items.
 OUTPUTS = [("lakehouses", "dbt_delta"), ("lakehouses", "dbt_iceberg"),
            ("lakehouses", "dbt_spark"), ("warehouses", "dbt_dwh")]
+
+# Every leg reads the landed CSVs through a `Files/landing` SHORTCUT to dbt_landing sitting in its
+# OWN lakehouse, and that is what splits the read CU: OneLake accounts a transaction against the
+# REQUESTED PATH, so a read through a shortcut is booked to the item hosting the shortcut, not to
+# the item holding the bytes. It is the only way the documented rule ("the transaction usage counts
+# against the capacity tied to the workspace where the shortcut is created") can be implemented.
+# Before this, all four legs read dbt_landing directly and `cu/` had one undivided 6,578.9 CU row
+# it could not attribute to anyone.
+#
+# No new items for duckrun/iceberg/spark — the shortcut goes into the output lakehouse they already
+# have, so a leg's landing reads land in the same `cu/` column as its writes. dwh is the ONE
+# exception and not by preference: a Fabric Warehouse has no `Files` section and cannot host a
+# shortcut at all, so it gets a lakehouse holding this shortcut and nothing else.
+#
+# THE NAME IS LOAD-BEARING, and `dbt_dwh_landing` is the wrong spelling. `cu/capacity_cu.py`'s
+# `engine_of()` substring-matches a display name against CU_ENGINES **in order** — which starts
+# `landing` — so `dbt_dwh_landing` would match `landing` first and put dwh's reads straight back
+# into the column this change exists to empty. `_src` collides with no engine token.
+#
+# NOT in OUTPUTS, deliberately: `reset` must never drop it. It is an input, it holds no data, and a
+# shortcut host that gets deleted and recreated is the `ItemDisplayNameNotAvailableYet` 409 that
+# killed three legs on run 30639018466. The other three shortcuts DO go down with `reset`, since
+# they live inside items it deletes — which is why the shortcut is ensured in each engine's own
+# mode, right after that mode recreates its lakehouse, and not once in `land` (where those three
+# lakehouses may not exist yet, `reset` having just run).
+DWH_SRC = "dbt_dwh_src"
+LANDING_SHORTCUT = "landing"
 ws = os.environ["WS_ID"]
 FAB = "https://api.fabric.microsoft.com/v1"
 
@@ -171,6 +201,39 @@ base = f"abfss://{ws}@onelake.dfs.fabric.microsoft.com"
 lh_payload = {"creationPayload": {"enableSchemas": True}}
 out = []
 
+
+def ensure_landing_shortcut(item):
+    """Find-or-create `Files/landing` -> dbt_landing/Files inside `item`, and return the FILES_PATH
+    the leg should read through. Never deletes anything, so it is safe on every run.
+
+    Takes an item id and knows nothing about engines: the caller passes whichever lakehouse this
+    leg reads from — its own output lakehouse for duckrun/iceberg/spark, DWH_SRC for dwh.
+
+    Verified against the live warehouse before this was written: parquet OPENROWSET, an explicit
+    multi-file CSV `BULK (...)` list and the `*.CSV` + `filepath(1)` fallback all return byte-
+    identical results through the shortcut and through the direct path. `[file]` is unaffected —
+    `parse_filename` stores the stem, never the path, so no merge key moves.
+    """
+    land = find("lakehouses", LANDING)
+    if not land:
+        raise SystemExit(f"{LANDING} does not exist — run `provision.py land` first")
+    r = requests.get(f"{FAB}/workspaces/{ws}/items/{item}/shortcuts/Files/{LANDING_SHORTCUT}",
+                     headers=H)
+    if r.status_code == 200:
+        sys.stderr.write(f"  shortcut Files/{LANDING_SHORTCUT} exists in {item}\n")
+    else:
+        sys.stderr.write(f"  creating shortcut Files/{LANDING_SHORTCUT} -> {LANDING}/Files "
+                         f"in {item} ...\n")
+        r = requests.post(
+            f"{FAB}/workspaces/{ws}/items/{item}/shortcuts", headers=H,
+            json={"path": "Files", "name": LANDING_SHORTCUT,
+                  "target": {"oneLake": {"workspaceId": ws, "itemId": land["id"],
+                                         "path": "Files"}}})
+        if r.status_code not in (200, 201):
+            sys.stderr.write(r.text + "\n")
+            r.raise_for_status()
+    return f"{base}/{item}/Files/{LANDING_SHORTCUT}"
+
 if mode == "reset":
     # Deletes only. Nothing is recreated here and nothing is printed to stdout — the engine legs
     # provision their own item as usual, minutes later, by which time Fabric has released the
@@ -181,6 +244,9 @@ if mode == "reset":
 
 elif mode == "land":
     lh = ensure("lakehouses", LANDING, lh_payload)
+    # The FILES_PATH printed here is the DIRECT path, and stays that way: download_aemo.py writes
+    # the archive through it, and the download's write CU belongs to `dbt_landing`. Only the legs
+    # read through a shortcut, and each ensures its own — see the engine modes below.
     n = os.environ.get("CI_DOWNLOAD_LIMIT", "1000")   # one knob: same cap for daily + intraday
     out += [f"FILES_PATH={base}/{lh}/Files",
             f"download_limit={n}",
@@ -188,27 +254,33 @@ elif mode == "land":
 
 elif mode == "duckrun":
     lh = ensure("lakehouses", "dbt_delta", lh_payload)
-    out += [f"ONELAKE_TABLES_PATH={base}/{lh}/Tables"]
+    out += [f"ONELAKE_TABLES_PATH={base}/{lh}/Tables",
+            f"FILES_PATH={ensure_landing_shortcut(lh)}"]
 
 elif mode == "iceberg":
     lh = ensure("lakehouses", "dbt_iceberg", lh_payload)
     out += [f"WAREHOUSE_PATH={ws}/{lh}",
-            "ONELAKE_ENDPOINT=https://onelake.table.fabric.microsoft.com/iceberg"]
+            "ONELAKE_ENDPOINT=https://onelake.table.fabric.microsoft.com/iceberg",
+            f"FILES_PATH={ensure_landing_shortcut(lh)}"]
 
 elif mode == "spark":
     lh = ensure("lakehouses", "dbt_spark", lh_payload)
     out += [f"FABRIC_WORKSPACE_ID={ws}",
             f"FABRIC_WORKSPACE_NAME={workspace_display_name()}",
             f"FABRIC_LAKEHOUSE_ID={lh}",
-            "FABRIC_LAKEHOUSE_NAME=dbt_spark"]
+            "FABRIC_LAKEHOUSE_NAME=dbt_spark",
+            f"FILES_PATH={ensure_landing_shortcut(lh)}"]
 
 elif mode == "dwh":
     ensure("warehouses", "dbt_dwh")
     conn = warehouse_conn("dbt_dwh")
+    # The one extra item this repo creates: a warehouse has no `Files` and cannot host a shortcut,
+    # so dwh reads through a lakehouse holding nothing but that shortcut. See DWH_SRC.
     out += [f"FABRIC_DWH_SERVER={conn}",
             "FABRIC_DWH_NAME=dbt_dwh",
             f"FABRIC_WORKSPACE_ID={ws}",
-            "FABRIC_AUTH=CLI"]
+            "FABRIC_AUTH=CLI",
+            f"FILES_PATH={ensure_landing_shortcut(ensure('lakehouses', DWH_SRC, lh_payload))}"]
 else:
     raise SystemExit(f"unknown mode {mode}")
 

@@ -131,11 +131,15 @@ CLASS_ORDER = ["etl", "analytics", "other"]
 # disappears is indistinguishable from one that spent nothing.
 #
 # `landing` leads and is NOT an engine — it is the stage every engine reads from: `dbt_landing` holds
-# the downloaded AEMO archive, `download_aemo.py` writes it, and all four legs read it. It gets a
-# column because "the download and the source reads cost X" is a real answer, where folding it into
-# `shared` was a shrug. It is still not splittable per engine and that has not changed — see
-# `_shared_note` and cu/README.md — this just stops the one item that dominates `shared` from
-# looking like an accounting failure.
+# the downloaded AEMO archive and `download_aemo.py` writes it. It gets a column because "the
+# download cost X" is a real answer, where folding it into `shared` was a shrug.
+#
+# It USED to hold the legs' reads too, as one undivided `OneLake Read` row nothing could attribute,
+# and this file said flatly that it could not be split. It can, and now is: each leg reads the same
+# bytes through a `Files/landing` shortcut in its own lakehouse (provision.py), and OneLake accounts
+# a transaction against the REQUESTED PATH — so the read is booked to the item hosting the shortcut,
+# which for three legs IS their output lakehouse and for dwh is `dbt_dwh_src` (a warehouse has no
+# `Files`). What stays in this column is the download's write and the round-trip.
 ENGINES = [e.strip() for e in os.environ.get(
     "CU_ENGINES", "landing,duckrun,iceberg,spark,dwh").split(",") if e.strip()]
 
@@ -767,10 +771,12 @@ def _engine_table(cells, meta):
             row(op, [per.get((cls, op, c), 0.0) for c in cols])
     if landing_cu:
         print("\n<sub>`landing` is a STAGE, not an engine: one lakehouse holding the downloaded "
-              "AEMO archive that all four legs read and `download_aemo.py` writes. It is a shared "
-              "input cost, so do not add it to an engine's column — and it cannot be split between "
-              "them, because the metrics rows carry no consumer dimension, the legs read it "
-              "concurrently, and they read it as the same service principal.</sub>")
+              "AEMO archive, written by `download_aemo.py`. What is left here is that WRITE plus "
+              "the result/log round-trip `fabric_run.py` does — a shared input cost, so do not add "
+              "it to an engine's column. The legs' READS of the same bytes are no longer here: "
+              "each reads through a `Files/landing` shortcut in its own lakehouse, and OneLake "
+              "books a transaction against the requested path, so those land in the engine "
+              "columns.</sub>")
     _shared_note(shared)
 
 
