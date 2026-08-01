@@ -75,6 +75,10 @@ on:
         description: "the Capacity Metrics app's own UTC offset, which is what its timestamps are in. +10 here. Used to turn this run's start into the `since` floor."
         type: string
         default: "10"
+      since_override:
+        description: "measure from this instant instead of this run's own start, IN THE MODEL'S CLOCK. For re-measuring a generation that was built by an EARLIER dispatch — with build and benchmark off, that is a re-read and a republish for the price of one metrics query. Blank = this run's start hour, which is what you want when this run built the thing."
+        type: string
+        default: ""
       workspace:
         description: "Fabric workspace GUID"
         type: string
@@ -107,9 +111,14 @@ jobs:
       - id: s
         run: |
           set -euo pipefail
-          SINCE=$(date -u -d "+${{ inputs.model_clock_offset_hours }} hours" +%Y-%m-%dT%H:00:00)
+          SINCE="${{ inputs.since_override }}"
+          if [ -n "$SINCE" ]; then
+            echo "CU floor: $SINCE (overridden — measuring a generation this run did not build)" >&2
+          else
+            SINCE=$(date -u -d "+${{ inputs.model_clock_offset_hours }} hours" +%Y-%m-%dT%H:00:00)
+            echo "CU floor: $SINCE (this run's start, model clock UTC+${{ inputs.model_clock_offset_hours }})" >&2
+          fi
           echo "since=$SINCE" >> "$GITHUB_OUTPUT"
-          echo "CU floor: $SINCE (model clock, UTC+${{ inputs.model_clock_offset_hours }})" >&2
 
   build:
     name: build
