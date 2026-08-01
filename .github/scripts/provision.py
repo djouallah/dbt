@@ -15,12 +15,12 @@ row. See DWH_SRC. Naming is prefixed `dbt_` so it never clashes with the other A
 this workspace.
 
 `reset` is the start-from-nothing lever (the workflow's `reset_outputs` input), and it is a
-**separate mode, run as the first step of `land`** rather than something each leg does to its own
-item on the way in. That ordering is the whole point: Fabric keeps a deleted item's DISPLAY NAME
-reserved for minutes after the item stops being listed, so a drop immediately followed by a create
-draws `409 ItemDisplayNameNotAvailableYet` — which is exactly how the per-leg version failed on run
-30639018466. Deleting everything up front and then landing the data gives the reservation the whole
-download to expire in.
+**separate mode run in its own job before `land`** rather than something each leg does to its
+own item on the way in. That ordering is the whole point: Fabric keeps a deleted item's DISPLAY
+NAME reserved for minutes after the item stops being listed, so a drop immediately followed by a
+create draws `409 ItemDisplayNameNotAvailableYet` — which is exactly how the per-leg version
+failed on run 30639018466. Deleting everything up front and then landing the data gives the
+reservation the whole download to expire in.
 
 It deletes the whole ITEM, not tables inside it — a `Tables/<schema>/<name>` folder removed by
 hand leaves the catalog entry behind and dbt then emits DML against nothing. `dbt_landing` is

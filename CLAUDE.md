@@ -552,7 +552,8 @@ the `cu/` section.
 
 - Cancel superseded runs immediately (`gh run cancel <id>`) — spark and Fabric legs cost money.
 - **`reset_outputs` is the start-from-nothing lever, off by default, and it never touches the
-  landing data.** It is the **first step of the `land` job**, before the download, and calls
+  landing data.** It runs as its own `reset` job, **side by side with `land`** — the two touch
+  different items, so the graph is one row of two boxes and the legs `needs: [reset, land]`. It calls
   `provision.py reset` to DELETE all four output items (`dbt_delta`, `dbt_iceberg`, `dbt_spark`,
   `dbt_dwh`). The engine legs then create their item the ordinary way, unaware a reset happened.
   **That ordering is load-bearing, not tidiness:** Fabric keeps a deleted item's DISPLAY NAME
@@ -560,12 +561,12 @@ the `cu/` section.
   dropping and recreating its own item on the way in — drew `409 ItemDisplayNameNotAvailableYet`
   and killed three of four legs on run 30639018466. The one that survived did so purely because
   its delete took 36s to propagate. Waiting on the item list proves nothing; only the create can
-  tell you the name is free, which is why the fix is the download-long gap and not a longer poll.
-  The gap that matters is **drop → engine leg**, not drop → anything else, which is why the drop
-  moved from its own job into `land`'s first step: the download sits inside that gap either way,
-  and a separate job bought a second checkout + setup-python + pip (~1m30s) to spend five seconds
-  deleting four items. Only the STEP is conditional — an `if:` on the job would skip every job
-  that needs it, i.e. the whole build.
+  tell you the name is free. The gap that matters is **drop → engine leg**, and running `reset`
+  beside `land` rather than before it shortens that gap to whatever `land` has left when `reset`
+  finishes — possibly nothing, since `reset` has been the slower of the two. What carries it is
+  `ensure()`'s 409 poll (~10 min), which exists for precisely this; the cost is a leg that may wait
+  a minute or two on the name, and only on a `reset_outputs` dispatch. Do not make the legs
+  `needs: land` alone — a leg would then recreate its lakehouse while `reset` is still deleting it.
   `ensure()` does still ride out that 409 as a backstop, for a by-hand reset followed straight
   away by a build. `dbt_landing` is never dropped — `drop()` refuses it by name, and the `reset`
   mode's item list does not contain it. Neither is `dbt_dwh_src`, the shortcut-only lakehouse dwh

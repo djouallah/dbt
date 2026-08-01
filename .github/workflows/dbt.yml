@@ -109,7 +109,7 @@ env:
   # It was pinned to readHeavyForPBI in profiles.yml; making it an input means a layout change is
   # something a dispatch asks for. Expect the next build's layout table to move.
   SPARK_RESOURCE_PROFILE: ${{ inputs.spark_resource_profile || 'writeHeavy' }}
-  # `reset_outputs` needs no env var — the drop step in `land` reads the input directly. What it
+  # `reset_outputs` needs no env var — the `reset` job below reads the input directly. What it
   # does: DELETE the four output items (dbt_delta / dbt_iceberg / dbt_spark / dbt_dwh) before
   # anything else runs, so every model is rebuilt from scratch. Reach for it when tables are
   # wrong in a way no incremental write can repair, instead of --full-refresh (which DROPs on
@@ -126,21 +126,42 @@ env:
   # grants. `benchmark/` is fine — it deletes and recreates its models per dispatch.
 
 jobs:
-  # Reset and land are ONE job, and the drop is its first step. What is load-bearing is the GAP
-  # between deleting an item and recreating it under the same display name — Fabric keeps that name
-  # reserved for minutes after the item stops being listed, so a drop followed straight away by a
-  # create draws `409 ItemDisplayNameNotAvailableYet`, which is how the per-leg version of this
-  # failed on run 30639018466, taking three legs with it. That gap is drop -> ENGINE LEG, and the
-  # whole download sits inside it either way, so which job the drop lives in never mattered. Two
-  # jobs meant a second checkout + setup-python + pip — a minute and a half of runner setup to
-  # spend five seconds deleting four items, and two boxes in the graph for one stage.
+  # `reset` and `land` run SIDE BY SIDE — two boxes on one row of the graph, not a chain. They touch
+  # different items (reset deletes the four OUTPUTS, land writes `dbt_landing`), so there is nothing
+  # to order between them, and the legs wait for both.
   #
-  # Only the drop step is conditional. Do NOT put the `if:` on the job: a job skipped by `if:`
-  # skips everything that needs it, which would skip the entire build.
+  # What this costs, and it is worth knowing before shortening it further: Fabric keeps a deleted
+  # item's DISPLAY NAME reserved for minutes after the item stops being listed, so a drop followed
+  # too closely by a create draws `409 ItemDisplayNameNotAvailableYet` — which is how the per-leg
+  # version of this failed on run 30639018466, taking three legs with it. Chained, the whole
+  # download sat between the drop and the leg that recreates the item. In parallel that gap is only
+  # whatever `land` still has left to do when `reset` finishes, which can be nothing. The backstop
+  # is real and was built for exactly this: `ensure()` polls through the 409 for ~10 minutes. So a
+  # reset dispatch may now spend a minute or two waiting inside the leg instead of not waiting at
+  # all — that is the trade, and it is only paid when `reset_outputs` is ticked.
+  #
+  # The job always runs; only its step is conditional. A job skipped by `if:` skips everything
+  # that needs it, so gating the job itself would skip the entire build.
+  reset:
+    name: reset outputs
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        if: inputs.reset_outputs
+      - uses: actions/setup-python@v5
+        if: inputs.reset_outputs
+        with: {python-version: "3.11"}
+      - run: pip install duckrun
+        if: inputs.reset_outputs
+      - name: Drop the four output items
+        if: inputs.reset_outputs
+        run: python .github/scripts/provision.py reset
+
   land:
     name: land data
     runs-on: ubuntu-latest
-    timeout-minutes: 40
+    timeout-minutes: 30
     # No `outputs:` any more. This job used to export FILES_PATH for every leg to share; each leg
     # now gets its own from `provision.py <engine>`, pointing at the `Files/landing` shortcut in
     # its own lakehouse. The FILES_PATH this job sets is the DIRECT dbt_landing path and is for
@@ -150,9 +171,6 @@ jobs:
       - uses: actions/setup-python@v5
         with: {python-version: "3.11"}
       - run: pip install duckrun
-      - name: Drop the four output items
-        if: inputs.reset_outputs
-        run: python .github/scripts/provision.py reset
       - name: Provision landing lakehouse
         run: python .github/scripts/provision.py land >> "$GITHUB_ENV"
       - name: Download AEMO data (obstore -> OneLake)
@@ -174,7 +192,9 @@ jobs:
     # engine were the adapter, and as if the other leg were not equally on Fabric. `label` is the
     # display name ONLY; `engine` is still the key provision.py and the dbt target key take.
     name: duckdb ${{ matrix.label }}
-    needs: land
+    # BOTH, not just `land`: with reset and land running side by side, needing `land` alone would
+    # let a leg recreate its lakehouse while `reset` is still deleting it.
+    needs: [reset, land]
     runs-on: ubuntu-latest
     timeout-minutes: 90
     strategy:
@@ -204,7 +224,7 @@ jobs:
   # dwh + spark: dbt client on the runner, compute on Fabric's own servers.
   server:
     name: fabric-server ${{ matrix.engine }}
-    needs: land
+    needs: [reset, land]   # both — see the `fabric` job above
     runs-on: ubuntu-latest
     # Backlog-draining spark runs (1024-file folds) reach ~40 min; leave room for one retry.
     timeout-minutes: 60
