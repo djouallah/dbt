@@ -324,8 +324,14 @@ and its CU disappears while the report says "no activity". So names are resolved
 then `GET /groups/{workspace}/datasets` (semantic models only, same host and token as
 `executeQueries`). The second is not redundant — it is what still works with no Fabric-audience
 token. If either call is refused the run still works, logs why, and the diagnostic below names the
-unresolved GUIDs. The lag bites hardest on the ETL side: a `duckrun-py-*` notebook created by the
-very run being measured is the item `'Items'` is least likely to hold.
+unresolved GUIDs.
+
+**Neither live call can name the throwaway notebooks**, and nothing is wrong when they don't:
+`run_python` deletes its notebook on the way out, so the item is already gone from the workspace by
+the time this reads. `'Items'` is the only route to those names — and it does carry them, which is
+how the earlier attempt at this width ended up with a row per `duckrun-py-*` notebook in the first
+place. What the live calls fix is the long-lived items: a lakehouse or warehouse provisioned during
+the run being measured, and the semantic models.
 
 **An empty report explains itself.** "No item activity" and "1,202 rows came back and every
 one failed a filter" are opposite conclusions that used to print the same sentence. Now an empty

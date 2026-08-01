@@ -170,6 +170,30 @@ def test_display_label_collapses_the_throwaway_notebooks():
     assert m.display_label("dbt_delta") == "dbt_delta"
 
 
+def test_a_fabric_notebook_is_etl_under_every_spelling():
+    """Measured on run 30676341725: the app calls a Fabric notebook `SynapseNotebook` for most of
+    the CU and `Notebook` for the rest. Missing the first put 103,157 CU in `other`."""
+    m = load()
+    assert m.classify("SynapseNotebook") == "etl"
+    assert m.classify("Notebook") == "etl"
+    assert m.classify("JupyterNotebook") == "etl"
+
+
+def test_a_collapsed_group_takes_the_known_class_not_the_first_one(capsys):
+    """Same measurement, other half: one collapsed group held both spellings, so first-wins made the
+    group's class depend on row order. A known class must beat `other`."""
+    m = load(CU_WORKSPACE_FILTER=WS_ID, CU_MODELS="", CU_ETL="1")
+    rows = [_row("NB1", "Jupyter Notebook Scheduled Run", 100.0, H),
+            _row("NB2", "Jupyter Notebook Scheduled Run", 50.0, H)]
+    items = [{"Id": "NB1", "Name": "duckrun-py-aaa", "Kind": "SomethingUnmapped"},
+             {"Id": "NB2", "Name": "duckrun-py-bbb", "Kind": "Notebook"}]
+    _stub(m, rows, items)
+    m.main()
+    out = capsys.readouterr().out
+    assert "| **etl** |" in out and "| **other** |" not in out
+    assert "**150.0**" in out
+
+
 def test_classify_is_case_and_space_insensitive_and_keeps_strangers():
     m = load()
     assert m.classify("Semantic Model") == "analytics"

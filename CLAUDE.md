@@ -878,11 +878,14 @@ detail.
   deleted by removing one directory and one workflow file. Do not "DRY it up" against
   `benchmark/xmla_compare.py`; the duplication is what keeps that deletion free.
 - **`FABRIC_TOKEN` is a SECOND token on a different audience, and it is for naming items only.** The
-  datasets endpoint `PBI_TOKEN` reaches lists semantic models and nothing else, so the ETL items
-  would otherwise be named from the metrics app's lagging `'Items'` snapshot alone — and the item it
-  is least likely to hold is a `duckrun-py-*` notebook created by the run being measured. Unnamed
-  means unclassified, i.e. a bare GUID in `other`. Minted from the same OIDC login,
-  `continue-on-error`, and the script degrades with a log line rather than failing.
+  datasets endpoint `PBI_TOKEN` reaches lists semantic models and nothing else, so the lakehouses and
+  the warehouse would otherwise be named from the metrics app's lagging `'Items'` snapshot alone, and
+  unnamed means unclassified — a bare GUID in `shared`. Minted from the same OIDC login,
+  `continue-on-error`, and the script degrades with a log line rather than failing. **It cannot name
+  the throwaway notebooks and is not expected to**: `run_python` deletes its notebook on the way out,
+  so no live listing can hold it. `'Items'` is the only route to those names, and it does carry them —
+  the earlier attempt at this width produced a row per `duckrun-py-*` notebook, which is where those
+  names came from.
 - **`python -m pytest cu/ -q` is the gate, and `cu.yml` runs it before the Azure login.** Offline, no
   token, ~2s. It pins the two run-allocation rules (exact by GUID for a redeployed item, by hour for
   one that outlives a run), that every (item, hour) pair lands in **exactly one** run, the class

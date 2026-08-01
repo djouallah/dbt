@@ -112,6 +112,10 @@ CLASS_BY_KIND = {
     # writes
     "lakehouse": "etl", "warehouse": "etl", "sqlendpoint": "etl",
     "sqlanalyticsendpoint": "etl", "notebook": "etl", "sparkjobdefinition": "etl",
+    # MEASURED on run 30676341725, and it is the spelling the metrics app actually uses for a Fabric
+    # notebook: 92,542 CU arrived as `SynapseNotebook` and only 10,615 as `Notebook`, for items of
+    # the same family. Both spellings are live, so both are mapped.
+    "synapsenotebook": "etl", "jupyternotebook": "etl",
     "sparkapplication": "etl", "datapipeline": "etl", "dataflow": "etl", "dataflowgen2": "etl",
     "environment": "etl", "mirroreddatabase": "etl", "eventhouse": "etl", "kqldatabase": "etl",
 }
@@ -490,17 +494,23 @@ def datasets_in_workspace(ws):
 def fabric_items(ws):
     """{item GUID: (display name, kind)} for EVERY item kind in the workspace, live.
 
-    The same trap `datasets_in_workspace()` exists for, one class worse. `'Items'` in the metrics
-    model is a lagging snapshot, and the items this report most wants to name are exactly the ones
-    least likely to be in it: a `duckrun-py-*` notebook that the very run being measured created
-    minutes ago. Unnamed means unclassified, which means it lands in `other` as a bare GUID — CU
-    kept, but nothing said about it.
+    The same trap `datasets_in_workspace()` exists for, widened to every item kind: `'Items'` in the
+    metrics model is a lagging snapshot, and an item it has not catalogued resolves to no name, which
+    means no class and no engine — a bare GUID in `other`/`shared`, CU kept but nothing said about it.
+    The datasets endpoint cannot cover this, because it lists semantic models only. The Fabric items
+    API lists every kind, but on a DIFFERENT audience (`api.fabric.microsoft.com`), so it needs its
+    own token — `cu.yml` mints one beside `PBI_TOKEN` from the same OIDC login.
 
-    The datasets endpoint cannot answer this: it lists semantic models only. The Fabric items API
-    lists every kind, but on a DIFFERENT audience (`api.fabric.microsoft.com`), so it needs its own
-    token — `cu.yml` mints one beside `PBI_TOKEN` from the same OIDC login. Optional by
-    construction: no token, a 401/403, or an unreachable host all fall back to `'Items'` with a
-    line saying so, because a report that names most items is worth far more than no report.
+    **It cannot name the throwaway notebooks, and do not expect it to.** `run_python` DELETES its
+    notebook on the way out, so by the time this runs the item is gone from the workspace and no live
+    listing can hold it — `'Items'` is the only route to those names, and empirically it does carry
+    them (the earlier attempt at this width showed a row per `duckrun-py-*` notebook, which is where
+    those names came from). What this call actually fixes is the long-lived items: a lakehouse,
+    warehouse or SQL endpoint provisioned during the run being measured, and semantic models, which
+    it also covers.
+
+    Optional by construction: no token, a 401/403, or an unreachable host all fall back to `'Items'`
+    with a line saying so, because a report that names most items is worth far more than no report.
     """
     if not ws:
         return {}
@@ -1271,6 +1281,12 @@ def main():
                     dropped["kind"] += 1
                     continue
             kinds[kind or "(unknown)"] = kinds.get(kind or "(unknown)", 0.0) + float(cu)
+            # A COLLAPSED group can hold items the app catalogued under different kinds — measured:
+            # `duckrun-py-*` came back as both `SynapseNotebook` and `Notebook`. First-wins would
+            # then make the group's class depend on which row was read first, so a known class
+            # always beats `other`. Only that direction, so two known classes never fight.
+            if (meta.get(key) or {}).get("cls") == "other" and cls != "other":
+                meta[key].update(cls=cls, kind=kind)
             meta.setdefault(key, {"label": label or iid, "cls": cls, "kind": kind,
                                   "engine": engine_of(label),
                                   # sessionize's exact generation rule needs an item that is created
