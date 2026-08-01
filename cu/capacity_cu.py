@@ -1186,19 +1186,19 @@ def render_hardware(doc):
     record prints as "not recorded", because a default filled in here would read exactly like a
     measurement.
 
-    dwh carries no row of its own knobs deliberately — Fabric Warehouse exposes none — so it says so
-    rather than leaving a blank that looks like missing data.
+    **dwh has no row at all**, and that is a change from a version that gave it one reading
+    "workspace default — Fabric Warehouse exposes no per-run compute knob". Fabric Warehouse
+    exposes no knob, so that row said the same thing on every run ever printed and could never
+    differ between two reports — a constant occupying a quarter of a table whose only job is to
+    say what varied. The table is what the dispatch CHOSE; dwh chooses nothing.
     """
     cfg = (doc.get("config") or {})
     run = doc.get("run") or {}
     rows = []
     for e in ENGINES:
-        if e == "landing":
+        if e in ("landing", "dwh"):
             continue
         c = cfg.get(e) or {}
-        if e == "dwh":
-            rows.append((e, "workspace default — Fabric Warehouse exposes no per-run compute knob"))
-            continue
         bits = []
         if e in ("duckrun", "iceberg"):
             v = c.get("vcores")

@@ -230,32 +230,44 @@ jobs:
       # table. It must never fail this job: a CU report is useful on its own, and the layout is
       # context.
       #
-      # The `stats` artifact comes from the `layout` job of the `dbt` workflow, which runs only
-      # when all four legs are green — so a SUCCESSFUL dbt run is exactly the set that can carry
-      # one. Walk the last few newest-first and take the first that actually has it: a successful
-      # run can still lack the artifact (uploaded with continue-on-error, or expired after 90d),
-      # and its id would just 404.
-      - name: Fetch the layout from the latest dbt run
+      # The `stats` artifact comes from the `layout` job of `dbt.yml`, which runs only when all four
+      # legs are green — so a SUCCESSFUL run is exactly the set that can carry one.
+      #
+      # THIS RUN COMES FIRST, and that is the fix for a real miss. `dbt.yml` usually runs as a
+      # `workflow_call` FROM `all.yml`, and a called workflow does not get a run of its own: the run
+      # belongs to the caller and its artifacts are uploaded there. So `gh run list --workflow
+      # dbt.yml` cannot see the build that just happened — it lists only standalone `dbt` dispatches
+      # — and on run 30685959678 it reached past this run's own build to the last standalone one
+      # (30676635835), whose stats predated the `config` block. The page then printed "not recorded
+      # by dbt run 30676635835" beside CU that a 64-vCore run had produced: a stale id, and the
+      # hardware section blank for exactly the dispatch that had chosen the hardware. When called
+      # from `all.yml` the build's artifact is on $GITHUB_RUN_ID, so try that before anything else.
+      #
+      # Then both workflows, newest-first within each. A successful run can still lack the artifact
+      # (uploaded with continue-on-error, or expired after 90d) and its id would just 404, so walk
+      # until one downloads. Best-effort by construction — no run, no artifact, or a 404 leaves
+      # STATS_JSON unset and the report simply has no layout table. It must never fail this job.
+      - name: Fetch the layout from this run, else the latest dbt build
         if: inputs.layout
         continue-on-error: true
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -o pipefail
-          ids=$(gh run list --workflow dbt.yml --status success -L 5 \
-                  --json databaseId -q '.[].databaseId' -R "$GITHUB_REPOSITORY" || true)
-          if [ -z "$ids" ]; then
-            echo "no successful 'dbt' run to read a layout from" >&2
-            exit 0
-          fi
+          ids="$GITHUB_RUN_ID"
+          for wf in all.yml dbt.yml; do
+            ids="$ids $(gh run list --workflow "$wf" --status success -L 5 \
+                          --json databaseId -q '.[].databaseId' -R "$GITHUB_REPOSITORY" || true)"
+          done
           for id in $ids; do
             if gh run download "$id" -n stats -D "$RUNNER_TEMP/stats" -R "$GITHUB_REPOSITORY"; then
               echo "STATS_JSON=$RUNNER_TEMP/stats/stats.json" >> "$GITHUB_ENV"
-              echo "layout from dbt run $id" >&2
+              echo "layout from run $id" >&2
               exit 0
             fi
-            echo "run $id has no 'stats' artifact, trying older" >&2
+            echo "run $id has no 'stats' artifact, trying next" >&2
           done
+          echo "no run carried a 'stats' artifact — no layout table" >&2
 
       # ONE read of the metrics model, three copies of its output: `cu-report.md` for the page and
       # the artifact, the step summary, and the job log (so `gh run view --log` shows it too).

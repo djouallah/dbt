@@ -298,7 +298,9 @@ def test_hardware_reports_what_the_run_recorded(capsys):
     out = capsys.readouterr().out
     assert "| duckrun | 64 vCores (Fabric Python notebook) |" in out
     assert "resource profile `readHeavyForPBI`, native execution engine ON" in out
-    assert "Fabric Warehouse exposes no per-run compute knob" in out
+    # dwh has NO row. It exposes no per-run compute knob, so its line was identical in every report
+    # ever printed — a constant in a table whose only job is to say what the dispatch chose.
+    assert "dwh" not in out
 
 
 def test_hardware_says_not_recorded_rather_than_guessing(capsys):

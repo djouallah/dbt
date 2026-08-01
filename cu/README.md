@@ -228,8 +228,14 @@ So the report ends with one table putting them together:
 **No Delta log is read here, and it would be wasteful to.** Reading four Delta logs over OneLake takes
 ~10 minutes (the iceberg item alone 12m+), and the layout only changes when the tables are REWRITTEN —
 which is why the dashboard is its own dispatch-only workflow rather than a job in every build. So the
-numbers come from the `stats` artifact of the latest successful **dbt** run (its `layout` job — `stats.py` writing `STATS_JSON`), which the
-workflow downloads with `gh run download`. That keeps this directory's one hard property: `requests` is
+numbers come from the `stats` artifact of a successful **dbt** build (its `layout` job — `stats.py` writing `STATS_JSON`), which the
+workflow downloads with `gh run download`. **It tries THIS run first**, and that is not an
+optimisation: `dbt.yml` normally runs as a `workflow_call` from `all.yml`, and a called workflow
+gets no run of its own — the run belongs to the caller and the artifact is uploaded there. So
+`gh run list --workflow dbt.yml` sees only standalone `dbt` dispatches, and on run 30685959678 it
+reached past the build that had just happened to a much older one, printing "not recorded by dbt
+run 30676635835" beside CU that a 64-vCore dispatch had produced. `$GITHUB_RUN_ID` first, then
+recent successful runs of `all.yml` and `dbt.yml`. That keeps this directory's one hard property: `requests` is
 still the whole dependency list, there is no duckrun, no storage token, no OneLake read, and
 `rm -rf cu/ .github/workflows/cu.yml` still removes every trace. The coupling is a JSON file produced
 by a workflow that exists anyway, not code.

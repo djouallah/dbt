@@ -926,8 +926,20 @@ detail.
 - **The hardware section is sourced, not asserted.** `stats.py` writes a `config` block from the env
   the legs were actually given (`FABRIC_CORES`, `SPARK_RESOURCE_PROFILE`, `SPARK_NATIVE_ENABLED`)
   and the page renders it. Anything the run did not record prints "not recorded by dbt run <id>" —
-  never a default, because a filled-in default reads exactly like a measurement. dwh says "workspace
-  default" explicitly rather than leaving a blank that looks like missing data.
+  never a default, because a filled-in default reads exactly like a measurement. **dwh has no row**:
+  Fabric Warehouse exposes no per-run knob, so its line ("workspace default …") was identical in
+  every report ever printed — a constant taking a quarter of a table whose only job is to say what
+  the dispatch CHOSE.
+- **The `stats` artifact lookup tries THIS run before any run list, and that is a fix, not a
+  shortcut.** `dbt.yml` normally runs as a `workflow_call` from `all.yml`, and a called workflow
+  gets **no run of its own** — the run belongs to the caller and its artifacts are uploaded there.
+  So `gh run list --workflow dbt.yml` lists only standalone `dbt` dispatches and cannot see the
+  build that just ran. On run 30685959678 it therefore reached past that build to 30676635835,
+  whose stats predated the `config` block, and the page printed "not recorded by dbt run
+  30676635835" beside CU produced by a 64-vCore dispatch — a stale id AND a blank hardware table,
+  for exactly the run that had chosen the hardware. Order is now `$GITHUB_RUN_ID`, then recent
+  successful runs of `all.yml`, then `dbt.yml`. Anything else that reaches for a sibling
+  workflow's artifacts has the same trap waiting.
 - **`history/` is the only storage that outlives retention.** Artifacts expire (90 days, the Pages
   one sooner) and the Capacity Metrics model keeps ~14 days, so every generation writes
   `history/<timestamp>-<run id>.json`: `schema: 1`, the run ids, the `since` floor, the hardware
