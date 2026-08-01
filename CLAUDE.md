@@ -1067,14 +1067,29 @@ detail.
   **body** (`Retry in N seconds`), because that response carries no `Retry-After` header. Both are
   pinned by tests. A report whose notebook CU sits in `shared` is this bug, not an attribution
   limit: **re-measure the same window** rather than reaching for `engine_of`.
-  **But the retry did not rescue that run, and the reason matters:** the cap is on a window far
-  longer than the 120 seconds its own message advertises. Runs 30685959678 (07:39) and 30691130030
-  (08:12), half an hour apart, were both refused on every attempt — a day of dispatches had spent
-  the quota. So a 429 here is usually not transient, and the 4 minutes of retries buy nothing;
-  `refresh` is now an input on `all.yml` (default true) precisely so a re-read can skip it. The
-  practical route back to named notebooks is to let the metrics app's OWN scheduled refresh
-  catalogue them, then re-measure with `refresh=false`. Do not raise `CU_REFRESH_TRIES` to fight a
-  quota.
+  **But the retry did not rescue that run, and the reason is PER-IDENTITY throttling.** Runs
+  30685959678 (07:39) and 30691130030 (08:12), half an hour apart, were refused on every attempt —
+  yet a **manual** refresh by the human at 08:18 completed immediately. That is the whole
+  diagnosis: Power BI throttles the REST API per user, the **service principal** had spent its
+  budget, and a different identity has a different budget. So the SP can be locked out of an
+  endpoint that answers a human instantly. **Where that budget actually goes is not where it
+  looks:** the DAX is only **6 queries** per run (`INFO.VIEW.COLUMNS`, `VALUES('Capacities')`, then
+  `items_for` + `cu_for` per capacity × this tenant's two — pin `CU_CAPACITY_ID` and it is 3). The
+  refresh path polls `GET …/refreshes?$top=1` every 20s for up to `CU_REFRESH_TIMEOUT`, i.e. **up
+  to 45 requests**, so it spends ~7× the measurement and is also the thing that gets refused. An
+  earlier version of this bullet said "~60 executeQueries per run"; that described the deleted
+  timepoint-detail design and is retracted. Attack the poll interval before the query count.
+  **A wrong answer was recorded here first and is retracted:** that this was the shared-capacity
+  *"maximum of eight requests per day, including scheduled refresh"* from the
+  [refresh API limitations](https://learn.microsoft.com/en-us/rest/api/power-bi/datasets/refresh-dataset-in-group).
+  The metrics workspace IS on shared capacity (`isOnDedicatedCapacity: False`) and the day did hold
+  7 prior refreshes, so it fit — and the human's 8th refresh going straight through disproved it.
+  Check the refresh history (`GET …/datasets/{id}/refreshes`) before believing either story; it is
+  one request and it names the identity's fate directly.
+  Consequences: a 429 here is not transient, so the 4 minutes of retries buy nothing, and `refresh`
+  is now an input on `all.yml` (default true) so a re-read can skip it. The route back to named
+  notebooks is a refresh by any identity that still has budget, then a re-measure with
+  `refresh=false`. Do not raise `CU_REFRESH_TRIES` to fight throttling.
 - **A deploy mints a NEW item GUID, and `'Items'` is a lagging snapshot — this made the whole report
   read empty.** The metrics tables hold item GUIDs; a semantic model that was just created (or deleted
   and recreated — `overwrite=True` keeps its id, a recreate does not) has a GUID `'Items'` has not seen

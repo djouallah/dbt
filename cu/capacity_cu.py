@@ -370,6 +370,20 @@ def refresh_metrics_model():
     duckrun and iceberg columns. The report degraded exactly as designed and was still wrong,
     because the one thing that makes a minutes-old item visible had not run. `execute_dax` already
     honours Retry-After for the same cap; this path did not, and gave up on the first response.
+
+    The retry is worth having and is NOT a cure. Power BI throttles the REST API **per identity**:
+    on that run and the next, half an hour apart, every attempt by the service principal was
+    refused, while a human refreshing by hand in between went straight through. So a 429 usually
+    means "this identity is out", which no amount of waiting inside one job fixes; skip the refresh
+    (`refresh: false`) for a re-read of a settled window instead.
+
+    Where this file's own requests go, counted rather than guessed, because an earlier version of
+    this note said "~60 executeQueries per run" and that was the DELETED timepoint design: the DAX
+    is **6 queries** — `INFO.VIEW.COLUMNS`, `VALUES('Capacities')`, then `items_for` + `cu_for` per
+    capacity, twice for this tenant's two. The expensive caller is the loop below, which polls
+    `GET …/refreshes?$top=1` every 20s for up to REFRESH_TIMEOUT — **up to 45 requests** — so the
+    refresh path spends roughly seven times what the measurement does, and then gets refused. If
+    throttling has to be attacked, attack that poll interval, not the query count.
     """
     base = f"{PBI}/groups/{WS}/datasets/{MODEL}/refreshes"
     headers = {"Authorization": f"Bearer {TOKEN}", "Content-Type": "application/json"}

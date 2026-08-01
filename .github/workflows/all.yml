@@ -180,10 +180,12 @@ jobs:
       workspace: ${{ inputs.workspace }}
       since: ${{ needs.stamp.outputs.since }}
       # Was never passed, so cu.yml's default (true) always applied — including on a measure-only
-      # re-read, where the refresh is pure latency and pure quota. The refresh API rate-limits on a
-      # window much longer than the 120s its own 429 advertises: on runs 30685959678 and
-      # 30691130030, half an hour apart, every attempt was refused. Each one costs ~4 minutes of
-      # retries and changes nothing, so it has to be turnable off.
+      # re-read, where the refresh is pure latency. Power BI throttles the REST API PER IDENTITY,
+      # and the service principal had spent its budget: on runs 30685959678 and 30691130030, half
+      # an hour apart, every refresh attempt was refused 429 — while a human refreshing by hand at
+      # 08:18 went straight through. Not the DAX doing the spending, which is 6 queries a run; the
+      # refresh's own status poll is up to 45. Each refused attempt costs ~4 minutes of retries and
+      # changes nothing, so the caller has to be able to say no.
       refresh: ${{ inputs.refresh }}
       # The permanent record, written only from here — see cu.yml.
       history: true
