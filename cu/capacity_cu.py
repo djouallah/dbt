@@ -228,15 +228,22 @@ REFRESH_TRIES = int(os.environ.get("CU_REFRESH_TRIES", "3"))
 # per-query dehydrate being dropped for a user-session walk with think time (8c037c8 / debef3a).
 # None of those are the same experiment and their CU must not be summed.
 #
-# The floor now sits at the `dbt` run of 2026-08-01 (30676635835, 00:53:23Z → hour 10:00 in the
-# model's clock), and that one is a harder boundary than a methodology change: it ran with
-# `reset_outputs`, so all four output items were DELETED and recreated. Every row before it belongs
-# to items that no longer exist — same display NAMES, different GUIDs — so summing across the floor
-# adds two generations of `dbt_delta` into one number that describes neither. It is also the first
-# build whose notebooks are named per engine, i.e. the first whose ETL is attributable at all.
+# The floor now sits at the `dbt` run of 2026-08-01 (30685959678, 05:30Z → hour 15:00 in the model's
+# clock), the first build in which **each leg reads the landing archive through its own shortcut**
+# (`ec04534`). That is what makes it a boundary rather than a preference: before it, every leg's read
+# of the same bytes was booked to `dbt_landing` — 7,488 CU sitting in a column that is not an engine,
+# with each engine's ETL understating by its own share of it. The numbers either side of this line
+# answer different questions about the same work, so they must not be summed, and the three records
+# below it were dropped rather than kept as a series nobody could read straight.
 #
-# Bump it again the next time the outputs are reset or the suite changes what it measures; blank
-# means everything retained, and a wider floor is a dispatch input away for a one-off comparison.
+# The PREVIOUS floor was 10:00, the from-scratch run 30676635835 that ran with `reset_outputs` —
+# deleting and recreating all four output items, so rows before IT belong to items that no longer
+# exist under the same display names. That reasoning still holds; it is simply superseded by a
+# newer boundary, and it is why a floor is bumped rather than widened.
+#
+# Bump it again the next time the outputs are reset, the ATTRIBUTION changes, or the suite changes
+# what it measures; blank means everything retained, and a wider floor is a dispatch input away for
+# a one-off comparison.
 #
 # EXPRESSED IN THE MODEL'S OWN CLOCK, not UTC. The Capacity Metrics tables stamp everything in the
 # offset configured inside the app — +10 here, so a benchmark that ran at 05:15Z sits under hour
@@ -247,7 +254,7 @@ REFRESH_TRIES = int(os.environ.get("CU_REFRESH_TRIES", "3"))
 # ~9 days into the FUTURE (it returned +227.5h), MAX() over activity lags by however long the
 # capacity has been idle, and there is no offset column anywhere in the model. Every run logs the
 # range of hours it actually saw, so one dispatch tells you what to set this to.
-SINCE = os.environ.get("CU_SINCE", "2026-08-01T10:00:00").strip()
+SINCE = os.environ.get("CU_SINCE", "2026-08-01T15:00:00").strip()
 
 # Run separation. Both signals it uses are already in every row — the item GUID and the hour — so
 # splitting the report per RUN costs nothing extra: no more requests, no new query, pure

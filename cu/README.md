@@ -145,14 +145,21 @@ what is being measured — the run where dwh was **DirectQuery** rather than Dir
 switch from a per-query dehydrate to a user-session walk with think time (`8c037c8`/`debef3a`).
 Those are different experiments and their CU must not be summed (see `benchmark/README.md`).
 
-The default floor is **`2026-08-01T10:00:00`** (model clock) — the from-scratch `dbt` run
-[30676635835](https://github.com/djouallah/fabric-dbt-benchmark/actions/runs/30676635835), which started 00:53:23Z.
-That is a harder boundary than a methodology change: it ran with `reset_outputs`, so all four output
-items were **deleted and recreated**. Rows before it belong to items that no longer exist — same
-display names, new GUIDs — so summing across the floor adds two generations of `dbt_delta` into one
-number describing neither. It is also the first build whose notebooks are named per engine, i.e. the
-first whose ETL is attributable at all. Bump it again the next time the outputs are reset or the
-suite changes what it measures; blank means everything retained.
+The default floor is **`2026-08-01T15:00:00`** (model clock) — `dbt` run
+[30685959678](https://github.com/djouallah/fabric-dbt-benchmark/actions/runs/30685959678), the first
+build in which **each leg reads the landing archive through its own shortcut** (`ec04534`). Before
+it, every leg's read of the same bytes was booked to `dbt_landing`: 7,488 CU in a column that is not
+an engine, with each engine's ETL understating by its own share. The two sides of that line answer
+different questions about the same work, so they must not be summed — and the three records below it
+were dropped rather than kept as a series nobody could read straight.
+
+The previous floor, `2026-08-01T10:00:00`, was the from-scratch run
+[30676635835](https://github.com/djouallah/fabric-dbt-benchmark/actions/runs/30676635835), which ran
+with `reset_outputs` — deleting and recreating all four output items, so rows before *it* belong to
+items that no longer exist under the same display names. That reasoning still holds; it is simply
+superseded, which is why a floor gets bumped rather than widened. Bump it again the next time the
+outputs are reset, the ATTRIBUTION changes, or the suite changes what it measures; blank means
+everything retained.
 
 ## Runs are separated, and it costs nothing extra
 
@@ -407,7 +414,7 @@ the artifact copy opens off a local disk with no network. Re-render any past rep
 
 | input | default | notes |
 |---|---|---|
-| `since` | `2026-08-01T10:00:00` | floor, **in the model's clock** (see below) — the from-scratch dbt run that reset every output item. Blank = everything retained |
+| `since` | `2026-08-01T15:00:00` | floor, **in the model's clock** (see below) — the first build whose landing reads are split per engine. Blank = everything retained |
 | `etl` | true | report every item in the workspace, classified into `etl`/`analytics`. Off = semantic models only, the old scope exactly |
 | `models` | the four `aemo_*` | comma-separated, leading the analytics rows and printed even at 0.0. With `etl` **on** this only orders; with `etl` off it also filters |
 | `workspace` | the `FABRIC_WORKSPACE_ID` secret | the workspace dbt.yml and benchmark.yml deploy to. With `etl` on this is the only filter left. Blank here AND no secret = all |
@@ -428,7 +435,7 @@ export PBI_TOKEN=$(az account get-access-token \
   --resource https://analysis.windows.net/powerbi/api --query accessToken -o tsv)
 export CU_METRICS_WORKSPACE_ID=<workspace holding the Capacity Metrics app>
 export CU_METRICS_MODEL_ID=<that app's semantic model GUID>
-CU_SINCE=2026-08-01T10:00:00 CU_DEBUG=1 python cu/capacity_cu.py
+CU_SINCE=2026-08-01T15:00:00 CU_DEBUG=1 python cu/capacity_cu.py
 ```
 
 Several knobs are env-only, because each only matters in a local investigation and the dispatch form

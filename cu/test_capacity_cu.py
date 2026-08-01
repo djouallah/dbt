@@ -50,7 +50,13 @@ def load(**env):
         os.environ.pop(k, None)
     os.environ.update({"PBI_TOKEN": "tok", "CU_METRICS_WORKSPACE_ID": "ws",
                        "CU_METRICS_MODEL_ID": "mdl", "CU_CAPACITY_ID": "cap",
-                       "CU_REFRESH": "0", "CU_HISTORY_DIR": _HISTORY_DIR, **env})
+                       "CU_REFRESH": "0", "CU_HISTORY_DIR": _HISTORY_DIR,
+                       # Pinned to this suite's own clock, NOT inherited from the production
+                       # default. Every stubbed row is stamped at H, and `main()` refuses to print a
+                       # total whose rows predate `since` — so leaving it unset meant that bumping
+                       # the real floor past H broke nine unrelated tests, which is exactly what
+                       # happened when the floor moved to 15:00.
+                       "CU_SINCE": H.isoformat(), **env})
     import capacity_cu
     m = importlib.reload(capacity_cu)
     if m.requests is None:
