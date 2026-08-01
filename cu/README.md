@@ -270,7 +270,7 @@ On the published page it is **one block per table, the mart first**, each with t
 reading — rows, files, row groups, average row-group size, MB, V-Order:
 
 ```
-### The layout that CU was spent on
+### Table layout
 
 #### `fct_summary` in detail — the mart the queries land on
 

@@ -378,7 +378,7 @@ def render_layouts(doc, analytics):
     for per_table in (doc.get("stats") or {}).values():
         for t, d in (per_table or {}).items():
             schema.setdefault(t, (d or {}).get("schema"))
-    print("\n### The layout that CU was spent on\n")
+    print("\n### Table layout\n")
     for t in order:
         head = (f"`{t}` in detail — the mart the queries land on" if t == mart
                 else f"`{(schema.get(t) + '.') if schema.get(t) else ''}{t}`")
