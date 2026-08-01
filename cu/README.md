@@ -231,6 +231,22 @@ model, or which GitHub run produced a number — only which *run* in its own sen
 `gh workflow run "Capacity units"` (or the Actions tab), `workflow_dispatch` only. **Wait ~10 minutes
 after the activity you want to measure** — see the lag note below.
 
+Every dispatch publishes the report to **<https://djouallah.github.io/dbt/>**. Pages is set to build
+from Actions, so there is no `gh-pages` branch and nothing is committed to the repo. That page is the
+**latest** report only — each dispatch overwrites it — and the per-run copy is that run's `cu-report`
+artifact, carrying both the markdown and the HTML. The `publish` job is separate from the read
+because `deploy-pages` needs the `github-pages` environment, and an environment on the job holding
+the Fabric tokens would gate the capacity read rather than the publish; it runs only on success, so a
+failed dispatch cannot overwrite a good page with a half-written one.
+
+**The repo is public, so the page is public.** It carries capacity-unit totals per engine and item
+names — no tokens, no ids, no data — but that is the trade, made deliberately.
+
+`cu/report_html.py` does the markdown → HTML, over the report's own markdown subset and nothing
+wider. One self-contained file: inline CSS, no script, no font, no image, no external URL at all, so
+the artifact copy opens off a local disk with no network. Re-render any past report offline with
+`python cu/report_html.py cu-report.md > page.html`.
+
 | input | default | notes |
 |---|---|---|
 | `since` | `2026-07-31T16:00:00` | floor, **in the model's clock** (see below) — the first dispatch measured the current way. Blank = everything retained |

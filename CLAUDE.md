@@ -861,10 +861,20 @@ detail.
 - **An unrecognised item kind lands in `other` and is logged, never dropped.** That log line
   (`kind X: N CU -> other`) is the route by which a kind gets into `CLASS_BY_KIND`. Do not guess a
   kind into the mapping; dispatch once and read stderr.
+- **Every dispatch publishes to <https://djouallah.github.io/dbt/>, and the repo is PUBLIC.** Pages
+  builds from Actions — no `gh-pages` branch, nothing committed — and holds the **latest** report
+  only; the per-run copy is that run's `cu-report` artifact (markdown + HTML). `publish` is its own
+  job because `deploy-pages` needs the `github-pages` environment, and an environment on the job
+  holding the Fabric tokens would gate the capacity read instead of the publish; `needs: cu` means a
+  failed read cannot overwrite a good page. `cu/report_html.py` renders it — a parser for the
+  report's own markdown subset, written a few lines away, which is why it is not a markdown
+  dependency in a directory whose whole property is `requests` and nothing else. The page is
+  self-contained by construction (inline CSS, no script/font/image/URL) because the artifact copy has
+  to open off a local disk years later.
 - **The isolation is the design, not an accident.** No imports from `benchmark/`, no
-  `run_report.json`, no artifact, no `needs:`, no shared concurrency group, no ADOMD, no .NET, no
-  duckrun — `requests` is the whole runtime dependency list, plus `pytest` for `cu/`'s own offline
-  suite, which imports nothing but `capacity_cu.py`. It is speculative tooling, so it is built to be
+  `run_report.json`, no `needs:` from another workflow, no shared concurrency group, no ADOMD, no
+  .NET, no duckrun — `requests` is the whole runtime dependency list, plus `pytest` for `cu/`'s own
+  offline suite, which imports nothing but `capacity_cu.py`. It is speculative tooling, so it is built to be
   deleted by removing one directory and one workflow file. Do not "DRY it up" against
   `benchmark/xmla_compare.py`; the duplication is what keeps that deletion free.
 - **`FABRIC_TOKEN` is a SECOND token on a different audience, and it is for naming items only.** The
