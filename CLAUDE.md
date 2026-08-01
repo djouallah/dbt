@@ -1086,8 +1086,13 @@ detail.
   tracked file outside `history/` holds a real one — the `model.bim`'s Direct Lake URL carries a
   zeros placeholder (`deploy()` rewrites both ids anyway, and the checked-in item id had already
   gone stale when `reset_outputs` recreated `dbt_delta`), and `benchmark/.platform`'s `logicalId`
-  identifies the template, not anything in the tenant. Keep the `model.bim` URL's SHAPE though:
-  `_is_directlake_bim()` greps the raw bytes for a `onelake.dfs` URL. Every workflow input defaults
+  identifies the template, not anything in the tenant. Keep the placeholder URL's SHAPE though, and
+  for the repoint rather than the detection: `deploy(lakehouse=…)` finds the ids to rewrite with
+  `_ONELAKE_REF` = `onelake\.dfs\.fabric\.microsoft\.com/([0-9a-fA-F-]{36})/([0-9a-fA-F-]{36})`
+  and **raises** when nothing matches, so the zeros have to stay 36 chars of hex and dashes. It is
+  *not* what makes the model Direct Lake — `_is_directlake_bim()` is
+  `"directLake" in text or _ONELAKE_REF.search(text)`, and every partition already carries
+  `"mode": "directLake"`. Every workflow input defaults
   to `""` and each **called workflow resolves the secret itself**. Two GitHub rules force that
   shape: an input's `default:` accepts no context at all, and `jobs.<id>.with.<id>` is the one
   place the `secrets` context is **not** available — so `all.yml` cannot pass either value down.
