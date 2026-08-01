@@ -40,7 +40,7 @@ on:
       since: { type: string, required: false, default: "2026-08-01T10:00:00" }
       etl: { type: boolean, required: false, default: true }
       models: { type: string, required: false, default: "aemo_duckrun,aemo_iceberg,aemo_spark,aemo_dwh" }
-      workspace: { type: string, required: false, default: "ea575278-bd81-459c-9680-47829898c902" }
+      workspace: { type: string, required: false, default: "" }
       metrics_workspace_id: { type: string, required: false, default: "7f7f5d92-1603-4a02-a46a-0d90fe1ed119" }
       metrics_model_id: { type: string, required: false, default: "0fdedd3b-1451-4499-9ed4-aa3658100ec1" }
       capacity_id: { type: string, required: false, default: "" }
@@ -66,9 +66,9 @@ on:
         type: string
         default: "aemo_duckrun,aemo_iceberg,aemo_spark,aemo_dwh"
       workspace:
-        description: "Fabric workspace GUID the items live in — the same one dbt.yml and benchmark.yml deploy to. With `etl` on this is the ONLY filter, which is the right one to be left with: everything in there is this repo's. Blank = every workspace on the capacity."
+        description: "Fabric workspace GUID the items live in — the same one dbt.yml and benchmark.yml deploy to. With `etl` on this is the ONLY filter, which is the right one to be left with: everything in there is this repo's. Blank = the FABRIC_WORKSPACE_ID repo secret, and only if that is unset too, every workspace on the capacity."
         type: string
-        default: "ea575278-bd81-459c-9680-47829898c902"
+        default: ""
       metrics_workspace_id:
         description: "workspace holding the Fabric Capacity Metrics app"
         type: string
@@ -78,7 +78,7 @@ on:
         type: string
         default: "0fdedd3b-1451-4499-9ed4-aa3658100ec1"
       capacity_id:
-        description: "capacity GUID (blank = every capacity the metrics model can see)"
+        description: "capacity GUID. Blank falls back to the CU_CAPACITY_ID secret, and only if that is unset too does it query every capacity the metrics model can see — which costs an extra DAX query to enumerate them plus two more per capacity beyond the first."
         type: string
         default: ""
       run_gap_hours:
@@ -136,13 +136,24 @@ jobs:
       contents: write
       actions: read
     # 45, not 20: the pre-query refresh of the metrics model waits up to CU_REFRESH_TIMEOUT (15
-    # min) before giving up, and the read itself is ~60 sequential timepoint requests.
+    # min) before giving up. The read itself is six DAX queries, or three with the capacity pinned
+    # — the "~60 sequential timepoint requests" this comment used to cite belonged to the deleted
+    # timepoint-detail design.
     timeout-minutes: 45
     env:
       CU_METRICS_WORKSPACE_ID: ${{ inputs.metrics_workspace_id }}
       CU_METRICS_MODEL_ID: ${{ inputs.metrics_model_id }}
-      CU_CAPACITY_ID: ${{ inputs.capacity_id }}
-      CU_WORKSPACE_FILTER: ${{ inputs.workspace }}
+      # Falls back to a SECRET, so the capacity GUID is not written down in this repo. Pinning it is
+      # not only about that: unpinned, the script must first ask the model which capacities exist
+      # and then read items + CU for each, so this tenant's two turn 3 DAX queries into 6. Against a
+      # metrics model on SHARED capacity — where the REST budget is what throttled the service
+      # principal in the first place — halving the request count is the point.
+      CU_CAPACITY_ID: ${{ inputs.capacity_id || secrets.CU_CAPACITY_ID }}
+      # Blank input -> the FABRIC_WORKSPACE_ID SECRET, so the GUID is not written into this
+      # repo. It cannot be defaulted on the input itself (a `default:` takes no context) nor
+      # passed down from all.yml (`jobs.<id>.with` is the one place `secrets` is NOT
+      # available), so every called workflow resolves it here, for itself.
+      CU_WORKSPACE_FILTER: ${{ inputs.workspace || secrets.FABRIC_WORKSPACE_ID }}
       CU_MODELS: ${{ inputs.models }}
       CU_ETL: ${{ inputs.etl && '1' || '0' }}
       CU_SINCE: ${{ inputs.since }}

@@ -559,6 +559,30 @@ def test_refresh_retries_a_429_and_reads_the_delay_from_the_body(monkeypatch):
     assert 120 in seen, "the retry must honour the delay the body advertises, not a default"
 
 
+def test_refresh_status_poll_backs_off_instead_of_hammering(monkeypatch):
+    """At a fixed 20s this loop made up to 45 requests per run against a SHARED-capacity model —
+    ~7x the whole measurement — on an endpoint that only answers "not yet", and it is the likeliest
+    thing that put the service principal into per-identity throttling. Backing off must reach the
+    same deadline in single digits."""
+    m = load(CU_REFRESH="1", CU_REFRESH_TIMEOUT="900")
+    slept, clock = [], [1000.0]
+
+    def fake_sleep(s):                 # a stubbed sleep must still advance the deadline's clock,
+        slept.append(s)                # or `while time.time() < deadline` spins on the real one
+        clock[0] += s
+
+    monkeypatch.setattr(m.time, "sleep", fake_sleep)
+    monkeypatch.setattr(m.time, "time", lambda: clock[0])
+    monkeypatch.setattr(m.requests, "post", lambda *a, **k: _Resp(202))
+    # Always "Unknown": the loop runs to its deadline, which is the worst case being bounded here.
+    monkeypatch.setattr(m.requests, "get", lambda *a, **k: type(
+        "R", (), {"status_code": 200, "json": staticmethod(lambda: {"value": [{"status": "Unknown"}]})})())
+    m.refresh_metrics_model()
+    assert len(slept) <= 8, f"{len(slept)} status polls to cover 900s — the backoff is gone"
+    assert sum(slept) >= 900, "backing off must still cover the full timeout, not cut it short"
+    assert max(slept) <= 300, "a single sleep longer than the 5-minute ceiling delays the finish"
+
+
 def test_refresh_does_not_retry_a_403(monkeypatch):
     """A 403 means the SP's access changed. Retrying it buries the reason — one attempt, then say so."""
     m = load(CU_REFRESH="1")

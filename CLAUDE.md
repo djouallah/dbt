@@ -1075,10 +1075,23 @@ detail.
   endpoint that answers a human instantly. **Where that budget actually goes is not where it
   looks:** the DAX is only **6 queries** per run (`INFO.VIEW.COLUMNS`, `VALUES('Capacities')`, then
   `items_for` + `cu_for` per capacity × this tenant's two — pin `CU_CAPACITY_ID` and it is 3). The
-  refresh path polls `GET …/refreshes?$top=1` every 20s for up to `CU_REFRESH_TIMEOUT`, i.e. **up
-  to 45 requests**, so it spends ~7× the measurement and is also the thing that gets refused. An
-  earlier version of this bullet said "~60 executeQueries per run"; that described the deleted
-  timepoint-detail design and is retracted. Attack the poll interval before the query count.
+  refresh path polled `GET …/refreshes?$top=1` every 20s for up to `CU_REFRESH_TIMEOUT` — **up to
+  45 requests**, ~7× the measurement, on an endpoint that only ever answers "not yet", and it was
+  almost certainly what spent the budget that then refused it. That poll now **backs off** (30s,
+  doubling, 5-minute ceiling), reaching the same 900s deadline in six requests; a test pins it at
+  ≤8. An earlier version of this bullet said "~60 executeQueries per run"; that described the
+  deleted timepoint-detail design and is retracted.
+- **The workspace and capacity GUIDs are SECRETS, and the fallback cannot live where you would put
+  it.** `FABRIC_WORKSPACE_ID` and `CU_CAPACITY_ID` are repo secrets; every workflow input defaults
+  to `""` and each **called workflow resolves the secret itself**. Two GitHub rules force that
+  shape: an input's `default:` accepts no context at all, and `jobs.<id>.with.<id>` is the one
+  place the `secrets` context is **not** available — so `all.yml` cannot pass either value down.
+  Workflow-level and job-level `env` both do allow `secrets`, which is where the
+  `${{ inputs.x || secrets.X }}` lines sit. `capacity_cu.py` deliberately keeps **no default GUID**
+  either: a hardcoded fallback would put the value back in the repo and outvote the secret whenever
+  the env var arrived empty. Pinning the capacity is not only about secrecy — unpinned, the script
+  asks the model which capacities exist and then reads items + CU for each, so this tenant's two
+  turn 3 DAX queries into 6.
   **A wrong answer was recorded here first and is retracted:** that this was the shared-capacity
   *"maximum of eight requests per day, including scheduled refresh"* from the
   [refresh API limitations](https://learn.microsoft.com/en-us/rest/api/power-bi/datasets/refresh-dataset-in-group).

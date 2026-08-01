@@ -38,7 +38,7 @@ on:
   # therefore fails at the leg rather than at the form — the defaults are the same either way.
   workflow_call:
     inputs:
-      workspace: { type: string, required: false, default: "ea575278-bd81-459c-9680-47829898c902" }
+      workspace: { type: string, required: false, default: "" }
       download_limit: { type: string, required: false, default: "200" }
       cores: { type: string, required: false, default: "8" }
       native_execution_engine: { type: boolean, required: false, default: false }
@@ -47,9 +47,9 @@ on:
   workflow_dispatch:
     inputs:
       workspace:
-        description: "Fabric workspace GUID"
+        description: "Fabric workspace GUID. Blank = the FABRIC_WORKSPACE_ID repo secret, which is where it normally comes from."
         type: string
-        default: "ea575278-bd81-459c-9680-47829898c902"
+        default: ""
       download_limit:
         description: "files to download per source"
         type: string
@@ -90,7 +90,11 @@ permissions:
   actions: read
 
 env:
-  WS_ID: ${{ inputs.workspace || 'ea575278-bd81-459c-9680-47829898c902' }}
+  # Blank input -> the FABRIC_WORKSPACE_ID SECRET, so the GUID is not written into this repo.
+  # It cannot be defaulted on the input (a `default:` takes no context) nor passed down from
+  # all.yml (`jobs.<id>.with` is the one place `secrets` is NOT available), so each called
+  # workflow resolves it here, for itself. Workflow-level `env` DOES allow `secrets`.
+  WS_ID: ${{ inputs.workspace || secrets.FABRIC_WORKSPACE_ID }}
   AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
   AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
   DBT_SCHEMA: mart

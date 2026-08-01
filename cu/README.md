@@ -325,7 +325,7 @@ the artifact copy opens off a local disk with no network. Re-render any past rep
 | `since` | `2026-08-01T10:00:00` | floor, **in the model's clock** (see below) — the from-scratch dbt run that reset every output item. Blank = everything retained |
 | `etl` | true | report every item in the workspace, classified into `etl`/`analytics`. Off = semantic models only, the old scope exactly |
 | `models` | the four `aemo_*` | comma-separated, leading the analytics rows and printed even at 0.0. With `etl` **on** this only orders; with `etl` off it also filters |
-| `workspace` | `ea575278-…` | the workspace dbt.yml and benchmark.yml deploy to. With `etl` on this is the only filter left. Blank = all |
+| `workspace` | the `FABRIC_WORKSPACE_ID` secret | the workspace dbt.yml and benchmark.yml deploy to. With `etl` on this is the only filter left. Blank here AND no secret = all |
 | `metrics_workspace_id` | `7f7f5d92-…` | where the Capacity Metrics app is installed |
 | `metrics_model_id` | `0fdedd3b-…` | the app's semantic model |
 | `capacity_id` | all | blank = every capacity the metrics model can see |
@@ -416,7 +416,7 @@ A bare GUID in that last table is the snapshot-lag trap above.
 **With `etl` on, `workspace` is the only filter — and that is the right one to be left with.** The
 name filter existed because display names are not unique across a tenant: a stale `aemo_spark` in
 some other workspace would otherwise be added to this one's CU. The workspace test alone still stops
-that, and everything inside `ea575278-…` is this repo's. `models` is then an ordering: the four are
+that, and everything inside the workspace named by `FABRIC_WORKSPACE_ID` is this repo's. `models` is then an ordering: the four are
 printed even with no activity, because a `0.0` row distinguishes "deployed and never queried" from
 "vanished", which a missing row would not. With `etl` **off** both filters stack as they always did.
 

@@ -189,8 +189,12 @@ MAX_OP_COLS = int(os.environ.get("CU_OP_COLS", "6") or 0)
 # TOP of the name filter, not instead of it: display names are not unique across a tenant, so a
 # stale `aemo_spark` in some other workspace would otherwise be silently added to this one's CU.
 # Blank = every workspace on the capacity.
-WS_FILTER = os.environ.get(
-    "CU_WORKSPACE_FILTER", "ea575278-bd81-459c-9680-47829898c902").strip().upper()
+#
+# NO DEFAULT GUID here, deliberately: `cu.yml` supplies it from the FABRIC_WORKSPACE_ID secret, and
+# a hardcoded fallback would put the value back in the repo and quietly outvote the secret whenever
+# the env var arrived empty. Unset means unfiltered, which is visible in the report (other
+# workspaces' items appear) rather than silently wrong.
+WS_FILTER = os.environ.get("CU_WORKSPACE_FILTER", "").strip().upper()
 
 DEBUG = os.environ.get("CU_DEBUG", "").strip().lower() in ("1", "true", "yes")
 
@@ -411,17 +415,29 @@ def refresh_metrics_model():
             f"notebook that is missing takes a whole leg's compute into `shared`.")
         return False
 
+    # BACKOFF, not a fixed 20s. At 20s this loop made up to 45 status requests per run against a
+    # SHARED-capacity model — roughly seven times the whole measurement (6 DAX queries, 3 once a
+    # capacity is pinned) — spent on an endpoint that only ever answers "not yet". That is the
+    # likeliest thing that put the service principal into per-identity throttling, which then
+    # refused the very refresh this loop was waiting on. Doubling from 30s to a 5-minute ceiling
+    # reaches the same 900s deadline in SIX requests. The cost is up to 5 minutes of latency
+    # between a refresh finishing and this noticing, against a refresh that takes minutes anyway.
     deadline = time.time() + REFRESH_TIMEOUT
+    delay, polls = 30, 0
     while time.time() < deadline:
-        time.sleep(20)
+        time.sleep(delay)
+        delay = min(delay * 2, 300)
+        polls += 1
         g = requests.get(f"{base}?$top=1", headers=headers, timeout=60)
         if g.status_code != 200:
-            log(f"  cannot read refresh status ({g.status_code}) — continuing without waiting")
+            log(f"  cannot read refresh status ({g.status_code}) after {polls} polls — "
+                f"continuing without waiting")
             return False
         rows = g.json().get("value") or []
         status = (rows[0].get("status") if rows else "") or ""
         if status == "Completed":
-            log(f"  refresh completed in {int(time.time() - (deadline - REFRESH_TIMEOUT))}s")
+            log(f"  refresh completed in {int(time.time() - (deadline - REFRESH_TIMEOUT))}s "
+                f"({polls} status polls)")
             return True
         if status in ("Failed", "Disabled", "Cancelled"):
             err = (rows[0].get("serviceExceptionJson") or "")[:200]

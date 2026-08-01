@@ -42,7 +42,7 @@ on:
   # exception: `schedule`, `push`, `workflow_run`, `repository_dispatch`.
   workflow_call:
     inputs:
-      workspace: { type: string, required: false, default: "ea575278-bd81-459c-9680-47829898c902" }
+      workspace: { type: string, required: false, default: "" }
       engines: { type: string, required: false, default: "duckrun,iceberg,spark,dwh" }
       runs: { type: string, required: false, default: "6" }
       think_seconds: { type: string, required: false, default: "4" }
@@ -51,9 +51,9 @@ on:
   workflow_dispatch:
     inputs:
       workspace:
-        description: "Fabric workspace GUID"
+        description: "Fabric workspace GUID. Blank = the FABRIC_WORKSPACE_ID repo secret, which is where it normally comes from."
         type: string
-        default: "ea575278-bd81-459c-9680-47829898c902"
+        default: ""
       engines:
         description: "engines to benchmark, comma-separated. Order is the order they are MEASURED in — no reference engine, no number in the report depends on it."
         type: string
@@ -129,7 +129,11 @@ jobs:
     env:
       AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
       AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
-      WS_ID: ${{ inputs.workspace }}
+      # Blank input -> the FABRIC_WORKSPACE_ID SECRET, so the GUID is not written into this
+      # repo. It cannot be defaulted on the input itself (a `default:` takes no context) nor
+      # passed down from all.yml (`jobs.<id>.with` is the one place `secrets` is NOT
+      # available), so every called workflow resolves it here, for itself.
+      WS_ID: ${{ inputs.workspace || secrets.FABRIC_WORKSPACE_ID }}
       RUN_REPORT: ${{ github.workspace }}/fragments/report-00-meta.json
     outputs:
       matrix: ${{ steps.resolve.outputs.matrix }}
