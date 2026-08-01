@@ -31,9 +31,9 @@ on:
   workflow_dispatch:
     inputs:
       since:
-        description: "count only from this instant, IN THE MODEL'S CLOCK (the app's own offset, not UTC — the run logs the hour range it saw). A pinned floor, not a rolling window. The default is the first dispatch measured the current way; widen it to reach older suites, whose CU is not comparable. Blank = everything retained (~14 days)."
+        description: "count only from this instant, IN THE MODEL'S CLOCK (the app's own offset, +10, not UTC — the run logs the hour range it saw). A pinned floor, not a rolling window. The default is the from-scratch dbt run of 2026-08-01 (30676635835), which reset every output item, so anything earlier belongs to items that no longer exist. Widen it to reach those anyway. Blank = everything retained (~14 days)."
         type: string
-        default: "2026-07-31T16:00:00"
+        default: "2026-08-01T10:00:00"
       etl:
         description: "report EVERY item in the workspace — lakehouses, the warehouse, notebooks, Livy sessions — classified into etl and analytics, not just the semantic models. With this on, `models` below stops filtering and only orders."
         type: boolean

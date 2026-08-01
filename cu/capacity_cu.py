@@ -203,14 +203,20 @@ REFRESH_TIMEOUT = int(os.environ.get("CU_REFRESH_TIMEOUT", "900"))
 # the boundary fell. A pinned floor stays put: everything after it accumulates, and two dispatches a
 # day apart are comparable.
 #
-# What it is for: the app retains ~14 days, and the benchmark's METHODOLOGY has moved inside that
-# window more than once — the run where dwh was DirectQuery rather than Direct Lake, and then the
-# per-query dehydrate being dropped for a user-session walk with think time (8c037c8 / debef3a,
-# 06:11Z on 2026-07-31). None of those are the same experiment and their CU must not be summed.
-# So the floor sits at the first dispatch measured the CURRENT way — 30609137059, which started
-# 06:16Z, i.e. hour 16:00 in the model's clock. Bump it again the next time the suite changes;
-# blank means everything retained, and a wider floor is a dispatch input away when the older runs
-# are wanted for a one-off comparison.
+# What it is for: the app retains ~14 days, and what is being MEASURED has changed inside that
+# window more than once — the run where dwh was DirectQuery rather than Direct Lake, then the
+# per-query dehydrate being dropped for a user-session walk with think time (8c037c8 / debef3a).
+# None of those are the same experiment and their CU must not be summed.
+#
+# The floor now sits at the `dbt` run of 2026-08-01 (30676635835, 00:53:23Z → hour 10:00 in the
+# model's clock), and that one is a harder boundary than a methodology change: it ran with
+# `reset_outputs`, so all four output items were DELETED and recreated. Every row before it belongs
+# to items that no longer exist — same display NAMES, different GUIDs — so summing across the floor
+# adds two generations of `dbt_delta` into one number that describes neither. It is also the first
+# build whose notebooks are named per engine, i.e. the first whose ETL is attributable at all.
+#
+# Bump it again the next time the outputs are reset or the suite changes what it measures; blank
+# means everything retained, and a wider floor is a dispatch input away for a one-off comparison.
 #
 # EXPRESSED IN THE MODEL'S OWN CLOCK, not UTC. The Capacity Metrics tables stamp everything in the
 # offset configured inside the app — +10 here, so a benchmark that ran at 05:15Z sits under hour
@@ -221,7 +227,7 @@ REFRESH_TIMEOUT = int(os.environ.get("CU_REFRESH_TIMEOUT", "900"))
 # ~9 days into the FUTURE (it returned +227.5h), MAX() over activity lags by however long the
 # capacity has been idle, and there is no offset column anywhere in the model. Every run logs the
 # range of hours it actually saw, so one dispatch tells you what to set this to.
-SINCE = os.environ.get("CU_SINCE", "2026-07-31T16:00:00").strip()
+SINCE = os.environ.get("CU_SINCE", "2026-08-01T10:00:00").strip()
 
 # Run separation. Both signals it uses are already in every row — the item GUID and the hour — so
 # splitting the report per RUN costs nothing extra: no more requests, no new query, pure

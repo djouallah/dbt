@@ -80,13 +80,18 @@ Read the rows as *what this item spent*, not as a like-for-like engine compariso
 and can slice one benchmark in half, making an engine look cheap for no reason but where the
 boundary fell. `since` stays put, everything after it accumulates, and two dispatches a day apart
 are comparable. Its specific purpose: the app's ~14 days of retention spans more than one version of
-the benchmark — the run where dwh was **DirectQuery** rather than Direct Lake, and then the switch
-from a per-query dehydrate to a user-session walk with think time (`8c037c8`/`debef3a`, 06:11Z on
-2026-07-31). Those are different experiments and their CU must not be summed (see
-`benchmark/README.md`), so the default floor sits at the first dispatch measured the current way,
-`2026-07-31T16:00:00` in the model's clock. Bump it again the next time the suite changes; blank
-means everything retained. Operation columns are discovered from the data and ordered by total CU,
-so the expensive one reads first.
+what is being measured — the run where dwh was **DirectQuery** rather than Direct Lake, then the
+switch from a per-query dehydrate to a user-session walk with think time (`8c037c8`/`debef3a`).
+Those are different experiments and their CU must not be summed (see `benchmark/README.md`).
+
+The default floor is **`2026-08-01T10:00:00`** (model clock) — the from-scratch `dbt` run
+[30676635835](https://github.com/djouallah/dbt/actions/runs/30676635835), which started 00:53:23Z.
+That is a harder boundary than a methodology change: it ran with `reset_outputs`, so all four output
+items were **deleted and recreated**. Rows before it belong to items that no longer exist — same
+display names, new GUIDs — so summing across the floor adds two generations of `dbt_delta` into one
+number describing neither. It is also the first build whose notebooks are named per engine, i.e. the
+first whose ETL is attributable at all. Bump it again the next time the outputs are reset or the
+suite changes what it measures; blank means everything retained.
 
 ## Runs are separated, and it costs nothing extra
 
@@ -249,7 +254,7 @@ the artifact copy opens off a local disk with no network. Re-render any past rep
 
 | input | default | notes |
 |---|---|---|
-| `since` | `2026-07-31T16:00:00` | floor, **in the model's clock** (see below) — the first dispatch measured the current way. Blank = everything retained |
+| `since` | `2026-08-01T10:00:00` | floor, **in the model's clock** (see below) — the from-scratch dbt run that reset every output item. Blank = everything retained |
 | `etl` | true | report every item in the workspace, classified into `etl`/`analytics`. Off = semantic models only, the old scope exactly |
 | `models` | the four `aemo_*` | comma-separated, leading the analytics rows and printed even at 0.0. With `etl` **on** this only orders; with `etl` off it also filters |
 | `workspace` | `ea575278-…` | the workspace dbt.yml and benchmark.yml deploy to. With `etl` on this is the only filter left. Blank = all |
@@ -270,7 +275,7 @@ export PBI_TOKEN=$(az account get-access-token \
   --resource https://analysis.windows.net/powerbi/api --query accessToken -o tsv)
 export CU_METRICS_WORKSPACE_ID=7f7f5d92-1603-4a02-a46a-0d90fe1ed119
 export CU_METRICS_MODEL_ID=0fdedd3b-1451-4499-9ed4-aa3658100ec1
-CU_SINCE=2026-07-31T16:00:00 CU_DEBUG=1 python cu/capacity_cu.py
+CU_SINCE=2026-08-01T10:00:00 CU_DEBUG=1 python cu/capacity_cu.py
 ```
 
 Several knobs are env-only, because each only matters in a local investigation and the dispatch form

@@ -924,13 +924,17 @@ detail.
   change is what keeps it unnecessary. When everything lands in one generation the report says so
   rather than printing a one-column "runs" table that repeats the aggregate — which is the expected
   output at the default `since`, because that floor is pinned to the newest dispatch.
-- **`CU_SINCE` is pinned to the first dispatch measured the CURRENT way, and that is a floor to keep
-  bumping.** It is `2026-07-31T16:00:00` (model clock), the hour holding run 30609137059, which
-  started four minutes after `8c037c8`/`debef3a` changed the benchmark from a per-query dehydrate to
-  a user-session walk with think time. Older dispatches are still retained and still readable — pass
-  a wider `since` on the dispatch — but their CU is a different experiment and summing it with the
-  current one is apples to oranges. Bump the default again the next time `benchmark/` changes what it
-  measures; the value lives in both `cu/capacity_cu.py` and `cu.yml`.
+- **`CU_SINCE` is pinned to the last from-scratch build, and that is a floor to keep bumping.** It is
+  `2026-08-01T10:00:00` (model clock) — the hour holding `dbt` run 30676635835, which started
+  00:53:23Z and ran with `reset_outputs`. That reset is what makes it a hard boundary rather than a
+  preference: **all four output items were deleted and recreated**, so every row before it belongs to
+  items that no longer exist, carrying the same display NAMES under new GUIDs. Sum across the floor
+  and you add two generations of `dbt_delta` into one number describing neither. It is also the first
+  build whose notebooks are named per engine, so the first whose ETL is attributable at all. The
+  earlier floor was pinned to a benchmark methodology change instead (`8c037c8`/`debef3a`) — same
+  principle, weaker boundary. Older rows are still retained and readable with a wider `since`, they
+  are just a different experiment. Bump the default the next time the outputs are reset or the suite
+  changes what it measures; the value lives in both `cu/capacity_cu.py` and `cu.yml`.
 - **The runs table is model-down / run-across, and the transpose was the earlier shape.** One row per
   semantic model, one column per run, so "what did iceberg cost yesterday against today" is one row
   read left to right — and it matches the aggregate table above it instead of making the eye re-learn
