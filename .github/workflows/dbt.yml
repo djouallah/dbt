@@ -126,19 +126,12 @@ env:
   # grants. `benchmark/` is fine — it deletes and recreates its models per dispatch.
 
 jobs:
-  # `reset` and `land` run SIDE BY SIDE — two boxes on one row of the graph, not a chain. They touch
-  # different items (reset deletes the four OUTPUTS, land writes `dbt_landing`), so there is nothing
-  # to order between them, and the legs wait for both.
-  #
-  # What this costs, and it is worth knowing before shortening it further: Fabric keeps a deleted
-  # item's DISPLAY NAME reserved for minutes after the item stops being listed, so a drop followed
-  # too closely by a create draws `409 ItemDisplayNameNotAvailableYet` — which is how the per-leg
-  # version of this failed on run 30639018466, taking three legs with it. Chained, the whole
-  # download sat between the drop and the leg that recreates the item. In parallel that gap is only
-  # whatever `land` still has left to do when `reset` finishes, which can be nothing. The backstop
-  # is real and was built for exactly this: `ensure()` polls through the 409 for ~10 minutes. So a
-  # reset dispatch may now spend a minute or two waiting inside the leg instead of not waiting at
-  # all — that is the trade, and it is only paid when `reset_outputs` is ticked.
+  # FIRST, and before `land` on purpose. Fabric keeps a deleted item's DISPLAY NAME reserved for
+  # minutes after the item stops being listed, so dropping and recreating in the same step draws
+  # `409 ItemDisplayNameNotAvailableYet` — which is how the per-leg version of this failed on run
+  # 30639018466, taking three legs with it. Deleting everything up front and then landing the data
+  # gives the reservation the whole download to expire in, and the engine legs then create their
+  # item the ordinary way, unaware a reset happened.
   #
   # The job always runs; only its step is conditional. A job skipped by `if:` skips everything
   # that needs it, so gating the job itself would skip the entire build.
@@ -160,6 +153,7 @@ jobs:
 
   land:
     name: land data
+    needs: reset
     runs-on: ubuntu-latest
     timeout-minutes: 30
     # No `outputs:` any more. This job used to export FILES_PATH for every leg to share; each leg
@@ -192,9 +186,7 @@ jobs:
     # engine were the adapter, and as if the other leg were not equally on Fabric. `label` is the
     # display name ONLY; `engine` is still the key provision.py and the dbt target key take.
     name: duckdb ${{ matrix.label }}
-    # BOTH, not just `land`: with reset and land running side by side, needing `land` alone would
-    # let a leg recreate its lakehouse while `reset` is still deleting it.
-    needs: [reset, land]
+    needs: land
     runs-on: ubuntu-latest
     timeout-minutes: 90
     strategy:
@@ -224,7 +216,7 @@ jobs:
   # dwh + spark: dbt client on the runner, compute on Fabric's own servers.
   server:
     name: fabric-server ${{ matrix.engine }}
-    needs: [reset, land]   # both — see the `fabric` job above
+    needs: land
     runs-on: ubuntu-latest
     # Backlog-draining spark runs (1024-file folds) reach ~40 min; leave room for one retry.
     timeout-minutes: 60
