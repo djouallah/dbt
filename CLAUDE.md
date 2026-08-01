@@ -1044,6 +1044,17 @@ detail.
   refresh is expected to succeed; it is non-fatal only so that an already-running scheduled refresh
   or a misbehaving one still yields a report. A `refresh NOT started (403 …)` line means the SP's
   access changed — chase it. `cu.yml`'s job timeout is 45 minutes to cover the wait.
+  **A 429 is retried, and that is not theoretical.** On run 30685959678 the POST drew
+  `429 … Retry in 120 seconds`, the refresh was skipped, and the two throwaway `dbt-<engine>-*`
+  notebooks the build had just created and deleted resolved to **no name anywhere** — so 41,887 CU
+  of DuckDB-leg compute printed in `shared` / `other` instead of in the duckrun and iceberg
+  columns. Nothing failed and nothing looked broken; the report was simply wrong, because the one
+  call that makes a minutes-old item visible had not run. `execute_dax` had honoured `Retry-After`
+  for the same cap all along; this path gave up on the first response. Only the 429 retries — a 403
+  is answered immediately, since retrying it buries the reason — and the delay is read from the
+  **body** (`Retry in N seconds`), because that response carries no `Retry-After` header. Both are
+  pinned by tests. A report whose notebook CU sits in `shared` is this bug, not an attribution
+  limit: **re-measure the same window** rather than reaching for `engine_of`.
 - **A deploy mints a NEW item GUID, and `'Items'` is a lagging snapshot — this made the whole report
   read empty.** The metrics tables hold item GUIDs; a semantic model that was just created (or deleted
   and recreated — `overwrite=True` keeps its id, a recreate does not) has a GUID `'Items'` has not seen

@@ -535,6 +535,38 @@ def test_bar_geometry_is_square_at_the_baseline_and_rounded_at_the_tip():
     assert "A" not in report_html._bar_path(2, 18)
 
 
+class _Resp:
+    def __init__(self, status, text="", headers=None):
+        self.status_code, self.text, self.headers = status, text, headers or {}
+
+
+def test_refresh_retries_a_429_and_reads_the_delay_from_the_body(monkeypatch):
+    """MEASURED on run 30685959678: this call drew `429 ... Retry in 120 seconds`, the refresh was
+    skipped, and the two throwaway dbt-<engine>-* notebooks the build had just created and deleted
+    resolved to no name — putting 41,887 CU of DuckDB-leg compute in `shared`/`other` instead of
+    the duckrun and iceberg columns. Nothing failed; the report was just wrong, which is exactly
+    the failure this suite exists for. The delay is in the BODY, not a Retry-After header."""
+    m = load(CU_REFRESH="1")
+    seen = []
+    posts = iter([_Resp(429, '{"message":"...Retry in 120 seconds."}'), _Resp(202)])
+    monkeypatch.setattr(m.time, "sleep", lambda s: seen.append(s))
+    monkeypatch.setattr(m.requests, "post", lambda *a, **k: next(posts))
+    monkeypatch.setattr(m.requests, "get", lambda *a, **k: _Resp(200))
+    monkeypatch.setattr(m, "REFRESH_TIMEOUT", 0)          # skip the wait-for-completion loop
+    m.refresh_metrics_model()
+    assert 120 in seen, "the retry must honour the delay the body advertises, not a default"
+
+
+def test_refresh_does_not_retry_a_403(monkeypatch):
+    """A 403 means the SP's access changed. Retrying it buries the reason — one attempt, then say so."""
+    m = load(CU_REFRESH="1")
+    calls = []
+    monkeypatch.setattr(m.time, "sleep", lambda s: None)
+    monkeypatch.setattr(m.requests, "post", lambda *a, **k: (calls.append(1), _Resp(403, "nope"))[1])
+    assert m.refresh_metrics_model() is False
+    assert len(calls) == 1
+
+
 def test_page_escapes_before_it_formats():
     """Item names come from a REST API. A `<` in one must not become markup."""
     import report_html

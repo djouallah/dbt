@@ -201,6 +201,11 @@ DEBUG = os.environ.get("CU_DEBUG", "").strip().lower() in ("1", "true", "yes")
 # is logged rather than fatal.
 REFRESH = os.environ.get("CU_REFRESH", "1").strip().lower() not in ("0", "false", "no", "")
 REFRESH_TIMEOUT = int(os.environ.get("CU_REFRESH_TIMEOUT", "900"))
+# POST attempts for the refresh, and it exists because of a 429. Only a 429 is retried — every
+# other non-2xx is answered on the first response, since retrying a 403 only buries the reason.
+# Two spare attempts at the advertised ~120s cover the per-user cap without pushing the job's own
+# timeout (45 min) anywhere near the edge.
+REFRESH_TRIES = int(os.environ.get("CU_REFRESH_TRIES", "3"))
 
 # A FLOOR, not a rolling window, and the difference matters. A window ("last 3h") moves with every
 # dispatch and can slice one benchmark in half, making an engine look cheap for no reason but where
@@ -357,10 +362,30 @@ def refresh_metrics_model():
     a CU report over an already-settled window is still worth printing if the refresh misbehaves.
     A `refresh NOT started (403 ...)` line means the SP's access has changed and is worth chasing,
     not shrugging at.
+
+    A 429 is RETRIED, unlike every other non-2xx, and measured rather than assumed: on run
+    30685959678 this call drew `429 ... Retry in 120 seconds`, the refresh was skipped, and the two
+    throwaway `dbt-<engine>-*` notebooks the build had just created and deleted resolved to no name
+    anywhere — so 41,887 CU of DuckDB-leg compute landed in `shared`/`other` instead of in the
+    duckrun and iceberg columns. The report degraded exactly as designed and was still wrong,
+    because the one thing that makes a minutes-old item visible had not run. `execute_dax` already
+    honours Retry-After for the same cap; this path did not, and gave up on the first response.
     """
     base = f"{PBI}/groups/{WS}/datasets/{MODEL}/refreshes"
     headers = {"Authorization": f"Bearer {TOKEN}", "Content-Type": "application/json"}
-    r = requests.post(base, json={"notifyOption": "NoNotification"}, headers=headers, timeout=60)
+    for attempt in range(1, REFRESH_TRIES + 1):
+        r = requests.post(base, json={"notifyOption": "NoNotification"}, headers=headers,
+                          timeout=60)
+        if r.status_code != 429 or attempt == REFRESH_TRIES:
+            break
+        # The body carries the delay when the header does not — "Retry in 120 seconds".
+        m = re.search(r"retry in (\d+)", r.text.lower())
+        wait = int(r.headers.get("Retry-After") or (m.group(1) if m else 120))
+        log(f"  429 from refresh (the per-user request cap); retrying in {wait}s "
+            f"({attempt}/{REFRESH_TRIES - 1})")
+        # Capped against a pathological Retry-After, NOT against REFRESH_TIMEOUT — that one bounds
+        # how long we wait for a refresh to finish, which is a different question.
+        time.sleep(min(wait, 300))
     if r.status_code in (200, 202):
         log("  refresh accepted, waiting for it to finish ...")
     elif r.status_code in (400, 409) and "already" in r.text.lower():
@@ -368,7 +393,8 @@ def refresh_metrics_model():
         log("  a refresh is already running; waiting for that one instead")
     else:
         log(f"  refresh NOT started ({r.status_code}: {r.text[:200].replace(chr(10), ' ')}) — "
-            f"reading the model as it stands. Newly created items may be missing.")
+            f"reading the model as it stands. Newly created items may be missing, and a throwaway "
+            f"notebook that is missing takes a whole leg's compute into `shared`.")
         return False
 
     deadline = time.time() + REFRESH_TIMEOUT
