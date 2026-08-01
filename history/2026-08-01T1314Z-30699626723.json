@@ -1,0 +1,182 @@
+{
+ "config": {
+  "duckrun": {
+   "vcores": "8"
+  },
+  "iceberg": {
+   "vcores": "8"
+  },
+  "spark": {
+   "native_execution_engine": "true",
+   "resource_profile": "readHeavyForPBI"
+  }
+ },
+ "cu": {
+  "analytics": {
+   "spark": {
+    "Dataset On-Demand Refresh": 55.8,
+    "Dataset Scheduled Refresh": 1.5,
+    "Query": 16.1,
+    "XMLA Read Operation": 1440.0
+   }
+  },
+  "etl": {
+   "duckrun": {
+    "OneLake Iterative Read via Proxy": 19.5,
+    "OneLake Other Operations Via Redirect": 70.4,
+    "OneLake Write via Proxy": 6.8,
+    "OneLake Write via Redirect": 3.4,
+    "SQL Endpoint Query": 4.9
+   },
+   "dwh": {
+    "OneLake Iterative Read via Proxy": 1.5,
+    "OneLake Other Operations Via Redirect": 0.2,
+    "OneLake Write via Proxy": 6.8,
+    "OneLake Write via Redirect": 3.4,
+    "SQL Endpoint Query": 19.3,
+    "Warehouse Query": 11.0
+   },
+   "iceberg": {
+    "OneLake Iterative Read via Proxy": 1351.0,
+    "OneLake Other Operations": 85.2,
+    "OneLake Other Operations Via Redirect": 0.8,
+    "OneLake Read via Proxy": 85.1,
+    "OneLake Write via Proxy": 6.8,
+    "OneLake Write via Redirect": 3.4,
+    "SQL Endpoint Query": 45.7
+   },
+   "landing": {
+    "OneLake Iterative Read via Proxy": 13.7,
+    "OneLake Other Operations Via Redirect": 0.3,
+    "OneLake Write via Proxy": 13.7,
+    "OneLake Write via Redirect": 3.4,
+    "SQL Endpoint Query": 10.1
+   },
+   "shared": {
+    "OneLake Iterative Read via Proxy": 183.7,
+    "OneLake Other Operations": 9.7,
+    "OneLake Other Operations Via Redirect": 1.2,
+    "OneLake Read via Proxy": 9.6,
+    "OneLake Write via Proxy": 13.7,
+    "OneLake Write via Redirect": 3.4,
+    "SQL Endpoint Query": 9.9
+   },
+   "spark": {
+    "High Concurrency Session Livy Run": 29788.2,
+    "OneLake Iterative Read via Proxy": 96.6,
+    "OneLake Other Operations": 4.1,
+    "OneLake Other Operations Via Redirect": 215.7,
+    "OneLake Read via Proxy": 4.7,
+    "OneLake Read via Redirect": 1019.5,
+    "OneLake Write via Proxy": 24.2,
+    "OneLake Write via Redirect": 497.2,
+    "SQL Endpoint Query": 54.8
+   }
+  }
+ },
+ "layout": {
+  "spark": {
+   "dim_calendar": {
+    "avg_row_group": 3197.0,
+    "compression": "SNAPPY",
+    "num_files": 1,
+    "num_row_groups": 1,
+    "schema": "mart",
+    "size_mb": 0.02,
+    "total_rows": 3197,
+    "vorder": true
+   },
+   "dim_duid": {
+    "avg_row_group": 689.0,
+    "compression": "SNAPPY",
+    "num_files": 1,
+    "num_row_groups": 1,
+    "schema": "mart",
+    "size_mb": 0.02,
+    "total_rows": 689,
+    "vorder": true
+   },
+   "fct_price": {
+    "avg_row_group": 418172.7,
+    "compression": "SNAPPY",
+    "num_files": 6,
+    "num_row_groups": 11,
+    "schema": "landing",
+    "size_mb": 650.5,
+    "total_rows": 4599900,
+    "vorder": true
+   },
+   "fct_price_today": {
+    "avg_row_group": 12750.0,
+    "compression": "SNAPPY",
+    "num_files": 1,
+    "num_row_groups": 1,
+    "schema": "landing",
+    "size_mb": 0.89,
+    "total_rows": 12750,
+    "vorder": true
+   },
+   "fct_scada": {
+    "avg_row_group": 6607526.8,
+    "compression": "SNAPPY",
+    "num_files": 24,
+    "num_row_groups": 56,
+    "schema": "landing",
+    "size_mb": 2633.46,
+    "total_rows": 370021502,
+    "vorder": true
+   },
+   "fct_scada_today": {
+    "avg_row_group": 750153.0,
+    "compression": "SNAPPY",
+    "num_files": 1,
+    "num_row_groups": 1,
+    "schema": "landing",
+    "size_mb": 3.75,
+    "total_rows": 750153,
+    "vorder": true
+   },
+   "fct_summary": {
+    "avg_row_group": 13089178.3,
+    "compression": "SNAPPY",
+    "num_files": 11,
+    "num_row_groups": 11,
+    "schema": "mart",
+    "size_mb": 1056.19,
+    "total_rows": 143980961,
+    "vorder": true
+   },
+   "stg_csv_archive_log": {
+    "avg_row_group": 8167.0,
+    "compression": "SNAPPY",
+    "num_files": 1,
+    "num_row_groups": 1,
+    "schema": "landing",
+    "size_mb": 0.43,
+    "total_rows": 8167,
+    "vorder": true
+   }
+  }
+ },
+ "layout_written": "2026-08-01T12:41:33.985957+00:00",
+ "runs": {
+  "build": "30699626723",
+  "build_sha": "8ce820c5855a6cb3d76da82fa6aea2120e2a32e2",
+  "measure": "30699626723",
+  "measure_sha": "8ce820c5855a6cb3d76da82fa6aea2120e2a32e2"
+ },
+ "schema": 2,
+ "since": "2026-08-01T22:00:00",
+ "tables": [
+  "stg_csv_archive_log",
+  "dim_calendar",
+  "dim_duid",
+  "fct_price",
+  "fct_scada",
+  "fct_price_today",
+  "fct_scada_today",
+  "fct_summary"
+ ],
+ "unit": "CU (s) \u2014 Fabric capacity-unit seconds",
+ "written": "2026-08-01T13:14:39+00:00"
+}
