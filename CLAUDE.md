@@ -879,8 +879,11 @@ detail.
 - **The page leads with CU bar charts and ends with the hardware, and there are no totals.** Two
   charts — ETL and analytics per engine, lower is better — drawn as inline SVG with one hue, because
   a single series needs no legend and colouring four bars differently would encode what the axis
-  labels already say. The engine order is FIXED (the table's column order), not sorted by value: the
-  two charts are read against each other and re-sorting would move an engine between them. The
+  labels already say. **Sorted cheapest first**: "lower is better" makes the ranking the finding, so
+  the chart answers "who cost least" before any two bars are compared. The cost is that an engine
+  sits at a different height in the two charts — the tables keep the fixed column order and are the
+  lookup. A **zero sorts to the bottom**, never the top: zero means the engine did no such work, and
+  at the top under that caption it would read as the winner. The
   grand-total row and the total column are gone: they summed ACROSS engines, which is the one sum on
   this page that answers nothing, since the engines are four alternatives to each other. Class
   subtotals stay — those sum down a column.

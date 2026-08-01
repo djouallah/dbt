@@ -34,8 +34,12 @@ read it as the same service principal. Any allocation key would be invented.
 The page leads with two **bar charts** — ETL and analytics CU per engine, lower is better — and ends
 with the **hardware** the build ran on. Both are drawn from numbers on this page: no timings, no
 second source. One hue, because a single series needs no legend and four colours would encode what
-the axis labels already say; a fixed engine order rather than sorted by value, because the two
-charts are read against each other and re-sorting would move an engine between them.
+the axis labels already say. **Sorted cheapest first** — "lower is better" makes the ranking the
+finding, so the chart answers "who cost least" before any two bar lengths are compared. The price is
+that an engine sits at a different height in the two charts; the tables below keep the fixed column
+order and are the lookup. A **zero sorts to the bottom**, never the top: it means the engine did no
+such work (a benchmark that skipped it), and at the top under a "lower is better" caption that would
+read as the winner — the one value whose rank would lie.
 
 The chart travels through the markdown as an HTML **comment** that `report_html.py` turns into
 inline SVG. That is not a workaround to tidy away: the same markdown goes to the GitHub job summary,

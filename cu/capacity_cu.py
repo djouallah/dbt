@@ -708,10 +708,17 @@ def _chart(title, subtitle, rows):
     The numbers below it in the tables are the same numbers, so the summary loses nothing but the
     picture.
 
-    `rows` is [(label, value)] in a FIXED order — the table's column order — deliberately not sorted
-    by value: the two charts are read against each other, and re-sorting each one would move an
-    engine between them.
+    Sorted CHEAPEST FIRST, because "lower is better" makes the ranking the finding — the chart
+    answers "who cost least" before the reader has compared any two bar lengths. The cost of that is
+    real and worth knowing: an engine sits at a different height in the two charts, so the pair is
+    read one at a time rather than scanned across. The tables keep the fixed column order, and they
+    are the lookup.
+
+    A ZERO sorts to the BOTTOM, not the top. Zero here means "this engine did no such work" — a
+    benchmark that skipped it, say — and at the top, under a "lower is better" caption, that reads
+    as the winner. It is the one value whose rank would lie.
     """
+    rows = sorted(rows, key=lambda r: (r[1] == 0, r[1]))
     if not any(v for _l, v in rows):
         return
     print(f"\n<!--chart:{json.dumps({'title': title, 'subtitle': subtitle, 'rows': rows})}-->")

@@ -498,6 +498,17 @@ def test_chart_marker_is_invisible_in_markdown_but_draws_in_html(capsys):
     assert ">10.0<" in svg and "<title>duckrun: 10.0 CU</title>" in svg
 
 
+def test_chart_ranks_cheapest_first_and_sinks_the_zeros(capsys):
+    """`lower is better` makes the ranking the finding. A zero is the exception: it means the engine
+    did no such work, and at the top under that caption it would read as the winner."""
+    m = load(CU_MODELS="")
+    m._chart("ETL", "lower is better",
+             [["spark", 30.0], ["duckrun", 10.0], ["iceberg", 0.0], ["dwh", 20.0]])
+    import json as _json
+    spec = _json.loads(capsys.readouterr().out.strip()[len("<!--chart:"):-len("-->")])
+    assert [r[0] for r in spec["rows"]] == ["duckrun", "dwh", "spark", "iceberg"]
+
+
 def test_a_chart_of_all_zeros_is_not_drawn(capsys):
     """Four bars of length zero is a picture of nothing, and it reads as a broken chart rather than
     as an idle engine. The table still carries the zeros."""
