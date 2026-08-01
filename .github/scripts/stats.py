@@ -41,10 +41,18 @@ FAB = "https://api.fabric.microsoft.com/v1"
 TRANSPORT = os.environ.get("AZURE_TRANSPORT_OPTION_TYPE", "curl")
 
 # (engine label, Fabric item name, item kind)
-ENGINES = [("duckrun", "dbt_delta", "lakehouses"),
-           ("iceberg", "dbt_iceberg", "lakehouses"),
-           ("spark", "dbt_spark", "lakehouses"),
-           ("dwh", "dbt_dwh", "warehouses")]
+ALL_ENGINES = [("duckrun", "dbt_delta", "lakehouses"),
+               ("iceberg", "dbt_iceberg", "lakehouses"),
+               ("spark", "dbt_spark", "lakehouses"),
+               ("dwh", "dbt_dwh", "warehouses")]
+
+# Narrowed to what the dispatch actually built. Reading an item this run did not touch would record
+# an older generation's layout under this run's id — and each read is 10+ minutes over OneLake.
+_want = [e.strip() for e in os.environ.get("BUILD_ENGINES", "").split(",") if e.strip()]
+_unknown = [e for e in _want if e not in {n for n, _i, _k in ALL_ENGINES}]
+if _unknown:
+    raise SystemExit(f"BUILD_ENGINES names unknown engine(s) {_unknown}")
+ENGINES = [t for t in ALL_ENGINES if not _want or t[0] in _want]
 
 # Every shared table each engine emits, in pipeline order — inputs first, mart last.
 #

@@ -8,14 +8,15 @@ name: dbt
 # run later. All four legs run the same six assertions — the singular suite is written per dialect
 # (tests/duckdb, tests/dwh, tests/spark) and gated per folder in dbt_project.yml, the same way
 # models/ is. What is gone is the neutral reader: no test compares one engine to another, so a
-# green leg means that engine is self-consistent and nothing more. The mart parity table is the only
-# cross-engine signal there is, and the `layout` job at the bottom runs it as the last step of the
-# build — gated on all four legs being green, since a table with holes in it reads as drift that
-# isn't there. It costs ~10 minutes of OneLake reads (iceberg alone 12m+) per dispatch to report
-# numbers that only move when the tables are rewritten; that is what the build pays for ending
-# with a cross-engine check instead of nobody noticing drift until someone remembers to look.
-# There is no standalone copy any more: `Table layout` (workflows/table-layout.yml) was deleted,
-# so this job is the only producer of the parity table and of the `stats` artifact `cu/` reads.
+# green leg means that engine is self-consistent and nothing more. The `layout` job at the bottom
+# then RECORDS what was built — row counts and file layout per table, into the step summary and
+# into `stats.json` — for the engines this dispatch built and no others. It does not gate on
+# anything: reading one generation against another is the dashboard's job, not the build's. It
+# costs ~10 minutes of OneLake reads (iceberg alone 12m+), and it is the only producer of the
+# `stats` artifact that `cu/`'s history record carries.
+#
+# `engines` selects which legs run. Fewer legs also means a narrower reset — only those engines'
+# items are deleted — because every item dropped is a from-scratch rebuild of 370M rows.
 #
 # This comment used to say dwh and spark were "graded by their generic column tests alone". They
 # were graded by nothing: the gate sat on the project key, which also matches generic tests (their
@@ -39,19 +40,29 @@ on:
   workflow_call:
     inputs:
       workspace: { type: string, required: false, default: "" }
+      engines: { type: string, required: false, default: "duckrun,iceberg,spark,dwh" }
+      skip_download: { type: boolean, required: false, default: true }
       download_limit: { type: string, required: false, default: "200" }
       cores: { type: string, required: false, default: "8" }
       native_execution_engine: { type: boolean, required: false, default: false }
       spark_resource_profile: { type: string, required: false, default: "writeHeavy" }
-      reset_outputs: { type: boolean, required: false, default: false }
+      reset_outputs: { type: boolean, required: false, default: true }
   workflow_dispatch:
     inputs:
       workspace:
         description: "Fabric workspace GUID. Blank = the FABRIC_WORKSPACE_ID repo secret, which is where it normally comes from."
         type: string
         default: ""
+      engines:
+        description: "engines to build, comma-separated (duckrun,iceberg,spark,dwh). Fewer means fewer legs AND a narrower reset — only the named engines' items are deleted, and only they are recorded."
+        type: string
+        default: "duckrun,iceberg,spark,dwh"
+      skip_download:
+        description: "DON'T download new data — reuse the archive already landed. On by default: with a reset, that makes a run reproducible (same input files, rebuilt from nothing). Turn off to extend the archive first."
+        type: boolean
+        default: true
       download_limit:
-        description: "files to download per source"
+        description: "files to download per source, when skip_download is off"
         type: string
         default: "200"
       cores:
@@ -71,9 +82,9 @@ on:
         options: ["writeHeavy", "readHeavyForPBI", "readHeavyForSpark"]
         default: "writeHeavy"
       reset_outputs:
-        description: "DESTRUCTIVE: delete the 4 output items and rebuild from scratch (landing data untouched)"
+        description: "DESTRUCTIVE, and ON BY DEFAULT: delete the selected engines' output items and rebuild from scratch (landing data untouched). With skip_download on, that is what makes a run reproducible — same input files, no incremental history. Turn OFF for a cheap top-up build."
         type: boolean
-        default: false
+        default: true
 
 concurrency:
   group: onelake-${{ github.ref_name }}
@@ -130,6 +141,50 @@ env:
   # grants. `benchmark/` is fine — it deletes and recreates its models per dispatch.
 
 jobs:
+  # Which legs run, decided ONCE and in one place. A GitHub matrix cannot be filtered by an input,
+  # so the two `include:` lists are computed here and consumed with `fromJSON` — which also means
+  # the dwh adapter pin lives in exactly one place instead of being duplicated by an `if:` per leg.
+  #
+  # An unknown engine name is FATAL. A typo that silently builds nothing looks identical to a build
+  # that worked, and the reset that runs next would then drop nothing while reporting success.
+  plan:
+    name: plan the legs
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      engines: ${{ steps.p.outputs.engines }}
+      fabric: ${{ steps.p.outputs.fabric }}
+      server: ${{ steps.p.outputs.server }}
+    steps:
+      - id: p
+        env:
+          ENGINES: ${{ inputs.engines }}
+        run: |
+          python3 - >> "$GITHUB_OUTPUT" <<'EOF'
+          import json, os, sys
+          LEGS = {
+              "duckrun": ("fabric", {"engine": "duckrun", "label": "delta_rs"}),
+              "iceberg": ("fabric", {"engine": "iceberg", "label": "iceberg"}),
+              "spark":   ("server", {"engine": "spark", "install": "dbt-fabricspark"}),
+              "dwh":     ("server", {"engine": "dwh",
+                                     "install": "dbt-fabric-samdebruyn dbt-core==1.11.10 "
+                                                "dbt-adapters==1.23.0"}),
+          }
+          picked = [e.strip() for e in (os.environ.get("ENGINES") or "").split(",") if e.strip()]
+          picked = picked or list(LEGS)
+          unknown = [e for e in picked if e not in LEGS]
+          if unknown:
+              sys.exit(f"unknown engine(s) {unknown}; known: {list(LEGS)}")
+          # LEGS order, not the input's: the matrix reads the same way run to run.
+          fabric = [LEGS[e][1] for e in LEGS if e in picked and LEGS[e][0] == "fabric"]
+          server = [LEGS[e][1] for e in LEGS if e in picked and LEGS[e][0] == "server"]
+          print(f"engines={','.join(e for e in LEGS if e in picked)}")
+          print(f"fabric={json.dumps(fabric)}")
+          print(f"server={json.dumps(server)}")
+          sys.stderr.write(f"building {picked}: {len(fabric)} duckdb leg(s), "
+                           f"{len(server)} server leg(s)\n")
+          EOF
+
   # FIRST, and before `land` on purpose. Fabric keeps a deleted item's DISPLAY NAME reserved for
   # minutes after the item stops being listed, so dropping and recreating in the same step draws
   # `409 ItemDisplayNameNotAvailableYet` — which is how the per-leg version of this failed on run
@@ -141,6 +196,7 @@ jobs:
   # that needs it, so gating the job itself would skip the entire build.
   reset:
     name: reset outputs
+    needs: plan
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
@@ -151,9 +207,17 @@ jobs:
         with: {python-version: "3.11"}
       - run: pip install duckrun
         if: inputs.reset_outputs
-      - name: Drop the four output items
+      # SCOPED to the engines being built. Dropping an item this dispatch will not rebuild is not
+      # tidiness — it is a from-scratch rebuild of 370M rows handed to whoever dispatches next.
+      #
+      # NOTE the gap this used to rely on is gone: with `skip_download` on (the default) `land` no
+      # longer takes a download's worth of time, so Fabric's display-name reservation is still live
+      # when the legs create their items. `provision.py ensure()` polls through the resulting
+      # `ItemDisplayNameNotAvailableYet` 409 — that poll is now the primary mechanism, not a
+      # backstop, and a leg waiting minutes here is that, not a permissions problem.
+      - name: Drop the selected engines' output items
         if: inputs.reset_outputs
-        run: python .github/scripts/provision.py reset
+        run: python .github/scripts/provision.py reset '${{ needs.plan.outputs.engines }}'
 
   land:
     name: land data
@@ -171,8 +235,18 @@ jobs:
       - run: pip install duckrun
       - name: Provision landing lakehouse
         run: python .github/scripts/provision.py land >> "$GITHUB_ENV"
+      # SKIPPED BY DEFAULT, and the job still runs: `land` also ensures the landing lakehouse and
+      # is what the reset's display-name reservation expires behind. What is skipped is only the
+      # DOWNLOAD, which is what makes a run reproducible — the same archive in, so two dispatches
+      # of the same commit differ by nothing but the engines' own behaviour. Turn `skip_download`
+      # off to extend the archive; that is a different question and a different run.
       - name: Download AEMO data (obstore -> OneLake)
+        if: ${{ !inputs.skip_download }}
         run: python download_aemo.py
+      - name: Say the archive was reused
+        if: ${{ inputs.skip_download }}
+        run: |
+          echo "skip_download is on — no new AEMO files fetched, building on the landed archive as-is" >&2
 
   # DuckDB-family: both engines are just DuckDB in a Python process, and that process always runs
   # in a Fabric notebook (duckrun.run_python), data-local to OneLake. The runner only ships
@@ -190,16 +264,17 @@ jobs:
     # engine were the adapter, and as if the other leg were not equally on Fabric. `label` is the
     # display name ONLY; `engine` is still the key provision.py and the dbt target key take.
     name: duckdb ${{ matrix.label }}
-    needs: land
+    needs: [plan, land]
+    # `!= '[]'` because a dispatch may select neither DuckDB engine, and an empty `include:` is a
+    # workflow error rather than a skipped job.
+    if: needs.plan.outputs.fabric != '[]'
     runs-on: ubuntu-latest
     timeout-minutes: 90
     strategy:
       # One engine failing says nothing about the other — they share only the landed data.
       fail-fast: false
       matrix:
-        include:
-          - {engine: duckrun, label: delta_rs}
-          - {engine: iceberg, label: iceberg}
+        include: ${{ fromJSON(needs.plan.outputs.fabric) }}
     # No job-level FILES_PATH. `provision.py <engine>` prints one pointing at the `Files/landing`
     # shortcut in THIS engine's own lakehouse, which is what splits the landing read CU per engine
     # — and a job-level `env` outranks anything a later step writes to $GITHUB_ENV, so a leftover
@@ -220,16 +295,15 @@ jobs:
   # dwh + spark: dbt client on the runner, compute on Fabric's own servers.
   server:
     name: fabric-server ${{ matrix.engine }}
-    needs: land
+    needs: [plan, land]
+    if: needs.plan.outputs.server != '[]'
     runs-on: ubuntu-latest
     # Backlog-draining spark runs (1024-file folds) reach ~40 min; leave room for one retry.
     timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - {engine: dwh, install: "dbt-fabric-samdebruyn dbt-core==1.11.10 dbt-adapters==1.23.0"}
-          - {engine: spark, install: "dbt-fabricspark"}
+        include: ${{ fromJSON(needs.plan.outputs.server) }}
     # No job-level FILES_PATH — same reason as the `fabric` job above: it would outrank the one
     # `provision.py <engine>` writes to $GITHUB_ENV and both legs would stay on the shared path.
     steps:
@@ -274,11 +348,8 @@ jobs:
   # tables from each item's Delta log and puts the four side by side — no test compares one engine
   # to another, so this is the only thing in the repo that can see drift.
   #
-  # NO `if:` ON PURPOSE. The default is success(), so this runs only when every leg of `fabric`
-  # AND `server` is green — all four engines. That is the whole point of it being here rather than
-  # dispatched: a partial run publishes a table with holes in it, and holes read as drift that
-  # isn't there. `fail-fast: false` on both matrices means a failing leg still lets the others
-  # finish; it just means no dashboard for that run.
+  # It records what this dispatch built, for the engines this dispatch built — nothing is gated on
+  # a full four-engine run. Comparing generations is the dashboard's job, not this one's.
   #
   # It costs ~10 minutes per build and reports numbers that only move when tables are REWRITTEN —
   # that cost is why it was once split out into a `Table layout` workflow. That workflow is gone:
@@ -287,7 +358,10 @@ jobs:
   # It only READS — nothing is written or provisioned.
   layout:
     name: table layout
-    needs: [fabric, server]
+    needs: [plan, fabric, server]
+    # Not `success()`: a skipped matrix (no engine of that kind selected) would skip this too, and
+    # a leg that failed still wrote tables worth recording.
+    if: ${{ !cancelled() }}
     runs-on: ubuntu-latest
     # get_stats() over OneLake is slow on the iceberg item (12m+ observed for that one engine);
     # 15 minutes was cancelling stats.py mid-table and turning slowness into a red run.
@@ -303,6 +377,9 @@ jobs:
       - name: Parity + layout dashboard
         env:
           STATS_JSON: ${{ github.workspace }}/stats.json
+          # Only the engines this dispatch built. Reading an item nobody rebuilt would record an
+          # older generation's layout under this run's id.
+          BUILD_ENGINES: ${{ needs.plan.outputs.engines }}
         run: |
           set -o pipefail
           python .github/scripts/stats.py | tee -a "$GITHUB_STEP_SUMMARY"

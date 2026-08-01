@@ -4,6 +4,7 @@ $GITHUB_ENV). Diagnostics -> stderr.
 
 Usage:
   python provision.py reset                # DELETE all four OUTPUT items (never the landing one)
+  python provision.py reset spark,dwh      # DELETE only those engines' items
   python provision.py land                 # the ONE shared landing lakehouse (holds Files)
   python provision.py {duckrun|iceberg|dwh|spark}   # that engine's OUTPUT item
 
@@ -19,8 +20,10 @@ this workspace.
 own item on the way in. That ordering is the whole point: Fabric keeps a deleted item's DISPLAY
 NAME reserved for minutes after the item stops being listed, so a drop immediately followed by a
 create draws `409 ItemDisplayNameNotAvailableYet` — which is exactly how the per-leg version
-failed on run 30639018466. Deleting everything up front and then landing the data gives the
-reservation the whole download to expire in.
+failed on run 30639018466. Deleting everything up front and then landing the data gave the
+reservation the whole download to expire in — but `skip_download` is on by default now, so that gap
+is usually gone and `ensure()`'s 409 poll is what actually carries it. Polling the create is the
+only authoritative test of whether a name is free, so this is sound; it just costs minutes.
 
 It deletes the whole ITEM, not tables inside it — a `Tables/<schema>/<name>` folder removed by
 hand leaves the catalog entry behind and dbt then emits DML against nothing. `dbt_landing` is
@@ -35,10 +38,18 @@ import os, sys, time, subprocess, requests
 
 mode = sys.argv[1]
 LANDING = "dbt_landing"
-# Every OUTPUT item, and the only list `reset` will touch. Kept beside the per-mode branches
-# below, which must name the same items.
-OUTPUTS = [("lakehouses", "dbt_delta"), ("lakehouses", "dbt_iceberg"),
-           ("lakehouses", "dbt_spark"), ("warehouses", "dbt_dwh")]
+# Every OUTPUT item, keyed by the ENGINE that writes it — the same key the dbt target, the leg's
+# provision mode and `cu/`'s columns all use, and the only map `reset` will touch. Kept beside the
+# per-mode branches below, which must name the same items.
+#
+# Keyed rather than a flat list because a reset is now SCOPED to the engines actually being built:
+# a dispatch rebuilding spark alone must not delete the other three lakehouses, because every item
+# dropped is a from-scratch rebuild of 370M rows charged to whoever dispatches next.
+OUTPUT_BY_ENGINE = {"duckrun": ("lakehouses", "dbt_delta"),
+                    "iceberg": ("lakehouses", "dbt_iceberg"),
+                    "spark": ("lakehouses", "dbt_spark"),
+                    "dwh": ("warehouses", "dbt_dwh")}
+OUTPUTS = list(OUTPUT_BY_ENGINE.values())
 
 # Every leg reads the landed CSVs through a `Files/landing` SHORTCUT to dbt_landing sitting in its
 # OWN lakehouse, and that is what splits the read CU: OneLake accounts a transaction against the
@@ -238,9 +249,22 @@ if mode == "reset":
     # Deletes only. Nothing is recreated here and nothing is printed to stdout — the engine legs
     # provision their own item as usual, minutes later, by which time Fabric has released the
     # display names. See the module docstring for why that gap is the design.
-    for kind, name in OUTPUTS:
-        drop(kind, name)
-    sys.stderr.write(f"  reset: {len(OUTPUTS)} output items dropped, {LANDING} untouched\n")
+    #
+    # SCOPED to the engines named in argv[2] (comma-separated), or all four when absent. Dropping
+    # an item the dispatch is not rebuilding is not a tidy-up: it is a from-scratch rebuild of that
+    # engine's 370M rows, deferred onto whoever dispatches next. An unknown name is fatal rather
+    # than ignored — a typo that silently resets nothing looks exactly like a reset that worked.
+    picked = [e.strip() for e in (sys.argv[2] if len(sys.argv) > 2 else "").split(",") if e.strip()]
+    picked = picked or list(OUTPUT_BY_ENGINE)
+    unknown = [e for e in picked if e not in OUTPUT_BY_ENGINE]
+    if unknown:
+        raise SystemExit(f"reset: unknown engine(s) {unknown}; known: {list(OUTPUT_BY_ENGINE)}")
+    for engine in picked:
+        drop(*OUTPUT_BY_ENGINE[engine])
+    kept = [e for e in OUTPUT_BY_ENGINE if e not in picked]
+    sys.stderr.write(f"  reset: dropped {', '.join(picked)}"
+                     + (f"; kept {', '.join(kept)}" if kept else "")
+                     + f"; {LANDING} untouched\n")
 
 elif mode == "land":
     lh = ensure("lakehouses", LANDING, lh_payload)

@@ -35,9 +35,13 @@ on:
         type: boolean
         default: true
       reset_outputs:
-        description: "DELETE and recreate all four output items before building. The start-from-nothing lever; never touches the landed data."
+        description: "DELETE and recreate the selected engines' output items before building. ON BY DEFAULT: with skip_download it is what makes a run reproducible — the same input files, rebuilt from nothing, so two dispatches differ only by what was changed. Never touches the landed data."
         type: boolean
-        default: false
+        default: true
+      skip_download:
+        description: "DON'T download new data — reuse the archive already landed. On by default, for the same reason: a growing input set makes two runs incomparable."
+        type: boolean
+        default: true
       cores:
         description: "Fabric Python-notebook vCores for the duckdb-family legs"
         type: choice
@@ -53,11 +57,11 @@ on:
         type: boolean
         default: false
       download_limit:
-        description: "files to download per source"
+        description: "files to download per source, when skip_download is off"
         type: string
         default: "200"
       engines:
-        description: "engines to benchmark, comma-separated"
+        description: "engines to build AND benchmark, comma-separated (duckrun,iceberg,spark,dwh). Fewer means fewer build legs, a reset scoped to just those engines, and fewer benchmark models — nothing is deleted or rebuilt for an engine not named here."
         type: string
         default: "duckrun,iceberg,spark,dwh"
       runs:
@@ -140,6 +144,8 @@ jobs:
     secrets: inherit
     with:
       workspace: ${{ inputs.workspace }}
+      engines: ${{ inputs.engines }}
+      skip_download: ${{ inputs.skip_download }}
       download_limit: ${{ inputs.download_limit }}
       cores: ${{ inputs.cores }}
       native_execution_engine: ${{ inputs.native_execution_engine }}

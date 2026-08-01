@@ -551,18 +551,40 @@ the `cu/` section.
 ## CI etiquette
 
 - Cancel superseded runs immediately (`gh run cancel <id>`) — spark and Fabric legs cost money.
-- **`reset_outputs` is the start-from-nothing lever, off by default, and it never touches the
-  landing data.** It runs as its own `reset` job — **first, before `land`** — which calls
-  `provision.py reset` to DELETE all four output items (`dbt_delta`, `dbt_iceberg`, `dbt_spark`,
-  `dbt_dwh`). The engine legs then create their item the ordinary way, unaware a reset happened.
+- **A default dispatch is now REPRODUCIBLE: `reset_outputs` and `skip_download` are both ON.** The
+  pair is the point — reset means no incremental history carries over, `skip_download` means the
+  input archive does not move, so two dispatches of the same commit differ by nothing but what was
+  deliberately changed. Each on its own is weaker: a reset over a grown archive still measures a
+  different workload, and a frozen archive on top of yesterday's tables still measures yesterday's
+  incremental state. What it costs is real and was accepted knowingly: **every default dispatch is a
+  from-scratch build of 370M rows per selected engine**, not a top-up. Turn `reset_outputs` off for a
+  cheap incremental run; turn `skip_download` off to extend the archive, which is a different
+  question and deserves its own run. `land` still runs either way — it provisions the landing
+  lakehouse and it is what the reset's display-name reservation expires behind; only the DOWNLOAD is
+  skipped.
+- **`engines` selects which legs run, and the reset is SCOPED to them.** `provision.py reset` takes
+  a comma-separated list (`OUTPUT_BY_ENGINE`), the `plan` job computes both matrices with
+  `fromJSON`, and `stats.py` reads only `BUILD_ENGINES`. Dropping an item the dispatch will not
+  rebuild is not tidiness — it is a from-scratch rebuild of that engine's 370M rows charged to
+  whoever dispatches next, which is why "reset everything, build one engine" is not a thing this
+  workflow can do by accident. An unknown engine name is fatal in all three places: a typo that
+  silently builds nothing looks exactly like a build that worked. The `layout` job then records
+  whatever was built, gated on nothing — comparing generations is the dashboard's job.
+- **`reset_outputs` never touches the landing data.** It runs as its own `reset` job — **first,
+  before `land`** — which calls `provision.py reset` to DELETE the selected engines' output items
+  (`dbt_delta`, `dbt_iceberg`, `dbt_spark`, `dbt_dwh`). The engine legs then create their item the ordinary way, unaware a reset happened.
   **That ordering is load-bearing, not tidiness:** Fabric keeps a deleted item's DISPLAY NAME
   reserved for minutes after the item stops being listed, so the first version — each leg
   dropping and recreating its own item on the way in — drew `409 ItemDisplayNameNotAvailableYet`
   and killed three of four legs on run 30639018466. The one that survived did so purely because
   its delete took 36s to propagate. Waiting on the item list proves nothing; only the create can
-  tell you the name is free, which is why the fix is the download-long gap and not a longer poll.
-  `ensure()` does still ride out that 409 as a backstop, for a by-hand reset followed straight
-  away by a build. `dbt_landing` is never dropped — `drop()` refuses it by name, and the `reset`
+  tell you the name is free, which is why the fix was the download-long gap and not a longer poll.
+  **`skip_download` being on by default removes that gap**, so `ensure()`'s 409 poll (40 attempts
+  at 15s ≈ 10 minutes, keyed on `ItemDisplayNameNotAvailableYet`/`isRetriable`) is now the PRIMARY
+  mechanism rather than a backstop for by-hand resets. That is sound — polling the create is the
+  only authoritative test — but it means a reproducible dispatch can spend a few minutes per leg
+  waiting on a name, and a leg that fails there is this, not a permissions problem. Turning
+  `skip_download` off restores the old gap as a side effect. `dbt_landing` is never dropped — `drop()` refuses it by name, and the `reset`
   mode's item list does not contain it. Neither is `dbt_dwh_src`, the shortcut-only lakehouse dwh
   reads landing through: it is an input, it holds no data, and dropping it would only cost a name
   reservation. The other three legs' shortcuts DO go down with their lakehouse and are recreated
