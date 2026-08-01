@@ -79,6 +79,10 @@ on:
         description: "measure from this instant instead of this run's own start, IN THE MODEL'S CLOCK. For re-measuring a generation that was built by an EARLIER dispatch — with build and benchmark off, that is a re-read and a republish for the price of one metrics query. Blank = this run's start hour, which is what you want when this run built the thing."
         type: string
         default: ""
+      refresh:
+        description: "refresh the Capacity Metrics model before reading it. Leave ON when this run built or benchmarked anything — without it, items minutes old are not catalogued and their CU lands in `shared`. Turn OFF for a pure re-read of a settled window, or when the refresh API is rate-limiting (a 429 costs ~4 minutes of retries and changes nothing)."
+        type: boolean
+        default: true
       workspace:
         description: "Fabric workspace GUID"
         type: string
@@ -175,5 +179,11 @@ jobs:
     with:
       workspace: ${{ inputs.workspace }}
       since: ${{ needs.stamp.outputs.since }}
+      # Was never passed, so cu.yml's default (true) always applied — including on a measure-only
+      # re-read, where the refresh is pure latency and pure quota. The refresh API rate-limits on a
+      # window much longer than the 120s its own 429 advertises: on runs 30685959678 and
+      # 30691130030, half an hour apart, every attempt was refused. Each one costs ~4 minutes of
+      # retries and changes nothing, so it has to be turnable off.
+      refresh: ${{ inputs.refresh }}
       # The permanent record, written only from here — see cu.yml.
       history: true

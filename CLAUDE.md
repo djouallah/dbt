@@ -1067,6 +1067,14 @@ detail.
   **body** (`Retry in N seconds`), because that response carries no `Retry-After` header. Both are
   pinned by tests. A report whose notebook CU sits in `shared` is this bug, not an attribution
   limit: **re-measure the same window** rather than reaching for `engine_of`.
+  **But the retry did not rescue that run, and the reason matters:** the cap is on a window far
+  longer than the 120 seconds its own message advertises. Runs 30685959678 (07:39) and 30691130030
+  (08:12), half an hour apart, were both refused on every attempt — a day of dispatches had spent
+  the quota. So a 429 here is usually not transient, and the 4 minutes of retries buy nothing;
+  `refresh` is now an input on `all.yml` (default true) precisely so a re-read can skip it. The
+  practical route back to named notebooks is to let the metrics app's OWN scheduled refresh
+  catalogue them, then re-measure with `refresh=false`. Do not raise `CU_REFRESH_TRIES` to fight a
+  quota.
 - **A deploy mints a NEW item GUID, and `'Items'` is a lagging snapshot — this made the whole report
   read empty.** The metrics tables hold item GUIDs; a semantic model that was just created (or deleted
   and recreated — `overwrite=True` keeps its id, a recreate does not) has a GUID `'Items'` has not seen
