@@ -25,6 +25,11 @@ reservation the whole download to expire in — but `skip_download` is on by def
 is usually gone and `ensure()`'s 409 poll is what actually carries it. Polling the create is the
 only authoritative test of whether a name is free, so this is sound; it just costs minutes.
 
+**Every item this touches is written down under its GUID**, into the run-record fragment named by
+`RUN_RECORD` (see record.py) — created, found, or deleted, with the timestamp. That is the input the
+CU ledger joins on: a GUID belongs to exactly one run, so `cu/` no longer has to guess an item's
+owner from its display name. `RUN_RECORD` unset is a no-op, so running this by hand still works.
+
 It deletes the whole ITEM, not tables inside it — a `Tables/<schema>/<name>` folder removed by
 hand leaves the catalog entry behind and dbt then emits DML against nothing. `dbt_landing` is
 **excluded by name** and `drop()` refuses it outright: that lakehouse holds the downloaded AEMO
@@ -36,8 +41,14 @@ it deletes and recreates its models per dispatch; nothing else in this repo hold
 """
 import os, sys, time, subprocess, requests
 
+import record
+
 mode = sys.argv[1]
 LANDING = "dbt_landing"
+# The REST collection name this script POSTs to, mapped to the item TYPE Fabric reports it as —
+# which is the spelling the metrics model and the run record use. Two vocabularies for one thing,
+# so the mapping lives here rather than being spelled out at each call site.
+KIND = {"lakehouses": "Lakehouse", "warehouses": "Warehouse", "folders": "Folder"}
 # Every OUTPUT item, keyed by the ENGINE that writes it — the same key the dbt target, the leg's
 # provision mode and `cu/`'s columns all use, and the only map `reset` will touch. Kept beside the
 # per-mode branches below, which must name the same items.
@@ -113,10 +124,13 @@ def ensure_folder(name):
     """Find-or-create a workspace folder; return its id (so all items group under it)."""
     it = find("folders", name)
     if it:
+        record.item(it["id"], "folder", "Folder", name, created=False, at=record.now())
         return it["id"]
     r = requests.post(f"{FAB}/workspaces/{ws}/folders", headers=H, json={"displayName": name})
     if r.status_code in (200, 201):
-        return r.json()["id"]
+        fid = r.json()["id"]
+        record.item(fid, "folder", "Folder", name, created=True, at=record.now())
+        return fid
     sys.stderr.write(r.text + "\n")
     r.raise_for_status()
 
@@ -124,20 +138,24 @@ def ensure_folder(name):
 FOLDER_ID = ensure_folder("dbt")
 
 
-def drop(kind, name):
-    """Delete an output item. The recreate is a LATER JOB's business, not this call's.
+def drop(kind, name, role="output"):
+    """Delete an item and RECORD the deletion against its GUID. Nothing is recreated here.
 
     Deletes the ITEM, never a folder under it: a `Tables/<schema>/<name>` directory removed by
     hand leaves the catalog entry behind and dbt then emits DML against nothing (see CLAUDE.md).
     Waits for it to stop being listed, which is a weaker guarantee than it looks — Fabric holds
-    the display NAME for minutes longer, which is why nothing recreates anything here."""
+    the display NAME for minutes longer, which is why nothing recreates anything here.
+
+    The `deleted` timestamp is not bookkeeping: it is the instant after which this GUID can never
+    accrue another capacity unit, which is what lets the CU ledger declare the item settled.
+    """
     if name == LANDING:
         raise SystemExit(f"refusing to drop {name}: it holds the raw landing data")
     it = find(kind, name)
     if not it:
         sys.stderr.write(f"  {kind}/{name} absent, nothing to drop\n")
         return
-    sys.stderr.write(f"  DROPPING {kind}/{name} ({it['id']}) — reset requested\n")
+    sys.stderr.write(f"  DROPPING {kind}/{name} ({it['id']})\n")
     r = requests.delete(f"{FAB}/workspaces/{ws}/items/{it['id']}", headers=H)
     if r.status_code not in (200, 202, 204):
         sys.stderr.write(r.text + "\n")
@@ -145,15 +163,17 @@ def drop(kind, name):
     for _ in range(120):
         if not find(kind, name):
             sys.stderr.write(f"  {kind}/{name} dropped\n")
+            record.item(it["id"], role, KIND.get(kind, kind), name, deleted=record.now())
             return
         time.sleep(5)
     raise SystemExit(f"timed out waiting for {kind}/{name} to disappear")
 
 
-def ensure(kind, name, payload=None):
+def ensure(kind, name, payload=None, role="output"):
     it = find(kind, name)
     if it:
         sys.stderr.write(f"  {kind}/{name} exists ({it['id']})\n")
+        record.item(it["id"], role, KIND.get(kind, kind), name, created=False, at=record.now())
         return it["id"]
     sys.stderr.write(f"  creating {kind}/{name} in folder dbt ...\n")
     body = {"displayName": name, "folderId": FOLDER_ID}
@@ -186,6 +206,7 @@ def ensure(kind, name, payload=None):
     for _ in range(120):
         it = find(kind, name)
         if it:
+            record.item(it["id"], role, KIND.get(kind, kind), name, created=True, at=record.now())
             return it["id"]
         time.sleep(5)
     raise SystemExit(f"timed out waiting for {kind}/{name}")
@@ -267,7 +288,7 @@ if mode == "reset":
                      + f"; {LANDING} untouched\n")
 
 elif mode == "land":
-    lh = ensure("lakehouses", LANDING, lh_payload)
+    lh = ensure("lakehouses", LANDING, lh_payload, role="landing")
     # The FILES_PATH printed here is the DIRECT path, and stays that way: download_aemo.py writes
     # the archive through it, and the download's write CU belongs to `dbt_landing`. Only the legs
     # read through a shortcut, and each ensures its own — see the engine modes below.
@@ -304,7 +325,8 @@ elif mode == "dwh":
             "FABRIC_DWH_NAME=dbt_dwh",
             f"FABRIC_WORKSPACE_ID={ws}",
             "FABRIC_AUTH=CLI",
-            f"FILES_PATH={ensure_landing_shortcut(ensure('lakehouses', DWH_SRC, lh_payload))}"]
+            f"FILES_PATH="
+            f"{ensure_landing_shortcut(ensure('lakehouses', DWH_SRC, lh_payload, role='dwh_src'))}"]
 else:
     raise SystemExit(f"unknown mode {mode}")
 

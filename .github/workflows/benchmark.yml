@@ -217,6 +217,10 @@ jobs:
       # per-engine path — measure one model, write its timings, compute no ratios.
       BENCH_ENGINES: ${{ matrix.engine }}
       RUN_REPORT: ${{ github.workspace }}/fragments/report-${{ matrix.engine }}.json
+      # A DIFFERENT document with a different lifetime — the semantic model's item GUID, for the
+      # per-run record `all.yml` commits and the CU ledger joins on. Kept out of `fragments/` on
+      # purpose: everything in there is merged into run_report.json by merge_reports.py.
+      RUN_RECORD: ${{ github.workspace }}/record/record-40-bench-${{ matrix.engine }}.json
     steps:
       - name: ${{ matrix.engine }} — checkout
         uses: actions/checkout@v4
@@ -264,7 +268,7 @@ jobs:
       # mints is minutes old when the XMLA step below starts using it.
       - name: ${{ matrix.engine }} — deploy semantic model
         run: |
-          mkdir -p fragments
+          mkdir -p fragments record
           python benchmark/deploy_models.py
 
       # No token re-mint needed: xmla_compare.py self-acquires the Power BI token via duckrun, which
@@ -285,6 +289,15 @@ jobs:
           name: report-fragment-${{ matrix.engine }}
           path: fragments/report-${{ matrix.engine }}.json
           if-no-files-found: warn
+
+      - name: ${{ matrix.engine }} — upload run-record fragment
+        if: always()
+        continue-on-error: true
+        uses: actions/upload-artifact@v4
+        with:
+          name: record-fragment-bench-${{ matrix.engine }}
+          path: record/
+          if-no-files-found: ignore
 
   # Where every comparison is now made. Free: no Fabric, no XMLA, no capacity — it reads the merged
   # fragments and nothing else. `if: always()` because a report covering three of four engines is

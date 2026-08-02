@@ -18,6 +18,11 @@ sit next to the layout that produced it, WITHOUT a second reader of the same Del
 duckrun or a storage token anywhere near `cu/`. A cached reading is sound precisely because the layout
 is near-static.
 
+The same document is also merged into the RUN RECORD under `layout` (see record.py) — two sinks, one
+document. The artifact is how a run's layout is read back without a checkout; the record is what
+outlives artifact retention and what the page joins against the CU ledger. `engines[e].guid` is the
+join key, and it was resolved here and discarded one line later until this was written.
+
 That JSON is a data contract with a consumer outside this file. Its shape is
 `{"run": {...}, "config": {...}, "engines": {...}, "tables": [...], "stats": {engine: {table:
 {detail}}}}` and the detail keys are DETAIL_KEYS below. `config` is what the build ran ON — vCores,
@@ -35,6 +40,8 @@ from datetime import datetime, timezone
 
 import requests
 import duckrun
+
+import record
 
 WS = os.environ["WS_ID"]
 FAB = "https://api.fabric.microsoft.com/v1"
@@ -204,16 +211,14 @@ def detail_tables(per_engine, engines):
     # Per-engine totals now live as the last two rows of the parity table above.
 
 
-def write_json(per_engine, engines):
-    """Write the same numbers as JSON when STATS_JSON names a path. No-op otherwise.
+def build_doc(per_engine, engines, guids=None):
+    """The layout document: run stamp, hardware config, per-engine item + GUID, per-table detail.
 
     Carries the run stamp too: a consumer reading this out of an artifact needs to know WHICH dbt run
     it came from and when, or it will quote a layout from a run three days older than the CU it sits
-    beside. `cu/` prints that provenance line for exactly that reason.
+    beside.
     """
-    path = os.environ.get("STATS_JSON", "").strip()
-    if not path:
-        return
+    guids = guids or {}
     doc = {
         # No `workspace` key. It was the WS_ID GUID, which is now a repo secret, and this document
         # is uploaded as a public-repo ARTIFACT — anyone can download it. Nothing ever read it back
@@ -239,12 +244,31 @@ def write_json(per_engine, engines):
             ("spark", {"resource_profile": os.environ.get("SPARK_RESOURCE_PROFILE") or None,
                        "native_execution_engine": os.environ.get("SPARK_NATIVE_ENABLED") or None}),
         ) if any(e == n for n, _i, _k in ENGINES)},
-        "engines": {e: {"item": item, "kind": kind, "writer": WRITER.get(e, e)}
+        # `guid` is the join key to the CU ledger, and it used to be resolved here and thrown away
+        # one line later (`_, per_engine[engine] = ...`). It is the item's identity; the display
+        # name is only how a human finds it, and matching on the name is exactly what `cu/` had to
+        # do for want of this field.
+        "engines": {e: {"item": item, "kind": kind, "writer": WRITER.get(e, e),
+                        "guid": guids.get(e)}
                     for e, item, kind in ENGINES},
         "tables": list(TABLES),
         "detail_keys": list(DETAIL_KEYS),
         "stats": {e: per_engine.get(e) or {} for e in engines},
     }
+    return doc
+
+
+def write_json(doc, engines):
+    """Write the layout doc where STATS_JSON names a path, and into the run record either way.
+
+    Two sinks, one document. STATS_JSON is the per-run artifact (kept: it is how a failed run's
+    layout is read back without a checkout); the run record is what survives artifact retention and
+    is what the page joins against the CU ledger.
+    """
+    record.merge({"layout": doc})
+    path = os.environ.get("STATS_JSON", "").strip()
+    if not path:
+        return
     with open(path, "w", encoding="utf-8") as f:
         json.dump(doc, f, indent=2, default=str)
     have = sum(len(v) for v in doc["stats"].values())
@@ -258,15 +282,15 @@ def one_engine(item, kind):
 
 
 def main():
-    per_engine = {}
+    per_engine, guids = {}, {}
     # The four items are independent and the iceberg one alone can take >10 minutes to read
     # over OneLake, so fetch them concurrently: wall-clock = slowest engine, not the sum.
     with ThreadPoolExecutor(max_workers=len(ENGINES)) as pool:
         futures = {engine: pool.submit(one_engine, item, kind) for engine, item, kind in ENGINES}
     for engine, item, kind in ENGINES:
         try:
-            _, per_engine[engine] = futures[engine].result()
-            sys.stderr.write(f"  {engine} ({item}): "
+            guids[engine], per_engine[engine] = futures[engine].result()
+            sys.stderr.write(f"  {engine} ({item} {guids[engine]}): "
                              f"{sum(d.get('total_rows') or 0 for d in per_engine[engine].values()):,}"
                              f" rows total (all tables)\n")
         except Exception as e:
@@ -276,7 +300,7 @@ def main():
     engines = [e for e, _, _ in ENGINES]
     parity_table(per_engine, engines)
     detail_tables(per_engine, engines)
-    write_json(per_engine, engines)
+    write_json(build_doc(per_engine, engines, guids), engines)
 
 
 if __name__ == "__main__":

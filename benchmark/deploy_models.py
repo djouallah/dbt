@@ -226,6 +226,17 @@ def main():
         _reparent(ws, item_id, name)
 
     report.merge({"deploy": {"deployed": deployed, "failed": failed}})
+    # ...and the same GUIDs into the RUN RECORD, which is a different document with a different
+    # lifetime: run_report.json is this benchmark's own artifact, the record is what the CU ledger
+    # joins against and what gets committed. Written through report.merge's `path` argument rather
+    # than by importing .github/scripts/record.py — benchmark/ deletes by removing one directory,
+    # and that is worth more than sharing twenty lines of dict-union.
+    rec = os.environ.get("RUN_RECORD")
+    if rec:
+        report.merge({"items": {str(d["item_id"]).upper(): {
+            "role": "semantic_model", "kind": "SemanticModel", "name": d["model"],
+            "engine": e, "created": True, "replaced": d["previous_item_id"]}
+            for e, d in deployed.items() if d.get("item_id")}}, rec)
 
     # A deploy failure fails THIS engine's job and nothing else: the matrix is not fail-fast, the
     # other engines' jobs are unaffected, and the report names whoever is missing. There is no

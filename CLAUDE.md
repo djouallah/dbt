@@ -753,6 +753,45 @@ the `cu/` section.
   `summary.py` (the four-engine test dashboard) is deleted — its input was the `rr-<engine>.json`
   artifacts the test matrix uploaded, and there is no test matrix.
 
+## The run record: one JSON per dispatch, and the item GUID is the point
+
+`all.yml` commits `history/runs/<UTC ts>-<run id>.json`. Every stage writes a JSON *fragment* naming
+the Fabric items it touched **under their GUIDs**; the final `record` job downloads them all and
+merges them into one document (`.github/scripts/record.py`, `finish`). Raw facts, no analysis.
+
+**Why it exists.** Nothing recorded which items a run created. The GUIDs all existed in-process and
+were thrown away — `stats.py` resolved all four and dropped them a line later, `provision.py` wrote
+them to stderr, `fabric_run.py` never saw the notebook's at all. So CU could only be attributed by
+matching item **display names**, which is why `cu/` carries a substring matcher, a `shared` column
+for anything ambiguous, and a lagging `'Items'` snapshot join. A run that writes down what it created
+turns that into a dictionary lookup.
+
+Things that are load-bearing rather than stylistic:
+
+- **`items` is a dict keyed by GUID, never a list.** The merge is a recursive dict union, which
+  unions dicts and *replaces* lists — so with a list, the teardown fragment's `{deleted: …}` would
+  overwrite the provision fragment's `{role, kind, name, created}` entirely. Pinned by a test.
+- **Fragments are sorted by BASENAME, not by path.** `download-artifact` nests each artifact in its
+  own directory, so full paths sort by artifact name and the `record-00-run` / `-10-land` /
+  `-20-build` / `-30-layout` / `-40-bench` ordering would be lost. Same rule, same reason, as
+  `benchmark/merge_reports.py`.
+- **`RUN_RECORD` unset is a NO-OP**, deliberately. `provision.py` and `stats.py` must stay runnable
+  by hand to reproduce a CI failure, and neither should need a record path to do it. One consequence:
+  a job that forgot its `RUN_RECORD` env fails *silently*, producing a record missing those items —
+  which is why every job's fragment is uploaded with `if-no-files-found: ignore` and the merge logs
+  the item table it assembled.
+- **`role` is the closed vocabulary** — `landing` | `output` | `dwh_src` | `folder` | `compute` |
+  `semantic_model` — and it is what replaces name matching downstream. Adding an item kind means
+  adding a role, not teaching a matcher another substring.
+- **`benchmark/` does not import `.github/scripts/record.py`.** `deploy_models.py` writes its item
+  ids through `report.merge(obj, path=os.environ["RUN_RECORD"])`, reusing the deep-merge it already
+  had. Twenty duplicated lines are cheaper than making `benchmark/` non-deletable, which is a stated
+  property of that directory.
+- `python -m pytest .github/scripts/test_record.py -q` is the offline gate, and `dbt.yml`'s free
+  `plan` job runs it **before any leg spends capacity**. Everything it covers fails silently: a
+  fragment that never lands, an entry a later stage overwrote, a merge order that dropped a deletion
+  timestamp — each produces a record that looks fine and attributes CU to the wrong run.
+
 ## The query benchmark is a second workflow, and it only reads
 
 `benchmark/` + `.github/workflows/benchmark.yml` ("Direct Lake benchmark") ask the question `dbt.yml`
@@ -974,15 +1013,26 @@ follows describes the measurement, and anything about the PAGE now lives in the 
   rows are **not** "compute for this leg": spark's compute is on its lakehouse, the two DuckDB legs'
   is on the throwaway `duckrun.run_python` notebook, dwh's is warehouse queries. Compare them as
   "what this item spent", not as a like-for-like engine benchmark — that is what `benchmark/` is for.
-- **`fabric_run.py` names its throwaway notebook `dbt-<engine>-<random>`, and both halves of that
-  are load-bearing.** duckrun's default is `duckrun-py-<runid>`, identical for both DuckDB legs, so
-  their compute arrived as one undivided row; the engine has to be in the name or `cu/` cannot
-  separate them. It has to be in the **prefix** because the suffix cannot go: the notebook is deleted
-  after every run, Fabric keeps a deleted item's DISPLAY NAME reserved for minutes (the 409 that
-  killed three legs on run 30639018466), and duckrun's `_execute_notebook` creates the item with no
-  retry around it. A fixed name would 409 the next build to tidy up a report. `CU_GROUP_PREFIXES`
-  collapses on that prefix, and a collapsed name is also what marks an item as throwaway for the run
-  split — so renaming this changes two things, not one.
+- **`fabric_run.py` names its throwaway notebook `dbt-<engine>-<random>`, and the RANDOM SUFFIX is
+  what is still load-bearing.** The notebook is deleted after every run, Fabric keeps a deleted
+  item's DISPLAY NAME reserved for minutes (the 409 that killed three legs on run 30639018466), and
+  duckrun's `_execute_notebook` creates the item with no retry around it — so a fixed name would 409
+  the next build. The *engine in the prefix* used to be load-bearing for the same reason the whole
+  name was: `cu/` could only tell one leg's compute from the other's by matching the display name,
+  and duckrun's default `duckrun-py-<runid>` is identical for both DuckDB legs. **That is no longer
+  how attribution works.** `fabric_run.py` now passes `keep_notebook=True`, resolves the item's GUID
+  by display name, records it in the run record and deletes it itself — so the GUID is the join key
+  and the name is a convenience. Keep the prefix anyway: it is what makes a workspace listing
+  readable, and it costs nothing.
+- **Recording the GUID is the reason the notebook is deleted by us and not by duckrun.**
+  `run_python` hands back a `ScriptResult` with `returncode`/`log` and no item id, and its own
+  teardown fires before the caller sees anything — so the only way to write the GUID down is to keep
+  the notebook and delete it a couple of HTTP calls later. The delete sits in a `finally` (a
+  session-level failure *raises* out of `run_python`, and a kept notebook that outlives the leg is
+  the one regression this must not introduce) and swallows its own errors (an exception raised
+  inside `finally` replaces the build's, and losing a real failure to a bookkeeping one is worse
+  than an unrecorded GUID). A `LEFT BEHIND` or `CHECK THE WORKSPACE` line in the log means a
+  billable item is still standing.
 - **An unrecognised item kind lands in `other` and is logged, never dropped.** That log line
   (`kind X: N CU -> other`) is the route by which a kind gets into `CLASS_BY_KIND`. Do not guess a
   kind into the mapping; dispatch once and read stderr.

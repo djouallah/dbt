@@ -168,6 +168,17 @@ jobs:
       fabric: ${{ steps.p.outputs.fabric }}
       server: ${{ steps.p.outputs.server }}
     steps:
+      # Free, offline, ~2s, and it runs before any leg spends capacity. What it covers is the run
+      # record's assembly — a fragment that never lands, an item entry a later stage overwrites, a
+      # merge order that drops a deletion timestamp. All of those produce a record that looks fine
+      # and attributes CU to the wrong run, which is exactly the class of failure worth catching
+      # before a Fabric leg starts rather than after.
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: {python-version: "3.11"}
+      - run: pip install pytest
+      - name: Test the run record offline
+        run: python -m pytest .github/scripts/test_record.py -q
       - id: p
         env:
           ENGINES: ${{ inputs.engines }}
@@ -240,6 +251,12 @@ jobs:
     # now gets its own from `provision.py <engine>`, pointing at the `Files/landing` shortcut in
     # its own lakehouse. The FILES_PATH this job sets is the DIRECT dbt_landing path and is for
     # download_aemo.py, which writes the archive — that write CU belongs to `dbt_landing`.
+    #
+    # RUN_RECORD names the fragment every script in this job merges its item GUIDs into. One file
+    # per JOB, because jobs run on separate runners and cannot share one; `all.yml`'s `record` job
+    # downloads them all and merges by basename, which is what the numeric prefix orders.
+    env:
+      RUN_RECORD: ${{ github.workspace }}/record/record-10-land.json
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -259,6 +276,14 @@ jobs:
         if: ${{ inputs.skip_download }}
         run: |
           echo "skip_download is on — no new AEMO files fetched, building on the landed archive as-is" >&2
+      - name: Upload the run-record fragment
+        if: always()
+        continue-on-error: true
+        uses: actions/upload-artifact@v4
+        with:
+          name: record-fragment-land
+          path: record/
+          if-no-files-found: ignore
 
   # DuckDB-family: both engines are just DuckDB in a Python process, and that process always runs
   # in a Fabric notebook (duckrun.run_python), data-local to OneLake. The runner only ships
@@ -293,16 +318,28 @@ jobs:
     # `FILES_PATH: ${{ needs.land.outputs.files_path }}` here would silently keep both legs on the
     # shared direct path and the split would look like it simply did not work. `needs: land` still
     # stands: the download has to have happened before anything reads it.
+    env:
+      RUN_RECORD: ${{ github.workspace }}/record/record-20-build-${{ matrix.engine }}.json
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with: {python-version: "3.11"}
-      # The runner never builds, so it needs only what fabric_run.py imports. pytz goes into the
-      # notebook's own pip list, not here.
-      - run: pip install duckrun
+      # The runner never builds, so it needs only what fabric_run.py imports. `requests` is for
+      # fabric_run.py's own notebook-GUID resolve and delete. pytz goes into the notebook's own pip
+      # list, not here.
+      - run: pip install duckrun requests
       - run: python .github/scripts/provision.py ${{ matrix.engine }} >> "$GITHUB_ENV"
       - name: dbt build in Fabric
         run: python .github/scripts/fabric_run.py ${{ matrix.engine }}
+      # always(): a failed build still created the items, and their CU still has to be attributable.
+      - name: Upload the run-record fragment
+        if: always()
+        continue-on-error: true
+        uses: actions/upload-artifact@v4
+        with:
+          name: record-fragment-build-${{ matrix.engine }}
+          path: record/
+          if-no-files-found: ignore
 
   # dwh + spark: dbt client on the runner, compute on Fabric's own servers.
   server:
@@ -318,6 +355,8 @@ jobs:
         include: ${{ fromJSON(needs.plan.outputs.server) }}
     # No job-level FILES_PATH — same reason as the `fabric` job above: it would outrank the one
     # `provision.py <engine>` writes to $GITHUB_ENV and both legs would stay on the shared path.
+    env:
+      RUN_RECORD: ${{ github.workspace }}/record/record-20-build-${{ matrix.engine }}.json
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -355,6 +394,14 @@ jobs:
         with:
           name: dbt-target-${{ matrix.engine }}
           path: target/
+      - name: Upload the run-record fragment
+        if: always()
+        continue-on-error: true
+        uses: actions/upload-artifact@v4
+        with:
+          name: record-fragment-build-${{ matrix.engine }}
+          path: record/
+          if-no-files-found: ignore
 
   # The cross-engine check, back as the last step of the build. `stats.py` reads all eight shared
   # tables from each item's Delta log and puts the four side by side — no test compares one engine
@@ -378,6 +425,8 @@ jobs:
     # get_stats() over OneLake is slow on the iceberg item (12m+ observed for that one engine);
     # 15 minutes was cancelling stats.py mid-table and turning slowness into a red run.
     timeout-minutes: 40
+    env:
+      RUN_RECORD: ${{ github.workspace }}/record/record-30-layout.json
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -405,3 +454,14 @@ jobs:
           name: stats
           path: stats.json
           if-no-files-found: warn
+      # The same document again, as a run-record fragment. The artifact above is how a run's layout
+      # is read back without a checkout; the record is what outlives the 90-day retention and what
+      # the page joins against the CU ledger.
+      - name: Upload the run-record fragment
+        if: always()
+        continue-on-error: true
+        uses: actions/upload-artifact@v4
+        with:
+          name: record-fragment-layout
+          path: record/
+          if-no-files-found: ignore
