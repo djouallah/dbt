@@ -1,0 +1,142 @@
+{
+ "config": {
+  "spark": {
+   "native_execution_engine": "false",
+   "resource_profile": "writeHeavy"
+  }
+ },
+ "cu": {
+  "analytics": {
+   "spark": {
+    "Dataset On-Demand Refresh": 50.8,
+    "Dataset Scheduled Refresh": 0.8,
+    "Query": 12.6,
+    "XMLA Read Operation": 2616.4
+   }
+  },
+  "etl": {
+   "landing": {
+    "OneLake Iterative Read via Proxy": 8.8,
+    "OneLake Other Operations Via Redirect": 0.2,
+    "OneLake Write via Proxy": 6.8,
+    "SQL Endpoint Query": 9.9
+   },
+   "spark": {
+    "High Concurrency Session Livy Run": 27965.3,
+    "OneLake Iterative Read via Proxy": 96.1,
+    "OneLake Other Operations": 4.8,
+    "OneLake Other Operations Via Redirect": 625.6,
+    "OneLake Read via Proxy": 8.9,
+    "OneLake Read via Redirect": 1198.2,
+    "OneLake Write via Proxy": 18.9,
+    "OneLake Write via Redirect": 4084.5,
+    "SQL Endpoint Query": 55.7
+   }
+  }
+ },
+ "layout": {
+  "spark": {
+   "dim_calendar": {
+    "avg_row_group": 3197.0,
+    "compression": "SNAPPY",
+    "num_files": 1,
+    "num_row_groups": 1,
+    "schema": "mart",
+    "size_mb": 0.02,
+    "total_rows": 3197,
+    "vorder": false
+   },
+   "dim_duid": {
+    "avg_row_group": 689.0,
+    "compression": "SNAPPY",
+    "num_files": 1,
+    "num_row_groups": 1,
+    "schema": "mart",
+    "size_mb": 0.02,
+    "total_rows": 689,
+    "vorder": false
+   },
+   "fct_price": {
+    "avg_row_group": 766650.0,
+    "compression": "SNAPPY",
+    "num_files": 6,
+    "num_row_groups": 6,
+    "schema": "landing",
+    "size_mb": 589.78,
+    "total_rows": 4599900,
+    "vorder": false
+   },
+   "fct_price_today": {
+    "avg_row_group": 12750.0,
+    "compression": "SNAPPY",
+    "num_files": 1,
+    "num_row_groups": 1,
+    "schema": "landing",
+    "size_mb": 0.92,
+    "total_rows": 12750,
+    "vorder": false
+   },
+   "fct_scada": {
+    "avg_row_group": 8605151.2,
+    "compression": "SNAPPY",
+    "num_files": 43,
+    "num_row_groups": 43,
+    "schema": "landing",
+    "size_mb": 3891.14,
+    "total_rows": 370021502,
+    "vorder": false
+   },
+   "fct_scada_today": {
+    "avg_row_group": 750153.0,
+    "compression": "SNAPPY",
+    "num_files": 1,
+    "num_row_groups": 1,
+    "schema": "landing",
+    "size_mb": 4.41,
+    "total_rows": 750153,
+    "vorder": false
+   },
+   "fct_summary": {
+    "avg_row_group": 10284354.4,
+    "compression": "SNAPPY",
+    "num_files": 14,
+    "num_row_groups": 14,
+    "schema": "mart",
+    "size_mb": 1260.89,
+    "total_rows": 143980961,
+    "vorder": false
+   },
+   "stg_csv_archive_log": {
+    "avg_row_group": 8167.0,
+    "compression": "SNAPPY",
+    "num_files": 1,
+    "num_row_groups": 1,
+    "schema": "landing",
+    "size_mb": 0.43,
+    "total_rows": 8167,
+    "vorder": false
+   }
+  }
+ },
+ "layout_written": "2026-08-02T03:00:38.323678+00:00",
+ "runs": {
+  "build": "30729365764",
+  "build_sha": "4651ee058d4d37f5c018f06cf3f98d6f197686d2",
+  "measure": "30729365764",
+  "measure_sha": "4651ee058d4d37f5c018f06cf3f98d6f197686d2"
+ },
+ "schema": 2,
+ "since": "2026-08-02T12:00:00",
+ "tables": [
+  "stg_csv_archive_log",
+  "dim_calendar",
+  "dim_duid",
+  "fct_price",
+  "fct_scada",
+  "fct_price_today",
+  "fct_scada_today",
+  "fct_summary"
+ ],
+ "unit": "CU (s) \u2014 Fabric capacity-unit seconds",
+ "written": "2026-08-02T03:33:22+00:00"
+}
