@@ -468,10 +468,15 @@ def render_sources(cols, ledger, unmeasured):
     that a run measured minutes ago is a LOWER BOUND — an hour's CU keeps growing for ~70 minutes
     after the fact — so the reader is told to dispatch again rather than left to wonder.
     """
-    print("\n<sub>Each column is that engine's latest run. They are different dispatches:</sub>\n")
+    print("\n<sub>Each column is that engine's latest run. They are different dispatches, "
+          "newest first:</sub>\n")
     print("| column | run | built | items | CU |")
     print("|:--|:--|:--|--:|:--|")
-    for col, _engine, rec in cols:
+    # NEWEST DISPATCH FIRST. Everywhere else on the page the order is the engine order, which is
+    # what makes columns comparable across two renders; here the point of the table is precisely
+    # that the columns are NOT contemporaneous, so it sorts on the thing it is reporting.
+    for col, _engine, rec in sorted(
+            cols, key=lambda c: ((c[2].get("run") or {}).get("started") or ""), reverse=True):
         rid = (rec.get("run") or {}).get("id")
         link = f"[{rid}]({run_url(rid)})" if rid else "—"
         items = [g for g, it in (rec.get("items") or {}).items()
@@ -547,7 +552,8 @@ def render_layouts(cols, analytics):
 
     The mart leads because it is the table the benchmark's queries land on, and it is the only block
     carrying the CU column — the analytics CU is one number per engine, not per table, so printing it
-    in every block would read as one measurement per table.
+    in every block would read as one measurement per table. That block's rows are ordered by that CU,
+    cheapest first; the rest keep the engine order.
     """
     stats = {col: ((rec.get("layout") or {}).get("stats") or {}).get(rec.get("engine")) or {}
              for col, _e, rec in cols}
@@ -575,6 +581,12 @@ def render_layouts(cols, analytics):
         if not present:
             continue
         show_cu = t == mart
+        if show_cu:
+            # CHEAPEST FIRST, like `chart()` — the CU column is the finding on this block, and
+            # "lower is better" only reads as a ranking if the rows are in that order. A 0 means
+            # nothing was measured, not that querying was free, so it sorts to the END. The other
+            # blocks carry no CU and keep the engine order.
+            present.sort(key=lambda cd: (analytics.get(cd[0], 0.0) == 0, analytics.get(cd[0], 0.0)))
         head = (f"`{t}` in detail — the mart the queries land on" if t == mart
                 else f"`{(schema.get(t) + '.') if schema.get(t) else ''}{t}`")
         print(f"\n#### {head}\n")
