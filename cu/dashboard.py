@@ -145,13 +145,14 @@ def incomplete(rec):
     The page compares generations, so a run has to be a WHOLE generation: built, benchmarked, and
     torn down. A partial one is not a smaller answer, it is a misleading one —
 
-    - **no teardown** means the items are still alive and still accruing, so their CU is not this
-      run's cost but the cost of everything since. Run 30733912205 predates the teardown and its
-      `dbt_delta` has been billing ever since.
     - **no benchmark** means an empty analytics column, which reads as "querying this engine was
       free" rather than "nobody measured it". Run 30743411308 is exactly that: the `bench` job was
       skipped by a `needs` bug and only the ETL half exists.
     - **no layout** means the build half never reported.
+
+    A run that was never TORN DOWN is not rejected — see `drifting()`. Its numbers do keep creeping,
+    but the creep is small and a missing column costs more than a caveated one; the page says so
+    instead of hiding the run.
 
     Non-compliant records are skipped and NAMED, never silently dropped — and `measure.py` still
     reads them, because their items really did cost capacity and the ledger is the ledger.
@@ -164,15 +165,29 @@ def incomplete(rec):
     items = rec.get("items") or {}
     if not any((it.get("role") or "") == "output" for it in items.values()):
         return "no output item"
-    alive = sorted(f"{it.get('role')}/{it.get('name') or g}" for g, it in items.items()
-                   if (it.get("role") or "") in DELETABLE_ROLES and not it.get("deleted"))
-    if alive:
-        return f"not torn down: {', '.join(alive)} — still accruing"
     if not ((rec.get("layout") or {}).get("stats") or {}).get(rec["engine"]):
         return "no layout recorded — the build half did not report"
     if not ((rec.get("benchmark") or {}).get("timings") or {}):
         return "no benchmark timings — the query half did not run"
     return None
+
+
+def drifting(rec):
+    """Items this run created and never deleted — so its CU has no upper bound.
+
+    A run whose teardown ran has a FINAL cost: every item is gone, nothing can be charged to it
+    again. One whose teardown did not (run 30733912205 predates the job) leaves its lakehouse and
+    semantic model alive, and Fabric keeps billing them — background OneLake reads against an idle
+    lakehouse, a Direct Lake model that gets refreshed. Its number is therefore "that run, plus
+    whatever those items have done since", and it grows every time the ledger is topped up.
+
+    Reported rather than rejected. The drift is small in practice and a column that disappears is
+    worse than one carrying a caveat — but the caveat has to be there, because "settled" and "still
+    climbing" are different claims and only one of them is comparable to a torn-down run.
+    """
+    return sorted(f"{it.get('role')}/{it.get('name') or g}"
+                  for g, it in (rec.get("items") or {}).items()
+                  if (it.get("role") or "") in DELETABLE_ROLES and not it.get("deleted"))
 
 
 def load_ledger(path=None):
@@ -425,7 +440,13 @@ def render_sources(cols, ledger, unmeasured):
                  if (it.get("role") or "") not in NON_ENGINE_ROLES]
         started = ((rec.get("run") or {}).get("started") or "?")[:16].replace("T", " ")
         missing = unmeasured.get(col) or []
-        if missing:
+        live = drifting(rec)
+        if live:
+            # Loudest of the three, because it is the only one that never resolves: the other two
+            # are "wait and read again", this one is "the number has no upper bound until someone
+            # deletes these".
+            state = f"**still billing** — {len(live)} item(s) never deleted"
+        elif missing:
             state = f"{len(items) - len(missing)}/{len(items)} items measured"
         elif still_accruing(rec):
             state = "may still rise"
@@ -433,10 +454,16 @@ def render_sources(cols, ledger, unmeasured):
             state = "settled"
         load = "full" if rec.get("full_load") else "incremental"
         print(f"| {col} | {link} | {started} ({load}) | {len(items)} | {state} |")
+    drifters = {c: drifting(r) for c, _e, r in cols}
     print("\n<sub>An hour's CU keeps growing for up to ~70 minutes after the work happened, so a run "
           "measured just now is a lower bound — dispatch **Dashboard** again and the numbers rise to "
           "their final value. Every item a run creates is deleted when it finishes, which is what "
-          "makes a Fabric item GUID belong to exactly one run and the attribution exact.</sub>")
+          "makes a Fabric item GUID belong to exactly one run and the attribution exact."
+          + ("".join(f" **{c}** predates that teardown and still owns {', '.join(f'`{x}`' for x in v)}"
+                     f" — Fabric keeps billing them, so its total creeps upward and is an upper "
+                     f"bound on that run rather than a measurement of it. Delete them and it "
+                     f"settles." for c, v in drifters.items() if v))
+          + "</sub>")
 
 
 def render_input(cols):

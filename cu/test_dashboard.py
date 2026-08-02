@@ -24,6 +24,11 @@ def ago(hours):
     return (datetime.now(timezone.utc) - timedelta(hours=hours)).isoformat()
 
 
+def gone(role, name):
+    """An item the teardown deleted — the normal case, and the one that is not `drifting`."""
+    return {"role": role, "name": name, "deleted": ago(1)}
+
+
 def rec(file, engine, items, config=None, stats=None, tables=None, landing=None,
         full_load=True, finished_hours_ago=48):
     return {"_file": file, "schema": 1, "engine": engine, "full_load": full_load,
@@ -181,11 +186,9 @@ def test_a_column_with_no_operations_of_a_kind_prints_a_dash_not_a_zero():
 
 
 def test_the_page_says_when_a_column_can_still_rise():
-    fresh = [rec("a-1.json", "dwh", {"OUT": {"role": "output", "name": "dbt_dwh"}},
-                 finished_hours_ago=0.5)]
+    fresh = [rec("a-1.json", "dwh", {"OUT": gone("output", "dbt_dwh")}, finished_hours_ago=0.5)]
     assert "may still rise" in _render(fresh, ledger({"OUT": 5.0}))
-    old = [rec("a-1.json", "dwh", {"OUT": {"role": "output", "name": "dbt_dwh"}},
-               finished_hours_ago=48)]
+    old = [rec("a-1.json", "dwh", {"OUT": gone("output", "dbt_dwh")}, finished_hours_ago=48)]
     assert "may still rise" not in _render(old, ledger({"OUT": 5.0}))
 
 
@@ -228,13 +231,30 @@ def test_a_whole_generation_is_accepted():
     assert d.incomplete(_full("a-1.json", "spark")) is None
 
 
-def test_a_run_that_was_not_torn_down_is_rejected():
-    """Its items are still alive and still accruing, so the CU is not that run's cost — it is the
-    cost of everything since. Run 30733912205 predates the teardown and is exactly this."""
+def test_a_run_that_was_not_torn_down_is_caveated_not_rejected():
+    """Its items are still alive and Fabric keeps billing them, so its total creeps upward — but the
+    creep is small, and a column that disappears costs more than one carrying a caveat. Run
+    30733912205 predates the teardown and is exactly this."""
     r = _full("a-1.json", "duckrun")
     del r["items"]["OUT"]["deleted"]
-    assert "not torn down" in d.incomplete(r)
-    assert "dbt_duckrun" in d.incomplete(r), "it must name what is still alive"
+    assert d.incomplete(r) is None, "it still renders"
+    assert d.drifting(r) == ["output/dbt_duckrun"], "and it is named as still billing"
+
+
+def test_a_torn_down_run_is_not_drifting():
+    assert d.drifting(_full("a-1.json", "spark")) == []
+
+
+def test_the_sources_table_says_which_column_is_still_billing():
+    """"settled" and "still climbing" are different claims and only one is comparable to a
+    torn-down run, so the loudest of the three states is the one that never resolves on its own."""
+    good = _full("a-1.json", "spark")
+    bad = _full("b-2.json", "duckrun")
+    del bad["items"]["OUT"]["deleted"]
+    out = _render([good, bad], ledger({"OUT": 1.0, "SEM": 2.0}))
+    assert "**still billing** — 1 item(s) never deleted" in out
+    assert "predates that teardown and still owns `output/dbt_duckrun`" in out
+    assert "upper bound on that run rather than a measurement of it" in out
 
 
 def test_a_run_with_no_benchmark_is_rejected():
@@ -255,7 +275,7 @@ def test_incomplete_records_are_skipped_by_the_loader_and_named(tmp_path, capsys
     """Skipped, never silently dropped: a page that quietly ignores a record is indistinguishable
     from one that never had it."""
     good, bad = _full("a-1.json", "spark"), _full("b-2.json", "dwh")
-    del bad["items"]["OUT"]["deleted"]
+    bad["benchmark"] = {}          # the query half never ran — that is still a rejection
     for r in (good, bad):
         (tmp_path / r["_file"]).write_text(json.dumps(r), encoding="utf-8")
     loaded = d.load_runs(str(tmp_path))
@@ -276,13 +296,11 @@ def test_a_class_with_one_item_per_engine_is_not_decomposed():
     """analytics is always exactly one semantic model per engine, so item rows there would repeat
     the subtotal and add a row of em dashes for every other engine — three rows carrying one row's
     information. etl splits because a DuckDB leg really is a notebook plus a lakehouse."""
-    runs = [rec("a-1.json", "duckrun",
-                {"NB": {"role": "compute", "name": "dbt-duckrun-ab12"},
-                 "OUT": {"role": "output", "name": "dbt_delta"},
-                 "SEM": {"role": "semantic_model", "name": "aemo_duckrun"}}),
-            rec("b-2.json", "spark",
-                {"OUT2": {"role": "output", "name": "dbt_spark"},
-                 "SEM2": {"role": "semantic_model", "name": "aemo_spark"}})]
+    runs = [rec("a-1.json", "duckrun", {"NB": gone("compute", "dbt-duckrun-ab12"),
+                                        "OUT": gone("output", "dbt_delta"),
+                                        "SEM": gone("semantic_model", "aemo_duckrun")}),
+            rec("b-2.json", "spark", {"OUT2": gone("output", "dbt_spark"),
+                                      "SEM2": gone("semantic_model", "aemo_spark")})]
     out = _render(runs, ledger({"NB": 26403.5, "OUT": 2463.9, "SEM": 2157.8,
                                 "OUT2": 34046.3, "SEM2": 1514.0}))
     assert "| **analytics** |" in out and "2,157.8" in out and "1,514.0" in out

@@ -1016,15 +1016,22 @@ capacity for the GUIDs in those records, tops up `history/cu.json`, and publishe
   safe from truncation when the floor walks forward. Adding would multiply an item's cost by the
   number of reads. And the floor is the earliest recorded run start CLAMPED to `now - 14 days`, so
   one query covers everything still learnable and never more.
-- **ONLY WHOLE GENERATIONS REACH THE PAGE.** `dashboard.py`'s `incomplete()` requires a record to be
-  built, benchmarked AND torn down, and skips anything else by name. Both failures it guards are real
-  and already happened: run 30733912205 predates the teardown, so `dbt_delta` and `aemo_duckrun` were
-  left alive and have been billing ever since — their CU is the cost of everything since, not of that
-  run; and run 30743411308's `bench` job was skipped by the `needs` bug, so it has an ETL half and no
-  analytics, which on a chart reads as "querying spark was free". Both now live in
-  `history/runs/legacy/` with a README saying which is which. `measure.py` deliberately does NOT
-  filter — those items really did cost capacity and the ledger is the ledger; it is the PAGE that
-  must only compare like with like.
+- **A record must be built and benchmarked to reach the page**, and `incomplete()` skips anything
+  else by name. Run 30743411308 is the live example: its `bench` job was skipped by the `needs` bug,
+  so it has an ETL half and no analytics, which on a chart reads as "querying spark was free". It
+  lives in `history/runs/legacy/`.
+- **A run that was never TORN DOWN renders WITH A CAVEAT, not rejected.** Run 30733912205 predates
+  the teardown job, so `dbt_delta` and `aemo_duckrun` are still alive and Fabric keeps billing them —
+  its total is an upper bound on that run rather than a measurement of it. It was briefly moved to
+  `legacy/` for that; the creep is small and a missing column costs more than a caveated one, so
+  `drifting()` marks it **still billing — N item(s) never deleted** in the sources table, the loudest
+  of the three states because it is the only one that does not resolve by waiting.
+  **Moving a record in or out of `legacy/` MOVES THE FLOOR**, which is easy to miss: `measure.py`
+  derives it from the earliest remaining run start, so parking a record narrows the window and the
+  items of any run outside it stop being read. That is what made duckrun read 14.8 CU for a moment —
+  the ledger had only the trailing background hours. Re-dispatch `Dashboard` after moving one.
+  `measure.py` deliberately does NOT filter on `incomplete()` — those items really did cost capacity
+  and the ledger is the ledger; it is the PAGE that must only compare like with like.
 - **`compute` against `storage` comes from the OPERATION, and it can only come from there.** They
   share an ITEM, which is measured, not assumed: `dbt_spark` [Lakehouse] bills 188,636 CU of `High
   Concurrency Session Livy Run` AND 20,268 of `OneLake Write via Redirect` against one GUID;

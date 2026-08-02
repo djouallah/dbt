@@ -150,13 +150,15 @@ because that artifact has to open off a local disk years later.
   number on the page describes what came OUT.
 - **Table layout**, every shared table, mart first, with the analytics CU beside the mart alone (it
   is one number per engine, not per table).
-- **Only WHOLE generations reach the page.** A record has to be built, benchmarked and torn down;
-  `dashboard.py`'s `incomplete()` skips anything else and names why. A run that was not torn down has
-  items still alive and still accruing, so its CU is not that run's cost but the cost of everything
-  since; a run with no benchmark shows an empty analytics column, which reads as "querying this
-  engine was free" rather than "nobody measured it". `measure.py` still reads the skipped records —
-  their items really did cost capacity — and `history/runs/legacy/` holds the ones already known to
-  be partial.
+- **A record has to be built and benchmarked to reach the page.** `dashboard.py`'s `incomplete()`
+  skips anything else and names why — a run with no benchmark shows an empty analytics column, which
+  reads as "querying this engine was free" rather than "nobody measured it".
+- **A run that was never TORN DOWN still renders, with a caveat.** Its items are alive and Fabric
+  keeps billing them, so its total creeps upward and is an upper bound on that run rather than a
+  measurement of it. It was briefly rejected outright; the creep is small and a column that
+  disappears costs more than one carrying a caveat, so `drifting()` marks it **still billing** in the
+  sources table instead — the loudest of the three states, because it is the only one that does not
+  resolve by waiting. Deleting the items settles it.
 - **Columns are each engine's latest run, once per config.** One dispatch builds one engine, so
   rendering the newest record alone would give a comparison page with one column. spark under
   `readHeavyForPBI` and spark under `writeHeavy` are two columns, because one number cannot answer
