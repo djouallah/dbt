@@ -29,8 +29,11 @@ def rec(file, engine, started, finished, items, config=None, stats=None, tables=
                        **({"landing": landing} if landing else {})}}
 
 
-def ledger(cu, settled=None):
-    return {"cu": cu, "settled": settled or {}, "reads": [{"at": "2026-08-02T20:00:00+00:00"}],
+def ledger(items, settled=(), runs=None):
+    """The cumulative shape measure.py keeps: `{guid: {cu: {op: total}, settled: ...}}`."""
+    return {"items": {g: {"cu": ops, "settled": ("quiet" if g in settled else None)}
+                      for g, ops in items.items()},
+            "runs": runs or {}, "reads": [{"at": "2026-08-02T20:00:00+00:00"}],
             "updated": "2026-08-02T20:00:00+00:00"}
 
 
@@ -48,36 +51,33 @@ def test_the_role_decides_the_class_not_the_fabric_item_kind():
         "NB": {"role": "compute", "name": "dbt-spark-ab12"},
         "SEM": {"role": "semantic_model", "name": "aemo_spark"},
     })
-    led = ledger({"OUT": {"OneLake Write": {"2026-08-02T15:00:00": 10.0}},
-                  "NB": {"Livy Run": {"2026-08-02T15:00:00": 900.0}},
-                  "SEM": {"XMLA Read": {"2026-08-02T15:00:00": 40.0}}})
+    led = ledger({"OUT": {"OneLake Write": 10.0}, "NB": {"Livy Run": 900.0},
+                  "SEM": {"XMLA Read": 40.0}})
     cells, _landing, _open = d.run_cu(r, led)
     assert cells == {("etl", "OneLake Write"): 10.0, ("etl", "Livy Run"): 900.0,
                      ("analytics", "XMLA Read"): 40.0}
 
 
-def test_landing_is_allocated_by_hour_and_kept_out_of_the_engine_total():
-    """`dbt_landing` is the one item that outlives a run, so it is the one thing allocated by window
-    rather than by GUID — and it is a shared INPUT cost, never an engine's."""
+def test_landing_comes_from_the_per_run_rollup_and_never_joins_the_engine_total():
+    """`dbt_landing` is never deleted, so it has no total of its own — measure.py attributes it per
+    run over that run's window, and the page reads THAT rather than re-deriving it. Two sides
+    deriving the same allocation independently is two chances to disagree."""
     r = rec("r-1.json", "spark", "2026-08-02T05:00:00+00:00", "2026-08-02T06:30:00+00:00", {
         "OUT": {"role": "output", "name": "dbt_spark"},
         "LAND": {"role": "landing", "name": "dbt_landing"},
     })
-    led = ledger({"OUT": {"Write": {"2026-08-02T15:00:00": 10.0}},
-                  # 15:00 and 16:00 are inside the run (05:00-06:30 UTC -> 15:00-16:00 model);
-                  # 09:00 belongs to some earlier run and must not be counted here.
-                  "LAND": {"Write": {"2026-08-02T09:00:00": 500.0,
-                                     "2026-08-02T15:00:00": 3.0,
-                                     "2026-08-02T16:00:00": 4.0}}})
-    cells, landing, _open = d.run_cu(r, led)
+    led = ledger({"OUT": {"Write": 10.0}, "LAND": {"Write": 507.0}},
+                 runs={"1": {"landing": {"Write": 7.0}, "settled": True}})
+    cells, landing, open_items = d.run_cu(r, led)
     assert landing == {"Write": 7.0}
     assert cells == {("etl", "Write"): 10.0}, "landing must not be added to the engine's own CU"
+    assert open_items == ["output/dbt_spark"], "landing is never an item that settles"
 
 
 def test_the_dbt_folder_costs_nothing_and_is_skipped():
     r = rec("r-1.json", "dwh", "2026-08-02T05:00:00+00:00", "2026-08-02T06:00:00+00:00",
             {"F": {"role": "folder", "name": "dbt"}, "OUT": {"role": "output", "name": "dbt_dwh"}})
-    cells, _l, open_items = d.run_cu(r, ledger({"OUT": {"Q": {"2026-08-02T15:00:00": 1.0}}}))
+    cells, _l, open_items = d.run_cu(r, ledger({"OUT": {"Q": 1.0}}))
     assert cells == {("etl", "Q"): 1.0}
     assert open_items == ["output/dbt_dwh"], "the folder is not an item whose CU can settle"
 
@@ -89,6 +89,17 @@ def test_an_item_with_no_ledger_rows_yet_is_reported_as_open_not_as_zero():
             {"OUT": {"role": "output", "name": "dbt_spark"}})
     cells, _l, open_items = d.run_cu(r, ledger({}))
     assert cells == {} and open_items == ["output/dbt_spark"]
+
+
+def test_a_settled_item_still_reports_its_total_after_its_hours_are_gone():
+    """The whole reason the ledger keeps cumulative totals: measure.py drops the hour detail when an
+    item settles, because the app forgets the window within 14 days. A reader that summed hours
+    would show a settled item as having cost nothing."""
+    r = rec("r-1.json", "dwh", "2026-08-02T05:00:00+00:00", "2026-08-02T06:00:00+00:00",
+            {"OUT": {"role": "output", "name": "dbt_dwh"}})
+    cells, _l, open_items = d.run_cu(r, ledger({"OUT": {"Q": 31063.6}}, settled={"OUT"}))
+    assert cells == {("etl", "Q"): 31063.6}
+    assert open_items == []
 
 
 def test_columns_are_the_latest_run_per_engine_and_config():
@@ -141,8 +152,7 @@ def test_the_page_renders_end_to_end_with_charts_and_a_layout():
                                                    "size_mb": 998.9, "vorder": False,
                                                    "schema": "mart"}}},
                 tables=["fct_summary"], landing={"files": 8167, "size_mb": 12345.6})]
-    led = ledger({"OUT": {"OneLake Write": {"2026-08-02T15:00:00": 1088.0}},
-                  "SEM": {"XMLA Read": {"2026-08-02T15:00:00": 1891.0}}})
+    led = ledger({"OUT": {"OneLake Write": 1088.0}, "SEM": {"XMLA Read": 1891.0}})
     out = _render(runs, led)
     assert "<!--chart:" in out and out.count("<!--chart:") == 2
     assert "| **etl** |" in out and "| **analytics** |" in out
@@ -158,10 +168,9 @@ def test_the_page_renders_end_to_end_with_charts_and_a_layout():
 def test_the_page_says_when_a_column_is_still_accruing():
     runs = [rec("a-1.json", "dwh", "2026-08-02T05:00:00+00:00", "2026-08-02T06:00:00+00:00",
                 {"OUT": {"role": "output", "name": "dbt_dwh"}})]
-    open_page = _render(runs, ledger({"OUT": {"Q": {"2026-08-02T15:00:00": 5.0}}}))
+    open_page = _render(runs, ledger({"OUT": {"Q": 5.0}}))
     assert "still accruing" in open_page
-    done_page = _render(runs, ledger({"OUT": {"Q": {"2026-08-02T15:00:00": 5.0}}},
-                                     settled={"OUT": "quiet"}))
+    done_page = _render(runs, ledger({"OUT": {"Q": 5.0}}, settled={"OUT"}))
     assert "still accruing" not in done_page
 
 
@@ -176,4 +185,4 @@ def test_no_records_explains_the_contract_rather_than_printing_an_empty_page():
 
 def test_a_missing_directory_is_an_empty_list_not_an_exception(tmp_path):
     assert d.load_runs(str(tmp_path / "nope")) == []
-    assert d.load_ledger(str(tmp_path / "nope.json"))["cu"] == {}
+    assert d.load_ledger(str(tmp_path / "nope.json"))["items"] == {}

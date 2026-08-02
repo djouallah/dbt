@@ -19,25 +19,48 @@ no name matching, no classification.** This file measures; it does not interpret
 ## The ledger — `history/cu.json`
 
     {"schema": 1, "updated": "...",
-     "reads":   [{"at": ..., "since": ..., "rows": N, "changed": M, "settled": K}],
-     "cu":      {"<ITEM GUID>": {"<operation>": {"<hour>": CU}}},
-     "settled": {"<ITEM GUID>": "<when it was frozen>"}}
+     "reads": [{"at": ..., "since": ..., "rows": N, "changed": M, "settled": K}],
+
+     # THE PERMANENT RECORD: cumulative CU per item, per operation.
+     "items": {"<ITEM GUID>": {"cu": {"<operation>": total},
+                               "settled": "<why and when>" | null,
+                               "first_hour": ..., "last_hour": ...}},
+
+     # Per-run rollup of the ONE item that outlives a run and so has no total of its own.
+     "runs": {"<run id>": {"landing": {"<operation>": total}, "settled": bool}},
+
+     # WORKING SET, not history: hour detail for items that can still move. Pruned on settle.
+     "hours": {"<ITEM GUID>": {"<operation>": {"<hour>": CU}}}}
 
 It exists because the app retains about **14 days**. Everything measured is gone within a fortnight
 unless it is written down, and a run record's GUIDs stay meaningful for years.
+
+**`items` is the shape that lasts, and `hours` is scaffolding.** The hour grain exists for exactly
+one reason — to make a re-read idempotent while an item's numbers are still moving — and that reason
+expires the moment the item settles. So a settled item collapses to `{operation: total}` and its
+hours are dropped: the permanent record is cumulative CU per item, which is the only form still
+meaningful once the app has forgotten the window it came from. A ledger that kept every hour forever
+would grow without bound to preserve a resolution nothing can check any more.
 
 Three rules make re-reading safe, and all three matter:
 
 1. **Upsert only, never remove.** A key that stops being returned — retention rolling past it — keeps
    its last value. Deleting on absence would quietly erase the history this file exists to keep.
+   (Collapsing an hour into a settled total is not removal: the CU stays, at a coarser grain.)
 2. **Latest read wins per `(guid, operation, hour)`.** An hour's CU keeps growing for up to ~70
    minutes after the fact (~6 min ingestion lag, 5-64 min smoothing), so overwriting is correct.
-   SUMMING repeated reads would multiply every hour by the number of times it was read.
+   SUMMING repeated reads would multiply every hour by the number of times it was read — which is
+   also why the collapse only happens once, at settle, and never to an open item.
 3. **Settle, then freeze.** An item is settled when a read changed nothing about it AND its newest
    hour is older than `CU_SETTLE_HOURS`. A settled item is never rewritten and its time is never
    re-read. That is "an item's CU is done when no more CU is being attributed to it", and it is also
    what makes the missing refresh safe: an item the first read could not see is picked up by the
    next one, because nothing is final until two reads agree.
+
+**`dbt_landing` is the exception and needs the `runs` rollup.** It is the one item that is never
+deleted, so it never settles and its hours would accumulate forever. Instead its CU is rolled up per
+RUN — summed over the hours inside that run's own window — and frozen when the rest of that run's
+items settle, at which point the hours it covered are dropped.
 
 Env in: `PBI_TOKEN` (minted from the OIDC login), `CU_METRICS_WORKSPACE_ID`, `CU_METRICS_MODEL_ID`,
 `CU_CAPACITY_ID`, `CU_WORKSPACE_FILTER`. Optional: `CU_SINCE` (override the computed floor),
@@ -80,6 +103,11 @@ SETTLE_HOURS = float(os.environ.get("CU_SETTLE_HOURS", "3"))
 # every future read re-query time that can never change.
 RETENTION_DAYS = float(os.environ.get("CU_RETENTION_DAYS", "14"))
 SCHEMA = 1
+
+# Roles whose items never accrue a capacity unit and so can never settle. `folder` is a workspace
+# folder; `landing` is the archive lakehouse, which is never deleted and is rolled up per run
+# instead. Waiting on either would hold every run open forever.
+NEVER_SETTLES = {"folder", "landing"}
 
 TABLE = "Metrics By Item Operation And Hour"
 # Column names move between versions of the app — Microsoft's own accelerator ships four DAX variants
@@ -204,17 +232,41 @@ EVALUATE
 
 # ------------------------------------------------------------------------------------- the ledger
 
+def blank():
+    return {"schema": SCHEMA, "updated": None, "reads": [], "items": {}, "runs": {}, "hours": {}}
+
+
 def load_ledger(path=None):
     path = path or LEDGER
     try:
         with open(path, encoding="utf-8") as f:
             doc = json.load(f)
     except (OSError, ValueError):
-        return {"schema": SCHEMA, "updated": None, "reads": [], "cu": {}, "settled": {}}
-    doc.setdefault("cu", {})
-    doc.setdefault("settled", {})
-    doc.setdefault("reads", [])
+        return blank()
+    for key, default in (("items", {}), ("runs", {}), ("hours", {}), ("reads", [])):
+        doc.setdefault(key, default)
     return doc
+
+
+def is_settled(ledger, guid):
+    return bool((ledger["items"].get(guid) or {}).get("settled"))
+
+
+def roll_up(ledger, guid):
+    """Recompute an OPEN item's cumulative totals from its hours, and its first/last hour.
+
+    Called after every merge so `items` is the single place anything downstream reads, whether the
+    item is still moving or frozen. A settled item is never passed here — its totals are the ones
+    that were true when it stopped accruing, and recomputing from hours it no longer has would zero
+    them.
+    """
+    hours = ledger["hours"].get(guid) or {}
+    entry = ledger["items"].setdefault(guid, {"cu": {}, "settled": None})
+    entry["cu"] = {op: round(sum(per.values()), 3) for op, per in sorted(hours.items())}
+    stamps = [h for per in hours.values() for h in per]
+    entry["first_hour"] = min(stamps) if stamps else None
+    entry["last_hour"] = max(stamps) if stamps else None
+    return entry
 
 
 def save_ledger(doc, path=None):
@@ -283,12 +335,12 @@ def pending(runs, ledger, now_model):
         items = rec.get("items") or {}
         if not items:
             continue
-        open_guids = [g for g in items if g not in ledger["settled"]]
+        open_guids = [g for g in items if not is_settled(ledger, g)]
         if not open_guids:
             continue
         if floor is not None and floor < horizon:
             for g in open_guids:
-                ledger["settled"][g] = f"retention ({RETENTION_DAYS:g}d) passed with no further rows"
+                freeze(ledger, g, f"retention ({RETENTION_DAYS:g}d) passed with no further rows")
             reasons[rec["_file"]] = f"{len(open_guids)} item(s) aged out"
             continue
         guids.update(open_guids)
@@ -299,14 +351,14 @@ def pending(runs, ledger, now_model):
 
 
 def merge_rows(ledger, rows, cols, now_model):
-    """Upsert this read into the ledger. Returns `(kept, changed, skipped_settled)`.
+    """Upsert this read into the working set. Returns `(kept, changed, skipped_settled, hours)`.
 
     Upsert-only and last-write-wins per `(guid, operation, hour)` — see the module docstring. A
-    settled item is skipped entirely: its numbers are frozen, and re-reading a window the app has
-    started to age out could only take value away.
+    settled item is skipped entirely: its total is frozen, it has no hours left to write into, and
+    re-reading a window the app has started to age out could only take value away.
     """
     kept = changed = skipped = 0
-    hours = []
+    stamps = []
     for r in rows or []:
         guid = str(r.get(cols["item_id"]) or "").upper()
         wsid = str(r.get(cols["workspace_id"]) or "").upper()
@@ -315,52 +367,145 @@ def merge_rows(ledger, rows, cols, now_model):
             continue
         if WS_FILTER and wsid != WS_FILTER:
             continue
-        if guid in ledger["settled"]:
+        if is_settled(ledger, guid):
             skipped += 1
             continue
         stamp = str(r.get(cols["when"]) or "")[:19]
         if not stamp:
             continue
-        hours.append(stamp)
+        stamps.append(stamp)
         op = str(r.get(cols["operation"]) or "(unnamed)").strip()
-        slot = ledger["cu"].setdefault(guid, {}).setdefault(op, {})
+        slot = ledger["hours"].setdefault(guid, {}).setdefault(op, {})
         new = round(float(value), 3)
         if slot.get(stamp) != new:
             slot[stamp] = new
             changed += 1
         kept += 1
-    return kept, changed, skipped, hours
+    for guid in ledger["hours"]:
+        roll_up(ledger, guid)
+    return kept, changed, skipped, stamps
 
 
-def settle(ledger, changed_guids, now_model):
-    """Freeze every open item that this read left untouched and that has been quiet long enough.
+def freeze(ledger, guid, why):
+    """Collapse an item to its cumulative total and drop the hour detail.
+
+    This is the point of the ledger. The hours were only ever there to make a re-read idempotent
+    while the numbers moved; once the item is final they preserve a resolution nothing can check
+    against any more — the app has a 14-day memory — while growing the file without bound.
+    """
+    entry = roll_up(ledger, guid) if guid in ledger["hours"] else \
+        ledger["items"].setdefault(guid, {"cu": {}, "first_hour": None, "last_hour": None})
+    entry["settled"] = why
+    ledger["hours"].pop(guid, None)
+    return entry
+
+
+def settle(ledger, changed_guids, now_model, keep=()):
+    """Freeze every open item this read left untouched that has been quiet long enough.
 
     Two conditions, both needed. UNCHANGED, because an item still accruing must not be frozen at a
     partial number — and requiring two agreeing reads is also what covers the missing refresh: an
     item the first read could not see yet is picked up by the second. QUIET, because "the read
-    changed nothing" is trivially true for an hour that has not finished smoothing and has not been
+    changed nothing" is trivially true of an hour that has not finished smoothing and has not been
     written to yet either.
+
+    `keep` names items that must never freeze — `dbt_landing`, which is never deleted and so is never
+    done. It is rolled up per RUN instead (see `roll_up_landing`).
     """
     frozen = []
     quiet_before = now_model - timedelta(hours=SETTLE_HOURS)
-    for guid, ops in ledger["cu"].items():
-        if guid in ledger["settled"] or guid in changed_guids:
+    for guid in sorted(ledger["hours"]):
+        if guid in changed_guids or guid in keep:
             continue
-        last = max((h for op in ops.values() for h in op), default=None)
-        if last is None:
+        last = (ledger["items"].get(guid) or {}).get("last_hour")
+        if not last:
             continue
         try:
             if datetime.fromisoformat(last) > quiet_before:
                 continue
         except ValueError:
             continue
-        ledger["settled"][guid] = f"unchanged and quiet since {last}"
+        freeze(ledger, guid, f"unchanged and quiet since {last}")
         frozen.append(guid)
     return frozen
 
 
+def roll_up_landing(ledger, runs):
+    """Attribute the landing lakehouse's CU to the run that was active, and prune what is finished.
+
+    `dbt_landing` is the one item a run does not delete, so it never settles and its hours would
+    accumulate for the life of the repo. Its CU is instead summed per RUN over the hours inside that
+    run's own `started`/`finished` window, and frozen when the rest of that run's items settle — at
+    which point those hours are dropped.
+
+    An hour that falls in no run's window is left alone: it is real CU that nothing can attribute
+    yet, and dropping it to keep the file small would be the one thing this file must never do.
+    """
+    landing = {g for rec in runs for g, it in (rec.get("items") or {}).items()
+               if (it.get("role") or "") == "landing"}
+    if not landing:
+        return landing
+    covered = set()
+    for rec in runs:
+        rid = str((rec.get("run") or {}).get("id") or rec.get("_file"))
+        items = rec.get("items") or {}
+        window = _window(rec)
+        if not window[0]:
+            continue
+        per_op, hours_used = {}, []
+        for guid in landing & set(items):
+            for op, per in (ledger["hours"].get(guid) or {}).items():
+                for hour, value in per.items():
+                    if window[0] <= hour <= window[1]:
+                        per_op[op] = round(per_op.get(op, 0.0) + value, 3)
+                        hours_used.append((guid, op, hour))
+        # Only the items that CAN settle count towards "this run is done". The `dbt` folder never
+        # accrues a capacity unit, so it never settles — waiting on it would hold every run open
+        # forever, and the landing rollup would never freeze. Same exclusion the page applies.
+        watch = [g for g, it in items.items() if (it.get("role") or "") not in NEVER_SETTLES]
+        done = bool(watch) and all(is_settled(ledger, g) for g in watch)
+        if (ledger["runs"].get(rid) or {}).get("settled"):
+            continue                                  # already frozen; never recomputed
+        ledger["runs"][rid] = {"landing": per_op, "settled": done}
+        if done:
+            covered.update(hours_used)
+    for guid, op, hour in covered:
+        per = (ledger["hours"].get(guid) or {}).get(op) or {}
+        per.pop(hour, None)
+        if not per:
+            (ledger["hours"].get(guid) or {}).pop(op, None)
+        if not ledger["hours"].get(guid):
+            ledger["hours"].pop(guid, None)
+    # Landing gets NO entry in `items`, and that is deliberate rather than an omission. `items` means
+    # "this is what the item finally cost"; landing is never deleted, so it has no final cost, and an
+    # entry there would show only the part not yet attributed to a run — a half-total that reads like
+    # a whole one. Its CU lives in exactly two places: `runs[*].landing` once attributed, and `hours`
+    # while it is not.
+    for guid in landing:
+        ledger["items"].pop(guid, None)
+    return landing
+
+
+def _window(rec):
+    """This run's `(started, finished)` as ledger hour strings, or `(None, None)`."""
+    run = rec.get("run") or {}
+    out = []
+    for key in ("started", "finished"):
+        raw = run.get(key)
+        if not raw:
+            return None, None
+        try:
+            t = datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
+        except ValueError:
+            return None, None
+        if t.tzinfo:
+            t = t.astimezone(timezone.utc).replace(tzinfo=None)
+        out.append((t + MODEL_OFFSET).replace(minute=0, second=0, microsecond=0).isoformat())
+    return out[0], out[1]
+
+
 def total(ledger, guid):
-    return sum(v for op in (ledger["cu"].get(guid) or {}).values() for v in op.values())
+    return sum((ledger["items"].get(guid) or {}).get("cu", {}).values())
 
 
 def main():
@@ -389,7 +534,7 @@ def main():
 
     if not guids and not override:
         log("  every recorded item is settled — nothing left that a read could change")
-        print(f"CU ledger unchanged: {len(ledger['cu'])} item(s), all settled.")
+        print(f"CU ledger unchanged: {len(ledger['items'])} item(s), all settled.")
         save_ledger(ledger)
         return 0
     if floor is None:
@@ -401,7 +546,7 @@ def main():
     cols = discover_columns()
     kept = changed = skipped = 0
     seen_hours = []
-    before = {g: json.dumps(ops, sort_keys=True) for g, ops in ledger["cu"].items()}
+    before = {g: json.dumps(ops, sort_keys=True) for g, ops in ledger["hours"].items()}
     for cap in capacities():
         rows = read_cu(cap, floor, cols)
         if rows is None:
@@ -422,9 +567,13 @@ def main():
             die(f"the `since` filter did NOT bind: asked for >= {floor}, got rows from {lo}. "
                 f"Refusing to write a ledger that silently includes excluded time.")
 
-    after = {g: json.dumps(ops, sort_keys=True) for g, ops in ledger["cu"].items()}
+    after = {g: json.dumps(ops, sort_keys=True) for g, ops in ledger["hours"].items()}
     changed_guids = {g for g in after if before.get(g) != after[g]}
-    frozen = settle(ledger, changed_guids, now_model)
+    # `dbt_landing` is never deleted and so is never done — it is rolled up per RUN instead, and
+    # excluded from settling so it keeps a working set for the runs still open.
+    landing = roll_up_landing(ledger, runs)
+    frozen = settle(ledger, changed_guids, now_model, keep=landing)
+    roll_up_landing(ledger, runs)          # again: this read's settles may have closed a run
 
     ledger["schema"] = SCHEMA
     ledger["updated"] = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
@@ -436,8 +585,15 @@ def main():
         f"{len(frozen)} item(s) frozen this read")
     for g in frozen:
         log(f"    settled {g}: {total(ledger, g):,.1f} CU")
-    print(f"{path}: {len(ledger['cu'])} item GUID(s), {len(ledger['settled'])} settled, "
-          f"{sum(total(ledger, g) for g in ledger['cu']):,.1f} CU total")
+    settled = sum(1 for g in ledger["items"] if is_settled(ledger, g))
+    # Three places hold CU and the sum of them is what was measured: items (final, per item), runs
+    # (landing, attributed to a run), and hours (read but not yet attributable to either).
+    items_cu = sum(total(ledger, g) for g in ledger["items"])
+    runs_cu = sum(v for r in ledger["runs"].values() for v in (r.get("landing") or {}).values())
+    open_cu = sum(v for per in ledger["hours"].values() for op in per.values() for v in op.values())
+    print(f"{path}: {len(ledger['items'])} item GUID(s), {settled} settled, "
+          f"{len(ledger['hours'])} still carrying hour detail — "
+          f"{items_cu:,.1f} CU on items + {runs_cu:,.1f} landing + {open_cu:,.1f} unattributed")
     return 0
 
 

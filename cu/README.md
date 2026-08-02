@@ -13,7 +13,7 @@ authoritative source, which is why this exists at all.
 | file | written by | shape |
 |---|---|---|
 | `history/runs/<ts>-<run id>.json` | the `Benchmark` workflow | every Fabric item GUID that run created, with its `role`, plus the layout, the input archive and the raw query timings |
-| `history/cu.json` | `cu/measure.py` | `{item GUID: {operation: {hour: CU}}}`, cumulative, plus which items have settled |
+| `history/cu.json` | `cu/measure.py` | cumulative CU per item (`items`), the landing share per run (`runs`), and an hour-grain working set (`hours`) for whatever is still moving |
 
 They are joined on the **item GUID**, and that is the whole design.
 
@@ -38,10 +38,39 @@ None of it was needed. `Metrics By Item Operation And Hour` carries `Item` (a GU
 no resolving. And if a first read cannot see an item at all, the settle rule below picks it up on the
 next one.
 
+## `items` is what lasts; `hours` is scaffolding
+
+```jsonc
+{"items": {"<GUID>": {"cu": {"<operation>": total},      // THE permanent record
+                      "settled": "<why and when>" | null,
+                      "first_hour": ..., "last_hour": ...}},
+ "runs":  {"<run id>": {"landing": {"<op>": total}, "settled": bool}},
+ "hours": {"<GUID>": {"<operation>": {"<hour>": CU}}}}   // working set, pruned on settle
+```
+
+The hour grain exists for exactly one reason — making a re-read idempotent while an item's numbers
+are still moving — and that reason expires the moment the item settles. So a settled item **collapses
+to `{operation: total}` and its hours are dropped**. Cumulative CU per item is the only form still
+meaningful once the app has forgotten the window it came from, and a ledger that kept every hour
+forever would grow without bound to preserve a resolution nothing can check.
+
+`dbt_landing` is the exception, and it deliberately has **no `items` entry at all**. It is never
+deleted, so it never settles and has no final cost; an entry there would show only the part not yet
+attributed to a run, which is a half-total that reads like a whole one. Its CU lives in exactly two
+places: `runs[*].landing` once attributed to the run whose window contains it, and `hours` while it
+is not. An hour belonging to no run's window is left in `hours` indefinitely — it is real CU that
+nothing can attribute *yet*, and dropping it to keep the file small is the one thing this file must
+never do.
+
+A run's landing share freezes when the rest of that run's items settle. The `dbt` folder is excluded
+from that check: it never accrues a capacity unit, so waiting on it would hold every run open
+forever.
+
 ## The three ledger rules
 
 1. **Upsert only, never remove.** A key that stops being returned — retention rolling past it — keeps
    its last value. This is the whole reason the ledger exists: the app retains about **14 days**.
+   (Collapsing an hour into a settled total is not removal — the CU stays, at a coarser grain.)
 2. **Latest read wins per `(guid, operation, hour)`.** An hour's CU keeps growing for up to ~70
    minutes after the fact (~6 min ingestion lag, 5–64 min smoothing), so overwriting is correct.
    Summing repeated reads would multiply every hour by how many times it was read — and still look

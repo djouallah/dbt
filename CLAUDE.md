@@ -987,6 +987,21 @@ capacity for the GUIDs in those records, tops up `history/cu.json`, and publishe
   about it **and** it has been quiet for `CU_SETTLE_HOURS` (3). Requiring two agreeing reads is also
   what makes the missing refresh safe — an item the first read could not see is picked up by the
   second.
+- **`items` is the permanent record and `hours` is scaffolding.** The hour grain exists for exactly
+  one reason — making a re-read idempotent while the numbers move — and that reason expires when the
+  item settles, so a settled item COLLAPSES to `{operation: total}` and its hours are dropped.
+  Cumulative CU per item is the only form still meaningful once the app has forgotten the window it
+  came from, and keeping every hour forever would grow the file without bound to preserve a
+  resolution nothing can check. The dashboard therefore reads `items[guid].cu` and never touches
+  `hours` — a reader that summed hours would show every settled item as having cost nothing.
+- **`dbt_landing` has NO `items` entry, deliberately.** It is never deleted, so it never settles and
+  has no final cost; an entry there would carry only the part not yet attributed to a run, which is a
+  half-total that reads like a whole one. Its CU lives in `runs[<run id>].landing` once attributed
+  and in `hours` while it is not, and an hour matching no run's window stays in `hours` indefinitely
+  — real CU nothing can attribute *yet*, and dropping it to keep the file small is the one thing this
+  file must never do. A run's landing share freezes when the rest of that run's items settle, and the
+  `dbt` FOLDER is excluded from that check: it never accrues a capacity unit, so waiting on it held
+  every run open forever (a real bug, caught in the end-to-end simulation before it shipped).
 - **A fresh run is a LOWER BOUND and the page says so per column.** Dispatch `Dashboard` twice. The
   second read is nearly free: `measure.py` queries only from the earliest hour belonging to an
   unsettled item, so settled time is never re-read.

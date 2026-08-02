@@ -116,80 +116,54 @@ def load_ledger(path=None):
         with open(path, encoding="utf-8") as f:
             doc = json.load(f)
     except (OSError, ValueError):
-        return {"cu": {}, "settled": {}, "reads": []}
-    doc.setdefault("cu", {})
-    doc.setdefault("settled", {})
+        return {"items": {}, "runs": {}, "reads": []}
+    for key in ("items", "runs"):
+        doc.setdefault(key, {})
     doc.setdefault("reads", [])
     return doc
+
+
+def item_cu(ledger, guid):
+    """`{operation: total}` for one item. Cumulative, whether it has settled or not.
+
+    ONE place, deliberately. `measure.py` keeps hour detail only while an item can still move and
+    collapses it on settle, so a reader that summed hours would see nothing for a settled item — the
+    exact case the ledger exists to preserve.
+    """
+    return (ledger["items"].get(guid) or {}).get("cu") or {}
+
+
+def settled(ledger, guid):
+    return bool((ledger["items"].get(guid) or {}).get("settled"))
 
 
 # ------------------------------------------------------------------------------------- the join
 
 def run_cu(rec, ledger):
-    """`{(class, operation): CU}` for one run, plus its landing and unsettled counts.
+    """`{(class, operation): CU}` for one run, plus its landing rollup and its open items.
 
-    THE join. Every GUID in the record is looked up in the ledger and its operations summed into the
-    class its ROLE implies. Exact, with no allocation and no heuristic, because the teardown means a
-    GUID belongs to one run — except `dbt_landing`, which outlives every run and is therefore
-    allocated by hour containment in this run's own window (see `landing_cu`).
+    THE join, and it is a dictionary lookup. Every GUID in the record is looked up in the ledger and
+    its cumulative operations added to the class its ROLE implies. No allocation and no heuristic,
+    because the teardown means a GUID belongs to exactly one run.
+
+    `dbt_landing` is the one exception — it is never deleted, so it never settles and has no total of
+    its own. `measure.py` rolls it up per run instead, over the hours inside that run's window; this
+    reads that rollup rather than re-deriving it, so both sides cannot disagree about which hour
+    belonged to which run.
     """
-    cells, landing, open_items = {}, {}, []
-    started, finished = _window(rec)
+    cells, open_items = {}, []
+    rid = str((rec.get("run") or {}).get("id") or rec.get("_file"))
+    landing = dict(((ledger["runs"].get(rid) or {}).get("landing")) or {})
     for guid, item in (rec.get("items") or {}).items():
         role = item.get("role") or "?"
-        ops = ledger["cu"].get(guid)
-        if role == "landing":
-            for op, value in _within(ledger, guid, started, finished).items():
-                landing[op] = landing.get(op, 0.0) + value
+        if role in NON_ENGINE_ROLES:
             continue
-        if role == "folder":
-            continue
-        if guid not in ledger["settled"]:
+        if not settled(ledger, guid):
             open_items.append(f"{role}/{item.get('name') or guid}")
-        if not ops:
-            continue
         cls = "analytics" if role in ANALYTICS_ROLES else "etl"
-        for op, hours in ops.items():
-            cells[(cls, op)] = cells.get((cls, op), 0.0) + sum(hours.values())
+        for op, value in item_cu(ledger, guid).items():
+            cells[(cls, op)] = cells.get((cls, op), 0.0) + value
     return cells, landing, open_items
-
-
-def _window(rec):
-    """This run's `(started, finished)` as the ledger's hour strings, or `(None, None)`.
-
-    The ledger stamps the METRICS MODEL's clock and the record stamps UTC, so the comparison is only
-    valid after the same offset measure.py applied. Rather than re-derive it, the window is widened
-    to whole hours and the offset is read from the environment exactly as measure.py reads it — a
-    landing hour landing in the wrong run is a rounding error on a shared input cost, not a claim
-    about an engine.
-    """
-    from datetime import datetime, timedelta, timezone
-    offset = timedelta(hours=float(os.environ.get("CU_MODEL_OFFSET_HOURS", "10")))
-    run = rec.get("run") or {}
-    out = []
-    for key in ("started", "finished"):
-        raw = run.get(key)
-        if not raw:
-            return None, None
-        try:
-            t = datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
-        except ValueError:
-            return None, None
-        if t.tzinfo:
-            t = t.astimezone(timezone.utc).replace(tzinfo=None)
-        out.append((t + offset).replace(minute=0, second=0, microsecond=0))
-    return out[0].isoformat(), out[1].isoformat()
-
-
-def _within(ledger, guid, started, finished):
-    """`{operation: CU}` for the hours of `guid` that fall inside `[started, finished]`."""
-    out = {}
-    for op, hours in (ledger["cu"].get(guid) or {}).items():
-        for hour, value in hours.items():
-            if started and (hour < started or hour > finished):
-                continue
-            out[op] = out.get(op, 0.0) + value
-    return out
 
 
 def variant(rec):
@@ -332,7 +306,7 @@ def render_sources(cols, ledger):
         link = f"[{rid}]({run_url(rid)})" if rid else "—"
         items = {g: it for g, it in (rec.get("items") or {}).items()
                  if (it.get("role") or "") not in NON_ENGINE_ROLES}
-        done = sum(1 for g in items if g in ledger["settled"])
+        done = sum(1 for g in items if settled(ledger, g))
         started = ((rec.get("run") or {}).get("started") or "?")[:16].replace("T", " ")
         state = "yes" if done == len(items) and items else f"{done}/{len(items)} — still accruing"
         load = "full" if rec.get("full_load") else "incremental"
@@ -457,7 +431,8 @@ def render(cols, runs, ledger):
     reads = len(ledger.get("reads") or [])
     print(" · ".join([f"[source]({SERVER}/{REPO})",
                       f"`{RUNS_DIR}/` — {len(runs)} run(s), {len(cols)} on this page",
-                      f"`{LEDGER}` — {len(ledger['cu'])} item GUID(s) over {reads} read(s)"]) + "\n")
+                      f"`{LEDGER}` — {len(ledger['items'])} item GUID(s) over {reads} read(s)"])
+          + "\n")
 
     render_sources(cols, ledger)
 

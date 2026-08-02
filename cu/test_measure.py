@@ -36,7 +36,12 @@ def _now():
 
 
 def empty():
-    return {"schema": 1, "updated": None, "reads": [], "cu": {}, "settled": {}}
+    return measure.blank()
+
+
+def totals(led, guid):
+    """The cumulative form — the thing the ledger keeps once the app has forgotten the window."""
+    return (led["items"].get(guid) or {}).get("cu") or {}
 
 
 def test_a_re_read_overwrites_an_hour_rather_than_adding_to_it():
@@ -45,7 +50,8 @@ def test_a_re_read_overwrites_an_hour_rather_than_adding_to_it():
     led = empty()
     measure.merge_rows(led, [row("G1", "Query", "2026-08-02T10:00:00", 100.0)], COLS, _now())
     measure.merge_rows(led, [row("G1", "Query", "2026-08-02T10:00:00", 140.0)], COLS, _now())
-    assert led["cu"]["G1"]["Query"] == {"2026-08-02T10:00:00": 140.0}
+    assert led["hours"]["G1"]["Query"] == {"2026-08-02T10:00:00": 140.0}
+    assert totals(led, "G1") == {"Query": 140.0}
 
 
 def test_an_hour_that_stops_being_returned_keeps_its_value():
@@ -53,26 +59,28 @@ def test_an_hour_that_stops_being_returned_keeps_its_value():
     led = empty()
     measure.merge_rows(led, [row("G1", "Query", "2026-08-02T10:00:00", 100.0)], COLS, _now())
     measure.merge_rows(led, [row("G1", "Query", "2026-08-02T14:00:00", 7.0)], COLS, _now())
-    assert led["cu"]["G1"]["Query"] == {"2026-08-02T10:00:00": 100.0, "2026-08-02T14:00:00": 7.0}
+    assert led["hours"]["G1"]["Query"] == {"2026-08-02T10:00:00": 100.0,
+                                           "2026-08-02T14:00:00": 7.0}
+    assert totals(led, "G1") == {"Query": 107.0}
 
 
 def test_a_settled_item_is_never_rewritten():
     """Frozen means frozen: re-reading a window the app has begun to age out could only take value
     away, and the settled number is the one that was true when the item stopped accruing."""
     led = empty()
-    led["cu"]["G1"] = {"Query": {"2026-08-02T10:00:00": 100.0}}
-    led["settled"]["G1"] = "unchanged and quiet"
+    led["items"]["G1"] = {"cu": {"Query": 100.0}, "settled": "unchanged and quiet"}
     kept, changed, skipped, _hours = measure.merge_rows(
         led, [row("G1", "Query", "2026-08-02T10:00:00", 3.0)], COLS, _now())
     assert (kept, changed, skipped) == (0, 0, 1)
-    assert led["cu"]["G1"]["Query"]["2026-08-02T10:00:00"] == 100.0
+    assert totals(led, "G1") == {"Query": 100.0}
+    assert "G1" not in led["hours"], "a settled item has no hour detail to write into"
 
 
 def test_rows_outside_the_workspace_are_dropped():
     led = empty()
     measure.merge_rows(led, [row("G1", "Query", "2026-08-02T10:00:00", 5.0, ws="SOMEONE-ELSE")],
                        COLS, _now())
-    assert led["cu"] == {}
+    assert led["items"] == {} and led["hours"] == {}
 
 
 def test_settling_needs_both_unchanged_and_quiet():
@@ -80,12 +88,12 @@ def test_settling_needs_both_unchanged_and_quiet():
     written to yet either — freezing on it would pin a partial total."""
     led = empty()
     # Quiet (8 hours old) but CHANGED by this read: not settled.
-    led["cu"]["G1"] = {"Query": {"2026-08-02T10:00:00": 100.0}}
+    measure.merge_rows(led, [row("G1", "Query", "2026-08-02T10:00:00", 100.0)], COLS, _now())
     assert measure.settle(led, {"G1"}, _now()) == []
     # Unchanged but RECENT (one hour old, inside the 3h settle window): not settled.
-    led["cu"]["G2"] = {"Query": {"2026-08-02T17:00:00": 100.0}}
+    measure.merge_rows(led, [row("G2", "Query", "2026-08-02T17:00:00", 100.0)], COLS, _now())
     assert measure.settle(led, set(), _now()) == ["G1"]
-    assert "G2" not in led["settled"]
+    assert not measure.is_settled(led, "G2")
 
 
 def test_two_agreeing_reads_settle_an_item():
@@ -97,6 +105,10 @@ def test_two_agreeing_reads_settle_an_item():
     assert measure.settle(led, {"G1"}, _now()) == []          # first read: changed
     measure.merge_rows(led, rows, COLS, _now())
     assert measure.settle(led, set(), _now()) == ["G1"]       # second read: identical, and quiet
+    # THE POINT OF THE LEDGER: settling collapses the hours to a cumulative total and drops them.
+    # The app forgets the window in 14 days; the total is the form that stays meaningful.
+    assert totals(led, "G1") == {"Query": 100.0}
+    assert "G1" not in led["hours"]
 
 
 def test_the_floor_is_the_earliest_open_run_in_the_model_clock(tmp_path, monkeypatch):
@@ -117,7 +129,7 @@ def test_the_floor_is_the_earliest_open_run_in_the_model_clock(tmp_path, monkeyp
 def test_a_run_whose_items_are_all_settled_is_not_re_read(tmp_path):
     from datetime import datetime
     led = empty()
-    led["settled"] = {"G1": "done"}
+    led["items"]["G1"] = {"cu": {"Query": 1.0}, "settled": "done"}
     runs = [{"_file": "a.json", "run": {"started": "2026-08-02T05:00:00+00:00"},
              "items": {"G1": {"role": "output"}}}]
     floor, guids, _why = measure.pending(runs, led, datetime(2026, 8, 2, 20, 0))
@@ -133,7 +145,7 @@ def test_a_run_past_retention_is_force_settled_with_a_reason():
              "items": {"G1": {"role": "output"}}}]
     floor, guids, why = measure.pending(runs, led, datetime(2026, 8, 2, 20, 0))
     assert (floor, guids) == (None, set())
-    assert "retention" in led["settled"]["G1"]
+    assert "retention" in led["items"]["G1"]["settled"]
     assert "aged out" in why["old.json"]
 
 
@@ -141,12 +153,71 @@ def test_the_ledger_round_trips_and_sorts_its_keys(tmp_path):
     """sort_keys so a re-read that moves one hour is a one-line diff in the commit."""
     p = tmp_path / "cu.json"
     led = empty()
-    led["cu"] = {"B": {"Query": {"h": 1.0}}, "A": {"Query": {"h": 2.0}}}
+    led["items"] = {"B": {"cu": {"Query": 1.0}}, "A": {"cu": {"Query": 2.0}}}
     measure.save_ledger(led, str(p))
-    assert list(json.loads(p.read_text(encoding="utf-8"))["cu"]) == ["A", "B"]
-    assert measure.load_ledger(str(p))["cu"] == led["cu"]
+    assert list(json.loads(p.read_text(encoding="utf-8"))["items"]) == ["A", "B"]
+    assert measure.load_ledger(str(p))["items"] == led["items"]
 
 
 def test_a_missing_ledger_starts_empty_rather_than_raising(tmp_path):
     led = measure.load_ledger(str(tmp_path / "nope.json"))
-    assert led["cu"] == {} and led["settled"] == {} and led["schema"] == measure.SCHEMA
+    assert led["items"] == {} and led["hours"] == {} and led["schema"] == measure.SCHEMA
+
+
+def _run(rid, started, finished, items):
+    return {"_file": f"{rid}.json", "run": {"id": rid, "started": started, "finished": finished},
+            "items": items}
+
+
+def test_landing_is_rolled_up_per_run_and_never_settles(monkeypatch):
+    """`dbt_landing` is the one item a run does not delete, so it never becomes final and its hours
+    would accumulate for the life of the repo. Its CU is attributed to the run that was active."""
+    from datetime import timedelta
+    monkeypatch.setattr(measure, "MODEL_OFFSET", timedelta(hours=10))
+    led = empty()
+    runs = [_run("r1", "2026-08-02T05:00:00+00:00", "2026-08-02T06:30:00+00:00",
+                 {"OUT": {"role": "output"}, "LAND": {"role": "landing"}})]
+    measure.merge_rows(led, [
+        row("OUT", "Write", "2026-08-02T15:00:00", 10.0),
+        row("LAND", "Write", "2026-08-02T15:00:00", 3.0),
+        row("LAND", "Write", "2026-08-02T16:00:00", 4.0),
+        row("LAND", "Write", "2026-08-02T02:00:00", 999.0),   # some earlier run's hour
+    ], COLS, _now())
+    landing = measure.roll_up_landing(led, runs)
+    assert landing == {"LAND"}
+    assert led["runs"]["r1"]["landing"] == {"Write": 7.0}
+    assert led["runs"]["r1"]["settled"] is False
+    # Landing gets no `items` entry: it is never deleted, so it has no final total, and one there
+    # would show only the part not yet attributed to a run — a half-total that reads like a whole.
+    assert "LAND" not in led["items"]
+    # Even quiet and unchanged, landing must not freeze — it is never done.
+    assert measure.settle(led, set(), _now(), keep=landing) == ["OUT"]
+    assert not measure.is_settled(led, "LAND")
+
+
+def test_a_landing_hour_belonging_to_no_run_is_kept(monkeypatch):
+    """It is real CU that nothing can attribute YET. Dropping it to keep the file small is the one
+    thing this file must never do."""
+    from datetime import timedelta
+    monkeypatch.setattr(measure, "MODEL_OFFSET", timedelta(hours=10))
+    led = empty()
+    runs = [_run("r1", "2026-08-02T05:00:00+00:00", "2026-08-02T06:00:00+00:00",
+                 {"OUT": {"role": "output"}, "LAND": {"role": "landing"}})]
+    measure.merge_rows(led, [row("LAND", "Write", "2026-08-02T02:00:00", 999.0),
+                             row("OUT", "Write", "2026-08-02T15:00:00", 1.0)], COLS, _now())
+    measure.settle(led, set(), _now(), keep={"LAND"})          # closes OUT, so r1 is done
+    measure.roll_up_landing(led, runs)
+    assert led["hours"]["LAND"]["Write"] == {"2026-08-02T02:00:00": 999.0}
+
+
+def test_a_frozen_run_rollup_is_never_recomputed(monkeypatch):
+    """Once a run is closed its landing share is history. Recomputing it after the app has begun to
+    age the window out could only take value away."""
+    from datetime import timedelta
+    monkeypatch.setattr(measure, "MODEL_OFFSET", timedelta(hours=10))
+    led = empty()
+    led["runs"]["r1"] = {"landing": {"Write": 7.0}, "settled": True}
+    runs = [_run("r1", "2026-08-02T05:00:00+00:00", "2026-08-02T06:00:00+00:00",
+                 {"LAND": {"role": "landing"}})]
+    measure.roll_up_landing(led, runs)
+    assert led["runs"]["r1"] == {"landing": {"Write": 7.0}, "settled": True}
