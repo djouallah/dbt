@@ -43,7 +43,7 @@
    "Dataset On-Demand Refresh": 70.752,
    "Dataset Scheduled Refresh": 0.752,
    "Query": 18.816,
-   "XMLA Read Operation": 1004.016
+   "XMLA Read Operation": 1058.736
   },
   "3CD6810A-0BD4-4CCC-9370-127E8F6B206A": {
    "High Concurrency Session Livy Run": 29196.993,
@@ -66,7 +66,7 @@
    "Warehouse Query": 33902.88
   },
   "4FBE4130-1717-4FC9-A985-3FB7B4A13067": {
-   "OneLake Iterative Read via Proxy": 69.918,
+   "OneLake Iterative Read via Proxy": 70.894,
    "OneLake Other Operations": 0.187,
    "OneLake Other Operations Via Redirect": 1.654,
    "OneLake Read via Proxy": 3.474,
@@ -96,10 +96,10 @@
    "High Concurrency Session Livy Run": 29127.868,
    "OneLake Iterative Read via Proxy": 69.105,
    "OneLake Other Operations": 3.962,
-   "OneLake Other Operations Via Redirect": 171.954,
+   "OneLake Other Operations Via Redirect": 187.262,
    "OneLake Read via Proxy": 4.701,
    "OneLake Read via Redirect": 1019.866,
-   "OneLake Write via Proxy": 17.398,
+   "OneLake Write via Proxy": 24.227,
    "OneLake Write via Redirect": 496.906
   },
   "65416969-0570-43FC-9858-BD842B44C988": {
@@ -260,8 +260,15 @@
    "items": 25,
    "since": "2026-08-02T21:00:00",
    "unfound": 0
+  },
+  {
+   "at": "2026-08-02T16:16:50+00:00",
+   "changed": 4,
+   "items": 25,
+   "since": "2026-08-02T21:00:00",
+   "unfound": 0
   }
  ],
  "schema": 1,
- "updated": "2026-08-02T15:50:39+00:00"
+ "updated": "2026-08-02T16:16:50+00:00"
 }
