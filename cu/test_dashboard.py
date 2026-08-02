@@ -370,3 +370,12 @@ def test_the_numbers_come_before_the_methodology():
     assert first_chart < out.index("[source](")
     # ...and the heading still leads.
     assert out.index("## Capacity units") < first_chart
+
+
+def test_the_page_says_the_columns_are_comparable():
+    """A capacity unit already prices in how much compute an engine was given — that is the whole
+    reason to measure cost rather than wall-clock. Seconds would need a hardware caveat; CU is the
+    bill, so the page says so rather than leaving a reader to invent one."""
+    out = _render([_full("a-1.json", "spark")], ledger({"OUT": 1.0, "SEM": 2.0}))
+    assert "The columns are directly comparable" in out
+    assert "CU is the bill" in out

@@ -169,6 +169,17 @@ The chart travels through the markdown as an HTML comment (`<!--chart:{…}-->`)
 turns into SVG. The same markdown goes to the job summary, which sanitises inline SVG, so a comment
 is the one form that is invisible there and drawable here. Do not "simplify" it into raw SVG.
 
+## The columns are comparable, and that is the point of the unit
+
+The engines are handed different compute — a 64-vCore notebook, a Livy pool, a warehouse — and it
+does not qualify the comparison. **A capacity unit already prices that in.** 64 vCores for ten
+minutes costs more CU than 8 vCores for ten minutes, which is exactly why this measures cost and not
+wall-clock: seconds would need a hardware caveat, CU is the bill.
+
+The chart captions still name the configuration (`dbt-duckrun · 64 vCores`) because it says which
+setting produced the number — a run at a different core count is a different data point, not an
+invalid one.
+
 ## Things that will bite
 
 - **`CU_MODEL_OFFSET_HOURS` is the app's own offset, not UTC** (+10 here). A wrong value reads as

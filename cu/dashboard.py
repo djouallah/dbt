@@ -592,6 +592,10 @@ def render(cols, runs, ledger):
           "data: this is what each engine charged to build the same tables and to answer the same "
           "queries. Attribution is by Fabric ITEM GUID — each run records what it created and then "
           "deletes it — so no number here is a guess about which engine an item belonged to.\n")
+    print("**The columns are directly comparable.** The engines were handed different compute — a "
+          "64-vCore notebook, a Livy pool, a warehouse — and that does not qualify anything: a "
+          "capacity unit already prices it in, which is the whole reason to measure cost rather than "
+          "wall-clock. Seconds would need the caveat; CU is the bill.\n")
 
     render_sources(cols, ledger, unmeasured)
 
