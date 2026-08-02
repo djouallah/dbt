@@ -160,3 +160,14 @@ def test_compute_and_storage_are_kept_apart_within_one_item():
     assert led["items"]["G1"] == {"High Concurrency Session Livy Run": 188635.8,
                                   "OneLake Write via Redirect": 20267.9}
     assert round(cu(led, "G1"), 1) == 208903.7
+
+
+def test_a_ledger_written_before_operations_is_dropped_not_guessed(tmp_path):
+    """An entry stored as one NUMBER mixes compute and storage, so it cannot be bucketed. Filing it
+    under a guessed operation would put storage-heavy items in the compute half; dropping it is
+    safe, because the floor reaches back to the earliest run and the next read repopulates it."""
+    p = tmp_path / "cu.json"
+    p.write_text(json.dumps({"schema": 1, "items": {"OLD": 123.4, "NEW": {"Query": 5.0}}}),
+                 encoding="utf-8")
+    led = measure.load_ledger(str(p))
+    assert led["items"] == {"NEW": {"Query": 5.0}}

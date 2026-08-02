@@ -245,6 +245,16 @@ def load_ledger(path=None):
         return blank()
     doc.setdefault("items", {})
     doc.setdefault("reads", [])
+    # An earlier ledger stored one NUMBER per item, before the operation was needed to separate
+    # compute from storage. Such an entry cannot be bucketed — the number is both, mixed — so it is
+    # dropped rather than filed under a guessed operation, and the next read repopulates it in full.
+    # Safe because the floor reaches back to the earliest run, and nothing outside retention could
+    # have been in there anyway.
+    legacy = [g for g, v in doc["items"].items() if not isinstance(v, dict)]
+    for g in legacy:
+        del doc["items"][g]
+    if legacy:
+        log(f"  dropped {len(legacy)} item(s) stored without operations — this read repopulates them")
     return doc
 
 

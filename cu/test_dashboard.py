@@ -263,13 +263,13 @@ def test_incomplete_records_are_skipped_by_the_loader_and_named(tmp_path, capsys
     assert "skipping b-2.json" in capsys.readouterr().err
 
 
-def test_the_table_warns_that_item_rows_are_not_like_for_like():
-    """Fabric attributes compute three different ways and the rows inherit that: a DuckDB leg's
-    compute is its own notebook item, Livy bills against the lakehouse, dwh against the warehouse.
-    So one engine's (output) row against another's compares different things, and the page has to
-    say so — it is the most misreadable thing on it."""
+def test_the_table_says_where_the_compute_storage_split_comes_from():
+    """It comes from the operation, and the page has to say so: compute and storage share an item,
+    so a reader who assumes the rows are per-item will misread every column."""
     out = _render([_full("a-1.json", "spark")], ledger({"OUT": 34046.3, "SEM": 1514.0}))
-    assert "billed against the LAKEHOUSE" in out and "never \"free\"" in out
+    assert "comes from the OPERATION" in out
+    assert "share an ITEM" in out
+    assert "Every `OneLake …` operation is storage" in out
 
 
 def test_a_class_with_one_item_per_engine_is_not_decomposed():
@@ -312,3 +312,29 @@ def test_every_measured_operation_name_buckets_the_way_it_should():
     for op in ("High Concurrency Session Livy Run", "Warehouse Query", "SQL Endpoint Query",
                "Jupyter Notebook Scheduled Run", "XMLA Read Operation", "Dataset On-Demand Refresh"):
         assert d.bucket(op) == "compute", op
+
+
+def test_the_input_archive_is_one_table_not_a_column_per_engine():
+    """dbt_landing holds ONE copy of the CSVs and every engine reads the same bytes. A column per
+    engine repeated one number across the page and invited the reading that each had its own input.
+    Broken down by folder instead, which is a real decomposition."""
+    land = {"files": 8338, "size_mb": 170491.40,
+            "folders": {"csv_raw/daily": {"files": 3042, "size_mb": 170004.56},
+                        "csv_raw/price_today": {"files": 2550, "size_mb": 381.24}}}
+    runs = [_full("a-1.json", "duckrun", landing=land), _full("b-2.json", "spark", landing=land)]
+    out = _render(runs, ledger({"OUT": 1.0, "SEM": 2.0}))
+    block = out.split("### Input archive")[1].split("###")[0]
+    assert "| folder | files | size MB |" in block
+    assert "duckrun" not in block and "spark" not in block, "no engine column"
+    assert "`csv_raw/daily`" in block and "170,004.56" in block
+    assert "**8,338**" in block and "**170,491.40**" in block
+    assert block.count("170,491.40") == 1, "the total is stated once, not per engine"
+
+
+def test_a_changed_archive_between_runs_is_stated_not_averaged():
+    """skip_download off extends the archive, and then the two runs did genuinely different amounts
+    of work — which is a caveat, not something to smooth over."""
+    runs = [_full("a-1.json", "duckrun", landing={"files": 8000, "size_mb": 150000.0, "folders": {}}),
+            _full("b-2.json", "spark", landing={"files": 8338, "size_mb": 170491.4, "folders": {}})]
+    out = _render(runs, ledger({"OUT": 1.0, "SEM": 2.0}))
+    assert "did not all read the same archive" in out and "150,000.0" in out

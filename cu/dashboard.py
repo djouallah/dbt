@@ -194,7 +194,12 @@ def item_cu(ledger, guid):
     sources table has to be able to say which.
     """
     v = ledger["items"].get(guid)
-    return None if v is None else dict(v)
+    if v is None:
+        return None
+    # An older ledger stored one NUMBER per item, before the operation was needed to split compute
+    # from storage. It cannot be bucketed, so it is reported as unsplit rather than guessed into the
+    # wrong half; `measure.py` drops such entries on its next read and they come back in full.
+    return dict(v) if isinstance(v, dict) else {"(operation not recorded)": float(v)}
 
 
 # ------------------------------------------------------------------------------------- the join
@@ -392,16 +397,14 @@ def engine_table(per_col, cols):
                 # different statement from one that cost nothing.
                 row.append("—" if v is None else f"{v:,.1f}")
             print(f"| `{label}` | " + " | ".join(row) + " |")
-    print("\n<sub>`etl` against `analytics` comes from each item's recorded ROLE, not from an "
-          "operation name: a semantic model is only ever queried, everything else is work done to "
-          "build the tables.<br>"
-          "**`compute` is only broken out where Fabric bills it separately.** The DuckDB legs run in "
-          "a throwaway notebook, which is its own item, so their compute and storage really do "
-          "split. **Spark's Livy compute is billed against the LAKEHOUSE and dwh's against the "
-          "WAREHOUSE** — there is no Spark item of any kind — so for those engines `storage` is "
-          "storage *and* compute together, and a dash under `compute` means "
-          "\"bundled\", never \"free\". Compare the bold subtotals across engines; the split is only "
-          "meaningful down a DuckDB column.</sub>")
+    print("\n<sub>`etl` against `analytics` comes from each item's recorded ROLE — a semantic model "
+          "is only ever queried, everything else is work done to build the tables. `compute` against "
+          "`storage` comes from the OPERATION, which is the only thing that can separate them: they "
+          "share an ITEM. Spark bills its Livy session and its OneLake reads against the same "
+          "lakehouse; a warehouse bills `Warehouse Query` and its OneLake writes against the same "
+          "warehouse. Every `OneLake …` operation is storage; everything else — Livy runs, warehouse "
+          "queries, notebook runs, SQL-endpoint queries — is compute. A dash means no operation of "
+          "that kind was billed there at all.</sub>")
 
 
 def render_sources(cols, ledger, unmeasured):
@@ -437,20 +440,38 @@ def render_sources(cols, ledger, unmeasured):
 
 
 def render_input(cols):
-    """How much data went IN. Every other number on this page describes what came out."""
+    """How much data went IN — ONE archive, not one per engine.
+
+    `dbt_landing` holds a single copy of the AEMO CSVs and every engine reads the same bytes, so a
+    column per engine repeated one number across the page and invited the reading that each engine
+    had its own input. It is broken down by FOLDER instead, which is a real decomposition and comes
+    free in the record.
+
+    Taken from the most recent run that listed it. If an older column read a different archive — a
+    dispatch with `skip_download` off extends it — that is stated rather than averaged away, because
+    the two runs then did genuinely different amounts of work.
+    """
     have = [(col, ((rec.get("layout") or {}).get("landing") or {})) for col, _e, rec in cols]
     have = [(c, d) for c, d in have if d]
     if not have:
         return
+    col, latest = have[-1]
+    folders = latest.get("folders") or {}
     print("\n### Input archive\n")
-    print("| column | files | size MB |")
+    print("| folder | files | size MB |")
     print("|:--|--:|--:|")
-    for col, d in have:
-        print(f"| {col} | {d.get('files', 0):,} | {float(d.get('size_mb') or 0):,.2f} |")
-    print("\n<sub>The landed AEMO CSV archive as each run read it, from `stats.py`'s listing of "
-          "`dbt_landing/Files`. Every other number on this page is about what came OUT; this is what "
-          "went in, and it is the one that makes a duration or a CU total mean anything. It moves "
-          "only when a dispatch runs with `skip_download` off.</sub>")
+    for name, f in sorted(folders.items(), key=lambda kv: -(kv[1].get("size_mb") or 0)):
+        print(f"| `{name}` | {f.get('files', 0):,} | {float(f.get('size_mb') or 0):,.2f} |")
+    print(f"| **total** | **{latest.get('files', 0):,}** | "
+          f"**{float(latest.get('size_mb') or 0):,.2f}** |")
+    differ = sorted({round(float(d.get("size_mb") or 0), 1) for _c, d in have})
+    print("\n<sub>The landed AEMO archive `stats.py` listed in `dbt_landing/Files` — **one copy, read "
+          "by every engine**, so this is not per column. Every other number on this page is about "
+          "what came OUT; this is what went in, and it is what makes a duration or a CU total mean "
+          "anything. It moves only when a dispatch runs with `skip_download` off."
+          + (f" The runs on this page did not all read the same archive: sizes ranged "
+             f"{differ[0]:,.1f}–{differ[-1]:,.1f} MB, so they did different amounts of work."
+             if len(differ) > 1 else "") + "</sub>")
 
 
 LAYOUT_TABLE = os.environ.get("CU_LAYOUT_TABLE", "fct_summary").strip()
