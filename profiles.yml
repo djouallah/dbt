@@ -21,10 +21,6 @@ aemo_electricity:
       type: duckrun
       schema: "{{ env_var('DBT_SCHEMA', 'mart') }}"
       root_path: "{{ env_var('ONELAKE_TABLES_PATH') }}"
-      # 4, matching the other three targets — but it is NOT in force yet: the adapter still
-      # hard-pins config.threads = 1 (impl.py), so a run reads 1 whatever this says. Written as
-      # the value we want for when a future duckrun lifts the pin; until then the duckrun/iceberg
-      # pair still differs by threads. See the note on the iceberg target.
       threads: 4
 
     # --- DuckDB + Iceberg REST catalog on OneLake.
@@ -33,13 +29,10 @@ aemo_electricity:
       path: ':memory:'
       database: onelake
       schema: "{{ env_var('DBT_SCHEMA', 'mart') }}"
-      # 4, matching dwh and spark. Every engine that CAN take a thread count takes the SAME one,
-      # so DAG-level concurrency stops being a hidden variable between the legs — it was 8 here
+      # 4, matching duckrun, dwh and spark. Every engine takes the SAME thread count, so
+      # DAG-level concurrency stops being a hidden variable between the legs — it was 8 here
       # against spark's 4, and a benchmark comparing engines should not also be comparing how many
-      # models each was allowed to build at once. duckrun is the one exception and it is not a
-      # choice: its adapter hard-pins config.threads = 1 (impl.py, and it RAISES if the pin fails)
-      # because the delta-rs write path is not thread-safe. So the duckrun/iceberg pair still
-      # differs by threads, just 1 vs 4 rather than 1 vs 8, and the dashboard caption says so.
+      # models each was allowed to build at once.
       threads: 4
       settings:
         preserve_insertion_order: false

@@ -22,8 +22,8 @@ on-run-start:
   # Iceberg spills large aggregations; set the temp dir once before anything spills.
   - "{% if target.name == 'iceberg' %}SET GLOBAL temp_directory = '{{ env_var('DUCKDB_TEMP_DIR', '/tmp/duckdb_spill') }}'{% endif %}"
   # duckrun: match what iceberg already gets from profiles.yml (`settings:` + the temp_directory
-  # hook above), so the two DuckDB legs run on IDENTICAL DuckDB settings and the only differences
-  # left between them are the writer and duckrun's adapter-forced threads=1.
+  # hook above), so the two DuckDB legs run on IDENTICAL DuckDB settings and the only difference
+  # left between them is the writer.
   # There was a `SET GLOBAL memory_limit = 4GB` here, on duckrun ONLY. It capped one half of the
   # pair the CU dashboard calls "the sharpest comparison" while iceberg — the same DuckDB, same
   # notebook, same FABRIC_CORES — ran at DuckDB's default (~80% of node RAM). Its comment said the

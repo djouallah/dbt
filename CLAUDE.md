@@ -587,16 +587,11 @@ the `cu/` section.
   The line is gone. Note the knock-on: duckrun's merge budget is a **0.3 share of the global
   limit** (`set_merge_memory_limit`), so the routed anti-join now gets 0.3 × default instead of
   0.3 × 4GB. Spill is unaffected — `temp_directory` is still set for both.
-  **The one difference that CANNOT be equalised is `threads`**: duckrun's adapter hard-pins
-  `config.threads = 1` (`impl.py`, and it *raises* if the pin fails) because its Delta write path
-  is not thread-safe. That is stated in the dashboard's own caption rather than claimed away — the
-  caption used to say the two "differ only in what writes the table", which was wrong on both
-  counts.
-- **Every engine that CAN take a thread count takes 4 — iceberg, dwh and spark alike.** It was
+- **Every engine takes 4 threads — duckrun, iceberg, dwh and spark alike.** It was
   8/8/4, so DAG-level concurrency was a hidden variable between the legs: a benchmark comparing
   engines should not also be comparing how many models each was allowed to build at once. duckrun
-  is the sole exception and not by choice (see above), so the duckrun/iceberg pair still differs by
-  threads, 1 vs 4 rather than 1 vs 8. **Spark's 4 is a hard cap, not the convention** — raise the
+  was the exception for as long as its adapter pinned `config.threads = 1`; that pin is gone, so
+  the duckrun/iceberg pair now differs only in the writer. **Spark's 4 is a hard cap, not the convention** — raise the
   shared value later and spark must stay behind: dbt-fabricspark opens one Spark REPL per thread
   and Fabric packs at most five per Livy session, so more means a second Spark application,
   separately billed, for one `dbt run`.
