@@ -1,9 +1,14 @@
-"""Read capacity units from the Fabric Capacity Metrics model, ONE TOTAL PER FABRIC ITEM.
+"""Read capacity units and duration from the Fabric Capacity Metrics model, PER FABRIC ITEM.
 
 Fabric exposes no per-operation CU REST API. The Capacity Metrics app's own semantic model is the
 only authoritative source, and it is read here with DAX over the Power BI `executeQueries` endpoint.
 
-**The output is item GUID -> operation -> CU (s), cumulative.** The operation is there for exactly
+**The output is item GUID -> operation -> CU (s), cumulative**, and beside it the same shape in
+SECONDS. The duration is one extra `SUM` in a query that runs anyway: no extra request, no extra
+round trip, no capacity spent, and it is the only free answer to "how long did the ETL take" —
+dbt's `run_results.json` never reaches the run record and the Fabric notebook cannot write one. Its
+column is OPTIONAL (see `OPTIONAL`), so a model that does not expose it costs the page two sections
+and nothing else. The operation is in the grain for exactly
 one reason: it is the ONLY thing that separates COMPUTE from STORAGE. Both live inside one item — a
 spark lakehouse bills 188,636 CU of `High Concurrency Session Livy Run` and ~31,800 of OneLake
 operations against the same GUID, and a warehouse bills `Warehouse Query` beside its OneLake ops. No
@@ -36,9 +41,14 @@ land, with no refresh, because this reader never joins `'Items'`.
 
 ## The ledger — `history/cu.json`
 
-    {"schema": 1, "updated": "...",
-     "reads": [{"at": ..., "since": ..., "items": N, "changed": M}],
-     "items": {"<ITEM GUID>": {"<operation>": 31080.4}}}
+    {"schema": 2, "updated": "...",
+     "reads":   [{"at": ..., "since": ..., "items": N, "changed": M, "unfound": K, "timed": T}],
+     "items":   {"<ITEM GUID>": {"<operation>": 31080.4}},
+     "seconds": {"<ITEM GUID>": {"<operation>":  1204.5}}}
+
+`seconds` is a SIBLING of `items`, not a nesting inside it, so both leaves stay plain floats and one
+merge rule serves both. It is absent or empty whenever the duration column was not resolved — which
+the page reads as "not measured" and renders as no section, never as zero.
 
 It exists because the app retains about **14 days**. Everything measured is gone within a fortnight
 unless it is written down; a run record's GUIDs stay meaningful for years.
@@ -49,7 +59,8 @@ Three rules keep re-reading safe, and none of them needs any state:
   from the result, so it keeps its last value. That is "upsert only, never remove", for free.
 - **`max(old, new)`, never blind overwrite.** CU per item over a fixed window start only ever grows,
   so the larger number is always the more complete one — and this is also what protects an older
-  item when the floor walks forward and its window gets truncated.
+  item when the floor walks forward and its window gets truncated. Seconds are the same kind of
+  quantity, read the same way from the same floor, so the same rule serves them unchanged.
 - **The floor is bounded by retention.** The earliest recorded run start, clamped to `now - 14 days`,
   so one query covers everything that can still be learned and never more.
 
@@ -90,7 +101,9 @@ MODEL_OFFSET = timedelta(hours=float(os.environ.get("CU_MODEL_OFFSET_HOURS", "10
 # What the app keeps. The floor is clamped to it: reading further back cannot return anything, and
 # an unbounded floor would grow the query for the life of the repo.
 RETENTION_DAYS = float(os.environ.get("CU_RETENTION_DAYS", "14"))
-SCHEMA = 1
+# 2 added the `seconds` sibling. Nothing branches on this — a ledger is normalised on load either
+# way — it is here so a committed file says which shape it was written in.
+SCHEMA = 2
 
 # The hourly fact table. `Metrics By Item` also exists and is one row per item with no time
 # dimension at all — closer to what this file wants — but it carries no date column, so there is
@@ -116,6 +129,17 @@ REQUIRED = {
     # `Warehouse Query` and ~3,300 of OneLake against the same warehouse. Split by item and the two
     # are inseparable. Measured 2026-08-02.
     "operation": ["Operation name", "Operation", "Operation Name"],
+}
+
+# Resolved if present, SKIPPED if not — and that distinction is the whole point of a second dict.
+# `REQUIRED` is fatal by design: a role that does not resolve means the read cannot be trusted, so it
+# dies naming what was there. Duration is a BONUS riding an existing query, and its column name is
+# not measured against this app version the way the five above are. Putting it in `REQUIRED` would
+# mean a guessed name could kill the CU read that works today, to gain a number the page can live
+# without. So a miss costs the two time sections and nothing else, and the log names what the table
+# actually has — which is how the right name gets added.
+OPTIONAL = {
+    "duration": ["Duration (s)", "Duration", "Total Duration (s)", "Operation Duration (s)"],
 }
 
 
@@ -161,7 +185,12 @@ def strip_prefix(rows):
 
 
 def discover_columns():
-    """Resolve every role against the model's real schema, so a version bump fails specifically."""
+    """Resolve every role against the model's real schema, so a version bump fails specifically.
+
+    A `REQUIRED` role that misses is fatal. An `OPTIONAL` one that misses is `None` and is NAMED, so
+    the job log says which column the model actually has — the only way the right duration name gets
+    found without spending a read to guess.
+    """
     rows = strip_prefix(execute_dax("EVALUATE INFO.VIEW.COLUMNS()"))
     cols = {r.get("Name") for r in rows if r.get("Table") == TABLE}
     if not cols:
@@ -175,6 +204,13 @@ def discover_columns():
     if missing:
         die(f"'{TABLE}' exists but these columns were not found: {'; '.join(missing)}. "
             f"Present: {sorted(cols)}. Add the actual name to REQUIRED in this file.")
+    for role, candidates in OPTIONAL.items():
+        got[role] = next((c for c in candidates if c in cols), None)
+        if got[role]:
+            log(f"  {role} -> '{got[role]}'")
+        else:
+            log(f"  no {role} column (tried {candidates}) — that measurement is skipped, the rest is "
+                f"unaffected. '{TABLE}' has: {sorted(cols)}")
     return got
 
 
@@ -193,12 +229,18 @@ def capacities():
 
 
 def read_cu(cap, since, c):
-    """CU per (item, operation) for one capacity, from `since` onward, summed server-side.
+    """CU and DURATION per (item, operation) for one capacity, from `since` onward, summed
+    server-side.
 
     The operation is in the grain because it is the ONLY thing that separates compute from storage —
     a spark lakehouse bills its Livy compute and its OneLake operations against one item, and so does
     a warehouse. The hour is not: nothing downstream wants it, and cumulative CU per item is the form
     that stays meaningful once the app has forgotten the window.
+
+    Duration rides along in the same `SUMMARIZECOLUMNS` when the column resolved — one more `SUM` on
+    a query that runs anyway, so it costs no request, no round trip and no capacity. It is what lets
+    the page say how long the work took as well as what it cost, and there is no other free source:
+    dbt's own `run_results.json` never reaches the run record and the notebook cannot write one.
 
     `FirstHour` is projected for one reason and it is not decoration: a DAX filter that is accepted
     and then silently ignored produces a plausible wrong number, which is the worst failure this tool
@@ -211,12 +253,13 @@ def read_cu(cap, since, c):
     per query; passing several fails with an opaque `Internal Error: Error obtaining data location`
     naming neither the cause nor the capacity.
     """
+    secs = (f',\n        "Seconds", SUM ( \'{TABLE}\'[{c["duration"]}] )' if c.get("duration") else "")
     inner = f"""SUMMARIZECOLUMNS (
         '{TABLE}'[{c['item_id']}],
         '{TABLE}'[{c['workspace_id']}],
         '{TABLE}'[{c['operation']}],
         "CU", SUM ( '{TABLE}'[{c['cu']}] ),
-        "FirstHour", MIN ( '{TABLE}'[{c['when']}] )
+        "FirstHour", MIN ( '{TABLE}'[{c['when']}] ){secs}
     )"""
     if since:
         lit = (f"DATE({since.year}, {since.month}, {since.day}) + "
@@ -233,7 +276,7 @@ EVALUATE
 # ------------------------------------------------------------------------------------- the ledger
 
 def blank():
-    return {"schema": SCHEMA, "updated": None, "reads": [], "items": {}}
+    return {"schema": SCHEMA, "updated": None, "reads": [], "items": {}, "seconds": {}}
 
 
 def load_ledger(path=None):
@@ -244,17 +287,23 @@ def load_ledger(path=None):
     except (OSError, ValueError):
         return blank()
     doc.setdefault("items", {})
+    # Absent on every ledger written before the duration read, and absent again on any read where
+    # the model had no duration column. `{}` is the correct state for both: the page renders what it
+    # HAS, so no seconds means no time section rather than a section full of zeros.
+    doc.setdefault("seconds", {})
     doc.setdefault("reads", [])
     # An earlier ledger stored one NUMBER per item, before the operation was needed to separate
     # compute from storage. Such an entry cannot be bucketed — the number is both, mixed — so it is
     # dropped rather than filed under a guessed operation, and the next read repopulates it in full.
     # Safe because the floor reaches back to the earliest run, and nothing outside retention could
     # have been in there anyway.
-    legacy = [g for g, v in doc["items"].items() if not isinstance(v, dict)]
-    for g in legacy:
-        del doc["items"][g]
-    if legacy:
-        log(f"  dropped {len(legacy)} item(s) stored without operations — this read repopulates them")
+    for key in ("items", "seconds"):
+        legacy = [g for g, v in doc[key].items() if not isinstance(v, dict)]
+        for g in legacy:
+            del doc[key][g]
+        if legacy:
+            log(f"  dropped {len(legacy)} {key} entr(ies) stored without operations — this read "
+                f"repopulates them")
     return doc
 
 
@@ -293,12 +342,20 @@ def load_runs(directory=None):
 
 
 def fold(rows, cols):
-    """`({guid: {operation: CU}}, [earliest hours seen])` for the rows this workspace owns.
+    """`({guid: {op: CU}}, {guid: {op: seconds}}, [earliest hours seen])` for this workspace's rows.
+
+    Two parallel dicts, and the leaf of each stays a plain FLOAT. Nesting `{"cu": …, "seconds": …}`
+    under the operation would have been tidier to look at and would have changed the type every
+    reader downstream expects — `item_cu`, `total`, `apply`, the dashboard's join and every test that
+    touches them. Two flat dicts governed by one merge rule cost a parameter instead.
+
+    The seconds dict is EMPTY when the model had no duration column, never zeros: "not measured" and
+    "took no time" are different claims, and the page has to be able to tell them apart.
 
     The workspace test is the only filter, and it is applied here rather than in DAX because the
     query is one round trip either way and a rejected row is easier to explain from this side.
     """
-    out, stamps = {}, []
+    cu, secs, stamps = {}, {}, []
     for r in rows or []:
         guid = str(r.get(cols["item_id"]) or "").upper()
         wsid = str(r.get(cols["workspace_id"]) or "").upper()
@@ -311,23 +368,31 @@ def fold(rows, cols):
         if first:
             stamps.append(first)
         op = str(r.get(cols["operation"]) or "(unnamed)").strip()
-        per = out.setdefault(guid, {})
+        per = cu.setdefault(guid, {})
         per[op] = round(per.get(op, 0.0) + float(value), 3)
-    return out, stamps
+        seconds = r.get("Seconds")
+        if seconds is not None:
+            per_s = secs.setdefault(guid, {})
+            per_s[op] = round(per_s.get(op, 0.0) + float(seconds), 3)
+    return cu, secs, stamps
 
 
-def apply(ledger, read):
-    """Merge a read into the ledger, keeping the LARGER number. Returns how many items moved.
+def apply(ledger, read, key="items"):
+    """Merge a read into one of the ledger's dicts, keeping the LARGER number. Returns how many
+    (item, operation) pairs moved.
 
-    `max`, not overwrite, and never `+`. CU per item over a fixed window start only ever grows, so
-    the larger value is always the more complete one — which makes a re-read idempotent, makes an
-    undercounted first read self-correcting, and protects an older item from being truncated when the
-    floor walks forward past part of its window. Adding would multiply an item's cost by the number
-    of times it was read, and still look entirely plausible.
+    `max`, not overwrite, and never `+`. A per-item sum over a window with a FIXED FLOOR only ever
+    grows, so the larger value is always the more complete one — which makes a re-read idempotent,
+    makes an undercounted first read self-correcting, and protects an older item from being truncated
+    when the floor walks forward past part of its window. Adding would multiply an item's cost by the
+    number of times it was read, and still look entirely plausible.
+
+    **The rule holds identically for duration**, for exactly that reason and no other: it is the same
+    kind of quantity — a server-side SUM over the same rows, from the same floor.
     """
     changed = 0
     for guid, ops in read.items():
-        cur = ledger["items"].setdefault(guid, {})
+        cur = ledger.setdefault(key, {}).setdefault(guid, {})
         for op, value in ops.items():
             if cur.get(op) is None or value > cur[op]:
                 cur[op] = value
@@ -335,9 +400,9 @@ def apply(ledger, read):
     return changed
 
 
-def total(ledger, guid):
-    """One item's CU across every operation it was billed for."""
-    return sum((ledger["items"].get(guid) or {}).values())
+def total(ledger, guid, key="items"):
+    """One item's CU — or seconds — across every operation it was billed for."""
+    return sum(((ledger.get(key) or {}).get(guid) or {}).values())
 
 
 def coverage(runs, read):
@@ -421,19 +486,20 @@ def main():
     log(f"  {len(runs)} run record(s); reading from {floor} "
         f"(model clock, UTC+{MODEL_OFFSET.total_seconds() / 3600:g})")
     cols = discover_columns()
-    read, seen, rows_seen = {}, [], 0
+    read, timed, seen, rows_seen = {}, {}, [], 0
     for cap in capacities():
         rows = read_cu(cap, floor, cols)
         if rows is None:
             log(f"  capacity {cap}: refused the query — skipping it")
             continue
         rows_seen += len(rows)
-        per_item, stamps = fold(rows, cols)
+        per_item, per_secs, stamps = fold(rows, cols)
         log(f"  capacity {cap}: {len(rows)} row(s), {len(per_item)} in this workspace")
-        for guid, ops in per_item.items():
-            per = read.setdefault(guid, {})
-            for op, value in ops.items():
-                per[op] = round(per.get(op, 0.0) + value, 3)
+        for src, dest in ((per_item, read), (per_secs, timed)):
+            for guid, ops in src.items():
+                per = dest.setdefault(guid, {})
+                for op, value in ops.items():
+                    per[op] = round(per.get(op, 0.0) + value, 3)
         seen += stamps
 
     # Verify the floor actually BOUND — see read_cu.
@@ -445,6 +511,7 @@ def main():
                 f"Refusing to write a ledger that silently includes excluded time.")
 
     changed = apply(ledger, read)
+    changed_s = apply(ledger, timed, "seconds")
 
     # Did the read find what the runs say exists? See coverage() — this is the standing check on the
     # one assumption the no-refresh design rests on.
@@ -461,15 +528,24 @@ def main():
 
     ledger["schema"] = SCHEMA
     ledger["updated"] = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+    # `timed` is in the read entry so a ledger can say for itself whether the duration column was
+    # there — otherwise a page with no time section looks like a render bug rather than a model that
+    # does not expose the column.
     ledger["reads"].append({"at": ledger["updated"], "since": floor.isoformat(),
-                            "items": len(read), "changed": changed, "unfound": unfound})
+                            "items": len(read), "changed": changed, "unfound": unfound,
+                            "timed": len(timed)})
     path = save_ledger(ledger)
 
     for guid, ops in sorted(read.items(), key=lambda kv: -sum(kv[1].values()))[:12]:
-        log(f"    {guid}  {sum(ops.values()):>12,.1f} CU  ({len(ops)} operation(s))")
-    log(f"  {rows_seen} row(s) read, {len(read)} item(s) in this workspace, {changed} updated")
+        log(f"    {guid}  {sum(ops.values()):>12,.1f} CU  "
+            f"{sum((timed.get(guid) or {}).values()):>10,.1f} s  ({len(ops)} operation(s))")
+    log(f"  {rows_seen} row(s) read, {len(read)} item(s) in this workspace, {changed} updated"
+        + (f", {changed_s} duration(s) updated over {len(timed)} item(s)" if timed
+           else "; no duration column, so no seconds were written"))
     print(f"{path}: {len(ledger['items'])} item GUID(s), "
           f"{sum(total(ledger, g) for g in ledger['items']):,.1f} CU total"
+          + (f", {sum(total(ledger, g, 'seconds') for g in ledger['seconds']):,.0f} s" if
+             ledger["seconds"] else "")
           + (f", {unfound} recorded item(s) not yet visible" if unfound else ""))
     return 0
 

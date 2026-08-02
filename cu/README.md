@@ -1,9 +1,9 @@
 # `cu/` — what the work cost, by Fabric item GUID
 
-Two programs and one published page. `measure.py` reads capacity units from the Fabric Capacity
-Metrics app's own semantic model and keeps a cumulative ledger; `dashboard.py` joins that ledger to
-the run records and renders. Both run in the `Dashboard` workflow, one of only two workflows in this
-repo.
+Two programs and one published page. `measure.py` reads capacity units — and duration — from the
+Fabric Capacity Metrics app's own semantic model and keeps a cumulative ledger; `dashboard.py` joins
+that ledger to the run records and renders. Both run in the `Dashboard` workflow, one of only two
+workflows in this repo.
 
 Fabric exposes **no per-operation CU REST API**. The metrics app's semantic model is the only
 authoritative source, which is why this exists at all.
@@ -13,7 +13,7 @@ authoritative source, which is why this exists at all.
 | file | written by | shape |
 |---|---|---|
 | `history/runs/<ts>-<run id>.json` | the `Benchmark` workflow | every Fabric item GUID that run created, with its `role`, plus the layout, the input archive and the raw query timings |
-| `history/cu.json` | `cu/measure.py` | `{item GUID: CU}` — one number per Fabric item |
+| `history/cu.json` | `cu/measure.py` | `{item GUID: {operation: CU}}`, and a `seconds` sibling of the same shape |
 
 They are joined on the **item GUID**, and that is the whole design.
 
@@ -56,17 +56,34 @@ changed that. Every read logs
 
 and stores `unfound` in the ledger's `reads` entry.
 
-## One number per item
+## One number per item per operation, twice
 
 ```json
-{"schema": 1, "updated": "...",
- "reads": [{"at": "...", "since": "...", "items": 6, "changed": 4}],
- "items": {"<ITEM GUID>": 31080.4}}
+{"schema": 2, "updated": "...",
+ "reads":   [{"at": "...", "since": "...", "items": 6, "changed": 4, "unfound": 0, "timed": 6}],
+ "items":   {"<ITEM GUID>": {"Warehouse Query": 34016.048}},
+ "seconds": {"<ITEM GUID>": {"Warehouse Query":   925.655}}}
 ```
 
 That is the whole file, and it is the same shape as the app's own **Items** visual —
-`Item kind | Item Id | Item name | CU (s)`, one row per item. Three facts make everything else
-unnecessary:
+`Operation name | CU (s) | Duration (s)`, one row per item per operation.
+
+**The operation is in the grain because it is the ONLY thing that separates COMPUTE from STORAGE**,
+which share an item — see the engine-major bullet under *The page*.
+
+**`seconds` is a SIBLING of `items`, not a nesting inside it.** Both leaves stay plain floats, so one
+merge rule serves both and no reader's expected type changed. It is read from `Duration (s)` in the
+same Capacity Metrics row, in the same `SUMMARIZECOLUMNS` — one more `SUM` on a query that runs
+anyway, so it costs no request, no round trip and no capacity. That is the only free source for it:
+dbt's own `run_results.json` never reaches the run record, and the Fabric notebook cannot write one.
+
+**Its column is OPTIONAL by design.** `REQUIRED` is fatal — a role that will not resolve means the
+read cannot be trusted, so it dies naming what the table actually had. Duration sits in `OPTIONAL`
+instead, because its name is not measured against this app version the way the other five are, and a
+guessed name in `REQUIRED` could kill the CU read that works today to gain a number the page can live
+without. A miss costs the two time sections, logs what the table does have, and nothing else.
+
+Three facts make everything else unnecessary:
 
 1. **A deleted item keeps its CU rows in the metrics model.** Verified by hand against the live
    model: every item is still there after the teardown removed it. So deleting is free of
@@ -88,7 +105,9 @@ bookkeeping. There used to be all four.
   only ever grows, so the larger value is the more complete one. That makes a re-read idempotent,
   makes an undercounted first read self-correcting, and protects an older item from being truncated
   when the floor walks forward past part of its window. Adding would multiply an item's cost by the
-  number of times it was read and still look entirely plausible.
+  number of times it was read and still look entirely plausible. **Seconds are the same kind of
+  quantity** — a server-side SUM over the same rows from the same floor — so the same rule serves
+  them unchanged.
 - **The floor is bounded by retention**: the earliest recorded run start, clamped to `now − 14 days`,
   in the model's clock. One query covers everything that can still be learned and never more.
 
@@ -136,10 +155,11 @@ because that artifact has to open off a local disk years later.
   the same display name: `dbt_spark` 306.3 CU, `dbt_iceberg` 245.7, `dbt_delta` 278.9, all of it
   `SQL Endpoint Query`. It was invisible to the ledger until `provision.py` started recording it —
   the GUID is not the lakehouse's. It is never deleted by the teardown: Fabric removes it with its
-  parent. That orientation
-  is what makes the width work: item-major needs a column per operation type and a lakehouse alone
-  brings a dozen. **No total column and no grand-total row** — both would sum ACROSS engines, which
-  is the one sum on this page that answers nothing, since the engines are alternatives to each other.
+  parent.
+- **Engine-major is what makes the width work**: item-major needs a column per operation type and a
+  lakehouse alone brings a dozen. **No total column and no grand-total row** — both would sum ACROSS
+  engines, which is the one sum on this page that answers nothing, since the engines are alternatives
+  to each other.
 - **`landing` CU is not on the page at all.** The page compares ENGINES. `dbt_landing` is the
   ingestion staging area — no run deletes it, every run reads it — so its CU is one cumulative figure
   belonging to no engine, and it answers no question this page asks. It was briefly given a row of
@@ -150,6 +170,35 @@ because that artifact has to open off a local disk years later.
   number on the page describes what came OUT.
 - **Table layout**, every shared table, mart first, with the analytics CU beside the mart alone (it
   is one number per engine, not per table).
+- **Query time — cold, warm, hot.** The one thing on the page that is not capacity units, and it
+  comes from the run records, not the ledger: `benchmark.timings.<model>.<query>` is already there on
+  every record. `benchmark/render_report.py` renders it per dispatch, but a dispatch builds ONE
+  engine, so that report always has a single column and its ranking is degenerate — composed here
+  from every engine's latest run, this is the only place the three tiers can be read ACROSS engines
+  at all. **cold** is the first visit to a freshly deployed semantic model, **warm** the second,
+  **hot** the median of the passes after that; the record's own `tier` field is something else
+  entirely (the query CATEGORY — `probe`/`composite`/`raw`/`hot_only`) and must not be confused with
+  them. Each tier is summed over the queries **every column carries at that tier**, and the count is
+  printed because it genuinely differs: the selectivity-ladder queries have no `cold_ms` at all, the
+  top DUID being resolved only after pass 1, so cold is two queries short of warm and hot. A `hot
+  spread` row carries the median per-query spread — where two columns sit closer together than that,
+  the gap between them means nothing. Fastest per row in bold. The **cold** tier gets the chart,
+  because it is the one the table layout moves: a first visit transcodes columns out of parquet, so
+  V-Order, file count and row-group size show up there and nowhere else.
+  Deliberately **reimplemented rather than imported** — `render_report._totals`/`rank` take exactly
+  this shape, and `cu/` importing `benchmark/` would end the isolation that makes this directory
+  deletable by removing one folder and one workflow file.
+- **Time — how long the work took, and how hard it drew.** The same GUID→role→bucket join as the CU
+  table, read off the ledger's `seconds` dict, with a `CU per second` row under each class.
+  **Seconds here are BILLED OPERATION seconds, not wall clock**, and the difference is not small on
+  every engine: a duckrun leg is one long notebook run so the two nearly agree, while spark opens
+  five concurrent Livy REPLs under one session whose durations sum to more than the clock ever
+  showed. **The rate is the sturdier of the two** — it is the average capacity the work drew while it
+  ran, and the concurrency that makes spark's seconds hard to read appears in the numerator and the
+  denominator alike, so it cancels. A high rate is a WIDE engine, not a slow one. The section renders
+  **nothing** when the ledger has no seconds, which is the correct output both for a ledger written
+  before the duration read and for a model that does not expose the column: an absent section says
+  "not measured", a table of zeros would say "instant".
 - **A record has to be built and benchmarked to reach the page.** `dashboard.py`'s `incomplete()`
   skips anything else and names why — a run with no benchmark shows an empty analytics column, which
   reads as "querying this engine was free" rather than "nobody measured it".
@@ -169,12 +218,18 @@ The chart travels through the markdown as an HTML comment (`<!--chart:{…}-->`)
 turns into SVG. The same markdown goes to the job summary, which sanitises inline SVG, so a comment
 is the one form that is invisible there and drawable here. Do not "simplify" it into raw SVG.
 
-## The columns are comparable, and that is the point of the unit
+## The CU columns are comparable, and that is the point of the unit
 
 The engines are handed different compute — a 64-vCore notebook, a Livy pool, a warehouse — and it
 does not qualify the comparison. **A capacity unit already prices that in.** 64 vCores for ten
-minutes costs more CU than 8 vCores for ten minutes, which is exactly why this measures cost and not
-wall-clock: seconds would need a hardware caveat, CU is the bill.
+minutes costs more CU than 8 vCores for ten minutes, which is exactly why CU leads: it is the bill.
+
+**The two time sections do not have that property, and the page says which is which.** Billed
+operation seconds SUM across concurrent operations, so a spark leg totals more than the clock it ran
+on; query milliseconds are one sample of a shared capacity rather than a bill. They are on the page
+because they answer a question CU cannot — how long a person waits, and how hard the engine drew
+while they did — and each section states where its own number bends. Do not flatten the three into
+one ranking.
 
 The chart captions still name the configuration (`dbt-duckrun · 64 vCores`) because it says which
 setting produced the number — a run at a different core count is a different data point, not an

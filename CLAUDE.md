@@ -1015,14 +1015,26 @@ capacity for the GUIDs in those records, tops up `history/cu.json`, and publishe
   silently widen every window. `Metrics By Item` also exists — one row per item, no time dimension,
   which is closer to what this wants — but with no date column there is nothing to floor and nothing
   to verify a floor against, and the hourly table summed per item gives identical totals.
-- **THE LEDGER IS ONE NUMBER PER ITEM.** `history/cu.json` is `{item GUID: CU}` and nothing else —
-  the same shape as the app's own `Items` visual. Three facts make everything else unnecessary: a
+- **THE LEDGER IS ONE NUMBER PER ITEM PER OPERATION, TWICE.** `history/cu.json` is
+  `{"items": {GUID: {operation: CU}}, "seconds": {GUID: {operation: s}}}` and nothing else. The
+  operation is in the grain for one reason only — it is the ONLY thing that separates compute from
+  storage, which share an item. Three facts make everything else unnecessary: a
   DELETED item keeps its CU rows (verified by hand against the live model, which is why the teardown
   is unconditional); every item is deleted when its run ends, so a total can only ever be INCOMPLETE,
   never wrong; and a run's items belong to that run alone, so a total per item already is a total per
-  run per engine. There is no hour grain, no operation grain, no per-run window allocation and no
-  settle-and-freeze bookkeeping. There used to be all four, and removing them removed most of the
+  run per engine. There is no hour grain, no per-run window allocation and no
+  settle-and-freeze bookkeeping. There used to be all three, and removing them removed most of the
   file.
+- **DURATION RIDES THE SAME READ, FOR FREE, AND ITS COLUMN IS OPTIONAL ON PURPOSE.** `Duration (s)`
+  sits in the same Capacity Metrics row as `CU (s)`, so it is one more `SUM` in a `SUMMARIZECOLUMNS`
+  that runs anyway — no extra request, no round trip, no capacity. It is the **only free source**:
+  dbt's `run_results.json` never reaches the run record and the Fabric notebook cannot write one, so
+  the alternative was plumbing per-leg timings back through `fabric_run.py`. It lives in `OPTIONAL`,
+  not `REQUIRED`, and that distinction is load-bearing: `REQUIRED` is fatal by design, and a guessed
+  column name in there would kill the CU read that works today to gain a number the page can live
+  without. A miss logs what the table actually has and costs the two time sections only. `seconds` is
+  a SIBLING of `items` rather than a nesting inside it, so both leaves stay plain floats and one
+  `max(old, new)` rule serves both — same kind of quantity, same floor, so it can only grow.
 - **Three rules, none of which needs any state, and each fails as a plausible number.** Only items
   the read RETURNED are touched, so one that has aged past retention keeps its last value —
   "upsert only, never remove", for free. `max(old, new)`, never a blind overwrite and never `+`: CU
@@ -1069,6 +1081,29 @@ capacity for the GUIDs in those records, tops up `history/cu.json`, and publishe
   second read returns bigger numbers and `max()` takes them. "May still rise" on the page is DERIVED
   from `run.finished` being under two hours old — a property of the clock, not a flag written into a
   file that then has to be kept in step.
+- **THE PAGE CARRIES TWO NON-CU SECTIONS NOW, and each states where its own number bends.**
+  *Query time — cold, warm, hot* comes from the RUN RECORDS, not the ledger: every record already
+  holds `benchmark.timings.<model>.<query>`, and `benchmark/render_report.py` renders it per
+  dispatch — but a dispatch builds ONE engine, so that report always has a single column and its
+  ranking is degenerate. The composed page is the only place the three tiers can be read ACROSS
+  engines. Three things there are easy to get wrong. **cold/warm/hot are PASS POSITIONS**, not the
+  record's own `tier` field, which is the query CATEGORY (`probe`/`composite`/`raw`/`hot_only`) and
+  names four different things. **Each tier is summed over the queries every column carries AT THAT
+  TIER**, and the sets genuinely differ — the selectivity-ladder queries have no `cold_ms` at all,
+  the top DUID being resolved after pass 1 — so cold is two queries short and the row prints its
+  count rather than leaving a small total to be misread. And it is **reimplemented, never imported**:
+  `render_report._totals`/`rank` take exactly this shape, and `cu/` importing `benchmark/` would end
+  the isolation that makes this directory deletable by removing one folder and one workflow file.
+  *Time — how long the work took* is the same GUID→role→bucket join as the CU table read off the
+  ledger's `seconds`, with a `CU per second` row under each class. **Those seconds are BILLED
+  OPERATION seconds, not wall clock**: a duckrun leg is one long notebook run so the two nearly
+  agree, while spark's five concurrent Livy REPLs sum to more than the clock ever showed. **The RATE
+  is the sturdier of the two** — the concurrency is in the numerator and the denominator alike, so it
+  cancels; a high rate is a WIDE engine, not a slow one. Both sections render **nothing** when their
+  input is absent (a record with no tier timings, a ledger with no `seconds`), which is the correct
+  output: an absent section says "not measured", a table of zeros would say "free" or "instant".
+  This is also why `### About these numbers` no longer says "seconds would need the caveat; CU is the
+  bill" — it now has to say what the caveat IS, since the page prints seconds and milliseconds too.
 - **`landing` CU IS NOT ON THE PAGE, and neither is anything else that is not an engine.** The
   page compares engines; `dbt_landing` is the ingestion staging area that no run deletes and every
   run reads, so its CU is one cumulative figure belonging to none of them. It briefly had a row of

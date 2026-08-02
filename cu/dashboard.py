@@ -196,19 +196,24 @@ def load_ledger(path=None):
         with open(path, encoding="utf-8") as f:
             doc = json.load(f)
     except (OSError, ValueError):
-        return {"items": {}, "reads": []}
+        return {"items": {}, "seconds": {}, "reads": []}
     doc.setdefault("items", {})
+    # Absent on every ledger written before `measure.py` read duration, and absent again on any read
+    # where the model had no duration column. Empty is the honest state for both, and the time
+    # section renders NOTHING rather than a table of zeros.
+    doc.setdefault("seconds", {})
     doc.setdefault("reads", [])
     return doc
 
 
-def item_cu(ledger, guid):
-    """`{operation: CU}` for one Fabric item. `None` when the ledger has never seen it.
+def item_cu(ledger, guid, key="items"):
+    """`{operation: CU}` — or `{operation: seconds}` — for one Fabric item. `None` when the ledger has
+    never seen it.
 
     `None` and `{}` are different claims — "not measured yet" against "cost nothing" — and the
     sources table has to be able to say which.
     """
-    v = ledger["items"].get(guid)
+    v = (ledger.get(key) or {}).get(guid)
     if v is None:
         return None
     # An older ledger stored one NUMBER per item, before the operation was needed to split compute
@@ -219,8 +224,10 @@ def item_cu(ledger, guid):
 
 # ------------------------------------------------------------------------------------- the join
 
-def run_cu(rec, ledger):
-    """`({class: {item label: CU}}, unmeasured items)` for one run.
+def run_cu(rec, ledger, key="items"):
+    """`({class: {bucket: CU}}, unmeasured items)` for one run. `key="seconds"` gives the same
+    breakdown in billed SECONDS, off the ledger's sibling dict — same GUIDs, same roles, same
+    compute/storage split, because it is the same read.
 
     THE join, and it is a dictionary lookup: every GUID the run recorded, looked up in the ledger,
     filed under the class its ROLE implies. No allocation and no heuristic, because the teardown
@@ -242,7 +249,7 @@ def run_cu(rec, ledger):
         role = item.get("role") or "?"
         if role in NON_ENGINE_ROLES:
             continue
-        value = item_cu(ledger, guid)
+        value = item_cu(ledger, guid, key)
         if value is None:
             unmeasured.append(f"{role}/{item.get('name') or guid}")
             continue
@@ -351,8 +358,9 @@ def engine_caption(rec, col):
     return " · ".join(bits)
 
 
-def spread_for(runs, ledger, cls, key_of):
-    """`{column: [CU, …]}` — every run's total for `cls`, not just the latest.
+def spread_for(runs, ledger, cls, key_of, key="items"):
+    """`{column: [CU, …]}` — every run's total for `cls`, not just the latest. `key="seconds"` reads
+    the ledger's duration dict instead, which is what puts a range on the ETL-time chart.
 
     One run is one sample of a SHARED capacity, so a single number is a reading rather than a
     result. Collecting every run of a column is what lets the chart show a mean and a range, and the
@@ -364,7 +372,7 @@ def spread_for(runs, ledger, cls, key_of):
         col = key_of(rec)
         if col is None:
             continue
-        cells, _missing = run_cu(rec, ledger)
+        cells, _missing = run_cu(rec, ledger, key)
         value = class_total(cells, cls)
         if value:
             out.setdefault(col, []).append(value)
@@ -605,6 +613,226 @@ def render_layouts(cols, analytics):
           "log.</sub>")
 
 
+# ------------------------------------------------------------------------------------ query time
+
+# Pass POSITION, which is what cold/warm/hot mean here — the first visit to a freshly deployed
+# semantic model, the second, then the median of the rest. NOT the record's own `tier` field, which
+# is the query CATEGORY (`probe`/`composite`/`raw`/`hot_only`) and names four different things.
+TIERS = [("cold", "cold_ms"), ("warm", "warm_ms"), ("hot", "hot_median_ms")]
+
+
+def bench_timings(rec):
+    """`{query: {metric: ms}}` for one run. One record measured ONE engine, so there is one semantic
+    model in it; a record holding two would merge, last wins."""
+    out = {}
+    for _model, queries in (((rec.get("benchmark") or {}).get("timings") or {})).items():
+        for q, t in (queries or {}).items():
+            if isinstance(t, dict):
+                out[q] = t
+    return out
+
+
+def bench_totals(per_col, metric):
+    """`({column: summed ms}, n queries)` over the query set EVERY column carries at this metric.
+
+    The common set, not each column's own, because a total over different queries is not a
+    comparison — and it genuinely differs by metric here, not just by engine: the selectivity-ladder
+    queries `sel_1duid`/`sel_1duid_1mo` have no `cold_ms` at all, since the top DUID is only resolved
+    after pass 1. Cold is therefore summed over two fewer queries than warm and hot, which is why the
+    count is returned and printed rather than left to be inferred from a total that looks small.
+    """
+    if not per_col:
+        return {}, 0
+    sets = [{q for q, t in (timings or {}).items() if t.get(metric) is not None}
+            for timings in per_col.values()]
+    common = set.intersection(*sets) if sets else set()
+    if not common:
+        return {}, 0
+    return ({col: round(sum(float(timings[q][metric]) for q in common), 1)
+             for col, timings in per_col.items()}, len(common))
+
+
+def render_query_time(cols, runs):
+    """How long the SAME 25 DAX queries took on each engine, cold, warm and hot.
+
+    The one thing on this page that is not capacity units. Every run record already carries it —
+    `benchmark.timings.<model>.<query>` — and `benchmark/render_report.py` renders it per dispatch,
+    but a dispatch builds ONE engine, so that report always has a single column and its ranking is
+    degenerate. Composed here from every engine's latest run, this is the only place the three tiers
+    can be read ACROSS engines at all.
+
+    Deliberately reimplemented rather than imported. `render_report._totals`/`rank` take exactly this
+    shape, and `cu/` importing `benchmark/` would end the isolation that makes this directory
+    deletable by removing one folder and one workflow file. It is twenty lines of arithmetic.
+    """
+    per_col = {col: bench_timings(rec) for col, _e, rec in cols}
+    per_col = {c: t for c, t in per_col.items() if t}
+    if not per_col:
+        return
+    names = [c for c, _e, _r in cols if c in per_col]
+    rows = [(label,) + bench_totals(per_col, metric) for label, metric in TIERS]
+    rows = [(label, tot, n) for label, tot, n in rows if n]
+    if not rows:
+        return
+
+    print("\n### Query time — cold, warm, hot\n")
+    # The COLD tier gets the chart. It is the one the layout moves: a first visit transcodes the
+    # columns out of parquet into VertiPaq, so it is where V-Order, file count and row-group size
+    # show up. Warm and hot converge on what the model holds in memory, which is the same shape
+    # whatever wrote it.
+    cold = next((r for r in rows if r[0] == "cold"), None)
+    if cold:
+        spread = bench_spread(runs, cols, per_col, "cold_ms")
+        n = max((len(v) for v in spread.values()), default=1)
+        chart("Query time — the first visit",
+              "milliseconds over the whole suite, lower is better — the tier the table layout moves"
+              + (f", mean of {n} runs with the range" if n > 1 else ""),
+              chart_rows([c for c in cols if c[0] in per_col], spread, cold[1],
+                         {c: engine_caption(r, c) for c, _e, r in cols}))
+    print("| ms | " + " | ".join(names) + " |")
+    print("|:--|" + "---:|" * len(names))
+    for label, totals, n in rows:
+        # Only when there is something to win. A lone column is trivially its own fastest, and
+        # bolding every cell of a one-column table states a ranking that was never run.
+        best = min((totals[c] for c in names if c in totals), default=None) if len(names) > 1 else None
+        cells = []
+        for c in names:
+            v = totals.get(c)
+            cells.append("—" if v is None else
+                         (f"**{v:,.0f}**" if v == best else f"{v:,.0f}"))
+        print(f"| **{label}** — {n} queries | " + " | ".join(cells) + " |")
+    spreads = hot_spreads(per_col)
+    if spreads:
+        print("| `hot spread` | "
+              + " | ".join("—" if names[i] not in spreads else f"{spreads[names[i]]:,.1f}%"
+                           for i in range(len(names))) + " |")
+    print("\n<sub>The same 25 DAX queries against the same semantic model on every engine — one "
+          "`.bim`, one storage mode, Direct Lake — so the adapter that wrote the parquet is the only "
+          "variable. **cold** is the first visit to a freshly deployed model, when nothing is "
+          "resident and every column has to be transcoded out of parquet; **warm** is the second "
+          "visit; **hot** is the median of the passes after that. Each tier is summed over the "
+          "queries EVERY column carries at that tier, and the count says how many — cold is two "
+          "short because the selectivity-ladder queries only exist once the top DUID has been "
+          "resolved, which happens after pass 1. `hot spread` is the median per-query spread across "
+          "the hot passes: where two columns sit closer together than that, the gap between them "
+          "means nothing. Fastest per row in bold.</sub>")
+
+
+def hot_spreads(per_col):
+    """Median per-query `hot_spread_pct` per column, over the queries every column has hot.
+
+    The honesty row. A total is a ranking only if the samples behind it are tight; this is the number
+    that says whether they are, and it is measured per query and already in the record.
+    """
+    sets = [{q for q, t in (timings or {}).items() if t.get("hot_spread_pct") is not None}
+            for timings in per_col.values()]
+    common = set.intersection(*sets) if sets else set()
+    if not common:
+        return {}
+    out = {}
+    for col, timings in per_col.items():
+        vals = sorted(float(timings[q]["hot_spread_pct"]) for q in common)
+        mid = len(vals) // 2
+        out[col] = vals[mid] if len(vals) % 2 else (vals[mid - 1] + vals[mid]) / 2
+    return out
+
+
+def bench_spread(runs, cols, per_col, metric):
+    """`{column: [total ms, …]}` over every run of that column, so the chart carries a range.
+
+    A run only counts if it covers the WHOLE common query set — otherwise its total is smaller for a
+    reason that has nothing to do with speed, and it would widen the range downward as if the engine
+    had once been fast. A column with no qualifying history simply gets its latest run, which is what
+    `chart_rows` falls back to anyway.
+    """
+    sets = [{q for q, t in (timings or {}).items() if t.get(metric) is not None}
+            for timings in per_col.values()]
+    common = set.intersection(*sets) if sets else set()
+    if not common:
+        return {}
+    key_by_variant = {(base_engine(c), variant(r)): c for c, _e, r in cols}
+    out = {}
+    for rec in runs:
+        col = key_by_variant.get((rec.get("engine"), variant(rec)))
+        if col is None:
+            continue
+        timings = bench_timings(rec)
+        if not all((timings.get(q) or {}).get(metric) is not None for q in common):
+            continue
+        out.setdefault(col, []).append(round(sum(float(timings[q][metric]) for q in common), 1))
+    return out
+
+
+# ------------------------------------------------------------------------------------- build time
+
+def render_time(cols, runs, ledger):
+    """What the work TOOK, beside what it cost — and how hard it drew while it ran.
+
+    Free: `measure.py` reads `Duration (s)` from the same Capacity Metrics row as `CU (s)`, in the
+    same query. So this is the same join as the CU table — item GUID, role, compute/storage — read
+    off the ledger's `seconds` dict instead of `items`.
+
+    **Seconds here are BILLED OPERATION seconds, not wall clock**, and the difference is not small on
+    every engine. A duckrun leg is one long notebook run, so the two nearly agree; spark opens five
+    concurrent Livy REPLs under one session and their durations sum to more than the clock ever
+    showed. That is why CU stays the page's lead measure and this is second.
+
+    **The rate is the robust number of the two.** `CU ÷ seconds` is the average capacity the work drew
+    while it was running, and the overlap that makes spark's seconds hard to read appears in the
+    numerator and the denominator alike — both are summed over the same operations — so it cancels.
+    A high rate is a wide engine, not a slow one; read it beside the seconds, not instead of them.
+
+    Renders NOTHING when the ledger has no seconds. That is the correct output for a ledger written
+    before the duration read, or one whose model does not expose the column: an absent section says
+    "not measured", a table of zeros would say "instant".
+    """
+    if not (ledger.get("seconds") or {}):
+        return
+    per_col = {}
+    for col, _e, rec in cols:
+        cells, _missing = run_cu(rec, ledger, "seconds")
+        if any(cells.values()):
+            per_col[col] = cells
+    if not per_col:
+        return
+    names = [c for c, _e, _r in cols if c in per_col]
+    cu_col = {col: run_cu(rec, ledger)[0] for col, _e, rec in cols}
+
+    print("\n### Time — how long the work took, and how hard it drew\n")
+    key_by_variant = {(base_engine(c), variant(r)): c for c, _e, r in cols}
+    key_of = lambda rec: key_by_variant.get((rec.get("engine"), variant(rec)))
+    etl_spread = spread_for(runs, ledger, "etl", key_of, "seconds")
+    n = max((len(v) for v in etl_spread.values()), default=1)
+    chart("ETL — how long building the tables took",
+          "billed operation seconds, lower is better — not wall clock, see below"
+          + (f", mean of {n} runs with the range" if n > 1 else ""),
+          chart_rows([c for c in cols if c[0] in per_col], etl_spread,
+                     {c: class_total(per_col[c], "etl") for c in per_col},
+                     {col: engine_caption(rec, col) for col, _e, rec in cols}))
+    print("| seconds | " + " | ".join(names) + " |")
+    print("|:--|" + "---:|" * len(names))
+    for cls in ("etl", "analytics"):
+        if not any(per_col[c].get(cls) for c in names):
+            continue
+        print(f"| **{cls}** | "
+              + " | ".join(f"**{class_total(per_col[c], cls):,.1f}**" for c in names) + " |")
+        rates = []
+        for c in names:
+            secs = class_total(per_col[c], cls)
+            cu = class_total(cu_col.get(c) or {}, cls)
+            rates.append("—" if not secs or not cu else f"{cu / secs:,.1f}")
+        print("| `CU per second` | " + " | ".join(rates) + " |")
+    print("\n<sub>Read from `Duration (s)` in the same Capacity Metrics row as the CU above, in the "
+          "same query — it costs no extra request and no capacity. These are **billed operation "
+          "seconds, not wall clock**: a duckrun leg is one long notebook run so the two nearly "
+          "agree, while spark's five concurrent Livy REPLs bill against one session and sum to more "
+          "than the clock ever showed. **`CU per second` is the sturdier of the two** — it is the "
+          "average capacity the work drew while it ran, and the concurrency that makes spark's "
+          "seconds hard to read is in the numerator and the denominator alike, so it cancels. A high "
+          "rate is a WIDE engine, not a slow one; the seconds beside it say whether that width "
+          "finished sooner.</sub>")
+
+
 def render(cols, runs, ledger):
     """The whole page, on stdout, as the markdown subset `report_html.py` renders."""
     per_col, analytics, unmeasured = {}, {}, {}
@@ -649,19 +877,29 @@ def render(cols, runs, ledger):
     engine_table(per_col, cols)
     render_input(cols)
     render_layouts(cols, analytics)
+    # The two non-CU axes, and they come AFTER the layout because that is the order the question is
+    # asked in: what did it cost, what shape are the tables, then how long did querying and building
+    # them take. Both render nothing when their input is absent — a record with no benchmark, a
+    # ledger with no duration column — which is what keeps the page a report of what exists.
+    render_query_time(cols, runs)
+    render_time(cols, runs, ledger)
 
     n = len({base_engine(c) for c, _e, _r in cols})
     print("\n### About these numbers\n")
-    print("**Every number on this page is capacity units (CU-seconds)** — Fabric's own billing "
+    print("**Capacity units (CU-seconds) are what this page leads with** — Fabric's own billing "
           "measure, read from the Capacity Metrics model. Not milliseconds and not rows: what the "
           f"work COST. One dbt project, {n} engine{'s' if n != 1 else ''}, one landed copy of the "
           "data: this is what each engine charged to build the same tables and to answer the same "
           "queries. Attribution is by Fabric ITEM GUID — each run records what it created and then "
           "deletes it — so no number here is a guess about which engine an item belonged to.\n")
-    print("**The columns are directly comparable.** The engines were handed different compute — a "
-          "64-vCore notebook, a Livy pool, a warehouse — and that does not qualify anything: a "
-          "capacity unit already prices it in, which is the whole reason to measure cost rather than "
-          "wall-clock. Seconds would need the caveat; CU is the bill.\n")
+    print("**The CU columns are directly comparable, and the two time sections need reading with "
+          "more care.** The engines were handed different compute — a 64-vCore notebook, a Livy "
+          "pool, a warehouse — and a capacity unit already prices that in, which is the whole reason "
+          "to lead with cost. Duration does not: billed operation seconds SUM across concurrent "
+          "operations, so spark's five Livy REPLs total more than the clock they ran on, and query "
+          "milliseconds are one sample of a shared capacity rather than a bill. They are on the page "
+          "because they answer a question CU cannot — how long a person waits, and how hard the "
+          "engine drew while they did — and each section says where its own number bends.\n")
     print("**Analytics is the half that matters**, and it leads for that reason. Fabric smooths "
           "BACKGROUND operations — everything the build does — over 24 hours, so a heavy ETL leg is "
           "absorbed and nobody waits for it. Query CU is INTERACTIVE, smoothed over minutes, and it "

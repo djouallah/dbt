@@ -17,14 +17,17 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import measure  # noqa: E402
 
 COLS = {"item_id": "Item Id", "workspace_id": "Workspace Id", "cu": "CU (s)",
-        "when": "Datetime", "operation": "Operation name"}
+        "when": "Datetime", "operation": "Operation name", "duration": "Duration (s)"}
 WS = "WORKSPACE-1"
 NOW = datetime(2026, 8, 2, 18, 0, 0)
 
 
-def row(guid, value, op="Warehouse Query", first="2026-08-02T15:00:00", ws=WS):
-    return {"Item Id": guid, "Workspace Id": ws, "Operation name": op, "CU": value,
-            "FirstHour": first}
+def row(guid, value, op="Warehouse Query", first="2026-08-02T15:00:00", ws=WS, seconds=None):
+    r = {"Item Id": guid, "Workspace Id": ws, "Operation name": op, "CU": value,
+         "FirstHour": first}
+    if seconds is not None:
+        r["Seconds"] = seconds
+    return r
 
 
 def cu(led, guid):
@@ -39,8 +42,9 @@ def _env(monkeypatch):
 
 
 def read(led, rows):
-    """One full read: fold the rows, merge them in. Returns how many items moved."""
-    folded, _stamps = measure.fold(rows, COLS)
+    """One full read: fold the rows, merge both metrics in. Returns how many CU pairs moved."""
+    folded, secs, _stamps = measure.fold(rows, COLS)
+    measure.apply(led, secs, "seconds")
     return measure.apply(led, folded)
 
 
@@ -160,6 +164,75 @@ def test_compute_and_storage_are_kept_apart_within_one_item():
     assert led["items"]["G1"] == {"High Concurrency Session Livy Run": 188635.8,
                                   "OneLake Write via Redirect": 20267.9}
     assert round(cu(led, "G1"), 1) == 208903.7
+
+
+# ----------------------------------------------------------------------------------- duration
+
+def test_duration_is_folded_into_a_sibling_dict_not_nested_in_items():
+    """Two flat dicts, one merge rule. Nesting `{"cu": …, "seconds": …}` under the operation would
+    have changed the leaf type every reader expects — `total`, `apply`, the dashboard's join and the
+    tests here — to save a parameter."""
+    led = measure.blank()
+    read(led, [row("G1", 34016.05, seconds=925.655),
+               row("G1", 383.25, op="OneLake Write via Redirect", seconds=0.049)])
+    assert led["items"]["G1"] == {"Warehouse Query": 34016.05,
+                                  "OneLake Write via Redirect": 383.25}
+    assert led["seconds"]["G1"] == {"Warehouse Query": 925.655,
+                                    "OneLake Write via Redirect": 0.049}
+    assert round(measure.total(led, "G1", "seconds"), 3) == 925.704
+
+
+def test_a_read_with_no_duration_column_writes_no_seconds_at_all():
+    """Empty, never zeros. "not measured" and "took no time" are different claims, and the page's
+    time section renders only when there is something to render."""
+    led = measure.blank()
+    read(led, [row("G1", 100.0)])                          # no `Seconds` key on the row
+    assert cu(led, "G1") == 100.0
+    assert led["seconds"] == {}
+
+
+def test_seconds_take_the_max_like_cu_does():
+    """Same kind of quantity — a server-side SUM over the same rows from the same floor — so it can
+    only grow, and the larger value is the more complete one."""
+    led = measure.blank()
+    read(led, [row("G1", 40.0, seconds=10.0)])
+    read(led, [row("G1", 125.0, seconds=31.0)])
+    read(led, [row("G1", 90.0, seconds=22.0)])             # a truncated later window
+    assert cu(led, "G1") == 125.0
+    assert measure.total(led, "G1", "seconds") == 31.0
+
+
+def test_an_optional_column_that_is_missing_is_none_rather_than_fatal(monkeypatch):
+    """`REQUIRED` is fatal by design. Duration is a bonus riding an existing query and its name is
+    not measured against this app version, so a miss must cost the time sections and not the CU
+    read that works today."""
+    schema = [{"Table": measure.TABLE, "Name": n}
+              for n in ("Item Id", "Workspace Id", "CU (s)", "Datetime", "Operation name")]
+    monkeypatch.setattr(measure, "execute_dax", lambda *a, **k: schema)
+    got = measure.discover_columns()
+    assert got["duration"] is None
+    assert got["cu"] == "CU (s)"
+    schema.append({"Table": measure.TABLE, "Name": "Duration (s)"})
+    assert measure.discover_columns()["duration"] == "Duration (s)"
+
+
+def test_the_duration_sum_is_only_in_the_dax_when_the_column_resolved(monkeypatch):
+    sent = []
+    monkeypatch.setattr(measure, "execute_dax", lambda q, **k: sent.append(q) or [])
+    measure.read_cu("CAP", None, dict(COLS, duration=None))
+    assert "Seconds" not in sent[-1]
+    measure.read_cu("CAP", None, COLS)
+    assert '"Seconds", SUM ( \'' in sent[-1] and "Duration (s)" in sent[-1]
+
+
+def test_both_dicts_round_trip_through_the_file(tmp_path):
+    p = tmp_path / "cu.json"
+    led = measure.blank()
+    read(led, [row("G1", 10.0, seconds=2.0)])
+    measure.save_ledger(led, str(p))
+    back = measure.load_ledger(str(p))
+    assert back["items"] == led["items"] and back["seconds"] == led["seconds"]
+    assert json.loads(p.read_text(encoding="utf-8"))["schema"] == measure.SCHEMA
 
 
 def test_a_ledger_written_before_operations_is_dropped_not_guessed(tmp_path):

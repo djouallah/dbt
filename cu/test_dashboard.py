@@ -221,15 +221,33 @@ def test_the_rendered_page_mentions_no_landing_cu_anywhere():
     assert "70.2" not in out and "dbt_landing (" not in out
 
 
-def _full(file, engine, **kw):
-    """A record that IS a whole generation: torn down, built, benchmarked."""
+def _full(file, engine, timings=None, **kw):
+    """A record that IS a whole generation: torn down, built, benchmarked.
+
+    The DEFAULT `timings` carries no tier keys at all — only `ms_by_pass`, which is what
+    `incomplete()` checks for and nothing the query-time table can read. That is deliberate: it
+    keeps every pre-existing test exercising the "a section whose input is absent renders nothing"
+    path, and `timings=` is how the query-time tests opt in.
+    """
     r = rec(file, engine, {"OUT": {"role": "output", "name": f"dbt_{engine}", "deleted": ago(1)},
                            "SEM": {"role": "semantic_model", "name": f"aemo_{engine}",
                                    "deleted": ago(1)},
                            "L": {"role": "landing", "name": "dbt_landing"}},
             stats={engine: {"fct_summary": {"total_rows": 1}}}, tables=["fct_summary"], **kw)
-    r["benchmark"] = {"timings": {f"aemo_{engine}": {"q": {"ms_by_pass": [1]}}}}
+    r["benchmark"] = {"timings": {f"aemo_{engine}": timings or {"q": {"ms_by_pass": [1]}}}}
     return r
+
+
+def _timings(**per_query):
+    """`{query: {cold_ms, warm_ms, hot_median_ms, hot_spread_pct}}` from `q=(cold, warm, hot)`.
+    A `None` cold is the real ladder-query shape: no first-pass sample at all."""
+    out = {}
+    for q, (cold, warm, hot) in per_query.items():
+        t = {"warm_ms": warm, "hot_median_ms": hot, "hot_spread_pct": 5.0}
+        if cold is not None:
+            t["cold_ms"] = cold
+        out[q] = t
+    return out
 
 
 def test_a_whole_generation_is_accepted():
@@ -369,7 +387,7 @@ def test_the_numbers_come_before_the_methodology():
     reach them — that material reads better as what you check after a number surprises you."""
     out = _render([_full("a-1.json", "spark")], ledger({"OUT": 34046.3, "SEM": 1514.0}))
     first_chart = out.index("<!--chart:")
-    assert first_chart < out.index("**Every number on this page is capacity units")
+    assert first_chart < out.index("**Capacity units (CU-seconds) are what this page leads with")
     assert first_chart < out.index("### About these numbers")
     assert first_chart < out.index("Each column is that engine's latest run")
     assert first_chart < out.index("[source](")
@@ -377,13 +395,15 @@ def test_the_numbers_come_before_the_methodology():
     assert out.index("## Capacity units") < first_chart
 
 
-def test_the_page_says_the_columns_are_comparable():
+def test_the_page_says_which_of_its_measures_is_the_comparable_one():
     """A capacity unit already prices in how much compute an engine was given — that is the whole
-    reason to measure cost rather than wall-clock. Seconds would need a hardware caveat; CU is the
-    bill, so the page says so rather than leaving a reader to invent one."""
+    reason CU leads. The two time sections do NOT have that property: billed seconds sum across
+    concurrent operations and milliseconds are a sample of a shared capacity. The page has to say
+    which is which, rather than presenting three measures as equally footed."""
     out = _render([_full("a-1.json", "spark")], ledger({"OUT": 1.0, "SEM": 2.0}))
-    assert "The columns are directly comparable" in out
-    assert "CU is the bill" in out
+    assert "The CU columns are directly comparable" in out
+    assert "reason to lead with cost" in out
+    assert "sample of a shared capacity" in out, "the ms caveat has to be stated, not implied"
 
 
 def test_the_chart_shows_the_mean_and_the_range_across_runs():
@@ -416,6 +436,108 @@ def test_the_chart_sorts_by_the_mean():
                                 "S1": {"XMLA Read Operation": 3.0}, "O1": {"Warehouse Query": 1.0}}))
     spec = json.loads(out.split("<!--chart:")[1].split("-->")[0])
     assert [r[0] for r in spec["rows"]] == ["dwh", "spark"], "cheapest mean first"
+
+
+# ------------------------------------------------------------------------------------ query time
+
+def test_a_tier_is_summed_over_the_queries_every_column_has():
+    """A total over different queries is not a comparison. A query one engine never ran is dropped
+    from EVERY column's total, not counted for the engines that have it."""
+    runs = [_full("a-1.json", "duckrun", timings=_timings(a=(10, 5, 4), b=(100, 50, 40))),
+            _full("b-2.json", "dwh", timings=_timings(a=(20, 6, 5)))]
+    per_col = {"duckrun": d.bench_timings(runs[0]), "dwh": d.bench_timings(runs[1])}
+    totals, n = d.bench_totals(per_col, "cold_ms")
+    assert n == 1, "`b` is duckrun's alone and must not inflate its total"
+    assert totals == {"duckrun": 10.0, "dwh": 20.0}
+
+
+def test_cold_covers_fewer_queries_than_hot_and_the_row_says_so():
+    """The selectivity-ladder queries have NO cold sample — the top DUID is resolved after pass 1 —
+    so cold is genuinely summed over a smaller set. Printing the count is what stops that reading as
+    a suspiciously small total."""
+    t = _timings(probe=(10, 5, 4), sel_1duid=(None, 7, 6))
+    runs = [_full("a-1.json", "duckrun", timings=t), _full("b-2.json", "dwh", timings=t)]
+    out = _render(runs, ledger({"OUT": 1.0, "SEM": 2.0}))
+    assert "| **cold** — 1 queries |" in out
+    assert "| **hot** — 2 queries |" in out
+
+
+def test_the_fastest_cell_in_each_tier_is_bold():
+    runs = [_full("a-1.json", "duckrun", timings=_timings(a=(10, 5, 4))),
+            _full("b-2.json", "dwh", timings=_timings(a=(20, 3, 9)))]
+    out = _render(runs, ledger({"OUT": 1.0, "SEM": 2.0}))
+    cold = next(ln for ln in out.splitlines() if ln.startswith("| **cold**"))
+    warm = next(ln for ln in out.splitlines() if ln.startswith("| **warm**"))
+    assert cold.endswith("| **10** | 20 |"), "duckrun wins cold"
+    assert warm.endswith("| 5 | **3** |"), "dwh wins warm — the winner is per ROW, not per table"
+
+
+def test_a_record_with_no_tier_timings_renders_no_query_time_section():
+    """`_full`'s default carries `ms_by_pass` and nothing else — enough for `incomplete()`, nothing
+    the table can read. An absent section says "not measured"; a table of zeros would say "instant"."""
+    out = _render([_full("a-1.json", "spark")], ledger({"OUT": 1.0, "SEM": 2.0}))
+    assert "### Query time" not in out
+
+
+def test_the_cold_chart_only_counts_runs_that_covered_the_whole_set():
+    """A run missing a query has a smaller total for a reason that is not speed. Letting it into the
+    range would show the engine as having once been fast."""
+    full = _timings(a=(10, 5, 4), b=(20, 6, 5))
+    runs = [_full("a-1.json", "duckrun", timings=_timings(a=(1, 1, 1)), finished_hours_ago=72),
+            _full("b-2.json", "duckrun", timings=full, finished_hours_ago=48),
+            _full("c-3.json", "dwh", timings=full, finished_hours_ago=24)]
+    out = _render(runs, ledger({"OUT": 1.0, "SEM": 2.0}))
+    spec = json.loads(out.split("<!--chart:")[3].split("-->")[0])
+    assert "first visit" in spec["title"]
+    rows = {r[0]: r[1:4] for r in spec["rows"]}
+    assert rows["duckrun"] == [30.0, 30.0, 30.0], "the partial older run must not widen the range"
+
+
+# ------------------------------------------------------------------------------------- build time
+
+def _secs(items):
+    return {g: (v if isinstance(v, dict) else {"Warehouse Query": v}) for g, v in items.items()}
+
+
+def test_seconds_split_by_role_exactly_like_cu():
+    """Same GUIDs, same roles, same read — the duration rides in the same Capacity Metrics row, so
+    the join cannot disagree with the CU one."""
+    r = rec("r-1.json", "spark", {"OUT": {"role": "output", "name": "dbt_spark"},
+                                  "SEM": {"role": "semantic_model", "name": "aemo_spark"},
+                                  "L": {"role": "landing", "name": "dbt_landing"}})
+    led = ledger({"OUT": {"High Concurrency Session Livy Run": 900.0},
+                  "SEM": {"XMLA Read Operation": 40.0}, "L": {"Warehouse Query": 70.2}})
+    led["seconds"] = _secs({"OUT": {"High Concurrency Session Livy Run": 30.0},
+                            "SEM": {"XMLA Read Operation": 4.0}, "L": {"Warehouse Query": 9.9}})
+    cells, _missing = d.run_cu(r, led, "seconds")
+    assert d.class_total(cells, "etl") == 30.0
+    assert d.class_total(cells, "analytics") == 4.0, "landing is skipped here as it is for CU"
+
+
+def test_a_ledger_with_no_seconds_renders_no_time_section():
+    """Every ledger written before the duration read, and any read where the model had no duration
+    column. Absent is the correct output for both."""
+    out = _render([_full("a-1.json", "spark")], ledger({"OUT": 1.0, "SEM": 2.0}))
+    assert "### Time —" not in out
+    assert out.count("<!--chart:") == 2, "no seconds, no ETL-time chart"
+
+
+def test_the_rate_is_cu_over_seconds():
+    """`CU ÷ seconds` is the average capacity the work drew while it ran, and it is the sturdier of
+    the two: the concurrency that makes a spark leg's billed seconds exceed its wall clock is in the
+    numerator and the denominator alike, so it cancels."""
+    runs = [_full("a-1.json", "spark")]
+    led = ledger({"OUT": {"High Concurrency Session Livy Run": 900.0},
+                  "SEM": {"XMLA Read Operation": 40.0}})
+    led["seconds"] = _secs({"OUT": {"High Concurrency Session Livy Run": 30.0},
+                            "SEM": {"XMLA Read Operation": 4.0}})
+    out = _render(runs, led)
+    body = out.split("### Time —")[1].split("###")[0]
+    assert "| **etl** | **30.0** |" in body
+    assert "| `CU per second` | 30.0 |" in body, "900 CU over 30 s"
+    assert "| **analytics** | **4.0** |" in body
+    assert "| `CU per second` | 10.0 |" in body, "40 CU over 4 s"
+    assert out.count("<!--chart:") == 3, "the ETL-time chart joins the two CU ones"
 
 
 def test_the_svg_draws_a_whisker_only_when_there_is_a_range():
