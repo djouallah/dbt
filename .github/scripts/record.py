@@ -124,10 +124,6 @@ def _init():
                     f"{os.environ.get('GITHUB_RUN_ID', '')}"),
         },
         "engine": os.environ.get("RUN_ENGINE") or None,
-        # Every item bar dbt_landing is deleted at teardown, so a build always starts from nothing —
-        # but only when the PREVIOUS run's teardown actually ran. Recorded rather than assumed:
-        # a dispatch with teardown off leaves tables behind and the next one is an incremental.
-        "full_load": (os.environ.get("RUN_FULL_LOAD") or "").lower() in ("1", "true", "yes"),
         "inputs": {k.lower()[6:]: v for k, v in os.environ.items()
                    if k.startswith("RUNIN_") and v != ""},
     })
@@ -144,7 +140,16 @@ def finish(frag_dir, bench, dest):
         with open(bench, encoding="utf-8") as f:
             merge({"benchmark": json.load(f)}, dest)
         got.append(bench)
-    merge({"run": {"finished": now()}}, dest)
+    with open(dest, encoding="utf-8") as f:
+        doc = json.load(f)
+    # DERIVED from the run's own items, not from a dispatch input. The teardown deletes every output
+    # item, so a build normally starts from nothing — but only if the previous run's teardown
+    # actually ran, and a dispatch with `teardown: false` leaves tables behind for the next one to
+    # build on incrementally. `created: true` on the output item is the fact that settles it; the
+    # input only ever stated an intention.
+    merge({"run": {"finished": now()},
+           "full_load": any(it.get("role") == "output" and it.get("created")
+                            for it in (doc.get("items") or {}).values())}, dest)
     with open(dest, encoding="utf-8") as f:
         doc = json.load(f)
     sys.stderr.write(

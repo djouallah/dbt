@@ -99,6 +99,9 @@ def test_finish_merges_every_stage_into_one_document(tmp_path):
 
     assert sorted(doc["items"]) == ["L", "N", "O", "S"]
     assert doc["engine"] == "spark"
+    # Derived from the output item having been created fresh, never from a dispatch input — the
+    # input states an intention, this states what happened.
+    assert doc["full_load"] is True
     assert doc["layout"]["stats"]["spark"]["fct_summary"]["total_rows"] == 7
     assert doc["benchmark"]["timings"]["aemo_spark"]["q1"]["ms_by_pass"] == [9, 3]
     # started survives finished — the run block is merged, not replaced.
@@ -114,16 +117,31 @@ def test_finish_without_a_benchmark_omits_the_key_rather_than_emptying_it(tmp_pa
     assert "benchmark" not in json.loads(dest.read_text(encoding="utf-8"))
 
 
+def test_an_incremental_build_is_recorded_as_such(tmp_path):
+    """teardown off -> the output item was FOUND, not created -> the next build is a top-up.
+
+    The distinction matters to anyone reading a layout or a CU number afterwards: 143M rows written
+    from nothing and 3M rows appended are not the same run.
+    """
+    _frag(tmp_path, "record-00-run.json", {"schema": 1})
+    _frag(tmp_path, "record-20-build-dwh.json",
+          {"items": {"O": {"role": "output", "name": "dbt_dwh", "created": False}}})
+    dest = tmp_path / "out.json"
+    record.finish(str(tmp_path / "fragments"), None, str(dest))
+    assert json.loads(dest.read_text(encoding="utf-8"))["full_load"] is False
+
+
 def test_init_reads_the_dispatch_inputs_and_skips_blanks(tmp_path, monkeypatch):
     monkeypatch.setenv("RUN_RECORD", str(tmp_path / "frag.json"))
     monkeypatch.setenv("GITHUB_RUN_ID", "42")
     monkeypatch.setenv("RUN_ENGINE", "dwh")
-    monkeypatch.setenv("RUN_FULL_LOAD", "true")
     monkeypatch.setenv("RUNIN_CORES", "64")
     # An input left blank is absent, not recorded as "": the record states what the run chose.
     monkeypatch.setenv("RUNIN_DOWNLOAD_LIMIT", "")
     record._init()
     doc = json.loads((tmp_path / "frag.json").read_text(encoding="utf-8"))
-    assert doc["engine"] == "dwh" and doc["full_load"] is True
+    assert doc["engine"] == "dwh"
     assert doc["inputs"] == {"cores": "64"}
     assert doc["run"]["id"] == "42" and doc["run"]["started"]
+    # full_load is settled at finish() from what was actually created, so it is absent here.
+    assert "full_load" not in doc

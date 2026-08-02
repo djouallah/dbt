@@ -3,10 +3,9 @@ print the env vars dbt/the notebook read to stdout (the workflow appends stdout 
 $GITHUB_ENV). Diagnostics -> stderr.
 
 Usage:
-  python provision.py reset                # DELETE all four OUTPUT items (never the landing one)
-  python provision.py reset spark,dwh      # DELETE only those engines' items
   python provision.py land                 # the ONE shared landing lakehouse (holds Files)
   python provision.py {duckrun|iceberg|dwh|spark}   # that engine's OUTPUT item
+  python provision.py teardown <record>    # DELETE every item that record names, except landing
 
 The download happens once (in the `land` job) and every engine job provisions only its own output
 item. The legs no longer share one FILES_PATH: each reads the SAME landed bytes through a
@@ -15,31 +14,36 @@ own), so the read CU is attributed per engine instead of arriving as one undivid
 row. See DWH_SRC. Naming is prefixed `dbt_` so it never clashes with the other AEMO repos sharing
 this workspace.
 
-`reset` is the start-from-nothing lever (the workflow's `reset_outputs` input), and it is a
-**separate mode run in its own job before `land`** rather than something each leg does to its
-own item on the way in. That ordering is the whole point: Fabric keeps a deleted item's DISPLAY
-NAME reserved for minutes after the item stops being listed, so a drop immediately followed by a
-create draws `409 ItemDisplayNameNotAvailableYet` — which is exactly how the per-leg version
-failed on run 30639018466. Deleting everything up front and then landing the data gave the
-reservation the whole download to expire in — but `skip_download` is on by default now, so that gap
-is usually gone and `ensure()`'s 409 poll is what actually carries it. Polling the create is the
-only authoritative test of whether a name is free, so this is sound; it just costs minutes.
-
 **Every item this touches is written down under its GUID**, into the run-record fragment named by
 `RUN_RECORD` (see record.py) — created, found, or deleted, with the timestamp. That is the input the
 CU ledger joins on: a GUID belongs to exactly one run, so `cu/` no longer has to guess an item's
 owner from its display name. `RUN_RECORD` unset is a no-op, so running this by hand still works.
 
+`teardown` is the end of that story and the reason a GUID belongs to one run at all. It runs LAST,
+takes the run's own merged record as its argument, and deletes **every item that record names**
+except the two whose `role` is `landing` or `folder` — so it can only ever delete what this run
+created, and it needs no list of names to do it. That is a real property: a name-driven teardown
+would happily delete an item some other dispatch had just made, and there is no undo.
+
 It deletes the whole ITEM, not tables inside it — a `Tables/<schema>/<name>` folder removed by
 hand leaves the catalog entry behind and dbt then emits DML against nothing. `dbt_landing` is
-**excluded by name** and `drop()` refuses it outright: that lakehouse holds the downloaded AEMO
-archive, the one thing here that cannot be rebuilt from anything else in the workspace. Costs,
-none of them errors: the dwh warehouse comes back with a new connectionString and no grants, and
-every item comes back with a new GUID, so anything bound to the old one (a Direct Lake semantic
-model, a shortcut) is pointing at an item that no longer exists. `benchmark/` survives it because
-it deletes and recreates its models per dispatch; nothing else in this repo holds a binding.
+excluded twice over, by role and by name, and `drop()` refuses it outright: that lakehouse holds the
+downloaded AEMO archive, the one thing here that cannot be rebuilt from anything else in the
+workspace. The `dbt` FOLDER survives too — landing lives in it.
+
+Costs, none of them errors: the dwh warehouse comes back with a new connectionString and no grants,
+and every item comes back with a new GUID, so anything bound to the old one (a Direct Lake semantic
+model, a shortcut) points at an item that no longer exists. `benchmark/` survives it because it
+deploys its models per dispatch. And **every build is now a full load**, because nothing survives to
+build on incrementally — which is what `reset_outputs` used to buy, minus the job that bought it.
+
+The display-name reservation this used to fight is now on the other side of the run. `reset` deleted
+immediately before the build, so Fabric was still holding the names when the legs tried to create
+them (`409 ItemDisplayNameNotAvailableYet`, which killed three legs on run 30639018466). Deleting at
+the END puts a whole idle period between the delete and the next dispatch's create, and `ensure()`'s
+40x15s poll stays as the guard.
 """
-import os, sys, time, subprocess, requests
+import json, os, sys, time, subprocess, requests
 
 import record
 
@@ -49,18 +53,12 @@ LANDING = "dbt_landing"
 # which is the spelling the metrics model and the run record use. Two vocabularies for one thing,
 # so the mapping lives here rather than being spelled out at each call site.
 KIND = {"lakehouses": "Lakehouse", "warehouses": "Warehouse", "folders": "Folder"}
-# Every OUTPUT item, keyed by the ENGINE that writes it — the same key the dbt target, the leg's
-# provision mode and `cu/`'s columns all use, and the only map `reset` will touch. Kept beside the
-# per-mode branches below, which must name the same items.
-#
-# Keyed rather than a flat list because a reset is now SCOPED to the engines actually being built:
-# a dispatch rebuilding spark alone must not delete the other three lakehouses, because every item
-# dropped is a from-scratch rebuild of 370M rows charged to whoever dispatches next.
-OUTPUT_BY_ENGINE = {"duckrun": ("lakehouses", "dbt_delta"),
-                    "iceberg": ("lakehouses", "dbt_iceberg"),
-                    "spark": ("lakehouses", "dbt_spark"),
-                    "dwh": ("warehouses", "dbt_dwh")}
-OUTPUTS = list(OUTPUT_BY_ENGINE.values())
+# What `teardown` will NOT delete, by role. `landing` holds the downloaded AEMO archive — the one
+# thing here that cannot be rebuilt from anything else in the workspace — and `folder` is the `dbt`
+# workspace folder that landing itself lives in. Everything else a run creates is disposable by
+# construction, which is the point: an item that outlives its run keeps drawing background CU into
+# the NEXT run's window, and there is nothing in a capacity reading that says it did.
+TEARDOWN_KEEP = {"landing", "folder"}
 
 # Every leg reads the landed CSVs through a `Files/landing` SHORTCUT to dbt_landing sitting in its
 # OWN lakehouse, and that is what splits the read CU: OneLake accounts a transaction against the
@@ -78,14 +76,14 @@ OUTPUTS = list(OUTPUT_BY_ENGINE.values())
 # THE NAME IS LOAD-BEARING, and `dbt_dwh_landing` is the wrong spelling. `cu/capacity_cu.py`'s
 # `engine_of()` substring-matches a display name against CU_ENGINES **in order** — which starts
 # `landing` — so `dbt_dwh_landing` would match `landing` first and put dwh's reads straight back
-# into the column this change exists to empty. `_src` collides with no engine token.
+# into the column this change exists to empty. `_src` collides with no engine token. (That matcher
+# is on its way out now that CU is attributed by GUID, but the name costs nothing to keep right.)
 #
-# NOT in OUTPUTS, deliberately: `reset` must never drop it. It is an input, it holds no data, and a
-# shortcut host that gets deleted and recreated is the `ItemDisplayNameNotAvailableYet` 409 that
-# killed three legs on run 30639018466. The other three shortcuts DO go down with `reset`, since
-# they live inside items it deletes — which is why the shortcut is ensured in each engine's own
-# mode, right after that mode recreates its lakehouse, and not once in `land` (where those three
-# lakehouses may not exist yet, `reset` having just run).
+# It goes down with the teardown like everything else — it is recreated on the way in, holds no
+# data, and an item that survives a run keeps drawing background CU into the next one's window.
+# The `Files/landing` shortcut inside it goes with it, which is why the shortcut is ensured in each
+# ENGINE's own mode rather than once in `land`: at `land` time the lakehouse that hosts it may not
+# exist yet.
 DWH_SRC = "dbt_dwh_src"
 LANDING_SHORTCUT = "landing"
 ws = os.environ["WS_ID"]
@@ -138,35 +136,65 @@ def ensure_folder(name):
 FOLDER_ID = ensure_folder("dbt")
 
 
-def drop(kind, name, role="output"):
-    """Delete an item and RECORD the deletion against its GUID. Nothing is recreated here.
+def drop_guid(guid, name, kind, role):
+    """Delete one item BY ITS GUID and record the deletion. Returns True if it is gone afterwards.
 
-    Deletes the ITEM, never a folder under it: a `Tables/<schema>/<name>` directory removed by
-    hand leaves the catalog entry behind and dbt then emits DML against nothing (see CLAUDE.md).
-    Waits for it to stop being listed, which is a weaker guarantee than it looks — Fabric holds
-    the display NAME for minutes longer, which is why nothing recreates anything here.
+    By GUID, not by name, and that is the safety property: `teardown` can only ever delete items
+    this run's own record names, so a concurrent dispatch's freshly created `dbt_spark` cannot be
+    caught by a name match. There is no undo for a wrong delete.
 
-    The `deleted` timestamp is not bookkeeping: it is the instant after which this GUID can never
-    accrue another capacity unit, which is what lets the CU ledger declare the item settled.
+    A 404 counts as success — the item was already gone (the notebook deletes itself, a re-run of
+    the teardown, a by-hand cleanup) and the record should say so either way.
     """
     if name == LANDING:
         raise SystemExit(f"refusing to drop {name}: it holds the raw landing data")
-    it = find(kind, name)
-    if not it:
-        sys.stderr.write(f"  {kind}/{name} absent, nothing to drop\n")
-        return
-    sys.stderr.write(f"  DROPPING {kind}/{name} ({it['id']})\n")
-    r = requests.delete(f"{FAB}/workspaces/{ws}/items/{it['id']}", headers=H)
-    if r.status_code not in (200, 202, 204):
-        sys.stderr.write(r.text + "\n")
-        r.raise_for_status()
+    r = requests.delete(f"{FAB}/workspaces/{ws}/items/{guid}", headers=H)
+    if r.status_code == 404:
+        sys.stderr.write(f"  {kind}/{name} ({guid}) already gone\n")
+    elif r.status_code not in (200, 202, 204):
+        sys.stderr.write(f"  FAILED to delete {kind}/{name} ({guid}): {r.status_code} {r.text}\n")
+        return False
+    else:
+        sys.stderr.write(f"  DELETED {kind}/{name} ({guid})\n")
+    # Confirm rather than assume: the DELETE is accepted asynchronously (202), and an item that is
+    # still listed is still billable. Same 10-minute budget as `drop()`.
     for _ in range(120):
-        if not find(kind, name):
-            sys.stderr.write(f"  {kind}/{name} dropped\n")
-            record.item(it["id"], role, KIND.get(kind, kind), name, deleted=record.now())
-            return
+        g = requests.get(f"{FAB}/workspaces/{ws}/items/{guid}", headers=H)
+        if g.status_code == 404:
+            record.item(guid, role, kind, name, deleted=record.now())
+            return True
         time.sleep(5)
-    raise SystemExit(f"timed out waiting for {kind}/{name} to disappear")
+    sys.stderr.write(f"  WARNING: {kind}/{name} ({guid}) still listed — it is STILL BILLABLE\n")
+    return False
+
+
+def teardown(src):
+    """Delete every item the run record names, except the roles in TEARDOWN_KEEP.
+
+    Failures are collected, not raised one at a time: a warehouse that refuses to delete must not
+    leave three lakehouses standing behind it. The exit status is non-zero if anything survived, so
+    the job goes red and someone looks — a leftover item costs capacity silently otherwise.
+    """
+    with open(src, encoding="utf-8") as f:
+        items = (json.load(f).get("items") or {})
+    left = []
+    for guid, it in sorted(items.items(), key=lambda kv: (kv[1].get("role", ""),
+                                                          kv[1].get("name", ""))):
+        role, name = it.get("role") or "?", it.get("name") or "?"
+        if role in TEARDOWN_KEEP:
+            sys.stderr.write(f"  keeping {role}/{name} ({guid})\n")
+            continue
+        if it.get("deleted"):
+            # The throwaway notebook deletes itself in fabric_run.py, in a `finally`, so it is
+            # already gone by the time this runs and its record entry already says so.
+            sys.stderr.write(f"  {role}/{name} already deleted at {it['deleted']}\n")
+            continue
+        if not drop_guid(guid, name, it.get("kind") or "Item", role):
+            left.append(f"{role}/{name} ({guid})")
+    if left:
+        raise SystemExit("teardown incomplete — these items are STILL BILLABLE: "
+                         + "; ".join(left))
+    sys.stderr.write(f"  teardown complete; {LANDING} untouched\n")
 
 
 def ensure(kind, name, payload=None, role="output"):
@@ -179,13 +207,14 @@ def ensure(kind, name, payload=None, role="output"):
     body = {"displayName": name, "folderId": FOLDER_ID}
     if payload:
         body.update(payload)
-    # BACKSTOP, not the fix. A create too soon after a drop hits `ItemDisplayNameNotAvailableYet`
-    # (409): Fabric frees the display NAME minutes after the item stops being listed. In CI that
-    # cannot bite any more — the `reset` job drops everything before `land`, so the whole download
-    # sits between the delete and the create — but a by-hand `provision.py reset` followed
-    # straight away by a build would hit it, as run 30639018466 did when each leg dropped its own
-    # item on the way in. Fabric marks the error `isRetriable`, so poll until it clears; anything
-    # not retriable still raises on the first response.
+    # THE guard, and the only authoritative one. A create too soon after a delete draws
+    # `ItemDisplayNameNotAvailableYet` (409): Fabric frees the display NAME minutes after the item
+    # stops being listed, and polling the create is the only way to learn that it has. This was how
+    # run 30639018466 lost three legs, when each leg dropped its own item on the way in. The
+    # teardown now runs at the END of a run instead, so a whole idle period sits between a delete
+    # and the next dispatch's create and this rarely fires — but back-to-back dispatches will still
+    # land in it, and a leg waiting minutes here is that, not a permissions problem. Fabric marks
+    # the error `isRetriable`; anything not retriable still raises on the first response.
     for attempt in range(40):                      # ~10 minutes at 15s
         r = requests.post(f"{FAB}/workspaces/{ws}/{kind}", headers=H, json=body)
         if r.status_code in (200, 201, 202):
@@ -266,26 +295,10 @@ def ensure_landing_shortcut(item):
             r.raise_for_status()
     return f"{base}/{item}/Files/{LANDING_SHORTCUT}"
 
-if mode == "reset":
-    # Deletes only. Nothing is recreated here and nothing is printed to stdout — the engine legs
-    # provision their own item as usual, minutes later, by which time Fabric has released the
-    # display names. See the module docstring for why that gap is the design.
-    #
-    # SCOPED to the engines named in argv[2] (comma-separated), or all four when absent. Dropping
-    # an item the dispatch is not rebuilding is not a tidy-up: it is a from-scratch rebuild of that
-    # engine's 370M rows, deferred onto whoever dispatches next. An unknown name is fatal rather
-    # than ignored — a typo that silently resets nothing looks exactly like a reset that worked.
-    picked = [e.strip() for e in (sys.argv[2] if len(sys.argv) > 2 else "").split(",") if e.strip()]
-    picked = picked or list(OUTPUT_BY_ENGINE)
-    unknown = [e for e in picked if e not in OUTPUT_BY_ENGINE]
-    if unknown:
-        raise SystemExit(f"reset: unknown engine(s) {unknown}; known: {list(OUTPUT_BY_ENGINE)}")
-    for engine in picked:
-        drop(*OUTPUT_BY_ENGINE[engine])
-    kept = [e for e in OUTPUT_BY_ENGINE if e not in picked]
-    sys.stderr.write(f"  reset: dropped {', '.join(picked)}"
-                     + (f"; kept {', '.join(kept)}" if kept else "")
-                     + f"; {LANDING} untouched\n")
+if mode == "teardown":
+    # Deletes only, and nothing is printed to stdout — there is no env for a later job to read
+    # because there is no later job. See teardown() and the module docstring.
+    teardown(sys.argv[2])
 
 elif mode == "land":
     lh = ensure("lakehouses", LANDING, lh_payload, role="landing")

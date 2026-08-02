@@ -34,8 +34,8 @@ on:
         description: "read capacity units and commit the history record (the page is a separate, manual Dashboard dispatch)"
         type: boolean
         default: true
-      reset_outputs:
-        description: "DELETE and recreate the selected engines' output items before building. ON BY DEFAULT: with skip_download it is what makes a run reproducible — the same input files, rebuilt from nothing, so two dispatches differ only by what was changed. Never touches the landed data."
+      teardown:
+        description: "DELETE every item this run created when it finishes — the output lakehouse/warehouse, dbt_dwh_src, the semantic model. ON BY DEFAULT, and it is what stops an idle item drawing background CU into the NEXT run's measurement. Never touches dbt_landing. Turn OFF only to keep a run's tables alive for debugging; the next build is then an incremental, which the record says."
         type: boolean
         default: true
       skip_download:
@@ -61,7 +61,7 @@ on:
         type: string
         default: "200"
       engines:
-        description: "the engine to build AND benchmark. One per dispatch. Scopes THREE things: which build leg runs, which item reset_outputs deletes and rebuilds, and which semantic model the benchmark measures. The other three engines are not touched at all."
+        description: "the engine to build AND benchmark. One per dispatch. Scopes THREE things: which build leg runs, which output item is created and torn down, and which semantic model the benchmark measures. The other three engines are not touched at all."
         # ONE ENGINE PER DISPATCH. A dropdown of the four names and nothing else — no combined
         # options, so a run always covers exactly one engine and the form cannot express more.
         # The value is still the string the called workflows take (they parse a comma-separated
@@ -149,19 +149,18 @@ jobs:
       - uses: actions/setup-python@v5
         with: {python-version: "3.11"}
       # Seeds the run block of the record every later stage merges into: the run id, the sha, the
-      # engine, and the dispatch inputs. `full_load` is recorded rather than assumed — with the
-      # teardown on, the previous run left nothing behind and this build starts from zero; with it
-      # off, it does not, and a layout number means a different thing.
+      # engine, and the dispatch inputs. `full_load` is NOT set here — it is derived at the end from
+      # whether the output item was actually created fresh, which is a fact rather than the
+      # intention an input states.
       - name: Open this run's record
         env:
           RUN_ENGINE: ${{ inputs.engines }}
-          RUN_FULL_LOAD: ${{ inputs.reset_outputs }}
           RUNIN_CORES: ${{ inputs.cores }}
           RUNIN_SPARK_RESOURCE_PROFILE: ${{ inputs.spark_resource_profile }}
           RUNIN_NATIVE_EXECUTION_ENGINE: ${{ inputs.native_execution_engine }}
           RUNIN_SKIP_DOWNLOAD: ${{ inputs.skip_download }}
           RUNIN_DOWNLOAD_LIMIT: ${{ inputs.download_limit }}
-          RUNIN_RESET_OUTPUTS: ${{ inputs.reset_outputs }}
+          RUNIN_TEARDOWN: ${{ inputs.teardown }}
           RUNIN_RUNS: ${{ inputs.runs }}
           RUNIN_THINK_SECONDS: ${{ inputs.think_seconds }}
           RUNIN_GAP_SECONDS: ${{ inputs.gap_seconds }}
@@ -197,7 +196,6 @@ jobs:
       cores: ${{ inputs.cores }}
       native_execution_engine: ${{ inputs.native_execution_engine }}
       spark_resource_profile: ${{ inputs.spark_resource_profile }}
-      reset_outputs: ${{ inputs.reset_outputs }}
 
   # `always()` so a skipped build does not skip the benchmark, but `!failure() && !cancelled()` so a
   # FAILED build does: benchmarking tables that did not finish writing measures nothing.
@@ -214,11 +212,68 @@ jobs:
       think_seconds: ${{ inputs.think_seconds }}
       gap_seconds: ${{ inputs.gap_seconds }}
 
+  # DELETE EVERYTHING THIS RUN CREATED, except dbt_landing. The output lakehouse or warehouse,
+  # dbt_dwh_src, and the benchmark's semantic model; the throwaway notebook has already deleted
+  # itself in fabric_run.py.
+  #
+  # Why, and it is not tidiness: an item that outlives its run keeps drawing background CU — OneLake
+  # bills reads against an idle lakehouse, and a Direct Lake model gets refreshed — which lands in
+  # the NEXT dispatch's measurement window with nothing in the capacity data to say it came from an
+  # older generation. On run 30699626723 that was 1,578 CU for an iceberg item the dispatch had not
+  # even selected.
+  #
+  # It deletes BY GUID, from this run's own merged record, so it can only ever remove what this run
+  # created — a name-driven teardown would happily delete an item a concurrent dispatch had just
+  # made, and there is no undo.
+  #
+  # ORDER IS LOAD-BEARING: after `build` (whose `layout` job reads every table through the Delta log)
+  # and after `benchmark` (which queries them), because both read what this deletes. `always()`, so
+  # a failed leg still gets cleaned up — a broken run that leaves a lakehouse standing is the worst
+  # case for both the bill and the next measurement.
+  teardown:
+    name: delete this run's items
+    needs: [stamp, build, benchmark]
+    if: ${{ always() && inputs.teardown }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+      AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+      WS_ID: ${{ inputs.workspace || secrets.FABRIC_WORKSPACE_ID }}
+      RUN_RECORD: ${{ github.workspace }}/record/record-50-teardown.json
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: {python-version: "3.11"}
+      - run: pip install duckrun requests
+      - name: Collect what this run created
+        uses: actions/download-artifact@v4
+        with:
+          pattern: record-fragment-*
+          path: fragments
+      # Merged into a scratch record first: the items are spread across one fragment per job, and
+      # the teardown has to see all of them. This copy is thrown away — the `record` job below
+      # re-merges everything including the deletions this writes.
+      - name: Delete them
+        run: |
+          set -euo pipefail
+          python .github/scripts/record.py combine fragments "$RUNNER_TEMP/sofar.json"
+          python .github/scripts/provision.py teardown "$RUNNER_TEMP/sofar.json"
+      # always(): a partial teardown still deleted things, and the record has to say which.
+      - name: Upload the run-record fragment
+        if: always()
+        continue-on-error: true
+        uses: actions/upload-artifact@v4
+        with:
+          name: record-fragment-50-teardown
+          path: record/
+          if-no-files-found: ignore
+
   # The lag is its own job so the wait is visible in the run graph rather than buried in a step, and
   # so the measure stage's timeout still describes the measurement.
   lag:
     name: wait for the metrics model
-    needs: [build, benchmark]
+    needs: [build, benchmark, teardown]
     if: inputs.measure && !failure() && !cancelled()
     runs-on: ubuntu-latest
     timeout-minutes: 60
@@ -260,7 +315,7 @@ jobs:
   # something. A record of a broken run is worth more than no record.
   record:
     name: record the run
-    needs: [build, benchmark, measure]
+    needs: [build, benchmark, teardown, measure]
     if: ${{ always() }}
     runs-on: ubuntu-latest
     timeout-minutes: 10

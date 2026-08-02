@@ -315,7 +315,8 @@ Rules that keep it honest:
   for duckrun **and** iceberg from one flag, so `REBUILD_SUMMARY=1` broke the iceberg leg and left
   a `fct_summary__dbt_backup` behind — which is why the `rebuild_summary` workflow input and both
   CI rebuild steps were removed. `REBUILD_SUMMARY` / `--vars 'rebuild_summary: true'` survives
-  only as a by-hand lever in the dwh model; CI's clean-table lever is `reset_outputs`.
+  only as a by-hand lever in the dwh model; CI's clean-table lever is the `teardown` — every
+  dispatch starts from nothing because the previous one deleted its own output item.
   See [LEARNINGS.md](LEARNINGS.md).
   This lever carries more weight now that both duckdb targets are insert-only on `fct_summary`: a
   **revised** `mw`/`price` cannot be repaired by any incremental run there, only by a rebuild.
@@ -599,57 +600,60 @@ the `cu/` section.
   shared value later and spark must stay behind: dbt-fabricspark opens one Spark REPL per thread
   and Fabric packs at most five per Livy session, so more means a second Spark application,
   separately billed, for one `dbt run`.
-- **A default dispatch is now REPRODUCIBLE: `reset_outputs` and `skip_download` are both ON.** The
-  pair is the point — reset means no incremental history carries over, `skip_download` means the
-  input archive does not move, so two dispatches of the same commit differ by nothing but what was
-  deliberately changed. Each on its own is weaker: a reset over a grown archive still measures a
+- **A default dispatch is REPRODUCIBLE, and it is now `teardown` + `skip_download` that make it
+  so.** Teardown means no tables survive to build on, `skip_download` means the input archive does
+  not move, so two dispatches of the same commit differ by nothing but what was deliberately
+  changed. Each on its own is weaker: a from-scratch build over a grown archive still measures a
   different workload, and a frozen archive on top of yesterday's tables still measures yesterday's
-  incremental state. What it costs is real and was accepted knowingly: **every default dispatch is a
-  from-scratch build of 370M rows per selected engine**, not a top-up. Turn `reset_outputs` off for a
-  cheap incremental run; turn `skip_download` off to extend the archive, which is a different
-  question and deserves its own run. `land` still runs either way — it provisions the landing
-  lakehouse and it is what the reset's display-name reservation expires behind; only the DOWNLOAD is
-  skipped.
-- **`engines` selects which legs run, and the reset is SCOPED to them.** `provision.py reset` takes
-  a comma-separated list (`OUTPUT_BY_ENGINE`), the `plan` job computes both matrices with
-  `fromJSON`, and `stats.py` reads only `BUILD_ENGINES`. Dropping an item the dispatch will not
-  rebuild is not tidiness — it is a from-scratch rebuild of that engine's 370M rows charged to
-  whoever dispatches next, which is why "reset everything, build one engine" is not a thing this
-  workflow can do by accident. An unknown engine name is fatal in all three places: a typo that
-  silently builds nothing looks exactly like a build that worked. The `layout` job then records
-  whatever was built, gated on nothing — comparing generations is the dashboard's job.
-- **`reset_outputs` never touches the landing data.** It runs as its own `reset` job — **first,
-  before `land`** — which calls `provision.py reset` to DELETE the selected engines' output items
-  (`dbt_delta`, `dbt_iceberg`, `dbt_spark`, `dbt_dwh`). The engine legs then create their item the ordinary way, unaware a reset happened.
-  **That ordering is load-bearing, not tidiness:** Fabric keeps a deleted item's DISPLAY NAME
-  reserved for minutes after the item stops being listed, so the first version — each leg
-  dropping and recreating its own item on the way in — drew `409 ItemDisplayNameNotAvailableYet`
-  and killed three of four legs on run 30639018466. The one that survived did so purely because
-  its delete took 36s to propagate. Waiting on the item list proves nothing; only the create can
-  tell you the name is free, which is why the fix was the download-long gap and not a longer poll.
-  **`skip_download` being on by default removes that gap**, so `ensure()`'s 409 poll (40 attempts
-  at 15s ≈ 10 minutes, keyed on `ItemDisplayNameNotAvailableYet`/`isRetriable`) is now the PRIMARY
-  mechanism rather than a backstop for by-hand resets. That is sound — polling the create is the
-  only authoritative test — but it means a reproducible dispatch can spend a few minutes per leg
-  waiting on a name, and a leg that fails there is this, not a permissions problem. Turning
-  `skip_download` off restores the old gap as a side effect. `dbt_landing` is never dropped — `drop()` refuses it by name, and the `reset`
-  mode's item list does not contain it. Neither is `dbt_dwh_src`, the shortcut-only lakehouse dwh
-  reads landing through: it is an input, it holds no data, and dropping it would only cost a name
-  reservation. The other three legs' shortcuts DO go down with their lakehouse and are recreated
-  by the leg on the way in. That lakehouse holds
-  the downloaded AEMO archive, the one thing here that cannot be rebuilt from the workspace, and
-  re-landing it means re-downloading years of files `download_limit` at a time.
-  This is the lever to reach for when a table is wrong in a way no incremental write can repair —
-  a revised `mw`/`price` on the insert-only duckdb targets, say — because the per-engine
-  alternatives are all sharp: `--full-refresh` DROPs on dwh, fails every time on iceberg, and has
-  been killed outright on duckrun's 143M-row `fct_summary`. It deletes the item instead of a
-  folder, which is the difference between a rebuild and the `[DELTA_TABLE_NOT_FOUND]` trap.
-  Two costs, neither of which surfaces as an error: a recreated item has a **new GUID**, so
-  anything bound to the old one (a Direct Lake semantic model, a shortcut) points at something
-  gone — `benchmark/` survives because it deletes and recreates its models per dispatch — and the
-  recreated warehouse comes back with a fresh `connectionString` and **no grants**.
-  The reset path runs offline against stubbed HTTP in seconds; do that before dispatching, since
-  the flag's failure mode is deleting the wrong thing.
+  incremental state. What it costs is real and was accepted knowingly: **every dispatch is a
+  from-scratch build of 370M rows for the selected engine**, not a top-up. Turn `teardown` off to
+  keep the tables for a cheap incremental next run; turn `skip_download` off to extend the archive,
+  which is a different question and deserves its own run. `land` still runs either way — it
+  provisions the landing lakehouse; only the DOWNLOAD is skipped.
+- **`engines` selects which leg runs, and everything is scoped to it.** The `plan` job computes both
+  matrices with `fromJSON` and `stats.py` reads only `BUILD_ENGINES`. An unknown engine name is
+  fatal in both places: a typo that silently builds nothing looks exactly like a build that worked.
+  The `layout` job then records whatever was built, gated on nothing — comparing generations is the
+  dashboard's job.
+- **THE TEARDOWN DELETES EVERYTHING THE RUN CREATED, except `dbt_landing`, and it deletes BY GUID.**
+  `reset_outputs` and the `reset` job are gone; `provision.py teardown <record>` runs LAST in
+  `all.yml` and removes every item this run's own record names whose `role` is not `landing` or
+  `folder` — the output lakehouse or warehouse, `dbt_dwh_src`, the benchmark's semantic model. The
+  throwaway notebook has already deleted itself in `fabric_run.py`'s `finally`.
+  **Why, and it is not tidiness:** an item that outlives its run keeps drawing background CU —
+  OneLake bills reads against an idle lakehouse, a Direct Lake model gets refreshed — and that CU
+  lands in the NEXT dispatch's measurement window with nothing in the capacity data to say it came
+  from an older generation. Run 30699626723 measured 1,578 CU for an iceberg item the dispatch had
+  not even selected. Deleting per run is what makes an item GUID belong to exactly one run, which is
+  the whole basis of GUID-keyed attribution.
+  **By GUID, not by name, is the safety property.** A name-driven teardown would delete a `dbt_spark`
+  a concurrent dispatch had just created, and there is no undo. `dbt_landing` is refused twice over
+  — by role, and by name in `drop_guid()` — because it holds the downloaded AEMO archive, the one
+  thing here that cannot be rebuilt from the workspace; re-landing it means re-downloading years of
+  files `download_limit` at a time. The `dbt` folder survives because landing lives in it.
+  **A delete that does not take fails the job.** Fabric accepts the DELETE asynchronously (202) and
+  an item still listed is still billable, so `drop_guid()` polls `GET /items/{guid}` for a 404 and
+  the run goes red with `STILL BILLABLE` rather than reporting a clean teardown. Failures are
+  collected, not raised one at a time — a warehouse that refuses must not leave the lakehouses
+  standing behind it.
+  **The display-name reservation moved to the good side of the run.** `reset` deleted immediately
+  before the build, so Fabric was still holding the names when the legs created theirs — `409
+  ItemDisplayNameNotAvailableYet`, which killed three of four legs on run 30639018466; the survivor
+  survived only because its delete took 36s to propagate. Deleting at the END puts a whole idle
+  period between a delete and the next dispatch's create. `ensure()`'s 409 poll (40 attempts at 15s
+  ≈ 10 minutes) stays as the guard for back-to-back dispatches, and a leg waiting minutes there is
+  that, not a permissions problem.
+  Two costs, neither of which surfaces as an error: a recreated item has a **new GUID**, so anything
+  bound to the old one (a Direct Lake semantic model, a shortcut) points at something gone —
+  `benchmark/` survives because it deploys its models per dispatch — and the recreated warehouse
+  comes back with a fresh `connectionString` and **no grants**.
+  `python -m pytest .github/scripts/ -q` exercises the whole path against a stubbed Fabric in
+  seconds, and `dbt.yml`'s free `plan` job runs it before any leg spends capacity. Run it before
+  touching this: the failure mode is deleting the wrong thing.
+- **`full_load` in the record is DERIVED, not an input.** It is `true` when the run's own output
+  item carries `created: true` — i.e. the previous run's teardown really did run. An input only ever
+  stated an intention; 143M rows written from nothing and 3M rows appended are not the same run, and
+  the record has to say which one a layout or a CU number describes.
 - **`native_execution_engine` toggles Fabric's NEE on the spark leg, off by default.** It sets
   `SPARK_NATIVE_ENABLED` → `spark.native.enabled` in the Livy conf, and that one key is the whole
   recipe: Microsoft's current session-level doc sets nothing else. Earlier preview guidance and
@@ -991,12 +995,12 @@ follows describes the measurement, and anything about the PAGE now lives in the 
   - **`dbt_dwh_src`, never `dbt_dwh_landing`.** `engine_of` substring-matches `CU_ENGINES` **in
     order** and `landing` is first, so the `_landing` spelling matches `landing` and puts dwh's
     reads straight back where they came from. Pinned by a test.
-  - **The shortcut is ensured in each ENGINE's provision mode, not in `land`.** `reset` deletes
-    `dbt_delta`/`dbt_iceberg`/`dbt_spark` and takes their shortcut with them, and it runs *before*
-    `land` — so at `land` time those lakehouses may not exist. The leg that recreates the item
-    recreates the shortcut, find-or-create, on the way in. `dbt_dwh_src` is **not** in `OUTPUTS`
-    and is never dropped: it holds no data, and a deleted-then-recreated item is the
-    `ItemDisplayNameNotAvailableYet` 409 from run 30639018466.
+  - **The shortcut is ensured in each ENGINE's provision mode, not in `land`.** The teardown
+    deletes `dbt_delta`/`dbt_iceberg`/`dbt_spark`/`dbt_dwh_src` at the end of the previous run and
+    takes their shortcuts with them, so at `land` time those lakehouses do not exist. The leg that
+    recreates the item recreates the shortcut, find-or-create, on the way in. `dbt_dwh_src` now goes
+    down with the rest — it was kept alive to dodge the `ItemDisplayNameNotAvailableYet` 409 from
+    run 30639018466, which deleting at the END of a run removes the occasion for.
   - **`dbt.yml` must not set a job-level `FILES_PATH`.** It outranks what `provision.py <engine>`
     writes to `$GITHUB_ENV`, so a leftover `FILES_PATH: ${{ needs.land.outputs.files_path }}` keeps
     every leg on the shared direct path and the split silently does not happen. The `land` job's
@@ -1220,7 +1224,7 @@ follows describes the measurement, and anything about the PAGE now lives in the 
   different questions about the same work and must not be summed, which is also why the three
   records below the line were **deleted from `history/`** rather than kept as a series nobody could
   read straight. The previous floor was `2026-08-01T10:00:00`, the from-scratch run 30676635835 that
-  ran with `reset_outputs` — all four output items deleted and recreated, so rows before IT belong to
+  ran with the outputs reset — all four output items deleted and recreated, so rows before IT belong to
   items that no longer exist under the same display names; and the one before that was pinned to a
   benchmark methodology change (`8c037c8`/`debef3a`). Each reasoning still holds, each is simply
   superseded — a floor is bumped, never widened. Older rows stay retained and readable with a wider
@@ -1289,7 +1293,7 @@ follows describes the measurement, and anything about the PAGE now lives in the 
   `FABRIC_WORKSPACE_ID`, `CU_CAPACITY_ID`, `CU_METRICS_WORKSPACE_ID`, `CU_METRICS_MODEL_ID`. No
   tracked file outside `history/` holds a real one — the `model.bim`'s Direct Lake URL carries a
   zeros placeholder (`deploy()` rewrites both ids anyway, and the checked-in item id had already
-  gone stale when `reset_outputs` recreated `dbt_delta`), and `benchmark/.platform`'s `logicalId`
+  gone stale when the teardown recreated `dbt_delta`), and `benchmark/.platform`'s `logicalId`
   identifies the template, not anything in the tenant. Keep the placeholder URL's SHAPE though, and
   for the repoint rather than the detection: `deploy(lakehouse=…)` finds the ids to rewrite with
   `_ONELAKE_REF` = `onelake\.dfs\.fabric\.microsoft\.com/([0-9a-fA-F-]{36})/([0-9a-fA-F-]{36})`
