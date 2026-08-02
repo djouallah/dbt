@@ -1025,9 +1025,13 @@ capacity for the GUIDs in those records, tops up `history/cu.json`, and publishe
   second read returns bigger numbers and `max()` takes them. "May still rise" on the page is DERIVED
   from `run.finished` being under two hours old — a property of the clock, not a flag written into a
   file that then has to be kept in step.
-- **`landing` is a stage, not an engine**, and it is the ONLY inexact attribution left. `dbt_landing`
-  is the one item no run deletes, so its total is cumulative over the measured window rather than any
-  single run's share. Reported on its own row, never added to an engine's column.
+- **`landing` CU IS NOT ON THE PAGE, and neither is anything else that is not an engine.** The
+  page compares engines; `dbt_landing` is the ingestion staging area that no run deletes and every
+  run reads, so its CU is one cumulative figure belonging to none of them. It briefly had a row of
+  its own and the same number appeared under every column, which reads as "each of them spent this".
+  `NON_ENGINE_ROLES` skips it and the `folder` outright. The archive's SIZE is still reported from
+  `stats.py`'s listing — input volume is a different question from what ingesting it cost. With this
+  gone there is no inexact attribution left anywhere on the page.
 - **The measurement can fail; the page cannot.** `measure` is `continue-on-error` and `render` is
   `always()`, so a throttled metrics model costs a stale number and never a stale page. The render job
   installs **no `requests`** — `measure.py` imports it optionally so that job proves by running that

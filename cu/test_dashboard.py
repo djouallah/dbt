@@ -49,27 +49,32 @@ def test_the_role_decides_the_class_not_the_fabric_item_kind():
         "NB": {"role": "compute", "name": "dbt-spark-ab12"},
         "SEM": {"role": "semantic_model", "name": "aemo_spark"},
     })
-    cells, _landing, _missing = d.run_cu(r, ledger({"OUT": 10.0, "NB": 900.0, "SEM": 40.0}))
+    cells, _missing = d.run_cu(r, ledger({"OUT": 10.0, "NB": 900.0, "SEM": 40.0}))
     assert cells == {"etl": {"dbt_spark (output)": 10.0, "dbt-spark-ab12 (compute)": 900.0},
                      "analytics": {"aemo_spark (semantic_model)": 40.0}}
     assert d.class_total(cells, "etl") == 910.0
     assert d.class_total(cells, "analytics") == 40.0
 
 
-def test_landing_is_reported_apart_and_never_joins_an_engine_total():
-    """`dbt_landing` is the one item no run deletes, so its total is cumulative over the measured
-    window rather than any one run's share. It is a stage every engine reads from, not a competitor."""
+def test_landing_cu_is_not_on_the_page_at_all():
+    """The page compares ENGINES. `dbt_landing` is the ingestion staging area — no run deletes it and
+    every run reads it, so its CU is one cumulative figure belonging to no engine. It is skipped
+    outright, not given a row: the same number repeated under every column read as "each of them
+    spent this". The archive's SIZE still appears — input volume is a different question from what
+    ingesting it cost."""
     r = rec("r-1.json", "spark", {"OUT": {"role": "output", "name": "dbt_spark"},
                                   "LAND": {"role": "landing", "name": "dbt_landing"}})
-    cells, landing, _missing = d.run_cu(r, ledger({"OUT": 10.0, "LAND": 507.0}))
-    assert landing == 507.0
+    cells, missing = d.run_cu(r, ledger({"OUT": 10.0, "LAND": 507.0}))
     assert d.class_total(cells, "etl") == 10.0, "landing must not be added to the engine's own CU"
+    assert missing == [], "landing is not an item whose CU could be missing"
+    assert not any("507" in lbl or 507.0 == v
+                   for per in cells.values() for lbl, v in per.items())
 
 
 def test_the_dbt_folder_costs_nothing_and_is_skipped():
     r = rec("r-1.json", "dwh", {"F": {"role": "folder", "name": "dbt"},
                                 "OUT": {"role": "output", "name": "dbt_dwh"}})
-    cells, _l, missing = d.run_cu(r, ledger({"OUT": 1.0}))
+    cells, missing = d.run_cu(r, ledger({"OUT": 1.0}))
     assert cells == {"etl": {"dbt_dwh (output)": 1.0}}
     assert missing == [], "a folder is not an item whose CU could be missing"
 
@@ -79,7 +84,7 @@ def test_an_item_the_ledger_has_never_seen_is_unmeasured_not_zero():
     able to say which."""
     r = rec("r-1.json", "spark", {"OUT": {"role": "output", "name": "dbt_spark"},
                                   "SEM": {"role": "semantic_model", "name": "aemo_spark"}})
-    cells, _l, missing = d.run_cu(r, ledger({"OUT": 5.0}))
+    cells, missing = d.run_cu(r, ledger({"OUT": 5.0}))
     assert cells == {"etl": {"dbt_spark (output)": 5.0}}
     assert missing == ["semantic_model/aemo_spark"]
 
@@ -186,3 +191,13 @@ def test_no_records_explains_the_contract_rather_than_printing_an_empty_page():
 def test_a_missing_directory_is_an_empty_list_not_an_exception(tmp_path):
     assert d.load_runs(str(tmp_path / "nope")) == []
     assert d.load_ledger(str(tmp_path / "nope.json"))["items"] == {}
+
+
+def test_the_rendered_page_mentions_no_landing_cu_anywhere():
+    """Belt and braces on the whole render path, not just the join."""
+    runs = [rec("a-1.json", "duckrun", {"OUT": {"role": "output", "name": "dbt_delta"},
+                                        "L": {"role": "landing", "name": "dbt_landing"}}),
+            rec("b-2.json", "spark", {"OUT2": {"role": "output", "name": "dbt_spark"},
+                                      "L": {"role": "landing", "name": "dbt_landing"}})]
+    out = _render(runs, ledger({"OUT": 1.0, "OUT2": 2.0, "L": 70.2}))
+    assert "70.2" not in out and "dbt_landing (" not in out

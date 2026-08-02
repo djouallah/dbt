@@ -131,9 +131,12 @@ because that artifact has to open off a local disk years later.
   is what makes the width work: item-major needs a column per operation type and a lakehouse alone
   brings a dozen. **No total column and no grand-total row** — both would sum ACROSS engines, which
   is the one sum on this page that answers nothing, since the engines are alternatives to each other.
-- **`landing` is a stage, not an engine.** `dbt_landing` holds the downloaded AEMO archive and is
-  the one item no run deletes, so its total is cumulative over the measured window rather than any
-  one run's share. Reported on its own row, never added to an engine's column.
+- **`landing` CU is not on the page at all.** The page compares ENGINES. `dbt_landing` is the
+  ingestion staging area — no run deletes it, every run reads it — so its CU is one cumulative figure
+  belonging to no engine, and it answers no question this page asks. It was briefly given a row of
+  its own; the same number repeated under every column read as "each of them spent this". The
+  archive's SIZE is still reported, because input volume is a different question from what ingesting
+  it cost.
 - **Input archive**: files and bytes in the landing archive, from `stats.py`'s listing. Every other
   number on the page describes what came OUT.
 - **Table layout**, every shared table, mart first, with the analytics CU beside the mart alone (it

@@ -65,8 +65,11 @@ COL_SEP = "·"
 # work done to BUILD the tables; a semantic model is only ever queried. This replaces classification
 # by Fabric item kind, read out of a snapshot that had usually not catalogued a minutes-old item.
 ANALYTICS_ROLES = {"semantic_model"}
-# Not an engine and never a column: the landing lakehouse is the shared archive every engine reads,
-# so its CU is an input cost, not one engine's. `folder` holds nothing and costs nothing.
+# Skipped entirely — not a column, not a row, not a footnote. This page compares ENGINES. The
+# landing lakehouse is the ingestion staging area that no run deletes and every run reads, so its CU
+# is one cumulative figure belonging to no engine; a workspace `folder` never accrues a capacity unit
+# at all. The archive's SIZE is still reported (render_input) — that is the input volume, which is a
+# different question from what ingesting it cost.
 NON_ENGINE_ROLES = {"landing", "folder"}
 
 
@@ -135,7 +138,7 @@ def item_cu(ledger, guid):
 # ------------------------------------------------------------------------------------- the join
 
 def run_cu(rec, ledger):
-    """`({class: {item label: CU}}, landing CU, unmeasured items)` for one run.
+    """`({class: {item label: CU}}, unmeasured items)` for one run.
 
     THE join, and it is a dictionary lookup: every GUID the run recorded, looked up in the ledger,
     filed under the class its ROLE implies. No allocation and no heuristic, because the teardown
@@ -145,26 +148,26 @@ def run_cu(rec, ledger):
     they cost nothing and say more: `dbt-duckrun-*` at 29,571 CU beside `dbt_delta` at 1,509 is the
     whole story of where a DuckDB leg's cost goes, and no operation name carries that.
 
-    `dbt_landing` is the exception — never deleted, read by every engine — so its total is cumulative
-    over the measured window rather than this run's share. It is returned separately and never added
-    to an engine.
+    **`landing` and `folder` are skipped entirely, not reported apart.** The page compares ENGINES.
+    `dbt_landing` is the ingestion staging area — no run deletes it, every run reads it, so its CU is
+    one cumulative figure that belongs to no engine and answers no question this page asks. It was
+    briefly given a row of its own; the same number repeated under every column read as "each of them
+    spent this", which is the opposite of what it meant. The archive's SIZE is still reported (see
+    `render_input`) — that is the input volume, not the cost of ingesting it.
     """
-    cells, landing, unmeasured = {}, None, []
+    cells, unmeasured = {}, []
     for guid, item in (rec.get("items") or {}).items():
         role = item.get("role") or "?"
-        if role == "folder":                     # a workspace folder never accrues a capacity unit
+        if role in NON_ENGINE_ROLES:
             continue
         value = item_cu(ledger, guid)
-        if role == "landing":
-            landing = (landing or 0.0) + value if value is not None else landing
-            continue
         if value is None:
             unmeasured.append(f"{role}/{item.get('name') or guid}")
             continue
         cls = "analytics" if role in ANALYTICS_ROLES else "etl"
         label = f"{item.get('name') or guid} ({role})"
         cells.setdefault(cls, {})[label] = cells.setdefault(cls, {}).get(label, 0.0) + value
-    return cells, landing, unmeasured
+    return cells, unmeasured
 
 
 def class_total(cells, cls):
@@ -358,23 +361,6 @@ def render_sources(cols, ledger, unmeasured):
           "makes a Fabric item GUID belong to exactly one run and the attribution exact.</sub>")
 
 
-def render_landing(cols, per_landing):
-    """The shared input cost, kept OUT of every engine column.
-
-    `dbt_landing` holds the downloaded AEMO archive and is the one item no run deletes, so its total
-    is cumulative over the measured window rather than any single run's share. It is a stage every
-    engine reads from, not a fifth competitor.
-    """
-    rows = [(col, per_landing.get(col)) for col, _e, _r in cols]
-    if not any(v for _c, v in rows if v):
-        return
-    print("\n<sub>`dbt_landing` — the shared archive every engine reads. Cumulative over the "
-          "measured window, and NOT part of any engine's column:</sub>\n")
-    print("| | " + " | ".join(c for c, _v in rows) + " |")
-    print("|:--|" + "---:|" * len(rows))
-    print("| landing | " + " | ".join("—" if v is None else f"{v:,.1f}" for _c, v in rows) + " |")
-
-
 def render_input(cols):
     """How much data went IN. Every other number on this page describes what came out."""
     have = [(col, ((rec.get("layout") or {}).get("landing") or {})) for col, _e, rec in cols]
@@ -448,11 +434,10 @@ def render_layouts(cols, analytics):
 
 def render(cols, runs, ledger):
     """The whole page, on stdout, as the markdown subset `report_html.py` renders."""
-    per_col, per_landing, analytics, unmeasured = {}, {}, {}, {}
+    per_col, analytics, unmeasured = {}, {}, {}
     for col, _engine, rec in cols:
-        cells, landing, missing = run_cu(rec, ledger)
+        cells, missing = run_cu(rec, ledger)
         per_col[col] = cells
-        per_landing[col] = landing
         unmeasured[col] = missing
         analytics[col] = class_total(cells, "analytics")
 
@@ -485,7 +470,6 @@ def render(cols, runs, ledger):
 
     print("\nEvery engine's latest run, summed:\n")
     engine_table(per_col, cols)
-    render_landing(cols, per_landing)
     render_input(cols)
     render_layouts(cols, analytics)
 
