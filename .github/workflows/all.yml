@@ -1,16 +1,17 @@
-name: Build, benchmark, measure
+name: Build and benchmark
 
-# THE dispatch. One run answers the whole question: build the tables on four engines, query them
-# through Direct Lake, then read what all of that cost in capacity units and FILE the record.
+# THE dispatch. Build the tables, query them through Direct Lake, delete everything the run created,
+# and FILE ONE JSON RECORD.
 #
-#   stamp → build (dbt.yml) → benchmark (benchmark.yml) → lag → measure (cu.yml) → history/<record>.json
+#   open record → build (dbt.yml) → benchmark (benchmark.yml) → teardown → history/runs/<record>.json
 #
-# **It does not publish a page**, and that is the contract: this produces the numbers, `dashboard.yml`
-# renders them, dispatched by a human afterwards. Chaining the publish onto the end of this meant
-# every measurement republished whether or not anyone had looked at it. Do not add a `dashboard`
-# job here.
+# **IT READS NO CAPACITY UNITS.** That was a `lag` + `measure` stage on the end of this chain and it
+# is gone. CU is the `Dashboard` workflow's business: it reads the metrics model by ITEM GUID, and
+# the GUIDs are in the record this run commits. Splitting them is what makes each side simple — this
+# one never waits for a metrics model, and the CU read never has to be re-run because a build was
+# slow. Do not add a measure or a dashboard job here.
 #
-# The three called workflows are unchanged and still dispatchable on their own — this composes them,
+# The two called workflows are unchanged and still dispatchable on their own — this composes them,
 # it does not replace them. Skipping a stage is an input, so a build-only dispatch spends no
 # benchmark CU.
 #
@@ -28,10 +29,6 @@ on:
         default: true
       benchmark:
         description: "run the Direct Lake benchmark. Its query passes are what CREATE the analytics CU — with this off the report's analytics bars are empty, which is correct rather than broken."
-        type: boolean
-        default: true
-      measure:
-        description: "read capacity units and commit the history record (the page is a separate, manual Dashboard dispatch)"
         type: boolean
         default: true
       teardown:
@@ -95,22 +92,6 @@ on:
         description: "idle seconds between benchmark engines"
         type: string
         default: "600"
-      cu_lag_minutes:
-        description: "wait this long before reading capacity units. Operations reach the metrics model ~6 minutes late and are smoothed over 5-64; below ~10 the newest work is simply missing, and it reads as an engine that cost nothing."
-        type: string
-        default: "15"
-      model_clock_offset_hours:
-        description: "the Capacity Metrics app's own UTC offset, which is what its timestamps are in. +10 here. Used to turn this run's start into the `since` floor."
-        type: string
-        default: "10"
-      since_override:
-        description: "measure from this instant instead of this run's own start, IN THE MODEL'S CLOCK. For re-measuring a generation that was built by an EARLIER dispatch — with build and benchmark off, that is a re-read for the price of one metrics query, filed as its own record. Blank = this run's start hour, which is what you want when this run built the thing."
-        type: string
-        default: ""
-      refresh:
-        description: "refresh the Capacity Metrics model before reading it. Leave ON when this run built or benchmarked anything — without it, items minutes old are not catalogued and their CU lands in `shared`. Turn OFF for a pure re-read of a settled window, or when the refresh API is rate-limiting (a 429 costs ~4 minutes of retries and changes nothing)."
-        type: boolean
-        default: true
       workspace:
         description: "Fabric workspace GUID. Blank = the FABRIC_WORKSPACE_ID repo secret, which is where it normally comes from."
         type: string
@@ -124,24 +105,20 @@ concurrency:
   cancel-in-progress: false
 
 # A called workflow can never hold MORE than its caller grants, so this is the union of what the
-# three stages need — not a wish list. `contents: write` is here for exactly one reason: `cu.yml`
-# commits the history record. Without it the whole run fails to COMPILE (startup_failure, no jobs,
-# no log), which reads like a broken file rather than a permission that is one level too low.
+# stages need — not a wish list. `contents: write` is here for exactly one reason: the `record` job
+# commits the run record. Without it the whole run fails to COMPILE (startup_failure, no jobs, no
+# log), which reads like a broken file rather than a permission that is one level too low.
 permissions:
   id-token: write     # OIDC to Fabric, every stage
-  contents: write     # cu.yml commits history/
-  actions: read       # cu.yml downloads the `stats` artifact from the dbt run
+  contents: write     # the `record` job commits history/runs/
 
 jobs:
-  # Free, and it is what makes the report describe ONE generation. The CU floor is this run's own
-  # start, so nothing earlier — a previous build, an older benchmark, items that have since been
-  # deleted and recreated — can be summed into it. Floored to the hour because the metrics table is
-  # hourly and a finer floor would silently exclude the run's own first rows.
-  stamp:
-    name: stamp the window
+  # Free, and it opens the document everything else merges into. There is no CU floor to stamp any
+  # more — the `Dashboard` workflow reads capacity by item GUID, and the GUIDs arrive in the record
+  # this job starts.
+  open:
+    name: open the record
     runs-on: ubuntu-latest
-    outputs:
-      since: ${{ steps.s.outputs.since }}
     env:
       RUN_RECORD: ${{ github.workspace }}/record/record-00-run.json
     steps:
@@ -170,21 +147,10 @@ jobs:
           name: record-fragment-00-run
           path: record/
           if-no-files-found: error
-      - id: s
-        run: |
-          set -euo pipefail
-          SINCE="${{ inputs.since_override }}"
-          if [ -n "$SINCE" ]; then
-            echo "CU floor: $SINCE (overridden — measuring a generation this run did not build)" >&2
-          else
-            SINCE=$(date -u -d "+${{ inputs.model_clock_offset_hours }} hours" +%Y-%m-%dT%H:00:00)
-            echo "CU floor: $SINCE (this run's start, model clock UTC+${{ inputs.model_clock_offset_hours }})" >&2
-          fi
-          echo "since=$SINCE" >> "$GITHUB_OUTPUT"
 
   build:
     name: build
-    needs: stamp
+    needs: open
     if: inputs.build
     uses: ./.github/workflows/dbt.yml
     secrets: inherit
@@ -201,7 +167,7 @@ jobs:
   # FAILED build does: benchmarking tables that did not finish writing measures nothing.
   benchmark:
     name: benchmark
-    needs: [stamp, build]
+    needs: [open, build]
     if: inputs.benchmark && !failure() && !cancelled()
     uses: ./.github/workflows/benchmark.yml
     secrets: inherit
@@ -232,7 +198,7 @@ jobs:
   # case for both the bill and the next measurement.
   teardown:
     name: delete this run's items
-    needs: [stamp, build, benchmark]
+    needs: [open, build, benchmark]
     if: ${{ always() && inputs.teardown }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
@@ -269,39 +235,6 @@ jobs:
           path: record/
           if-no-files-found: ignore
 
-  # The lag is its own job so the wait is visible in the run graph rather than buried in a step, and
-  # so the measure stage's timeout still describes the measurement.
-  lag:
-    name: wait for the metrics model
-    needs: [build, benchmark, teardown]
-    if: inputs.measure && !failure() && !cancelled()
-    runs-on: ubuntu-latest
-    timeout-minutes: 60
-    steps:
-      - run: |
-          echo "waiting ${{ inputs.cu_lag_minutes }}m for operations to reach the Capacity Metrics model" >&2
-          sleep $(( ${{ inputs.cu_lag_minutes }} * 60 ))
-
-  measure:
-    name: measure
-    needs: [stamp, lag]
-    if: inputs.measure && !failure() && !cancelled()
-    uses: ./.github/workflows/cu.yml
-    secrets: inherit
-    with:
-      workspace: ${{ inputs.workspace }}
-      since: ${{ needs.stamp.outputs.since }}
-      # Was never passed, so cu.yml's default (true) always applied — including on a measure-only
-      # re-read, where the refresh is pure latency. Power BI throttles the REST API PER IDENTITY,
-      # and the service principal had spent its budget: on runs 30685959678 and 30691130030, half
-      # an hour apart, every refresh attempt was refused 429 — while a human refreshing by hand at
-      # 08:18 went straight through. Not the DAX doing the spending, which is 6 queries a run; the
-      # refresh's own status poll is up to 45. Each refused attempt costs ~4 minutes of retries and
-      # changes nothing, so the caller has to be able to say no.
-      refresh: ${{ inputs.refresh }}
-      # The permanent record, written only from here — see cu.yml.
-      history: true
-
   # ONE JSON per dispatch, and it is the point of the whole chain. Every stage wrote a fragment
   # naming the Fabric items it created under their GUIDs; this merges them, folds in the layout and
   # the benchmark's raw timings, and commits the result.
@@ -315,7 +248,7 @@ jobs:
   # something. A record of a broken run is worth more than no record.
   record:
     name: record the run
-    needs: [build, benchmark, teardown, measure]
+    needs: [open, build, benchmark, teardown]
     if: ${{ always() }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
