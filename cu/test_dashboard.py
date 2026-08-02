@@ -162,10 +162,15 @@ def test_the_page_renders_end_to_end_with_charts_and_a_layout():
 
 
 def test_an_item_missing_from_one_column_prints_a_dash_not_a_zero():
-    """A dash says 'this engine never made an item of that name'; 0.0 would say 'it cost nothing'."""
-    runs = [rec("a-1.json", "duckrun", {"NB": {"role": "compute", "name": "dbt-duckrun-ab12"}}),
-            rec("b-2.json", "spark", {"OUT": {"role": "output", "name": "dbt_spark"}})]
-    out = _render(runs, ledger({"NB": 29571.0, "OUT": 24903.0}))
+    """A dash says 'this engine never made an item of that name'; 0.0 would say 'it cost nothing'.
+
+    duckrun gets two etl items so the class decomposes at all — a class where every column holds one
+    item is printed as the subtotal alone, since the breakdown would just repeat it.
+    """
+    runs = [rec("a-1.json", "duckrun", {"NB": {"role": "compute", "name": "dbt-duckrun-ab12"},
+                                        "OUT": {"role": "output", "name": "dbt_delta"}}),
+            rec("b-2.json", "spark", {"OUT2": {"role": "output", "name": "dbt_spark"}})]
+    out = _render(runs, ledger({"NB": 29571.0, "OUT": 1509.0, "OUT2": 24903.0}))
     rows = [ln for ln in out.splitlines() if ln.startswith("| `dbt-duckrun-ab12")]
     assert rows and "—" in rows[0]
 
@@ -260,3 +265,22 @@ def test_the_table_warns_that_item_rows_are_not_like_for_like():
     say so — it is the most misreadable thing on it."""
     out = _render([_full("a-1.json", "spark")], ledger({"OUT": 34046.3, "SEM": 1514.0}))
     assert "Compare the bold subtotals" in out and "Livy bills against the LAKEHOUSE" in out
+
+
+def test_a_class_with_one_item_per_engine_is_not_decomposed():
+    """analytics is always exactly one semantic model per engine, so item rows there would repeat
+    the subtotal and add a row of em dashes for every other engine — three rows carrying one row's
+    information. etl splits because a DuckDB leg really is a notebook plus a lakehouse."""
+    runs = [rec("a-1.json", "duckrun",
+                {"NB": {"role": "compute", "name": "dbt-duckrun-ab12"},
+                 "OUT": {"role": "output", "name": "dbt_delta"},
+                 "SEM": {"role": "semantic_model", "name": "aemo_duckrun"}}),
+            rec("b-2.json", "spark",
+                {"OUT2": {"role": "output", "name": "dbt_spark"},
+                 "SEM2": {"role": "semantic_model", "name": "aemo_spark"}})]
+    out = _render(runs, ledger({"NB": 26403.5, "OUT": 2463.9, "SEM": 2157.8,
+                                "OUT2": 34046.3, "SEM2": 1514.0}))
+    assert "| **analytics** |" in out and "2,157.8" in out and "1,514.0" in out
+    assert "aemo_duckrun" not in out and "aemo_spark" not in out, "no per-item analytics rows"
+    # etl still decomposes: duckrun is genuinely a notebook plus a lakehouse.
+    assert "`dbt-duckrun-ab12 (compute)`" in out and "`dbt_delta (output)`" in out

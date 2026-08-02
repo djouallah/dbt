@@ -349,13 +349,19 @@ def engine_table(per_col, cols):
         for col in names:
             for label, value in ((per_col.get(col) or {}).get(cls) or {}).items():
                 seen[label] = seen.get(label, 0.0) + value
-        labels[cls] = sorted(seen, key=lambda k: -seen[k])
+        # Decompose a class ONLY when it decomposes something: some column has to hold more than one
+        # item in it. `analytics` is always exactly one semantic model per engine, so its item rows
+        # would repeat the subtotal and add a row of em dashes for every other engine — three rows
+        # carrying one row's information. `etl` splits because a DuckDB leg really is a notebook
+        # plus a lakehouse.
+        deepest = max((len((per_col.get(c) or {}).get(cls) or {}) for c in names), default=0)
+        labels[cls] = sorted(seen, key=lambda k: -seen[k]) if deepest > 1 else []
     # The corner cell names the measure. Every number in the table is one, and a matrix whose values
     # carry no unit gets quoted as "26,128" with no idea what of.
     print("| CU (s) | " + " | ".join(names) + " |")
     print("|:--|" + "---:|" * len(names))
     for cls in ("etl", "analytics"):
-        if not labels[cls]:
+        if not any((per_col.get(c) or {}).get(cls) for c in names):
             continue
         print(f"| **{cls}** | "
               + " | ".join(f"**{class_total(per_col.get(c) or {}, cls):,.1f}**" for c in names)
