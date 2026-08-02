@@ -541,22 +541,10 @@ def render(cols, runs, ledger):
     print(f"## Capacity units — the latest run per engine, as of "
           f"{(ledger.get('updated') or newest or '?')[:16].replace('T', ' ')}\n")
 
-    n = len({base_engine(c) for c, _e, _r in cols})
-    print("**Every number on this page is capacity units (CU-seconds)** — Fabric's own billing "
-          "measure, read from the Capacity Metrics model. Not milliseconds and not rows: what the "
-          f"work COST. One dbt project, {n} engine{'s' if n != 1 else ''}, one landed copy of the "
-          "data: this is what each engine charged to build the same tables and to answer the same "
-          "queries. Attribution is by Fabric ITEM GUID — each run records what it created and then "
-          "deletes it — so no number here is a guess about which engine an item belonged to.\n")
-
-    reads = len(ledger.get("reads") or [])
-    print(" · ".join([f"[source]({SERVER}/{REPO})",
-                      f"`{RUNS_DIR}/` — {len(runs)} run(s), {len(cols)} on this page",
-                      f"`{LEDGER}` — {len(ledger['items'])} item GUID(s) over {reads} read(s)"])
-          + "\n")
-
-    render_sources(cols, ledger, unmeasured)
-
+    # NUMBERS FIRST. What this page is for is the two charts and the table under them; a reader who
+    # already knows what a capacity unit is should not have to scroll past a paragraph explaining it
+    # and a provenance table to reach them. All of that is true, none of it is the finding, and it
+    # reads better as the thing you check after a number surprises you than as a preamble.
     chart("ETL — what building the tables cost", "capacity units, lower is better",
           [[col, round(class_total(per_col[col], "etl"), 1), engine_caption(rec, col)]
            for col, _e, rec in cols])
@@ -568,6 +556,23 @@ def render(cols, runs, ledger):
     engine_table(per_col, cols)
     render_input(cols)
     render_layouts(cols, analytics)
+
+    n = len({base_engine(c) for c, _e, _r in cols})
+    print("\n### About these numbers\n")
+    print("**Every number on this page is capacity units (CU-seconds)** — Fabric's own billing "
+          "measure, read from the Capacity Metrics model. Not milliseconds and not rows: what the "
+          f"work COST. One dbt project, {n} engine{'s' if n != 1 else ''}, one landed copy of the "
+          "data: this is what each engine charged to build the same tables and to answer the same "
+          "queries. Attribution is by Fabric ITEM GUID — each run records what it created and then "
+          "deletes it — so no number here is a guess about which engine an item belonged to.\n")
+
+    render_sources(cols, ledger, unmeasured)
+
+    reads = len(ledger.get("reads") or [])
+    print("\n" + " · ".join([f"[source]({SERVER}/{REPO})",
+                             f"`{RUNS_DIR}/` — {len(runs)} run(s), {len(cols)} on this page",
+                             f"`{LEDGER}` — {len(ledger['items'])} item GUID(s) over "
+                             f"{reads} read(s)"]))
 
 
 def render_empty(runs_dir, ledger_path):

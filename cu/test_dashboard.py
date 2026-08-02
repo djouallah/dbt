@@ -338,3 +338,17 @@ def test_a_changed_archive_between_runs_is_stated_not_averaged():
             _full("b-2.json", "spark", landing={"files": 8338, "size_mb": 170491.4, "folders": {}})]
     out = _render(runs, ledger({"OUT": 1.0, "SEM": 2.0}))
     assert "did not all read the same archive" in out and "150,000.0" in out
+
+
+def test_the_numbers_come_before_the_methodology():
+    """The charts and the table are what the page is for. A reader who already knows what a capacity
+    unit is should not have to scroll past a paragraph explaining it, and a provenance table, to
+    reach them — that material reads better as what you check after a number surprises you."""
+    out = _render([_full("a-1.json", "spark")], ledger({"OUT": 34046.3, "SEM": 1514.0}))
+    first_chart = out.index("<!--chart:")
+    assert first_chart < out.index("**Every number on this page is capacity units")
+    assert first_chart < out.index("### About these numbers")
+    assert first_chart < out.index("Each column is that engine's latest run")
+    assert first_chart < out.index("[source](")
+    # ...and the heading still leads.
+    assert out.index("## Capacity units") < first_chart
