@@ -225,8 +225,6 @@ def teardown(src):
             sys.stderr.write(f"  keeping {role}/{name} ({guid})\n")
             continue
         if it.get("deleted"):
-            # The throwaway notebook deletes itself in fabric_run.py, in a `finally`, so it is
-            # already gone by the time this runs and its record entry already says so.
             sys.stderr.write(f"  {role}/{name} already deleted at {it['deleted']}\n")
             continue
         if not drop_guid(guid, name, it.get("kind") or "Item", role):

@@ -345,9 +345,11 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with: {python-version: "3.11"}
-      # The runner never builds, so it needs only what fabric_run.py imports. `requests` is for its
-      # notebook-GUID resolve and delete. pytz goes into the notebook's own pip list, not here.
-      - run: pip install duckrun requests
+      # The runner never builds, so it needs only what fabric_run.py and provision.py import.
+      # `requests` is provision.py's; fabric_run.py needs none of its own since duckrun >= 0.4.38
+      # hands back the notebook's item id (ScriptResult.item_id) instead of it being resolved by
+      # display name here. pytz goes into the notebook's own pip list, not here.
+      - run: pip install "duckrun>=0.4.38" requests
       - run: python .github/scripts/provision.py ${{ matrix.engine }} >> "$GITHUB_ENV"
       - name: dbt build in Fabric
         run: python .github/scripts/fabric_run.py ${{ matrix.engine }}

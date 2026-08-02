@@ -8,11 +8,14 @@ pip-installs duckrun, and runs .github/scripts/fabric_build.py as a subprocess o
 data-local to OneLake, so a backlog drain never pulls the corpus across the public internet —
 streaming the log back.
 
-The notebook is deleted HERE rather than by duckrun (`keep_notebook=True`), for one reason: Fabric
-bills this leg's whole compute against that item, and duckrun's teardown never hands back its id.
-An unrecorded GUID is compute that the CU ledger cannot attribute to an engine. So the run keeps it,
-resolves the GUID by display name, records it, and deletes it — in a `finally`, since a session-level
-failure raises.
+duckrun creates the notebook, runs it and deletes it; `ScriptResult.item_id` names it (duckrun
+>= 0.4.38), which is the whole reason this file records anything. Fabric bills this leg's compute
+against that item, so a GUID nobody wrote down is compute the CU ledger cannot attribute to an
+engine. This used to be `keep_notebook=True` plus a list-the-workspace-and-match-the-display-name
+resolve and a delete of our own — a reimplementation of duckrun's teardown, two extra control-plane
+calls, and a silent miss whenever the name lookup failed. The id is reported whether or not the
+notebook still exists, and a run that died before the payload ran carries it on the exception, so
+both outcomes are attributable.
 
 argv[1] is the engine (`duckrun` = Delta | `iceberg`). Its output lakehouse and the landing
 Files path are provisioned on the runner first (provision.py) and forwarded as CONFIG env — never
@@ -25,11 +28,8 @@ import sys
 import uuid
 
 import duckrun
-import requests
 
 import record
-
-FAB = "https://api.fabric.microsoft.com/v1"
 
 # Config the shipped project reads via env_var() — forwarded into the notebook if present.
 # Deliberately excludes tokens and the runner-only OneLake curl transport (AZURE_TRANSPORT_*).
@@ -39,39 +39,26 @@ _FORWARD = ("FILES_PATH", "ONELAKE_TABLES_PATH", "WAREHOUSE_PATH", "ONELAKE_ENDP
             "DBT_SCHEMA", "download_limit", "daily_download_limit")
 
 
-def _find_notebook(ws, token, name):
-    """The GUID of the notebook we just ran, by display name. None if it cannot be found.
+def _record_notebook(item_id, engine, name):
+    """Record the throwaway notebook's GUID. Best-effort by construction, twice over: a missed
+    GUID costs one un-attributed row in the CU ledger, and this also runs on the failure path,
+    where an exception raised here would REPLACE the build's own and lose the real cause.
 
-    Best-effort by construction: a missed GUID costs one un-attributed row in the CU ledger, and
-    failing the leg over it would throw away a build that succeeded.
+    No `deleted` timestamp: duckrun's teardown is best-effort (it warns rather than raising), so
+    the record leaves the item to `provision.py teardown`, which polls for a 404 and goes red if
+    it is still listed. A 404 there counts as success, which is the normal case.
     """
     try:
-        r = requests.get(f"{FAB}/workspaces/{ws}/items?type=Notebook",
-                         headers={"Authorization": f"Bearer {token}"}, timeout=60)
-        if r.status_code != 200:
-            print(f"[fabric_run] could not list notebooks ({r.status_code}) — "
-                  f"the compute GUID goes unrecorded", flush=True)
-            return None
-        return next((i["id"] for i in r.json().get("value", [])
-                     if i.get("displayName") == name), None)
+        if not item_id:
+            print(f"[fabric_run] no item id for {name} — its compute GUID goes unrecorded",
+                  flush=True)
+            return
+        record.item(item_id, "compute", "Notebook", name, engine=engine, created=True,
+                    at=record.now())
+        print(f"[fabric_run] notebook {name} ({item_id}) recorded", flush=True)
     except Exception as ex:                             # noqa: BLE001 — never fail a green build
-        print(f"[fabric_run] could not resolve the notebook GUID ({type(ex).__name__})", flush=True)
-        return None
-
-
-def _delete_notebook(ws, token, item_id):
-    try:
-        r = requests.delete(f"{FAB}/workspaces/{ws}/items/{item_id}",
-                            headers={"Authorization": f"Bearer {token}"}, timeout=60)
-        if r.status_code not in (200, 202, 204):
-            print(f"[fabric_run] WARNING: notebook {item_id} not deleted ({r.status_code}) — "
-                  f"delete it by hand, it is billable", flush=True)
-            return False
-        return True
-    except Exception as ex:                             # noqa: BLE001
-        print(f"[fabric_run] WARNING: notebook {item_id} not deleted ({type(ex).__name__})",
+        print(f"[fabric_run] could not record the notebook GUID ({type(ex).__name__}: {ex})",
               flush=True)
-        return False
 
 
 def main() -> int:
@@ -89,17 +76,9 @@ def main() -> int:
     print(f"[fabric_run] engine={engine} cores={cores} notebook={name} "
           f"forwarding: {', '.join(sorted(env))}", flush=True)
 
-    # keep_notebook, then delete it here — the ONE reason being that duckrun's own teardown never
-    # tells us the item id, and a notebook GUID nobody wrote down is a notebook whose compute CU
-    # cannot be attributed to an engine. Deleting it a couple of HTTP calls later than duckrun would
-    # have changes nothing else: the name still carries a fresh random suffix, so nothing waits on a
-    # display-name reservation.
-    #
-    # try/finally, because `run_python` RAISES when no attempt produced a result (a session-level
-    # failure, e.g. capacity throttling). With keep_notebook the item would then survive the leg and
-    # keep costing — the one outcome this change must not introduce. The cleanup swallows its own
-    # errors for the same reason in reverse: an exception raised inside `finally` REPLACES the
-    # build's, and losing the real failure to a bookkeeping one is not a trade worth making.
+    # `run_python` RAISES when no attempt produced a result (a session-level failure, e.g. capacity
+    # throttling). That item was created and did bill, so it is recorded before the failure
+    # propagates — duckrun sets `item_id` on the exception for exactly this case.
     try:
         res = duckrun.workspace(ws).run_python(
             ".",                                # ship this whole dbt project (cwd = project root)
@@ -110,25 +89,11 @@ def main() -> int:
             env=env,
             cores=cores,
             pip=["duckrun", "pytz"],            # duckrun brings dbt-duckdb + duckdb + deltalake
-            keep_notebook=True,
         )
-    finally:
-        try:
-            from duckrun.auth import get_fabric_token
-            token = get_fabric_token()
-            nb = _find_notebook(ws, token, name)
-            if nb:
-                deleted = _delete_notebook(ws, token, nb)
-                record.item(nb, "compute", "Notebook", name, engine=engine, created=True,
-                            at=record.now(), **({"deleted": record.now()} if deleted else {}))
-                print(f"[fabric_run] notebook {name} ({nb}) "
-                      + ("deleted" if deleted else "LEFT BEHIND"), flush=True)
-            else:
-                print(f"[fabric_run] notebook {name} not found — it may already be gone; "
-                      f"its compute GUID goes unrecorded", flush=True)
-        except Exception as ex:                         # noqa: BLE001 — see the comment above
-            print(f"[fabric_run] notebook cleanup failed ({type(ex).__name__}: {ex}) — "
-                  f"CHECK THE WORKSPACE for a leftover {name}", flush=True)
+    except BaseException as ex:
+        _record_notebook(getattr(ex, "item_id", None), engine, name)
+        raise
+    _record_notebook(res.item_id, engine, name)
 
     print(f"[fabric_run] {engine} success={res.success} returncode={res.returncode}", flush=True)
     return 0 if res.success else 1

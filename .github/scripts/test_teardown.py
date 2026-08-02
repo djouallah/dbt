@@ -130,8 +130,8 @@ def test_an_item_not_in_the_record_is_not_deleted(tmp_path, monkeypatch):
 
 
 def test_an_already_deleted_item_is_skipped_not_re_deleted(tmp_path, monkeypatch):
-    """The throwaway notebook deletes itself in fabric_run.py's `finally` and its record entry
-    already says so."""
+    """An entry that already carries a `deleted` timestamp is not re-deleted — whoever wrote it
+    (a re-run of the teardown, a by-hand cleanup) already confirmed the item is gone."""
     fab, _ = run_teardown(
         tmp_path, monkeypatch, items={},
         record_items={"NB": {"role": "compute", "kind": "Notebook", "name": "dbt-spark-ab12",

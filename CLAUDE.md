@@ -344,10 +344,19 @@ handles a small one slightly cheaper. That trade was never worth a decision that
 still run it by hand to reproduce a CI failure. That is a debugging affordance, not a CI path.
 
 The notebook's NAME is load-bearing and is not duckrun's default: `dbt-<engine>-<random>`. Fabric
-bills this leg's compute against the notebook item, so the engine has to be in the name or `cu/`
-reports both DuckDB legs as one row — and it has to be in the *prefix*, because a deleted item's
-display name stays reserved for minutes and `_execute_notebook` creates the item with no retry. See
-the `cu/` section.
+bills this leg's compute against the notebook item, so the engine has to be in the name — and it
+has to be in the *prefix*, because a deleted item's display name stays reserved for minutes and
+`_execute_notebook` creates the item with no retry. See the `cu/` section.
+
+**The notebook GUID comes from duckrun, not from a lookup here.** `ScriptResult.item_id`
+(duckrun ≥ 0.4.38) names the throwaway notebook whether or not it still exists, and a run that died
+before the payload ran carries the same id on the raised exception — so both outcomes are
+attributable and `fabric_run.py` records it on either path. It used to pass `keep_notebook=True`,
+re-list the workspace, match the display name and delete the item itself: two extra control-plane
+calls reimplementing duckrun's own teardown, and a name lookup that fails silently. Do not
+reintroduce that. One consequence of letting duckrun delete it: duckrun's teardown only *warns* on
+a failed delete, so the record deliberately carries **no `deleted` timestamp** and the item is left
+to `provision.py teardown`, which polls for a 404 and goes red if it is still listed.
 
 ## Facts that are easy to get wrong
 
