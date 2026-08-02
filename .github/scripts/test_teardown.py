@@ -21,7 +21,10 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 
 WS = "00000000-0000-0000-0000-0000000000ws"
-FOLDER = {"id": "FOLDER-ID", "displayName": "dbt"}
+# provision.py ensures both folders at import time: `benchmark` for everything a run creates and
+# `landing` for the one lakehouse that outlives it.
+FOLDERS = [{"id": "BENCH-FOLDER", "displayName": "benchmark"},
+           {"id": "LANDING-FOLDER", "displayName": "landing"}]
 
 
 class Resp:
@@ -48,7 +51,7 @@ class Fabric:
 
     def get(self, url, headers=None, **kw):
         if url.endswith("/folders"):
-            return Resp(200, {"value": [FOLDER]})
+            return Resp(200, {"value": FOLDERS})
         if "/items/" in url:
             guid = url.rsplit("/", 1)[1]
             return Resp(200, {"id": guid}) if guid in self.items else Resp(404)
@@ -104,13 +107,13 @@ def test_deletes_the_run_s_items_and_records_each_deletion(tmp_path, monkeypatch
 
 def test_landing_and_the_folder_are_never_touched(tmp_path, monkeypatch):
     """dbt_landing holds the downloaded AEMO archive — the one thing here that cannot be rebuilt
-    from the workspace. The `dbt` folder is what landing lives in."""
+    from the workspace. A folder holds no data and costs nothing."""
     fab, _ = run_teardown(
         tmp_path, monkeypatch,
-        items={"LAND": "dbt_landing", "FOLDER-ID": "dbt", "OUT": "dbt_spark"},
+        items={"LAND": "dbt_landing", "BENCH-FOLDER": "benchmark", "OUT": "dbt_spark"},
         record_items={
             "LAND": {"role": "landing", "kind": "Lakehouse", "name": "dbt_landing"},
-            "FOLDER-ID": {"role": "folder", "kind": "Folder", "name": "dbt"},
+            "BENCH-FOLDER": {"role": "folder", "kind": "Folder", "name": "benchmark"},
             "OUT": {"role": "output", "kind": "Lakehouse", "name": "dbt_spark"},
         })
     assert fab.deletes == ["OUT"]
@@ -196,3 +199,17 @@ def test_the_sql_endpoint_is_recorded_but_never_deleted(tmp_path, monkeypatch):
                       "EP": {"role": "sql_endpoint", "kind": "Warehouse", "name": "dbt_spark"}})
     assert fab.deletes == ["OUT"], "the endpoint goes down with its lakehouse, not separately"
     assert "EP" not in rec
+
+
+def test_both_folders_survive_the_teardown(tmp_path, monkeypatch):
+    """`benchmark` holds what a run creates and `landing` holds what outlives it, and neither is
+    ever deleted — a folder holds no data and costs nothing, and deleting the one landing lives in
+    would be the same mistake as deleting landing."""
+    fab, _ = run_teardown(
+        tmp_path, monkeypatch,
+        items={"BENCH-FOLDER": "benchmark", "LANDING-FOLDER": "landing", "OUT": "dbt_spark"},
+        record_items={
+            "BENCH-FOLDER": {"role": "folder", "kind": "Folder", "name": "benchmark"},
+            "LANDING-FOLDER": {"role": "folder", "kind": "Folder", "name": "landing"},
+            "OUT": {"role": "output", "kind": "Lakehouse", "name": "dbt_spark"}})
+    assert fab.deletes == ["OUT"]

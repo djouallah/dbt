@@ -29,7 +29,14 @@ It deletes the whole ITEM, not tables inside it — a `Tables/<schema>/<name>` f
 hand leaves the catalog entry behind and dbt then emits DML against nothing. `dbt_landing` is
 excluded twice over, by role and by name, and `drop()` refuses it outright: that lakehouse holds the
 downloaded AEMO archive, the one thing here that cannot be rebuilt from anything else in the
-workspace. The `dbt` FOLDER survives too — landing lives in it.
+workspace. Both FOLDERS survive too — they hold no data and cost nothing.
+
+Items live in TWO folders and the split is the point: `benchmark` holds everything a run creates and
+the teardown deletes, `landing` holds the one lakehouse that outlives every run. A workspace listing
+then shows at a glance what is disposable, and `benchmark` is empty between dispatches — which is
+exactly the state a successful teardown leaves behind. `benchmark/deploy_models.py` puts its semantic
+models in the same `benchmark` folder, so one name covers every item either half of the workflow
+makes.
 
 Costs, none of them errors: the dwh warehouse comes back with a new connectionString and no grants,
 and every item comes back with a new GUID, so anything bound to the old one (a Direct Lake semantic
@@ -54,8 +61,8 @@ LANDING = "dbt_landing"
 # so the mapping lives here rather than being spelled out at each call site.
 KIND = {"lakehouses": "Lakehouse", "warehouses": "Warehouse", "folders": "Folder"}
 # What `teardown` will NOT delete, by role. `landing` holds the downloaded AEMO archive — the one
-# thing here that cannot be rebuilt from anything else in the workspace — and `folder` is the `dbt`
-# workspace folder that landing itself lives in. Everything else a run creates is disposable by
+# thing here that cannot be rebuilt from anything else in the workspace — and `folder` is a workspace
+# folder, which holds no data and costs nothing. Everything else a run creates is disposable by
 # construction, which is the point: an item that outlives its run keeps drawing background CU into
 # the NEXT run's window, and there is nothing in a capacity reading that says it did.
 #
@@ -138,7 +145,35 @@ def ensure_folder(name):
     r.raise_for_status()
 
 
-FOLDER_ID = ensure_folder("dbt")
+# TWO folders, and the split is the point: `benchmark` holds everything a run creates and the
+# teardown deletes, `landing` holds the one lakehouse that outlives every run. A workspace listing
+# then shows at a glance what is disposable and what is not — and `benchmark` is empty between
+# dispatches, which is exactly the state the teardown is supposed to leave behind.
+#
+# `benchmark` rather than `dbt` because `benchmark/deploy_models.py` already puts its semantic models
+# there (`BENCH_FOLDER`), so one name now covers every item either half of the workflow creates.
+RUN_FOLDER, LANDING_FOLDER = "benchmark", "landing"
+FOLDER_ID = ensure_folder(RUN_FOLDER)
+LANDING_FOLDER_ID = ensure_folder(LANDING_FOLDER)
+
+
+def reparent(item_id, folder_id, name):
+    """Move an existing item into `folder_id`. Best-effort — a misfiled item still works.
+
+    Needed because `folderId` is only honoured at CREATE: an item provisioned before this split
+    stays where it was, and for `dbt_landing` that is forever, since nothing ever recreates it.
+    """
+    if not folder_id:
+        return
+    try:
+        r = requests.post(f"{FAB}/workspaces/{ws}/items/{item_id}/move", headers=H,
+                          json={"targetFolderId": folder_id}, timeout=60)
+        if r.status_code in (200, 201, 202):
+            sys.stderr.write(f"  moved {name} into folder {folder_id}\n")
+        elif r.status_code not in (400, 404):
+            sys.stderr.write(f"  note: could not move {name} ({r.status_code})\n")
+    except Exception as ex:                            # noqa: BLE001
+        sys.stderr.write(f"  note: could not move {name} ({type(ex).__name__})\n")
 
 
 def drop_guid(guid, name, kind, role):
@@ -230,16 +265,20 @@ def record_sql_endpoint(item_id, name):
         return None
 
 
-def ensure(kind, name, payload=None, role="output"):
+def ensure(kind, name, payload=None, role="output", folder=None):
+    folder = FOLDER_ID if folder is None else folder
     it = find(kind, name)
     if it:
         sys.stderr.write(f"  {kind}/{name} exists ({it['id']})\n")
         record.item(it["id"], role, KIND.get(kind, kind), name, created=False, at=record.now())
+        # `folderId` is honoured only at CREATE, so an item provisioned before this split stays
+        # where it was — and for `dbt_landing` that is forever, since nothing recreates it.
+        reparent(it["id"], folder, name)
         if kind == "lakehouses":
             record_sql_endpoint(it["id"], name)
         return it["id"]
-    sys.stderr.write(f"  creating {kind}/{name} in folder dbt ...\n")
-    body = {"displayName": name, "folderId": FOLDER_ID}
+    sys.stderr.write(f"  creating {kind}/{name} ...\n")
+    body = {"displayName": name, "folderId": folder}
     if payload:
         body.update(payload)
     # THE guard, and the only authoritative one. A create too soon after a delete draws
@@ -338,7 +377,8 @@ if mode == "teardown":
     teardown(sys.argv[2])
 
 elif mode == "land":
-    lh = ensure("lakehouses", LANDING, lh_payload, role="landing")
+    lh = ensure("lakehouses", LANDING, lh_payload, role="landing",
+                folder=LANDING_FOLDER_ID)
     # The FILES_PATH printed here is the DIRECT path, and stays that way: download_aemo.py writes
     # the archive through it, and the download's write CU belongs to `dbt_landing`. Only the legs
     # read through a shortcut, and each ensures its own — see the engine modes below.

@@ -629,6 +629,17 @@ the `cu/` section.
   **It is UNCONDITIONAL — there is no `teardown` input.** A deleted item keeps its CU rows in the
   metrics model (verified by hand against the live model), so deleting costs nothing in measurement
   and there is no case for leaving one standing.
+  **Items live in TWO FOLDERS and the split is the point.** `benchmark` holds everything a run
+  creates and the teardown deletes; `landing` holds the one lakehouse that outlives every run. A
+  workspace listing then shows at a glance what is disposable, and `benchmark` is EMPTY between
+  dispatches — which is exactly the state a successful teardown leaves behind, so an item sitting
+  there is a visible failure rather than one you have to go looking for.
+  `benchmark/deploy_models.py` puts its semantic models in the same `benchmark` folder (`BENCH_FOLDER`),
+  so one name covers every item either half of the workflow makes. Neither folder is ever deleted:
+  they hold no data and cost nothing, and deleting the one landing lives in would be the same mistake
+  as deleting landing. `folderId` is honoured only at CREATE, so `ensure()` also calls `reparent()`
+  on an item it FOUND — otherwise anything provisioned before the split stays where it was, and for
+  `dbt_landing` that is forever.
   **By GUID, not by name, is the safety property.** A name-driven teardown would delete a `dbt_spark`
   a concurrent dispatch had just created, and there is no undo. `dbt_landing` is refused twice over
   — by role, and by name in `drop_guid()` — because it holds the downloaded AEMO archive, the one
