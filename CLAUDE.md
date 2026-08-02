@@ -1016,6 +1016,15 @@ capacity for the GUIDs in those records, tops up `history/cu.json`, and publishe
   safe from truncation when the floor walks forward. Adding would multiply an item's cost by the
   number of reads. And the floor is the earliest recorded run start CLAMPED to `now - 14 days`, so
   one query covers everything still learnable and never more.
+- **ONLY WHOLE GENERATIONS REACH THE PAGE.** `dashboard.py`'s `incomplete()` requires a record to be
+  built, benchmarked AND torn down, and skips anything else by name. Both failures it guards are real
+  and already happened: run 30733912205 predates the teardown, so `dbt_delta` and `aemo_duckrun` were
+  left alive and have been billing ever since — their CU is the cost of everything since, not of that
+  run; and run 30743411308's `bench` job was skipped by the `needs` bug, so it has an ETL half and no
+  analytics, which on a chart reads as "querying spark was free". Both now live in
+  `history/runs/legacy/` with a README saying which is which. `measure.py` deliberately does NOT
+  filter — those items really did cost capacity and the ledger is the ledger; it is the PAGE that
+  must only compare like with like.
 - **The page's engine table is broken down by ITEM, not by operation type.** The item names come
   from the run record, so they cost nothing and say more: `dbt-duckrun-*` at 29,571 CU beside
   `dbt_delta` at 1,509 is the whole story of where a DuckDB leg's cost goes, and no operation name

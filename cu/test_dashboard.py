@@ -201,3 +201,53 @@ def test_the_rendered_page_mentions_no_landing_cu_anywhere():
                                       "L": {"role": "landing", "name": "dbt_landing"}})]
     out = _render(runs, ledger({"OUT": 1.0, "OUT2": 2.0, "L": 70.2}))
     assert "70.2" not in out and "dbt_landing (" not in out
+
+
+def _full(file, engine, **kw):
+    """A record that IS a whole generation: torn down, built, benchmarked."""
+    r = rec(file, engine, {"OUT": {"role": "output", "name": f"dbt_{engine}", "deleted": ago(1)},
+                           "SEM": {"role": "semantic_model", "name": f"aemo_{engine}",
+                                   "deleted": ago(1)},
+                           "L": {"role": "landing", "name": "dbt_landing"}},
+            stats={engine: {"fct_summary": {"total_rows": 1}}}, tables=["fct_summary"], **kw)
+    r["benchmark"] = {"timings": {f"aemo_{engine}": {"q": {"ms_by_pass": [1]}}}}
+    return r
+
+
+def test_a_whole_generation_is_accepted():
+    assert d.incomplete(_full("a-1.json", "spark")) is None
+
+
+def test_a_run_that_was_not_torn_down_is_rejected():
+    """Its items are still alive and still accruing, so the CU is not that run's cost — it is the
+    cost of everything since. Run 30733912205 predates the teardown and is exactly this."""
+    r = _full("a-1.json", "duckrun")
+    del r["items"]["OUT"]["deleted"]
+    assert "not torn down" in d.incomplete(r)
+    assert "dbt_duckrun" in d.incomplete(r), "it must name what is still alive"
+
+
+def test_a_run_with_no_benchmark_is_rejected():
+    """An empty analytics column reads as "querying this engine was free" rather than "nobody
+    measured it". Run 30743411308 is exactly this — the bench job was skipped by a needs bug."""
+    r = _full("a-1.json", "spark")
+    r["benchmark"] = {}
+    assert "query half did not run" in d.incomplete(r)
+
+
+def test_a_run_with_no_layout_is_rejected():
+    r = _full("a-1.json", "spark")
+    r["layout"]["stats"] = {}
+    assert "build half did not report" in d.incomplete(r)
+
+
+def test_incomplete_records_are_skipped_by_the_loader_and_named(tmp_path, capsys):
+    """Skipped, never silently dropped: a page that quietly ignores a record is indistinguishable
+    from one that never had it."""
+    good, bad = _full("a-1.json", "spark"), _full("b-2.json", "dwh")
+    del bad["items"]["OUT"]["deleted"]
+    for r in (good, bad):
+        (tmp_path / r["_file"]).write_text(json.dumps(r), encoding="utf-8")
+    loaded = d.load_runs(str(tmp_path))
+    assert [r["_file"] for r in loaded] == ["a-1.json"]
+    assert "skipping b-2.json" in capsys.readouterr().err

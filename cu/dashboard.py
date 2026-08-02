@@ -108,9 +108,54 @@ def load_runs(directory=None):
             log(f"  skipping {n}: unreadable ({type(ex).__name__}: {ex})")
             continue
         rec["_file"] = n
+        why = incomplete(rec)
+        if why:
+            log(f"  skipping {n}: {why}")
+            continue
         out.append(rec)
     out.sort(key=lambda r: (((r.get("run") or {}).get("started") or ""), r["_file"]))
     return out
+
+
+# Roles the teardown must have deleted. If one is still alive, that run's items are STILL ACCRUING
+# and its numbers are not a measurement of that run — they are a measurement of everything since.
+DELETABLE_ROLES = {"output", "dwh_src", "compute", "semantic_model"}
+
+
+def incomplete(rec):
+    """Why this run cannot go on the page, or `None` if it can.
+
+    The page compares generations, so a run has to be a WHOLE generation: built, benchmarked, and
+    torn down. A partial one is not a smaller answer, it is a misleading one —
+
+    - **no teardown** means the items are still alive and still accruing, so their CU is not this
+      run's cost but the cost of everything since. Run 30733912205 predates the teardown and its
+      `dbt_delta` has been billing ever since.
+    - **no benchmark** means an empty analytics column, which reads as "querying this engine was
+      free" rather than "nobody measured it". Run 30743411308 is exactly that: the `bench` job was
+      skipped by a `needs` bug and only the ETL half exists.
+    - **no layout** means the build half never reported.
+
+    Non-compliant records are skipped and NAMED, never silently dropped — and `measure.py` still
+    reads them, because their items really did cost capacity and the ledger is the ledger.
+    """
+    if not rec.get("engine"):
+        return "no engine recorded"
+    run = rec.get("run") or {}
+    if not (run.get("started") and run.get("finished")):
+        return "no start/finish stamp"
+    items = rec.get("items") or {}
+    if not any((it.get("role") or "") == "output" for it in items.values()):
+        return "no output item"
+    alive = sorted(f"{it.get('role')}/{it.get('name') or g}" for g, it in items.items()
+                   if (it.get("role") or "") in DELETABLE_ROLES and not it.get("deleted"))
+    if alive:
+        return f"not torn down: {', '.join(alive)} — still accruing"
+    if not ((rec.get("layout") or {}).get("stats") or {}).get(rec["engine"]):
+        return "no layout recorded — the build half did not report"
+    if not ((rec.get("benchmark") or {}).get("timings") or {}):
+        return "no benchmark timings — the query half did not run"
+    return None
 
 
 def load_ledger(path=None):
