@@ -6,8 +6,9 @@ only authoritative source, and it is read here with DAX over the Power BI `execu
 **The output is the app's own `Items` visual: item GUID -> CU (s).** One row per item, one number.
 That is all this repo needs, because of three facts:
 
-1. **A deleted item keeps its CU rows.** Verified by hand against the live model — every item is
-   still there after the teardown removed it. So deleting costs nothing in measurement.
+1. **A deleted item keeps its CU rows.** Measured against the live model: run 30743411308's
+   `dbt_spark` was created at 10:16 UTC and deleted by the teardown at 10:34, and still reads
+   30,940.3 CU — matching the app's own Items view to the decimal. Deleting costs nothing.
 2. **Every item is deleted when its run finishes**, so an item's total can only ever be INCOMPLETE,
    never wrong. A first read may undercount (~6 min ingestion lag, then 5-64 min of smoothing); the
    next read returns a bigger number and replaces it. It fixes itself, with nothing to reconcile.
@@ -21,8 +22,13 @@ settle-and-freeze bookkeeping in here. There used to be all four.
 read so items minutes old would be catalogued, and matched item DISPLAY NAMES to work out whose CU
 was whose. Power BI throttles the REST API per identity: the service principal spent its budget, and
 on two consecutive runs every refresh attempt drew 429 while 41,887 CU of DuckDB compute printed
-under `shared` because two throwaway notebooks resolved to no name. None of it was needed — the fact
-table carries `Item` (a GUID) and `Workspace Id` as columns of its own.
+under `shared` because two throwaway notebooks resolved to no name.
+
+None of it was needed, and that is MEASURED rather than argued. The fact table carries `Item Id` and
+`Workspace Id` as columns of its own, and it is DIRECTQUERY — on 2026-08-02 two item GUIDs carried CU
+in it (7,654.8 and 33.2) while being absent from the import-mode `'Items'` dimension entirely, both
+active AFTER the model's last refresh. A brand-new GUID is therefore summable the moment its rows
+land, with no refresh, because this reader never joins `'Items'`.
 
 ## The ledger — `history/cu.json`
 
@@ -82,15 +88,24 @@ MODEL_OFFSET = timedelta(hours=float(os.environ.get("CU_MODEL_OFFSET_HOURS", "10
 RETENTION_DAYS = float(os.environ.get("CU_RETENTION_DAYS", "14"))
 SCHEMA = 1
 
+# The hourly fact table. `Metrics By Item` also exists and is one row per item with no time
+# dimension at all — closer to what this file wants — but it carries no date column, so there is
+# nothing to put a floor on and nothing to verify a floor against. The hourly table summed per item
+# gives byte-identical totals (checked against the app's own Items view) and keeps the window ours.
 TABLE = "Metrics By Item Operation And Hour"
 # Column names move between versions of the app — Microsoft's own accelerator ships four DAX variants
 # for exactly this reason — so every role is resolved against the real schema and a miss fails
 # specifically, naming what was actually there.
+#
+# **The first name in each list is the one MEASURED against the live model (2026-08-02); the rest are
+# fallbacks.** They were the other way round and worked only by falling through, which is luck rather
+# than design. Note especially `Datetime`: the table also has a `Date` column that is date-only, and
+# resolving `when` to that would compare a floor against midnight and silently widen every window.
 REQUIRED = {
-    "item_id": ["Item", "Item Id", "ItemId"],
+    "item_id": ["Item Id", "ItemId", "Item"],
     "workspace_id": ["Workspace Id", "WorkspaceId", "Workspace"],
     "cu": ["CU (s)", "CU(s)", "Total CU (s)", "CU"],
-    "when": ["Date Hour", "DateHour", "Datetime", "Date/Time", "Hour"],
+    "when": ["Datetime", "Date Hour", "DateHour", "Date/Time"],
 }
 
 
@@ -294,19 +309,20 @@ def apply(ledger, read):
 def coverage(runs, read):
     """Which recorded items this read did and did not find. Returns `[(file, found, missing)]`.
 
-    **This is what answers the one open question about the whole design.** The Capacity Metrics app
-    refreshes on its own schedule, and the old reader refreshed it before every read so that items
-    minutes old would be catalogued. That refresh is gone, on the argument that it only ever updated
-    the IMPORT-mode `'Items'` dimension — while the metrics fact table is DirectQuery and carries
-    `Item` as a column of its own, so a GUID needs no cataloguing to be summed.
+    The standing check on the assumption that no metrics-model REFRESH is needed. That assumption is
+    now MEASURED rather than argued (2026-08-02, against the live model): two item GUIDs carried CU
+    in the fact table — 7,654.8 and 33.2 — while being absent from the `'Items'` dimension entirely,
+    and both were active AFTER the model's last refresh. The fact table is DirectQuery and reads
+    live; `'Items'` is import-mode and only moves on refresh. This reader never joins `'Items'`, so a
+    brand-new GUID is summable the moment its rows land.
 
-    Sound in theory, and this is the measurement. A run whose items are all found by a read taken
-    minutes after it finished says the fact table is live and the refresh really was only ever about
-    names. A run whose newest items are missing and then appear hours later says the opposite, and
-    the fix would be to re-add an opt-in refresh — not to guess.
+    Kept anyway, because it costs nothing and it is the thing that would notice if a future version
+    of the app changed that. A run whose items are all found minutes after it finished confirms it; a
+    run whose items are still missing hours later would disprove it, and the fix would be an opt-in
+    refresh rather than a guess.
 
-    A `folder` is excluded: a workspace folder never accrues a capacity unit, so its absence means
-    nothing either way.
+    A `folder` is excluded: a workspace folder never accrues a capacity unit — it is not even in the
+    `'Items'` dimension — so its absence means nothing either way.
     """
     out = []
     for rec in runs:

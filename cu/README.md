@@ -37,20 +37,24 @@ None of it was needed. `Metrics By Item Operation And Hour` carries `Item` (a GU
 `Workspace Id` as columns of its own, so the workspace filter binds with no join and the GUID needs
 no resolving.
 
-**The one assumption, and how it reports on itself.** The refresh updated the IMPORT-mode `'Items'`
-dimension; the metrics fact table is DirectQuery, so a brand-new item GUID should be summable without
-the model being refreshed to catalogue it. Every read checks: `measure.py` compares the GUIDs the run
-records name against the GUIDs the query returned and logs
+**No refresh is needed, and that is MEASURED, not argued** (2026-08-02, against the live model):
 
-    history/runs/2026-08-02T1034Z-30743411308.json: 3/3 recorded item(s) found
+- Two item GUIDs carried CU in `Metrics By Item Operation And Hour` — 7,654.8 and 33.2 — while being
+  **absent from the `'Items'` dimension entirely**, both active *after* the model's last refresh. The
+  fact table is DirectQuery and reads live; `'Items'` is import-mode and only moves on refresh. This
+  reader never joins `'Items'`.
+- A **deleted** item keeps its rows. Run 30743411308 created `dbt_spark` at 10:16 UTC and the
+  teardown deleted it at 10:34; it reads 30,940.3 CU, matching the app's own Items view to the
+  decimal.
+- `measure.py` run against the live model found **6 of 6** recorded items across two run records,
+  deleted ones included.
 
-A run whose items are all found minutes after it finished settles the question. Items still missing
-hours later would disprove it, and the fix would be an opt-in refresh — not a guess. `unfound` is
-recorded in the ledger's `reads` entry either way.
+The check stays anyway, because it costs nothing and would notice if a future version of the app
+changed that. Every read logs
 
-What is already known: a **deleted** item keeps its rows. Run 30743411308 created `dbt_spark`
-(`3CD6810A-0BD4-4CCC-9370-127E8F6B206A`) at 10:16 UTC and the teardown deleted it at 10:34; it shows
-in the app with 30,940 CU.
+    history/runs/2026-08-02T1034Z-30743411308.json: 2/2 recorded item(s) found
+
+and stores `unfound` in the ledger's `reads` entry.
 
 ## One number per item
 

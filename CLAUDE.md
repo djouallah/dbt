@@ -982,15 +982,24 @@ capacity for the GUIDs in those records, tops up `history/cu.json`, and publishe
   principal spent its budget, and on runs 30685959678 and 30691130030 every attempt drew 429 while a
   human refreshing by hand went straight through — leaving 41,887 CU of DuckDB compute in `shared`.
   Do not reintroduce it.
-- **The no-refresh assumption REPORTS ON ITSELF, every read.** The refresh updated the IMPORT-mode
-  `'Items'` dimension; the fact table is DirectQuery, so a brand-new item GUID should be summable
-  without the model being refreshed to catalogue it. That is an argument, not a measurement — so
-  `measure.py`'s `coverage()` compares the GUIDs the run records name against the GUIDs the query
-  returned and logs `<record>: 3/3 recorded item(s) found`, storing `unfound` in the ledger's `reads`
-  entry. All found minutes after a run ends settles it; still missing hours later disproves it, and
-  the fix is an opt-in refresh rather than a guess. Separately and already known: a **deleted** item
-  keeps its rows — run 30743411308's `dbt_spark` (`3CD6810A-…`) was created at 10:16 and deleted at
-  10:34, and shows 30,940 CU in the app.
+- **NO REFRESH IS NEEDED, and this is MEASURED** (2026-08-02, DAX against the live model). Two item
+  GUIDs carried CU in `Metrics By Item Operation And Hour` — 7,654.8 and 33.2 — while being absent
+  from the `'Items'` dimension **entirely**, both active AFTER the model's last refresh. The fact
+  table is DirectQuery and reads live; `'Items'` is import-mode and only moves on refresh; this
+  reader never joins it. A **deleted** item also keeps its rows: run 30743411308's `dbt_spark` was
+  created 10:16 UTC and deleted 10:34, and reads 30,940.3 CU — matching the app's own Items view to
+  the decimal. `measure.py` run against the live model found **6 of 6** recorded items across two
+  records, deleted ones included.
+  `coverage()` keeps checking it every read (`<record>: 2/2 recorded item(s) found`, `unfound` in the
+  ledger's `reads` entry) — not because it is in doubt, but because it costs nothing and would notice
+  if a future version of the app changed it.
+- **The column names are MEASURED too, and `REQUIRED` leads with the real ones.** They are `Item Id`
+  and `Datetime` — not `Item` and `Date Hour`, which is what the candidate lists tried first, so the
+  reader worked only by falling through. Watch `Datetime` in particular: the table also has a `Date`
+  column that is DATE-ONLY, and resolving `when` to it would compare the floor against midnight and
+  silently widen every window. `Metrics By Item` also exists — one row per item, no time dimension,
+  which is closer to what this wants — but with no date column there is nothing to floor and nothing
+  to verify a floor against, and the hourly table summed per item gives identical totals.
 - **THE LEDGER IS ONE NUMBER PER ITEM.** `history/cu.json` is `{item GUID: CU}` and nothing else —
   the same shape as the app's own `Items` visual. Three facts make everything else unnecessary: a
   DELETED item keeps its CU rows (verified by hand against the live model, which is why the teardown
