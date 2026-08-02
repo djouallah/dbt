@@ -251,10 +251,10 @@ jobs:
       # The `stats` artifact comes from the `layout` job of `dbt.yml`, which runs only when all four
       # legs are green — so a SUCCESSFUL run is exactly the set that can carry one.
       #
-      # THIS RUN COMES FIRST, and that is the fix for a real miss. `dbt.yml` usually runs as a
-      # `workflow_call` FROM `all.yml`, and a called workflow does not get a run of its own: the run
-      # belongs to the caller and its artifacts are uploaded there. So `gh run list --workflow
-      # dbt.yml` cannot see the build that just happened — it lists only standalone `dbt` dispatches
+      # THIS RUN COMES FIRST. `all.yml` and `dbt.yml` are gone — the build is now one `benchmark.yml`
+      # workflow — but the trap they created is worth remembering: a `workflow_call`ed workflow does
+      # not get a run of its own, its artifacts belong to the caller, so `gh run list --workflow
+      # dbt.yml` could not see the build that just happened — it lists only standalone `dbt` dispatches
       # — and on run 30685959678 it reached past this run's own build to the last standalone one
       # (30676635835), whose stats predated the `config` block. The page then printed "not recorded
       # by dbt run 30676635835" beside CU that a 64-vCore run had produced: a stale id, and the
@@ -273,7 +273,7 @@ jobs:
         run: |
           set -o pipefail
           ids="$GITHUB_RUN_ID"
-          for wf in all.yml dbt.yml; do
+          for wf in benchmark.yml; do
             ids="$ids $(gh run list --workflow "$wf" --status success -L 5 \
                           --json databaseId -q '.[].databaseId' -R "$GITHUB_REPOSITORY" || true)"
           done

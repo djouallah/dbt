@@ -1,74 +1,81 @@
-name: Direct Lake benchmark
+name: Benchmark
 
-# MANUAL ONLY, non-gating. Ported from djouallah/duckrun's `parquet_layout.yml` (job "Benchmark
-# (AEMO)"), and reframed by what this repo already has.
+# THE dispatch, and one of only two workflows in this repo. It builds the tables on one engine,
+# queries them through Direct Lake, deletes everything it created, and files ONE JSON record.
 #
-# Upstream had to MANUFACTURE the layouts it compared — it built a duckrun `SORTED BY AUTO` copy and
-# a Fabric Spark V-Order copy of one fct_summary, then benchmarked two semantic models over them.
-# Here the layouts already exist: four engines each write their own mart.fct_summary at row-count
-# parity, in genuinely different physical shapes. So there is no build phase and no stats phase —
-# this DEPLOYS one semantic model per engine, RUNS the DAX, and REPORTS the timings. Nothing else.
+#   open → checks → plan → land → build (fabric | server) → layout
+#                                       → resolve → bench → report
+#                                                         → teardown → history/runs/<record>.json
 #
-# What it measures is ONE USER SESSION per engine. The deploy DELETES and recreates the model, so it
-# starts with an empty VertiPaq store; the suite is then walked `runs` times and the pass number is
-# the tier — 1 cold, 2 warm, 3+ hot. Nothing is cleared between passes: the per-query
-# `clearValues` dehydrate is gone, because no user is ever in that state.
+# The other workflow is `Dashboard`, which reads capacity units and publishes the page. The two share
+# nothing but the JSON: this one commits `history/runs/<ts>-<run id>.json` naming every Fabric item
+# GUID it created, and the dashboard reads capacity by those GUIDs. **There is no CU read here** and
+# there must not be one — a build should never wait 15 minutes for a metrics model, and a CU read
+# should never have to be re-run because a build was slow.
 #
-# ONE JOB PER ENGINE, and that is the point of the shape. Every Fabric/XMLA token is valid for about
-# an hour; a single job walking four models over 25 queries with two 600s idle gaps runs well past
-# that, and the expiry lands mid-measurement on whichever engine happens to be last. A separate job
-# per engine mints its own token, minutes before it uses it, and retires it with the job — so no run
-# can die halfway through for a reason that has nothing to do with the thing being measured. The
-# matrix is `max-parallel: 1`: the engines still run one at a time, because a wall-clock benchmark
-# cannot absorb two models contending for the same capacity.
+# This was three files — `all.yml` composing `dbt.yml` and `benchmark.yml` through `workflow_call`.
+# The composition cost more than it bought: every input was declared twice (once as a `choice` on the
+# dispatch form, once as a plain string across the call boundary, because a `workflow_call` input
+# cannot be a choice), the workspace secret had to be re-resolved in each file (`jobs.<id>.with` is
+# the one place the `secrets` context is unavailable), and a called workflow can never hold MORE
+# permission than its caller grants — which is exactly how run 30735526504 died as a
+# `startup_failure` with no jobs and no log, because `dbt.yml` asked for `actions: read` after
+# `all.yml` stopped granting it. One file has one permission block and one set of inputs.
 #
-# The cost of the split is that no process holds all four engines' timings any more, so the ratios
-# moved to the render layer: each job uploads a report FRAGMENT, and `report` merges them and renders.
+# **What each half does.** The build lands the AEMO archive once and runs `dbt build` for the
+# selected engine on Fabric compute — model and test interleaved, so a failure stops at the node that
+# broke. All four dialects run the same six assertions (`tests/duckdb`, `tests/dwh`, `tests/spark`,
+# gated per folder in dbt_project.yml, the same way models/ is). No test compares one engine to
+# another, so a green leg means that engine is self-consistent and nothing more. `layout` then
+# records what was built — row counts, files, row groups, size, v-order — into the step summary and
+# the record.
 #
-# Physical layout (files, row groups, size, v-order, compression) is already reported per engine by
-# .github/scripts/stats.py in the `layout` job of the `dbt` workflow, and is deliberately not re-derived here.
+# The benchmark half deploys ONE semantic model over that engine's `mart.fct_summary` and walks a DAX
+# suite `runs` times. The deploy DELETES and recreates the model, so it starts with an empty VertiPaq
+# store and the pass number IS the tier: 1 cold, 2 warm, 3+ hot. Nothing is cleared between passes.
+# One engine per dispatch, so the report is a timing record rather than a comparison — comparing
+# engines is the dashboard's job, from the records.
 #
-# Nothing is read from OneLake and nothing is written anywhere: the only endpoints this job touches
-# are the Fabric control plane (deploy) and XMLA (query). dbt.yml's parity dashboard is unaffected.
+# **`workflow_dispatch` only, and that is the standing rule, not a default.** No `schedule`, no
+# `push`, no `workflow_run`, no `repository_dispatch`. Every run lands Fabric legs on paid capacity
+# and the query passes are INTERACTIVE CU on shared capacity — the class of usage a capacity admin
+# notices and asks about. A run nobody chose to start is the one that causes trouble. `paths-ignore`
+# does not soften this and never did: it is per-PUSH, not per-file, so a commit touching a doc AND
+# anything else still ran.
 #
-# dbt.yml is the pipeline that produces the data; this grades how fast it is to QUERY. See
-# benchmark/README.md.
+# It is also what makes the `record` job's commit safe. Nothing answers a push, so a bot commit
+# cannot start a paid build. If any workflow is ever given a `push:` trigger, revisit that step in
+# the same change.
 on:
-  # Callable from `all.yml`. **This does NOT weaken the no-auto-trigger rule** — read it carefully
-  # before adding anything else here. The rule exists because the query passes are interactive CU on
-  # shared capacity, which is the usage a capacity admin notices and asks about, so a run nobody
-  # chose to start is the one that causes trouble. `all.yml` is `workflow_dispatch` only, so a human
-  # still chose every run that reaches this. What remains forbidden, here and there, without
-  # exception: `schedule`, `push`, `workflow_run`, `repository_dispatch`.
-  workflow_call:
-    inputs:
-      workspace: { type: string, required: false, default: "" }
-      # `dwh`, not all four — see the dispatch input below. `all.yml` passes its own value down.
-      engines: { type: string, required: false, default: "dwh" }
-      runs: { type: string, required: false, default: "6" }
-      think_seconds: { type: string, required: false, default: "4" }
-      gap_seconds: { type: string, required: false, default: "600" }
-      top_duid: { type: string, required: false, default: "" }
   workflow_dispatch:
     inputs:
-      workspace:
-        description: "Fabric workspace GUID. Blank = the FABRIC_WORKSPACE_ID repo secret, which is where it normally comes from."
-        type: string
-        default: ""
+      build:
+        description: "run the dbt build (land the archive, then dbt build on the selected engine)"
+        type: boolean
+        default: true
+      benchmark:
+        description: "run the Direct Lake query benchmark over what the build wrote"
+        type: boolean
+        default: true
+      teardown:
+        description: "DELETE every item this run created when it finishes — the output lakehouse/warehouse, dbt_dwh_src, the semantic model. ON BY DEFAULT, and it is what stops an idle item drawing background CU into the NEXT run's measurement. Never touches dbt_landing. Turn OFF only to keep a run's tables alive for debugging; the next build is then an incremental, which the record says."
+        type: boolean
+        default: true
+      skip_download:
+        description: "DON'T download new data — reuse the archive already landed. On by default: with the teardown, that is what makes a run reproducible — the same input files, rebuilt from nothing, so two dispatches differ only by what was changed."
+        type: boolean
+        default: true
       engines:
-        description: "the engine to benchmark. One per dispatch — its semantic model is deleted, recreated and measured; the other three are not touched."
-        # ONE ENGINE PER DISPATCH, picked from a dropdown — see all.yml for the reasoning. The
-        # value is still the comma-separated string `engines.selected()` parses, and it still
-        # accepts a list, so `all.yml` and a by-hand `gh workflow run -f engines=a,b` are
-        # unaffected; the FORM just cannot express more than one.
-        # This is the most expensive form in the repo to get wrong: the query passes are
-        # INTERACTIVE CU on shared capacity — the class of usage a capacity admin notices — and the
-        # paid work is `max-parallel: 1`, so every extra engine is another full sequential job of
-        # 25 queries x `runs` passes with two 600s gaps.
-        # NOTE this is the one workflow where a single engine changes what the REPORT means, not
-        # just its width: with one column there is no ranking and no `x fastest`, so it reads as a
-        # timing record for that engine rather than a comparison.
+        description: "the engine to build AND benchmark. One per dispatch. Scopes THREE things: which build leg runs, which output item is created and torn down, and which semantic model is measured. The other three engines are not touched at all."
+        # ONE ENGINE PER DISPATCH. A dropdown of the four names and nothing else, so a run always
+        # covers exactly one engine and the form cannot express more. The value is still the
+        # comma-separated string `plan` and `engines.selected()` parse, and both still accept a list,
+        # so `gh workflow run -f engines=a,b` works; the FORM just cannot ask for it.
         # Keep `dwh` first: GitHub preselects the first option, and `default:` must match one.
+        # Consequence, stated because it is the point rather than a side effect: a four-engine
+        # comparison is four dispatches. The layout table, the record and the benchmark report all
+        # cover the single engine built, so the report carries no ranking and no `x fastest`.
+        # `cu/dashboard.py` is what compares them, from every record.
         type: choice
         default: "dwh"
         options:
@@ -76,37 +83,78 @@ on:
           - "duckrun"
           - "iceberg"
           - "spark"
+      cores:
+        description: "Fabric Python-notebook vCores for the duckdb-family legs"
+        type: choice
+        options: ["4", "8", "16", "32", "64"]
+        default: "8"
+      spark_resource_profile:
+        description: "spark leg only: writeHeavy = workspace default (no V-Order); readHeavyForPBI turns V-Order on and moves file layout broadly"
+        type: choice
+        options: ["writeHeavy", "readHeavyForPBI", "readHeavyForSpark"]
+        default: "writeHeavy"
+      native_execution_engine:
+        description: "spark leg only: Fabric Native Execution Engine (NEE). Documented semantic divergences — round(), DECIMAL to FLOAT — so expect small value differences while it is on."
+        type: boolean
+        default: false
+      download_limit:
+        description: "files to download per source, when skip_download is off"
+        type: string
+        default: "200"
       runs:
         description: "PASSES over the whole query suite. The pass number is the tier: 1 cold (a freshly created model), 2 warm, 3+ hot (median). Below 3 there is no hot tier."
         type: string
         default: "6"
       think_seconds:
-        description: "idle seconds BETWEEN queries — a user reading a visual before clicking the next. Outside every timed region, so it changes what is reproduced, not what is measured. Idle inside the token's ~1h life though, so raising it eats the headroom the per-engine split protects. 0 disables."
+        description: "idle seconds BETWEEN queries — a user reading a visual before clicking the next. Outside every timed region, so it changes what is reproduced, not what is measured."
         type: string
         default: "4"
       gap_seconds:
-        description: "idle seconds before each engine after the first (>5min CU smoothing => clean gaps in the capacity chart). NOT think time — this is between ENGINES, and it runs before the token is minted."
+        description: "idle seconds before each engine after the first (>5min CU smoothing => clean gaps in the capacity chart). NOT think time — this is between ENGINES."
         type: string
         default: "600"
       top_duid:
         description: "optional: pin the DUID the selectivity ladder filters on. Pinned, the ladder runs from pass 1; unpinned it is resolved AFTER the cold pass (resolving it transcodes DUID and mw) and joins at pass 2."
         type: string
         default: ""
+      workspace:
+        description: "Fabric workspace GUID. Blank = the FABRIC_WORKSPACE_ID repo secret, which is where it normally comes from."
+        type: string
+        default: ""
 
-# SHARED with dbt.yml on purpose, and load-bearing. Not for correctness — this run only reads — but
-# because a concurrent dbt build contends for the same Fabric capacity, and capacity contention is
-# the one thing a wall-clock benchmark cannot absorb. Not cancel-in-progress, matching dbt.yml: a
-# dispatch queues behind a push run instead of racing it.
+# One group for the whole run. It used to be two — `onelake-<ref>` shared between the build and the
+# benchmark so a benchmark dispatch queued behind a build rather than racing it for capacity, which
+# a wall-clock number cannot absorb. Same group, same reason, now with nothing to coordinate.
+# Not cancel-in-progress: a half-finished build is worse than a queued one, and cancelling never
+# saved the Fabric compute anyway — the notebook or Livy session keeps running workspace-side after
+# the GitHub job dies. It only erases the evidence.
 concurrency:
   group: onelake-${{ github.ref_name }}
   cancel-in-progress: false
 
 permissions:
-  id-token: write
-  contents: read
+  id-token: write     # OIDC to Fabric, every stage
+  contents: write     # the `record` job commits history/runs/
 
 env:
-  # Every job reads these; the per-engine jobs additionally narrow BENCH_ENGINES to themselves.
+  # Blank input -> the FABRIC_WORKSPACE_ID SECRET, so the GUID is not written into this repo. It
+  # cannot be defaulted on the input itself (a `default:` takes no context), but workflow-level `env`
+  # DOES allow `secrets` — which is why it is resolved here, once, for every job.
+  WS_ID: ${{ inputs.workspace || secrets.FABRIC_WORKSPACE_ID }}
+  AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+  AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+  DBT_SCHEMA: mart
+  AZURE_TRANSPORT_OPTION_TYPE: curl
+  CURL_CA_INFO: /etc/ssl/certs/ca-certificates.crt
+  DUCKDB_TEMP_DIR: /tmp/duckdb_spill
+  CI_DOWNLOAD_LIMIT: ${{ inputs.download_limit }}
+  FABRIC_CORES: ${{ inputs.cores }}
+  # Spark leg only, off by default: profiles.yml puts spark.native.enabled into the Livy conf. That
+  # single key is Microsoft's current documented session-level recipe.
+  SPARK_NATIVE_ENABLED: ${{ inputs.native_execution_engine && 'true' || 'false' }}
+  # Spark leg only. writeHeavy is the workspace default, so the default dispatch writes what a plain
+  # Fabric session writes — and therefore NO V-Order, which readHeavyForPBI alone enables.
+  SPARK_RESOURCE_PROFILE: ${{ inputs.spark_resource_profile }}
   BENCH_ENGINES: ${{ inputs.engines }}
   BENCH_RUNS: ${{ inputs.runs }}
   BENCH_THINK_SECONDS: ${{ inputs.think_seconds }}
@@ -115,61 +163,358 @@ env:
   PYTHONIOENCODING: utf-8
 
 jobs:
-  # The free gate: no Fabric, no capacity, no network at run time. It buys two things a paid job
-  # cannot — a broken ranking layer never reaches a report that might name the slower engine the
-  # winner, and a malformed .bim never reaches a deploy that fails after ADOMD.NET is installed.
+  # Free, and it opens the document everything else merges into: the run id, the sha, the engine and
+  # the dispatch inputs. Every later job writes its own fragment; `record` merges them at the end.
+  # `full_load` is NOT set here — it is derived from whether the output item was really created
+  # fresh, which is a fact rather than the intention an input states.
+  open:
+    name: open the record
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    env:
+      RUN_RECORD: ${{ github.workspace }}/record/record-00-run.json
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: {python-version: "3.11"}
+      - name: Open this run's record
+        env:
+          RUN_ENGINE: ${{ inputs.engines }}
+          RUNIN_BUILD: ${{ inputs.build }}
+          RUNIN_BENCHMARK: ${{ inputs.benchmark }}
+          RUNIN_TEARDOWN: ${{ inputs.teardown }}
+          RUNIN_CORES: ${{ inputs.cores }}
+          RUNIN_SPARK_RESOURCE_PROFILE: ${{ inputs.spark_resource_profile }}
+          RUNIN_NATIVE_EXECUTION_ENGINE: ${{ inputs.native_execution_engine }}
+          RUNIN_SKIP_DOWNLOAD: ${{ inputs.skip_download }}
+          RUNIN_DOWNLOAD_LIMIT: ${{ inputs.download_limit }}
+          RUNIN_RUNS: ${{ inputs.runs }}
+          RUNIN_THINK_SECONDS: ${{ inputs.think_seconds }}
+          RUNIN_GAP_SECONDS: ${{ inputs.gap_seconds }}
+        run: python .github/scripts/record.py init
+      - uses: actions/upload-artifact@v4
+        with:
+          name: record-fragment-00-run
+          path: record/
+          if-no-files-found: error
+
+  # THE free gate, and the only check in this repo that touches no Fabric at all. It runs before any
+  # job spends capacity, and everything it covers fails either SILENTLY or EXPENSIVELY:
+  #
+  #   .github/scripts/ — the run record's assembly (a fragment that never lands, an item entry a
+  #     later stage overwrites, a merge order that drops a deletion timestamp: each produces a record
+  #     that looks fine and attributes CU to the wrong run) and the TEARDOWN, a delete path with no
+  #     undo, stubbed against a fake Fabric for what it refuses to delete as much as what it does.
+  #   benchmark/ — the ranking layer and the .bim templates. A broken ranking would reach a report
+  #     that might name the slower engine the winner; a malformed .bim would fail at DEPLOY time,
+  #     after ADOMD.NET is installed and the workspace resolved.
+  #   cu/ — the render layer, which the Dashboard workflow also gates on.
+  #
   # duckrun is installed because test_templates.py asserts the templates against duckrun's OWN
   # repoint regexes; a local copy of them could drift from the thing that actually parses the file.
-  # This is the only check in the repo that touches no Fabric at all.
   checks:
-    name: ranking + template checks (free)
+    name: offline checks (free)
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
+        with: {python-version: "3.11"}
       - run: pip install pytest "duckrun>=0.4.36"
-      - name: pytest benchmark/
-        run: python -m pytest benchmark/ -q
+      - name: pytest the record, the teardown, the benchmark and the render layer
+        run: python -m pytest .github/scripts/ benchmark/ cu/ -q
 
-  # Resolve the workspace and EVERY engine's item once, and emit the matrix the bench jobs fan out
-  # over. Two reasons this is its own job rather than a step in each: a renamed item fails here,
-  # before any capacity is spent, instead of on the third job of a serialized matrix; and the `run`
-  # block (inputs, sha, workspace) is written once, by one job, so no per-engine fragment can
-  # overwrite it with its own single-engine view.
+  # Which legs run, decided ONCE and in one place. A GitHub matrix cannot be filtered by an input, so
+  # the two `include:` lists are computed here and consumed with `fromJSON` — which also means the
+  # dwh adapter pin lives in exactly one place instead of being duplicated by an `if:` per leg.
+  #
+  # An unknown engine name is FATAL. A typo that silently builds nothing looks identical to a build
+  # that worked.
+  plan:
+    name: plan the legs
+    needs: checks
+    if: inputs.build
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      engines: ${{ steps.p.outputs.engines }}
+      fabric: ${{ steps.p.outputs.fabric }}
+      server: ${{ steps.p.outputs.server }}
+    steps:
+      - id: p
+        env:
+          ENGINES: ${{ inputs.engines }}
+        run: |
+          python3 - >> "$GITHUB_OUTPUT" <<'EOF'
+          import json, os, sys
+          LEGS = {
+              "duckrun": ("fabric", {"engine": "duckrun", "label": "delta_rs"}),
+              "iceberg": ("fabric", {"engine": "iceberg", "label": "iceberg"}),
+              "spark":   ("server", {"engine": "spark", "install": "dbt-fabricspark"}),
+              "dwh":     ("server", {"engine": "dwh",
+                                     "install": "dbt-fabric-samdebruyn dbt-core==1.11.10 "
+                                                "dbt-adapters==1.23.0"}),
+          }
+          picked = [e.strip() for e in (os.environ.get("ENGINES") or "").split(",") if e.strip()]
+          picked = picked or list(LEGS)
+          unknown = [e for e in picked if e not in LEGS]
+          if unknown:
+              sys.exit(f"unknown engine(s) {unknown}; known: {list(LEGS)}")
+          # LEGS order, not the input's: the matrix reads the same way run to run.
+          fabric = [LEGS[e][1] for e in LEGS if e in picked and LEGS[e][0] == "fabric"]
+          server = [LEGS[e][1] for e in LEGS if e in picked and LEGS[e][0] == "server"]
+          print(f"engines={','.join(e for e in LEGS if e in picked)}")
+          print(f"fabric={json.dumps(fabric)}")
+          print(f"server={json.dumps(server)}")
+          sys.stderr.write(f"building {picked}: {len(fabric)} duckdb leg(s), "
+                           f"{len(server)} server leg(s)\n")
+          EOF
+
+  # There is no `reset` job and no `reset_outputs` input. The teardown at the END of this run deletes
+  # every item it created, so a build always starts from nothing and there is nothing left to reset
+  # on the way in. Deleting at the end is also the better side of Fabric's display-name reservation:
+  # reset-then-build put the create right inside the window in which a deleted name is still held
+  # (`409 ItemDisplayNameNotAvailableYet`, which took three legs down on run 30639018466).
+  land:
+    name: land data
+    needs: plan
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    # No `outputs:`. This job used to export FILES_PATH for every leg to share; each leg now gets its
+    # own from `provision.py <engine>`, pointing at the `Files/landing` shortcut in its own lakehouse
+    # — which is what splits the landing read CU per engine. The FILES_PATH set here is the DIRECT
+    # dbt_landing path, for download_aemo.py, whose write CU belongs to `dbt_landing`.
+    #
+    # RUN_RECORD names the fragment every script in this job merges its item GUIDs into. One file per
+    # JOB, because jobs run on separate runners and cannot share one; `record` downloads them all and
+    # merges by BASENAME, which is what the numeric prefix orders.
+    env:
+      RUN_RECORD: ${{ github.workspace }}/record/record-10-land.json
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: {python-version: "3.11"}
+      - run: pip install duckrun
+      - name: Provision landing lakehouse
+        run: python .github/scripts/provision.py land >> "$GITHUB_ENV"
+      # SKIPPED BY DEFAULT, and the job still runs: it also ensures the landing lakehouse. What is
+      # skipped is only the DOWNLOAD, which is what makes a run reproducible — the same archive in,
+      # so two dispatches of the same commit differ by nothing but what was changed. Turn
+      # `skip_download` off to extend the archive; that is a different question and a different run.
+      - name: Download AEMO data (obstore -> OneLake)
+        if: ${{ !inputs.skip_download }}
+        run: python download_aemo.py
+      - name: Say the archive was reused
+        if: ${{ inputs.skip_download }}
+        run: echo "skip_download is on — building on the landed archive as-is" >&2
+      - name: Upload the run-record fragment
+        if: always()
+        continue-on-error: true
+        uses: actions/upload-artifact@v4
+        with:
+          name: record-fragment-land
+          path: record/
+          if-no-files-found: ignore
+
+  # DuckDB-family: both engines are just DuckDB in a Python process, and that process always runs in
+  # a Fabric notebook (duckrun.run_python), data-local to OneLake. The runner only ships
+  # fabric_build.py there and relays its exit code.
+  #
+  # There used to be a second path — build on the runner when the fold looked small enough — sized by
+  # a pending-file count. It is gone. Placement was a guess that had to be right every run: it read
+  # the backlog through the very tables the build was about to write, so any table it could not read
+  # collapsed the estimate, and the cheap case it optimised for saved a session start-up while the
+  # expensive case it mis-sized cost a 7GB runner thrashing on a real fold.
+  fabric:
+    # Labelled by what the leg actually is — both are DuckDB, differing only in the table format they
+    # write (delta-rs via duckrun, Iceberg via dbt-duckdb). `label` is the display name ONLY;
+    # `engine` is still the key provision.py and the dbt target take.
+    name: duckdb ${{ matrix.label }}
+    needs: [plan, land]
+    # `!= '[]'` because a dispatch may select neither DuckDB engine, and an empty `include:` is a
+    # workflow error rather than a skipped job.
+    if: needs.plan.outputs.fabric != '[]'
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    strategy:
+      # One engine failing says nothing about the other — they share only the landed data.
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.plan.outputs.fabric) }}
+    # No job-level FILES_PATH. `provision.py <engine>` prints one pointing at the `Files/landing`
+    # shortcut in THIS engine's own lakehouse, and a job-level `env` outranks anything a later step
+    # writes to $GITHUB_ENV — so a leftover FILES_PATH here would silently keep both legs on the
+    # shared direct path and the CU split would look like it simply did not work.
+    env:
+      RUN_RECORD: ${{ github.workspace }}/record/record-20-build-${{ matrix.engine }}.json
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: {python-version: "3.11"}
+      # The runner never builds, so it needs only what fabric_run.py imports. `requests` is for its
+      # notebook-GUID resolve and delete. pytz goes into the notebook's own pip list, not here.
+      - run: pip install duckrun requests
+      - run: python .github/scripts/provision.py ${{ matrix.engine }} >> "$GITHUB_ENV"
+      - name: dbt build in Fabric
+        run: python .github/scripts/fabric_run.py ${{ matrix.engine }}
+      # always(): a failed build still created the items, and their CU still has to be attributable.
+      - name: Upload the run-record fragment
+        if: always()
+        continue-on-error: true
+        uses: actions/upload-artifact@v4
+        with:
+          name: record-fragment-build-${{ matrix.engine }}
+          path: record/
+          if-no-files-found: ignore
+
+  # dwh + spark: dbt client on the runner, compute on Fabric's own servers.
+  server:
+    name: fabric-server ${{ matrix.engine }}
+    needs: [plan, land]
+    if: needs.plan.outputs.server != '[]'
+    runs-on: ubuntu-latest
+    # Backlog-draining spark runs (1024-file folds) reach ~40 min; leave room for one retry.
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.plan.outputs.server) }}
+    # No job-level FILES_PATH — same reason as the `fabric` job above.
+    env:
+      RUN_RECORD: ${{ github.workspace }}/record/record-20-build-${{ matrix.engine }}.json
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: {python-version: "3.11"}
+      - run: pip install ${{ matrix.install }} requests pytz
+      - uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          allow-no-subscriptions: true
+      - run: python .github/scripts/provision.py ${{ matrix.engine }} >> "$GITHUB_ENV"
+      - name: Mint OneLake tokens
+        run: |
+          ST=$(az account get-access-token --resource https://storage.azure.com/ --query accessToken -o tsv)
+          echo "::add-mask::$ST"; echo "ONELAKE_TOKEN=$ST" >> "$GITHUB_ENV"
+          if [ "${{ matrix.engine }}" = "dwh" ]; then
+            SQL=$(az account get-access-token --resource https://database.windows.net --query accessToken -o tsv)
+            echo "::add-mask::$SQL"; echo "FABRIC_ACCESS_TOKEN=$SQL" >> "$GITHUB_ENV"
+          fi
+      - name: dbt build --target ${{ matrix.engine }}
+        # `|| dbt retry`: a killed Livy session (or any transient failure) fails only the nodes it
+        # touched; retry re-runs just those in a FRESH session/process instead of failing the whole
+        # leg, replaying the original flags from target/run_results. retry needs --target too:
+        # without it dbt renders the profile's DEFAULT target (duckrun), which demands an
+        # ONELAKE_TABLES_PATH this job does not have.
+        #
+        # No `--exclude tag:heavy`: nothing carries the tag any more, and a selector matching zero
+        # nodes is a warning and a lie about what ran.
+        run: dbt build --target ${{ matrix.engine }} --profiles-dir . || dbt retry --target ${{ matrix.engine }} --profiles-dir .
+      - if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: dbt-target-${{ matrix.engine }}
+          path: target/
+      - name: Upload the run-record fragment
+        if: always()
+        continue-on-error: true
+        uses: actions/upload-artifact@v4
+        with:
+          name: record-fragment-build-${{ matrix.engine }}
+          path: record/
+          if-no-files-found: ignore
+
+  # What was actually written. `stats.py` reads every shared table from the item's Delta log — rows,
+  # files, row groups, size, v-order — plus the landing archive's own file count and bytes, so the
+  # record says how much data went IN as well as what came out. No test compares one engine to
+  # another, so this is the only thing in the repo that can see drift between them.
+  #
+  # It costs ~10 minutes of OneLake reads (the iceberg item alone 12m+) and reports numbers that only
+  # move when tables are REWRITTEN. That cost is why it was once a separate dispatch-only workflow;
+  # that lost to the fact that a dashboard nobody remembers to dispatch reports nothing.
+  # It only READS — nothing is written or provisioned.
+  layout:
+    name: table layout
+    needs: [plan, fabric, server]
+    # Not `success()`: a skipped matrix (no engine of that kind selected) would skip this too, and a
+    # leg that FAILED still wrote tables worth recording. `inputs.build` is needed alongside it
+    # because `!cancelled()` overrides GitHub's skip-when-a-dependency-skipped rule — without it this
+    # would run on a benchmark-only dispatch and read BUILD_ENGINES off a `plan` job that never ran.
+    if: ${{ !cancelled() && inputs.build }}
+    runs-on: ubuntu-latest
+    # get_stats() over OneLake is slow on the iceberg item (12m+ observed); 15 minutes was cancelling
+    # stats.py mid-table and turning slowness into a red run.
+    timeout-minutes: 40
+    env:
+      RUN_RECORD: ${{ github.workspace }}/record/record-30-layout.json
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: {python-version: "3.11"}
+      - run: pip install duckrun requests
+      # `tee`, and STATS_JSON, so the result is not trapped on the run page: the markdown lands in
+      # the step summary AND the job log, and the same numbers land in stats.json and in the record.
+      # pipefail so a failed read cannot come out green through tee.
+      - name: Parity + layout dashboard
+        env:
+          STATS_JSON: ${{ github.workspace }}/stats.json
+          # Only the engines this dispatch built. Reading an item nobody rebuilt would record an
+          # older generation's layout under this run's id.
+          BUILD_ENGINES: ${{ needs.plan.outputs.engines }}
+        run: |
+          set -o pipefail
+          python .github/scripts/stats.py | tee -a "$GITHUB_STEP_SUMMARY"
+      - name: Upload stats.json
+        if: always()
+        continue-on-error: true
+        uses: actions/upload-artifact@v4
+        with:
+          name: stats
+          path: stats.json
+          if-no-files-found: warn
+      # The same document again, as a run-record fragment. The artifact is how a run's layout is read
+      # back without a checkout; the record is what outlives the 90-day retention.
+      - name: Upload the run-record fragment
+        if: always()
+        continue-on-error: true
+        uses: actions/upload-artifact@v4
+        with:
+          name: record-fragment-layout
+          path: record/
+          if-no-files-found: ignore
+
+  # Resolve the workspace and the engine's item ONCE, and emit the matrix `bench` fans out over. Its
+  # own job rather than a step: a renamed item fails here, before any query capacity is spent, and
+  # the `run` block (inputs, sha, workspace) is written once so no per-engine fragment can overwrite
+  # it with its own single-engine view.
+  #
+  # `needs: layout` serializes the benchmark behind the build — not for correctness, but because two
+  # workloads on the same capacity is the one thing a wall-clock number cannot absorb.
   resolve:
     name: resolve workspace + engine matrix
-    needs: checks
+    needs: [checks, layout]
+    # `!failure() && !cancelled()` so a SKIPPED build (benchmark-only dispatch) still gets here,
+    # while a FAILED build does not: benchmarking tables that did not finish writing measures nothing.
+    if: inputs.benchmark && !failure() && !cancelled()
     runs-on: ubuntu-latest
     timeout-minutes: 10
     env:
-      AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
-      AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
-      # Blank input -> the FABRIC_WORKSPACE_ID SECRET, so the GUID is not written into this
-      # repo. It cannot be defaulted on the input itself (a `default:` takes no context) nor
-      # passed down from all.yml (`jobs.<id>.with` is the one place `secrets` is NOT
-      # available), so every called workflow resolves it here, for itself.
-      WS_ID: ${{ inputs.workspace || secrets.FABRIC_WORKSPACE_ID }}
       RUN_REPORT: ${{ github.workspace }}/fragments/report-00-meta.json
     outputs:
       matrix: ${{ steps.resolve.outputs.matrix }}
       pbi_workspace: ${{ steps.resolve.outputs.pbi_workspace }}
       bench_items: ${{ steps.resolve.outputs.bench_items }}
-      # NO ws_id output. The workspace GUID is a SECRET now, and GitHub evaluates job outputs on the
-      # runner and DROPS any whose value matches a secret — logging `Skip output ws_id since it may
-      # contain secret` and handing the next job an empty string. The bench jobs would have run with
-      # a blank WS_ID. They resolve the secret themselves instead, exactly as this job does; it was
-      # never a derived value, only an echo. pbi_workspace (a display NAME) and bench_items (item
-      # GUIDs, not secrets) pass through fine.
+      # NO ws_id output. The workspace GUID is a SECRET, and GitHub evaluates job outputs on the
+      # runner and DROPS any whose value matches one — logging `Skip output ws_id since it may
+      # contain secret` and handing the next job an empty string. The bench jobs read the workflow
+      # env instead. `pbi_workspace` (a display NAME) and `bench_items` (item GUIDs, not secrets)
+      # pass through fine.
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
-      - name: Install deps
-        run: pip install "duckrun>=0.4.36" requests
+        with: {python-version: "3.11"}
+      - run: pip install "duckrun>=0.4.36" requests
       - name: Init run report
         run: |
           mkdir -p fragments
@@ -185,8 +530,6 @@ jobs:
           path: fragments/report-00-meta.json
 
   bench:
-    # The engine name is in the job name, so the run's job list reads as the experiment: four
-    # adapters, one per row.
     name: benchmark ${{ matrix.engine }}
     needs: resolve
     runs-on: ubuntu-latest
@@ -198,28 +541,21 @@ jobs:
       # measurement. The report names whichever engines are missing.
       fail-fast: false
       matrix: ${{ fromJSON(needs.resolve.outputs.matrix) }}
-    # One engine over 25 queries x `runs` passes, plus one idle gap and the deploy. `raw_scada_mw`
-    # transcodes a column of the largest table in the project, so this is not a small budget.
-    # It is billed Fabric capacity: cancel a superseded run immediately (CLAUDE.md, CI etiquette),
-    # and use the scouting inputs in benchmark/README.md before committing to a full pass.
+    # 25 queries x `runs` passes, plus one idle gap and the deploy. `raw_scada_mw` transcodes a column
+    # of the largest table in the project, so this is not a small budget. It is billed Fabric
+    # capacity: cancel a superseded run immediately, and scout with
+    # `runs=3 think_seconds=0 gap_seconds=0` before committing to a full pass.
     timeout-minutes: 120
     env:
-      # The ONLY Azure inputs, same two secrets as dbt.yml: the OIDC federated identity. duckrun mints
-      # every token it needs (storage, Fabric control plane, Power BI) and resolves the workspace and
-      # items itself — so there is no azure/login and no `az` anywhere in this job. Each engine's job
-      # exchanges its OWN fresh OIDC assertion, which is the whole reason the matrix exists.
-      AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
-      AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
-      WS_ID: ${{ inputs.workspace || secrets.FABRIC_WORKSPACE_ID }}
-      PBI_WORKSPACE: ${{ needs.resolve.outputs.pbi_workspace }}
-      BENCH_ITEMS: ${{ needs.resolve.outputs.bench_items }}
       # Narrowed to this engine: deploy_models.py deploys only it, and xmla_compare.py takes its
       # per-engine path — measure one model, write its timings, compute no ratios.
       BENCH_ENGINES: ${{ matrix.engine }}
+      PBI_WORKSPACE: ${{ needs.resolve.outputs.pbi_workspace }}
+      BENCH_ITEMS: ${{ needs.resolve.outputs.bench_items }}
       RUN_REPORT: ${{ github.workspace }}/fragments/report-${{ matrix.engine }}.json
       # A DIFFERENT document with a different lifetime — the semantic model's item GUID, for the
-      # per-run record `all.yml` commits and the CU ledger joins on. Kept out of `fragments/` on
-      # purpose: everything in there is merged into run_report.json by merge_reports.py.
+      # record and the CU ledger that joins on it. Kept OUT of `fragments/` on purpose: everything in
+      # there is merged into run_report.json by merge_reports.py.
       RUN_RECORD: ${{ github.workspace }}/record/record-40-bench-${{ matrix.engine }}.json
     steps:
       - name: ${{ matrix.engine }} — checkout
@@ -227,13 +563,11 @@ jobs:
 
       - name: ${{ matrix.engine }} — set up Python
         uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
+        with: {python-version: "3.11"}
 
-      # >=0.4.36 for Workspace.deploy(mode=), which is what lets the WAREHOUSE be read by Direct
-      # Lake like the three lakehouses instead of DirectQuery — so all four legs measure a Delta
-      # layout rather than three layouts and one pushdown. (The repo's dbt floor is 0.4.35; this
-      # job needs the higher one, plus the OneLake repoints and auth.get_powerbi_token().)
+      # >=0.4.36 for Workspace.deploy(mode=), which is what lets the WAREHOUSE be read by Direct Lake
+      # like the three lakehouses instead of DirectQuery — so every leg measures a Delta layout
+      # rather than three layouts and one pushdown. (The repo's dbt floor is 0.4.35.)
       - name: ${{ matrix.engine }} — install deps
         run: pip install "duckrun>=0.4.36" pythonnet requests
 
@@ -262,25 +596,22 @@ jobs:
           echo "ADOMD_DIR=$proj/publish" >> "$GITHUB_ENV"
           echo "resolved ADOMD_DIR=$proj/publish"
 
-      # ONE semantic model, this engine's, over its own mart.fct_summary, from the ONE template:
+      # ONE semantic model, over this engine's own mart.fct_summary, from the ONE template:
       # lakehouse=/warehouse= says which item holds the tables, mode= says how it is read. Direct
-      # Lake, so the deploy reframes and returns only once the model is live. The Fabric token this
-      # mints is minutes old when the XMLA step below starts using it.
+      # Lake, so the deploy reframes and returns only once the model is live.
       - name: ${{ matrix.engine }} — deploy semantic model
         run: |
           mkdir -p fragments record
           python benchmark/deploy_models.py
 
       # No token re-mint needed: xmla_compare.py self-acquires the Power BI token via duckrun, which
-      # re-exchanges a fresh OIDC assertion. With one engine per job the whole measurement now fits
-      # comfortably inside one token's life — which is what this refactor bought.
+      # re-exchanges a fresh OIDC assertion.
       - name: ${{ matrix.engine }} — benchmark over XMLA
         env:
           PYTHONNET_RUNTIME: coreclr
-          PYTHONUNBUFFERED: "1"   # non-TTY runner block-buffers stdout; stream the per-query trace live
+          PYTHONUNBUFFERED: "1"   # non-TTY runner block-buffers stdout; stream the trace live
         run: python benchmark/xmla_compare.py
 
-      # The fragment, not a report: ratios need every engine and are computed in `report` below.
       - name: ${{ matrix.engine }} — upload report fragment
         if: always()
         continue-on-error: true
@@ -299,9 +630,7 @@ jobs:
           path: record/
           if-no-files-found: ignore
 
-  # Where every comparison is now made. Free: no Fabric, no XMLA, no capacity — it reads the merged
-  # fragments and nothing else. `if: always()` because a report covering three of four engines is
-  # exactly what you want when the fourth failed, and it names the missing one.
+  # Free: no Fabric, no XMLA, no capacity — it reads the merged fragments and nothing else.
   report:
     name: merge fragments + render report
     needs: [resolve, bench]
@@ -313,26 +642,20 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
-
+        with: {python-version: "3.11"}
       - name: Download every report fragment
         uses: actions/download-artifact@v4
         with:
           pattern: report-fragment-*
           path: fragments
-
       - name: Merge fragments into one run report
         run: python benchmark/merge_reports.py fragments
-
       - name: Render report to job summary
         continue-on-error: true
         run: python benchmark/render_report.py
-
       # The one step here that can fail the job: it exits 1 on a verdict-direction inversion.
       - name: Render specialist findings to job summary
         run: python benchmark/render_summary.py
-
       - name: Upload run report
         if: always()
         continue-on-error: true
@@ -341,3 +664,128 @@ jobs:
           name: run-report
           path: run_report.json
           if-no-files-found: warn
+
+  # DELETE EVERYTHING THIS RUN CREATED, except dbt_landing: the output lakehouse or warehouse,
+  # dbt_dwh_src, and the semantic model. The throwaway notebook has already deleted itself in
+  # fabric_run.py's `finally`.
+  #
+  # Why, and it is not tidiness: an item that outlives its run keeps drawing background CU — OneLake
+  # bills reads against an idle lakehouse, a Direct Lake model gets refreshed — and that CU lands in
+  # the NEXT dispatch's measurement window with nothing in the capacity data to say it came from an
+  # older generation. Run 30699626723 measured 1,578 CU for an iceberg item the dispatch had not even
+  # selected.
+  #
+  # It deletes BY GUID, from this run's own merged record, so it can only ever remove what this run
+  # created — a name-driven teardown would happily delete an item a concurrent dispatch had just
+  # made, and there is no undo.
+  #
+  # ORDER IS LOAD-BEARING: after `layout` (which reads every table through the Delta log) and after
+  # `bench` (which queries them). `always()`, so a failed leg still gets cleaned up — a broken run
+  # that leaves a lakehouse standing is the worst case for both the bill and the next measurement.
+  teardown:
+    name: delete this run's items
+    needs: [open, layout, bench]
+    if: ${{ always() && inputs.teardown }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      RUN_RECORD: ${{ github.workspace }}/record/record-50-teardown.json
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: {python-version: "3.11"}
+      - run: pip install duckrun requests
+      - name: Collect what this run created
+        uses: actions/download-artifact@v4
+        with:
+          pattern: record-fragment-*
+          path: fragments
+      # Merged into a scratch record first: the items are spread across one fragment per job and the
+      # teardown has to see all of them. This copy is thrown away — `record` re-merges everything,
+      # including the deletions this writes.
+      - name: Delete them
+        run: |
+          set -euo pipefail
+          python .github/scripts/record.py combine fragments "$RUNNER_TEMP/sofar.json"
+          python .github/scripts/provision.py teardown "$RUNNER_TEMP/sofar.json"
+      # always(): a partial teardown still deleted things, and the record has to say which.
+      - name: Upload the run-record fragment
+        if: always()
+        continue-on-error: true
+        uses: actions/upload-artifact@v4
+        with:
+          name: record-fragment-50-teardown
+          path: record/
+          if-no-files-found: ignore
+
+  # ONE JSON per dispatch, and it is the point of the whole chain. Every stage wrote a fragment naming
+  # the Fabric items it created under their GUIDs; this merges them, folds in the layout and the
+  # benchmark's raw timings, and commits the result.
+  #
+  # The GUID is why this exists. Before it, CU could only be attributed by matching item DISPLAY
+  # NAMES — hence `cu/`'s substring matcher, its lagging `'Items'` snapshot join, and its `shared`
+  # column for anything ambiguous. A run that writes down what it created, and then deletes it, makes
+  # every GUID belong to exactly one run.
+  #
+  # `always()`: a failed leg still created items, and their CU still has to be attributable to
+  # something. A record of a broken run is worth more than no record.
+  record:
+    name: record the run
+    needs: [open, layout, report, teardown]
+    if: ${{ always() }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: {python-version: "3.11"}
+
+      # `merge-multiple: false` (the default) nests each artifact in its own directory, which is
+      # exactly why record.py sorts by BASENAME — the numeric prefix is the merge order and the
+      # directory names would destroy it.
+      - name: Collect the fragments
+        uses: actions/download-artifact@v4
+        with:
+          pattern: record-fragment-*
+          path: fragments
+
+      # The benchmark's own document, folded in whole under `benchmark`. Raw timings: ms per pass per
+      # query per model. Best-effort — a build-only dispatch has no benchmark and the record then
+      # simply has no `benchmark` key, which is a different statement from an empty one.
+      - name: Collect the benchmark report
+        continue-on-error: true
+        uses: actions/download-artifact@v4
+        with:
+          name: run-report
+          path: bench
+
+      - name: Merge into one record
+        id: rec
+        run: |
+          set -euo pipefail
+          out="history/runs/$(date -u +%Y-%m-%dT%H%MZ)-${{ github.run_id }}.json"
+          mkdir -p history/runs
+          python .github/scripts/record.py finish fragments bench/run_report.json "$out"
+          echo "path=$out" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: run-record
+          path: ${{ steps.rec.outputs.path }}
+          if-no-files-found: error
+
+      # Committing from CI is safe in THIS repo precisely because nothing runs on push — that
+      # standing rule is what stops a bot commit from starting a paid build.
+      #
+      # `pull --rebase` because a queued dispatch can have moved main since checkout; the diff check
+      # exits 0 so a re-run producing an identical record does not fail the job.
+      - name: Commit the record
+        run: |
+          set -euo pipefail
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add "${{ steps.rec.outputs.path }}"
+          git diff --cached --quiet && { echo "record identical to HEAD" >&2; exit 0; }
+          git commit -m "record: run ${{ github.run_id }} (${{ inputs.engines }})"
+          git pull --rebase --autostash origin "${{ github.ref_name }}"
+          git push origin "HEAD:${{ github.ref_name }}"
