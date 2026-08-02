@@ -351,6 +351,26 @@ def engine_caption(rec, col):
     return " · ".join(bits)
 
 
+def spread_for(runs, ledger, cls, key_of):
+    """`{column: [CU, …]}` — every run's total for `cls`, not just the latest.
+
+    One run is one sample of a SHARED capacity, so a single number is a reading rather than a
+    result. Collecting every run of a column is what lets the chart show a mean and a range, and the
+    range is the honest part: when two engines' averages sit closer together than either one's own
+    spread, the ranking between them means nothing and the reader can see it.
+    """
+    out = {}
+    for rec in runs:
+        col = key_of(rec)
+        if col is None:
+            continue
+        cells, _missing = run_cu(rec, ledger)
+        value = class_total(cells, cls)
+        if value:
+            out.setdefault(col, []).append(value)
+    return out
+
+
 def chart(title, subtitle, rows):
     """Emit a chart spec for the HTML renderer, as an HTML COMMENT.
 
@@ -367,6 +387,24 @@ def chart(title, subtitle, rows):
     if not any(r[1] for r in rows):
         return
     print(f"\n<!--chart:{json.dumps({'title': title, 'subtitle': subtitle, 'rows': rows})}-->")
+
+
+def chart_rows(cols, spread, latest, captions):
+    """`[label, mean, min, max, caption]` per column, from every run that column has had.
+
+    Sorted by the MEAN, which is what a ranking should be built on — one dispatch of a shared
+    capacity is a sample. A column with no history falls back to its latest run, so a first-ever
+    engine still charts.
+    """
+    out = []
+    for col, _engine, _rec in cols:
+        vals = spread.get(col) or ([latest[col]] if latest.get(col) else [])
+        if not vals:
+            out.append([col, 0, 0, 0, captions.get(col, "")])
+            continue
+        out.append([col, round(sum(vals) / len(vals), 1), round(min(vals), 1),
+                    round(max(vals), 1), captions.get(col, "")])
+    return out
 
 
 def engine_table(per_col, cols):
@@ -568,16 +606,32 @@ def render(cols, runs, ledger):
     print(f"## Capacity units — the latest run per engine, as of "
           f"{(ledger.get('updated') or newest or '?')[:16].replace('T', ' ')}\n")
 
-    # NUMBERS FIRST. What this page is for is the two charts and the table under them; a reader who
+    # NUMBERS FIRST. What this page is for is the charts and the table under them; a reader who
     # already knows what a capacity unit is should not have to scroll past a paragraph explaining it
-    # and a provenance table to reach them. All of that is true, none of it is the finding, and it
-    # reads better as the thing you check after a number surprises you than as a preamble.
-    chart("ETL — what building the tables cost", "capacity units, lower is better",
-          [[col, round(class_total(per_col[col], "etl"), 1), engine_caption(rec, col)]
-           for col, _e, rec in cols])
-    chart("Analytics — what querying them cost", "capacity units, lower is better",
-          [[col, round(analytics.get(col, 0.0), 1), engine_caption(rec, col)]
-           for col, _e, rec in cols])
+    # and a provenance table to reach them.
+    #
+    # AND ANALYTICS FIRST OF THE TWO, which is the point of the whole project. Fabric smooths
+    # BACKGROUND operations — the build — over 24 hours, so a heavy ETL leg is absorbed. Query CU is
+    # INTERACTIVE, smoothed over minutes, and it is what throttles: it is the CU a user waits behind
+    # and a capacity admin notices. An engine that builds cheaply and queries expensively has
+    # optimised the half that does not hurt.
+    # EVERY run maps to its column, not just the one the column was named after: the chart's mean is
+    # over an engine's whole history at that configuration, and matching on the chosen record's
+    # filename would have collapsed every sample but the newest.
+    key_by_variant = {(base_engine(c), variant(r)): c for c, _e, r in cols}
+    key_of = lambda rec: key_by_variant.get((rec.get("engine"), variant(rec)))
+    captions = {col: engine_caption(rec, col) for col, _e, rec in cols}
+    runs_for = {col: len(spread_for(runs, ledger, "analytics", key_of).get(col) or []) or 1
+                for col, _e, _r in cols}
+    n_runs = max(runs_for.values(), default=1)
+    over = f", mean of {n_runs} runs with the range" if n_runs > 1 else ""
+    chart("Analytics — what querying the tables cost",
+          f"capacity units, lower is better — this is the INTERACTIVE CU that throttles{over}",
+          chart_rows(cols, spread_for(runs, ledger, "analytics", key_of), analytics, captions))
+    chart("ETL — what building them cost",
+          f"capacity units, lower is better — background CU, smoothed over 24h{over}",
+          chart_rows(cols, spread_for(runs, ledger, "etl", key_of),
+                     {c: class_total(per_col[c], "etl") for c in per_col}, captions))
 
     print("\nEvery engine's latest run, summed:\n")
     engine_table(per_col, cols)
@@ -596,6 +650,11 @@ def render(cols, runs, ledger):
           "64-vCore notebook, a Livy pool, a warehouse — and that does not qualify anything: a "
           "capacity unit already prices it in, which is the whole reason to measure cost rather than "
           "wall-clock. Seconds would need the caveat; CU is the bill.\n")
+    print("**Analytics is the half that matters**, and it leads for that reason. Fabric smooths "
+          "BACKGROUND operations — everything the build does — over 24 hours, so a heavy ETL leg is "
+          "absorbed and nobody waits for it. Query CU is INTERACTIVE, smoothed over minutes, and it "
+          "is what THROTTLES: the CU a user sits behind and a capacity admin asks about. An engine "
+          "that builds cheaply and queries expensively has optimised the half that does not hurt.\n")
 
     render_sources(cols, ledger, unmeasured)
 

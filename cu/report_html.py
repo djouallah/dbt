@@ -73,14 +73,29 @@ def _bar_path(w, h, r=4):
             f"A{r},{r} 0 0 1 {w - r:.1f},{h} H0 Z")
 
 
+def _row(r):
+    """`[label, avg, min, max, caption]`, tolerating the older `[label, value, caption]`."""
+    label, avg = str(r[0]), float(r[1])
+    if len(r) >= 4 and r[2] is not None and r[3] is not None:
+        return label, avg, float(r[2]), float(r[3]), (str(r[4]) if len(r) > 4 and r[4] else "")
+    return label, avg, avg, avg, (str(r[2]) if len(r) > 2 and r[2] else "")
+
+
 def chart_svg(spec):
-    rows = [(str(r[0]), float(r[1]), str(r[2]) if len(r) > 2 and r[2] else "")
-            for r in spec.get("rows") or []]
+    """A bar at the MEAN, with a whisker spanning min..max across that engine's runs.
+
+    One run is one sample and Fabric's capacity is shared, so a single number is a reading rather
+    than a result. The bar is the average because that is what a ranking should be built on; the
+    whisker is there so a reader can see when two averages are closer together than either engine's
+    own spread — which is the case where the ranking means nothing. With one run the whisker
+    collapses to the bar and says so honestly.
+    """
+    rows = [_row(r) for r in spec.get("rows") or []]
     if not rows:
         return ""
-    subs = any(s for _l, _v, s in rows)
+    subs = any(s for *_x, s in rows)
     band, label_w = (SUB_BAND, SUB_LABEL_W) if subs else (BAND, LABEL_W)
-    top = max(v for _l, v, _s in rows) or 1.0
+    top = max(hi for _l, _a, _lo, hi, _s in rows) or 1.0
     plot = WIDTH - label_w - VALUE_W
     height = PAD_T + len(rows) * band + 6
     out = [f'<figure class="chart"><figcaption><span class="chart-title">'
@@ -88,24 +103,38 @@ def chart_svg(spec):
            f'<span class="chart-sub">{html.escape(spec.get("subtitle", ""))}</span></figcaption>',
            f'<svg viewBox="0 0 {WIDTH} {height}" width="100%" height="{height}" role="img" '
            f'aria-label="{html.escape(spec.get("title", ""))}">']
-    for i, (label, value, sub) in enumerate(rows):
+    for i, (label, avg, lo, hi, sub) in enumerate(rows):
         y = PAD_T + i * band
-        w = plot * (value / top)
+        w = plot * (avg / top)
+        wlo, whi = plot * (lo / top), plot * (hi / top)
         # With a caption the name sits on the bar's upper half and the caption under it, so the pair
         # reads as one block against the bar rather than as two columns.
         ly = (BAR_H / 2 if subs else BAR_H / 2 + 4)
+        mid = BAR_H / 2
+        spread = ""
+        if whi - wlo > 0.5:
+            # Drawn OVER the bar, not beside it: the range belongs to the same quantity the bar
+            # measures, and a separate mark would read as a second series.
+            spread = (f'<line class="whisker" x1="{wlo:.1f}" y1="{mid}" x2="{whi:.1f}" y2="{mid}"/>'
+                      f'<line class="whisker-cap" x1="{wlo:.1f}" y1="{mid - 5}" '
+                      f'x2="{wlo:.1f}" y2="{mid + 5}"/>'
+                      f'<line class="whisker-cap" x1="{whi:.1f}" y1="{mid - 5}" '
+                      f'x2="{whi:.1f}" y2="{mid + 5}"/>')
+        value = f"{avg:,.1f}" + (f"  ({lo:,.0f}–{hi:,.0f})" if hi - lo > 0.05 else "")
         out.append(f'<g transform="translate(0,{y})">'
                    f'<title>{html.escape(label)}'
                    + (f' ({html.escape(sub)})' if sub else "")
-                   + f': {value:,.1f} CU</title>'
+                   + f': mean {avg:,.1f} CU'
+                   + (f', range {lo:,.1f}–{hi:,.1f}' if hi - lo > 0.05 else "")
+                   + '</title>'
                      f'<text class="bar-label" x="{label_w - 10}" y="{ly:.0f}" '
                      f'text-anchor="end">{html.escape(label)}</text>'
                    + (f'<text class="bar-caption" x="{label_w - 10}" y="{ly + 13:.0f}" '
                       f'text-anchor="end">{html.escape(sub)}</text>' if sub else "")
                    + f'<g transform="translate({label_w},0)">'
-                     f'<path class="bar" d="{_bar_path(w, BAR_H)}"/></g>'
-                     f'<text class="bar-value" x="{label_w + w + 8:.1f}" '
-                     f'y="{BAR_H / 2 + 4:.0f}">{value:,.1f}</text></g>')
+                     f'<path class="bar" d="{_bar_path(w, BAR_H)}"/>{spread}</g>'
+                     f'<text class="bar-value" x="{label_w + max(w, whi) + 8:.1f}" '
+                     f'y="{BAR_H / 2 + 4:.0f}">{value}</text></g>')
     out.append(f'<line class="axis" x1="{label_w}" y1="{PAD_T - 6}" x2="{label_w}" '
                f'y2="{PAD_T + len(rows) * band - band + BAR_H + 4}"/>')
     out.append("</svg></figure>")
@@ -225,6 +254,10 @@ figure.chart figcaption { display:flex; flex-wrap:wrap; align-items:baseline; ga
 .chart-sub { color:var(--dim); font-size:.78rem; }
 figure.chart svg { max-width:100%; height:auto; display:block; overflow:visible; }
 .bar { fill:var(--series); }
+/* Drawn over the bar in the page background colour, so it reads as a range ON the quantity rather
+   than as a second series beside it. */
+.whisker { stroke:var(--bg); stroke-width:2; opacity:.75; }
+.whisker-cap { stroke:var(--bg); stroke-width:2; opacity:.75; }
 .bar-label { fill:var(--fg); font-size:12px; font-weight:600; }
 .bar-caption { fill:var(--dim); font-size:10px; }
 .bar-value { fill:var(--dim); font-size:12px; font-variant-numeric:tabular-nums; }

@@ -166,9 +166,14 @@ def test_the_page_renders_end_to_end_with_charts_and_a_layout():
     assert "`storage`" in out and "1,509.0" in out
     assert "fct_summary" in out and "delta-rs" in out
     assert "8,167" in out and "12,345.60" in out, "the input archive should be on the page"
-    spec = json.loads(out.split("<!--chart:")[1].split("-->")[0])
-    assert spec["rows"][0][1] == 31080.0, "etl chart is the sum of the etl items"
-    assert spec["rows"][0][2] == "dbt-duckrun · 64 vCores"
+    # ANALYTICS leads: it is the interactive CU that throttles, which is the point of the project.
+    first, second = [json.loads(b.split("-->")[0]) for b in out.split("<!--chart:")[1:3]]
+    assert "Analytics" in first["title"] and "INTERACTIVE" in first["subtitle"]
+    assert "ETL" in second["title"] and "background" in second["subtitle"]
+    # [label, mean, min, max, caption] — one run, so the range collapses onto the mean.
+    assert first["rows"][0][:4] == ["duckrun", 2041.0, 2041.0, 2041.0]
+    assert second["rows"][0][:4] == ["duckrun", 31080.0, 31080.0, 31080.0]
+    assert second["rows"][0][4] == "dbt-duckrun · 64 vCores"
 
 
 def test_a_column_with_no_operations_of_a_kind_prints_a_dash_not_a_zero():
@@ -379,3 +384,55 @@ def test_the_page_says_the_columns_are_comparable():
     out = _render([_full("a-1.json", "spark")], ledger({"OUT": 1.0, "SEM": 2.0}))
     assert "The columns are directly comparable" in out
     assert "CU is the bill" in out
+
+
+def test_the_chart_shows_the_mean_and_the_range_across_runs():
+    """One dispatch is one sample of a SHARED capacity, so a single number is a reading rather than a
+    result. The bar is the mean because that is what a ranking should be built on; the range is what
+    tells a reader when two averages are closer together than either engine's own spread."""
+    runs = [_full("a-1.json", "spark", finished_hours_ago=72),
+            _full("b-2.json", "spark", finished_hours_ago=48),
+            _full("c-3.json", "spark", finished_hours_ago=24)]
+    # Distinct GUIDs per run so each contributes its own sample.
+    for i, r in enumerate(runs):
+        r["items"] = {f"S{i}": gone("semantic_model", "aemo_spark"),
+                      f"O{i}": gone("output", "dbt_spark")}
+    led = ledger({"S0": {"XMLA Read Operation": 1000.0}, "O0": {"Warehouse Query": 1.0},
+                  "S1": {"XMLA Read Operation": 2000.0}, "O1": {"Warehouse Query": 1.0},
+                  "S2": {"XMLA Read Operation": 1500.0}, "O2": {"Warehouse Query": 1.0}})
+    out = _render(runs, led)
+    spec = json.loads(out.split("<!--chart:")[1].split("-->")[0])
+    assert spec["rows"][0][:4] == ["spark", 1500.0, 1000.0, 2000.0]
+    assert "mean of 3 runs" in spec["subtitle"]
+
+
+def test_the_chart_sorts_by_the_mean():
+    runs = [_full("a-1.json", "spark"), _full("b-2.json", "dwh")]
+    runs[0]["items"] = {"S0": gone("semantic_model", "aemo_spark"),
+                        "O0": gone("output", "dbt_spark")}
+    runs[1]["items"] = {"S1": gone("semantic_model", "aemo_dwh"),
+                        "O1": gone("output", "dbt_dwh")}
+    out = _render(runs, ledger({"S0": {"XMLA Read Operation": 9.0}, "O0": {"Warehouse Query": 1.0},
+                                "S1": {"XMLA Read Operation": 3.0}, "O1": {"Warehouse Query": 1.0}}))
+    spec = json.loads(out.split("<!--chart:")[1].split("-->")[0])
+    assert [r[0] for r in spec["rows"]] == ["dwh", "spark"], "cheapest mean first"
+
+
+def test_the_svg_draws_a_whisker_only_when_there_is_a_range():
+    """A single run is a point, and drawing a zero-width whisker on it would suggest a spread that
+    was never measured."""
+    import report_html as R
+    wide = R.chart_svg({"title": "t", "subtitle": "s",
+                        "rows": [["spark", 1500.0, 1000.0, 2000.0, "cap"]]})
+    assert wide.count('class="whisker"') == 1 and wide.count("whisker-cap") == 2
+    assert "(1,000–2,000)" in wide
+    flat = R.chart_svg({"title": "t", "subtitle": "s",
+                        "rows": [["dwh", 1853.5, 1853.5, 1853.5, "cap"]]})
+    assert 'class="whisker"' not in flat and "(" not in flat.split("bar-value")[1][:40]
+
+
+def test_the_svg_still_takes_the_older_three_field_row():
+    """`[label, value, caption]` — so a chart spec from an artifact rendered months ago still draws."""
+    import report_html as R
+    svg = R.chart_svg({"title": "t", "subtitle": "s", "rows": [["spark", 42.0, "cap"]]})
+    assert "42.0" in svg and "cap" in svg and 'class="whisker"' not in svg

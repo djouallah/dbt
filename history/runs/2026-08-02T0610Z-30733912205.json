@@ -647,6 +647,8 @@
   "20D42F73-145A-4F57-9157-49BA023A267F": {
    "at": "2026-08-02T05:21:14+00:00",
    "created": true,
+   "deleted": "2026-08-02T12:52:08+00:00",
+   "deleted_by": "hand \u2014 this run predates the teardown job",
    "kind": "Lakehouse",
    "name": "dbt_delta",
    "role": "output"
@@ -669,6 +671,8 @@
   },
   "8B147D43-606E-4059-82C3-A41833266CDE": {
    "created": true,
+   "deleted": "2026-08-02T12:52:08+00:00",
+   "deleted_by": "hand \u2014 this run predates the teardown job",
    "engine": "duckrun",
    "kind": "SemanticModel",
    "name": "aemo_duckrun",
