@@ -1,219 +1,179 @@
-"""Offline tests for dashboard.py — `python -m pytest cu/ -q` runs these too.
+"""Offline tests for the page. No token, no network, no Fabric — which is the property being kept.
 
-The dashboard's whole claim is that a page can be rebuilt from a committed JSON record with no
-token, no network and no third-party package. That claim is only worth making if it is checked, and
-every one of these runs in milliseconds against files in a tmp_path.
+What matters here is the JOIN. Attribution used to be substring matching on display names with a
+`shared` bucket for anything ambiguous; it is now a dictionary lookup on the item GUID, and the class
+comes from the role the run itself recorded. If that join is wrong the page prints a confident number
+under the wrong engine, which is the failure this directory exists to avoid.
 
-What they pin, all of which fail the same quiet way when wrong — a page that renders and misleads:
-a record covering fewer engines must produce fewer COLUMNS rather than columns of zeros; the record
-being rendered must win its own `since` floor in the generations table; an old schema must still
-render; and an empty `history/` must say the contract rather than print a blank page that reads like
-an idle capacity.
+    python -m pytest cu/test_dashboard.py -q
 """
-import importlib
+import io
 import json
 import os
 import sys
+from contextlib import redirect_stdout
 
 import pytest
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import dashboard as d  # noqa: E402
 
 
-def load(directory, **env):
-    for k in [k for k in os.environ if k.startswith("CU_")] + ["PBI_TOKEN", "STATS_JSON"]:
-        os.environ.pop(k, None)
-    os.environ.update({"CU_HISTORY_DIR": str(directory), **env})
-    import capacity_cu
-    import dashboard
-    importlib.reload(capacity_cu)
-    return importlib.reload(dashboard)
+def rec(file, engine, started, finished, items, config=None, stats=None, tables=None,
+        landing=None, full_load=True):
+    return {"_file": file, "schema": 1, "engine": engine, "full_load": full_load,
+            "run": {"id": file.split("-")[-1].split(".")[0], "started": started,
+                    "finished": finished},
+            "items": items,
+            "layout": {"config": config or {}, "stats": stats or {}, "tables": tables or [],
+                       **({"landing": landing} if landing else {})}}
 
 
-def record(directory, name, *, since, written, build="b1", engines=("duckrun", "spark"),
-           schema=2, analytics=True):
-    rec = {
-        "schema": schema, "unit": "CU (s)", "written": written, "since": since,
-        "runs": {"measure": "m1", "build": build, "build_sha": "abc1234567"},
-        "config": {"duckrun": {"vcores": "64"},
-                   "spark": {"resource_profile": "writeHeavy",
-                             "native_execution_engine": "false"}},
-        "cu": {"etl": {e: {"OneLake Write": 100.0 * (i + 1)} for i, e in enumerate(engines)}},
-        "tables": ["dim_duid", "fct_summary"],
-        "layout_written": "2026-08-01T07:10:00",
-        "layout": {e: {"dim_duid": {"schema": "mart", "total_rows": 689, "num_files": 1,
-                                    "num_row_groups": 1, "avg_row_group": 689, "size_mb": 0.02,
-                                    "vorder": False},
-                       "fct_summary": {"schema": "mart", "total_rows": 143_980_961,
-                                       "num_files": 4 + i, "num_row_groups": 79,
-                                       "avg_row_group": 1_822_544, "size_mb": 998.91,
-                                       "vorder": False}}
-                   for i, e in enumerate(engines)},
-    }
-    if analytics:
-        rec["cu"]["analytics"] = {e: {"XMLA Read Operation": 50.0} for e in engines}
-    if schema == 1:
-        rec.pop("tables"), rec.pop("layout_written")
-    (directory / name).write_text(json.dumps(rec), encoding="utf-8")
-    return rec
+def ledger(cu, settled=None):
+    return {"cu": cu, "settled": settled or {}, "reads": [{"at": "2026-08-02T20:00:00+00:00"}],
+            "updated": "2026-08-02T20:00:00+00:00"}
 
 
-def test_a_two_engine_record_renders_two_columns(tmp_path, capsys):
-    """"It can be 1 engine, 2, whatever" is the contract. Nothing measured iceberg or dwh, so
-    neither has a zero to print — a column that appears anyway is a claim about an engine that was
-    never run."""
-    record(tmp_path, "a.json", since="2026-08-01T10:00:00", written="2026-08-01T04:00")
-    d = load(tmp_path)
-    assert d.main() == 0
-    out = capsys.readouterr().out
-    assert "| CU (s) | duckrun | spark |" in out
-    assert "iceberg" not in out and "dwh" not in out
-    assert "2 engines, one landed copy" in out
-    # …and the layout blocks follow the same rule, in the same column order.
-    assert "| duckrun | `delta-rs` | 50.0 | 143,980,961 |" in out
+@pytest.fixture(autouse=True)
+def _clock(monkeypatch):
+    monkeypatch.setenv("CU_MODEL_OFFSET_HOURS", "10")
 
 
-def test_every_engine_shows_its_latest_measurement(tmp_path, capsys):
-    """The page is the comparison, and dispatches are partial: `engines=spark` builds one leg. If
-    only the newest record renders, three engines vanish and the page stops being a comparison —
-    which is what it is for. Each engine keeps its last real measurement instead."""
-    record(tmp_path, "a.json", since="2026-08-01T10:00:00", written="2026-08-01T04:00",
-           build="old", engines=("duckrun", "iceberg", "spark", "dwh"))
-    record(tmp_path, "b.json", since="2026-08-01T15:00:00", written="2026-08-01T13:00",
-           build="new", engines=("spark",))
-    d = load(tmp_path)
-    d.main()
-    out = capsys.readouterr().out
-    assert "| CU (s) | duckrun | iceberg | spark | dwh |" in out
-    assert "4 engines, one landed copy" in out
-    # …and the provenance table says which dispatch each column came from, because they differ.
-    assert "| spark | [new]" in out and "| duckrun | [old]" in out
+def test_the_role_decides_the_class_not_the_fabric_item_kind():
+    """A semantic model is only ever queried; everything else is work done to BUILD the tables. This
+    replaced classification from the metrics app's item-kind snapshot, which routinely had not
+    catalogued a minutes-old item at all."""
+    r = rec("r-1.json", "spark", "2026-08-02T05:00:00+00:00", "2026-08-02T06:00:00+00:00", {
+        "OUT": {"role": "output", "name": "dbt_spark"},
+        "NB": {"role": "compute", "name": "dbt-spark-ab12"},
+        "SEM": {"role": "semantic_model", "name": "aemo_spark"},
+    })
+    led = ledger({"OUT": {"OneLake Write": {"2026-08-02T15:00:00": 10.0}},
+                  "NB": {"Livy Run": {"2026-08-02T15:00:00": 900.0}},
+                  "SEM": {"XMLA Read": {"2026-08-02T15:00:00": 40.0}}})
+    cells, _landing, _open = d.run_cu(r, led)
+    assert cells == {("etl", "OneLake Write"): 10.0, ("etl", "Livy Run"): 900.0,
+                     ("analytics", "XMLA Read"): 40.0}
 
 
-def test_one_engine_under_two_configs_is_two_columns(tmp_path, capsys):
-    """A resource profile is the variable being tested, so spark under `writeHeavy` and spark under
-    `readHeavyForPBI` are two findings, not one engine measured twice. Keying the column on
-    (engine, config) is what keeps both on the page."""
-    record(tmp_path, "a.json", since="2026-08-01T10:00:00", written="2026-08-01T04:00",
-           engines=("spark",))
-    rec = record(tmp_path, "b.json", since="2026-08-01T15:00:00", written="2026-08-01T13:00",
-                 engines=("spark",))
-    rec["config"]["spark"] = {"resource_profile": "readHeavyForPBI",
-                              "native_execution_engine": "true"}
-    (tmp_path / "b.json").write_text(json.dumps(rec), encoding="utf-8")
-    d = load(tmp_path)
-    d.main()
-    out = capsys.readouterr().out
-    assert "| CU (s) | spark·readHeavyForPBI+NEE | spark·writeHeavy+noNEE |" in out
-    # One ENGINE, two columns — the headline counts engines, not columns.
-    assert "1 engine, one landed copy" in out
+def test_landing_is_allocated_by_hour_and_kept_out_of_the_engine_total():
+    """`dbt_landing` is the one item that outlives a run, so it is the one thing allocated by window
+    rather than by GUID — and it is a shared INPUT cost, never an engine's."""
+    r = rec("r-1.json", "spark", "2026-08-02T05:00:00+00:00", "2026-08-02T06:30:00+00:00", {
+        "OUT": {"role": "output", "name": "dbt_spark"},
+        "LAND": {"role": "landing", "name": "dbt_landing"},
+    })
+    led = ledger({"OUT": {"Write": {"2026-08-02T15:00:00": 10.0}},
+                  # 15:00 and 16:00 are inside the run (05:00-06:30 UTC -> 15:00-16:00 model);
+                  # 09:00 belongs to some earlier run and must not be counted here.
+                  "LAND": {"Write": {"2026-08-02T09:00:00": 500.0,
+                                     "2026-08-02T15:00:00": 3.0,
+                                     "2026-08-02T16:00:00": 4.0}}})
+    cells, landing, _open = d.run_cu(r, led)
+    assert landing == {"Write": 7.0}
+    assert cells == {("etl", "Write"): 10.0}, "landing must not be added to the engine's own CU"
 
 
-def test_landing_and_shared_are_not_columns(tmp_path, capsys):
-    """Neither is one of the things being compared: `landing` is the archive every leg reads and
-    `shared` is CU nothing could attribute, so neither has an (engine, config) key to be the latest
-    for. Both stay in the measurement's own report."""
-    rec = record(tmp_path, "a.json", since="2026-08-01T10:00:00", written="2026-08-01T04:00")
-    rec["cu"]["etl"]["landing"] = {"OneLake Write": 40.0}
-    rec["cu"]["etl"]["shared"] = {"OneLake Write": 9.0}
-    (tmp_path / "a.json").write_text(json.dumps(rec), encoding="utf-8")
-    d = load(tmp_path)
-    d.main()
-    out = capsys.readouterr().out
-    assert "| CU (s) | duckrun | spark |" in out
-    # Asserted on the notes those columns would drag in, not on the words: a tmp_path can carry
-    # either one in its own name.
-    assert "is a STAGE, not an engine" not in out
-    assert "CU no engine can be given" not in out
+def test_the_dbt_folder_costs_nothing_and_is_skipped():
+    r = rec("r-1.json", "dwh", "2026-08-02T05:00:00+00:00", "2026-08-02T06:00:00+00:00",
+            {"F": {"role": "folder", "name": "dbt"}, "OUT": {"role": "output", "name": "dbt_dwh"}})
+    cells, _l, open_items = d.run_cu(r, ledger({"OUT": {"Q": {"2026-08-02T15:00:00": 1.0}}}))
+    assert cells == {("etl", "Q"): 1.0}
+    assert open_items == ["output/dbt_dwh"], "the folder is not an item whose CU can settle"
 
 
-def test_one_engine_says_engine_not_engines(tmp_path, capsys):
-    record(tmp_path, "a.json", since="2026-08-01T10:00:00", written="2026-08-01T04:00",
-           engines=("duckrun",))
-    d = load(tmp_path)
-    d.main()
-    out = capsys.readouterr().out
-    assert "1 engine, one landed copy" in out
-    assert "| CU (s) | duckrun |" in out
+def test_an_item_with_no_ledger_rows_yet_is_reported_as_open_not_as_zero():
+    """A run measured minutes ago is still accruing. 'not measured' and 'cost nothing' are different
+    claims, and the sources table has to be able to say which."""
+    r = rec("r-1.json", "spark", "2026-08-02T05:00:00+00:00", "2026-08-02T06:00:00+00:00",
+            {"OUT": {"role": "output", "name": "dbt_spark"}})
+    cells, _l, open_items = d.run_cu(r, ledger({}))
+    assert cells == {} and open_items == ["output/dbt_spark"]
 
 
-def test_a_pinned_record_renders_alone(tmp_path, capsys):
-    """`CU_RECORD` is the escape hatch from the composed page: one generation, exactly as it was
-    measured, which is what reproducing an old page means."""
-    record(tmp_path, "2026-08-01T0412Z-111.json", since="2026-08-01T10:00:00",
-           written="2026-08-01T04:12", engines=("duckrun", "iceberg"))
-    record(tmp_path, "2026-08-01T1300Z-222.json", since="2026-08-01T15:00:00",
-           written="2026-08-01T13:00", engines=("spark",))
-    d = load(tmp_path, CU_RECORD="111")
-    d.main()
-    out = capsys.readouterr().out
-    assert "| CU (s) | duckrun | iceberg |" in out
-    assert "spark" not in out
+def test_columns_are_the_latest_run_per_engine_and_config():
+    """One dispatch builds ONE engine, so rendering the newest record alone gives a comparison page
+    with a single column. And spark under readHeavyForPBI answers a different question from spark
+    under writeHeavy: one number cannot stand for both."""
+    runs = [
+        rec("a-1.json", "spark", "2026-08-01T05:00:00+00:00", "2026-08-01T06:00:00+00:00",
+            {}, config={"spark": {"resource_profile": "writeHeavy"}}),
+        rec("b-2.json", "spark", "2026-08-02T05:00:00+00:00", "2026-08-02T06:00:00+00:00",
+            {}, config={"spark": {"resource_profile": "writeHeavy"}}),
+        rec("c-3.json", "spark", "2026-08-02T07:00:00+00:00", "2026-08-02T08:00:00+00:00",
+            {}, config={"spark": {"resource_profile": "readHeavyForPBI"}}),
+        rec("d-4.json", "dwh", "2026-08-02T09:00:00+00:00", "2026-08-02T10:00:00+00:00", {}),
+    ]
+    cols = d.columns_for(runs)
+    assert [c for c, _e, _r in cols] == ["spark·readHeavyForPBI", "spark·writeHeavy", "dwh"]
+    by_col = {c: r["_file"] for c, _e, r in cols}
+    assert by_col["spark·writeHeavy"] == "b-2.json", "the LATER run of a config wins its column"
 
 
-def test_pick_takes_the_newest_or_a_named_run(tmp_path):
-    record(tmp_path, "2026-08-01T0412Z-111.json", since="2026-08-01T10:00:00",
-           written="2026-08-01T04:12")
-    record(tmp_path, "2026-08-01T0822Z-222.json", since="2026-08-01T15:00:00",
-           written="2026-08-01T08:22")
-    d = load(tmp_path)
-    recs = d.load_records()
-    assert d.pick(recs, "")["_file"].endswith("222.json")        # newest by default
-    assert d.pick(recs, "111")["_file"].endswith("111.json")     # by run id
-    # An unmatched pick renders the newest rather than nothing: refusing to render is worse.
-    assert d.pick(recs, "nope")["_file"].endswith("222.json")
+def test_one_config_per_engine_gets_a_bare_column_name():
+    runs = [rec("a-1.json", "dwh", "2026-08-02T05:00:00+00:00", "2026-08-02T06:00:00+00:00", {})]
+    assert [c for c, _e, _r in d.columns_for(runs)] == ["dwh"]
 
 
-def test_a_schema_1_record_still_renders(tmp_path, capsys):
-    """`history/` is the copy that outlives retention. A reader that silently ignores last month's
-    records is the same failure as never having written them."""
-    record(tmp_path, "old.json", since="2026-08-01T10:00:00", written="2026-08-01T04:00", schema=1)
-    d = load(tmp_path)
-    d.main()
-    out = capsys.readouterr().out
-    assert "`fct_summary` in detail" in out and "`mart.dim_duid`" in out
+def test_a_variant_tag_never_contains_the_column_separator():
+    """base_engine splits on COL_SEP; a tag containing one would make the column id unparseable back
+    to its engine, and STACK lookups would silently miss."""
+    tag = d.variant_tag((("native_execution_engine", "true"), ("resource_profile", "readHeavyForPBI"),
+                         ("vcores", "64")))
+    assert d.COL_SEP not in tag
+    assert d.base_engine(f"spark{d.COL_SEP}{tag}") == "spark"
 
 
-def test_an_empty_history_says_the_contract(tmp_path, capsys):
-    """The dashboard's one failure mode, and it must not look like an idle capacity."""
-    d = load(tmp_path / "nothing-here")
-    assert d.main() == 0
-    out = capsys.readouterr().out
-    assert "No records in" in out and "spends no capacity" in out
-    assert "Build, benchmark, measure" in out
+def _render(runs, led):
+    buf = io.StringIO()
+    with redirect_stdout(buf):
+        d.render(d.columns_for(runs), runs, led)
+    return buf.getvalue()
 
 
-def test_the_dashboard_never_reaches_the_network(tmp_path, capsys, monkeypatch):
-    """The claim that makes this workflow free and unbreakable: no token, no request, not even the
-    `requests` package. Rendered with it removed, so an accidental call cannot pass."""
-    record(tmp_path, "a.json", since="2026-08-01T10:00:00", written="2026-08-01T04:00")
-    d = load(tmp_path)
-    monkeypatch.setattr(d.cu, "requests", None)
-    assert d.main() == 0
-    assert "| CU (s) |" in capsys.readouterr().out
+def test_the_page_renders_end_to_end_with_charts_and_a_layout():
+    runs = [rec("a-1.json", "duckrun", "2026-08-02T05:00:00+00:00", "2026-08-02T06:00:00+00:00",
+                {"OUT": {"role": "output", "name": "dbt_delta"},
+                 "SEM": {"role": "semantic_model", "name": "aemo_duckrun"}},
+                config={"duckrun": {"vcores": "64"}},
+                stats={"duckrun": {"fct_summary": {"total_rows": 143980961, "num_files": 4,
+                                                   "num_row_groups": 79, "avg_row_group": 1822544,
+                                                   "size_mb": 998.9, "vorder": False,
+                                                   "schema": "mart"}}},
+                tables=["fct_summary"], landing={"files": 8167, "size_mb": 12345.6})]
+    led = ledger({"OUT": {"OneLake Write": {"2026-08-02T15:00:00": 1088.0}},
+                  "SEM": {"XMLA Read": {"2026-08-02T15:00:00": 1891.0}}})
+    out = _render(runs, led)
+    assert "<!--chart:" in out and out.count("<!--chart:") == 2
+    assert "| **etl** |" in out and "| **analytics** |" in out
+    assert "1,088.0" in out and "1,891.0" in out
+    assert "fct_summary" in out and "delta-rs" in out
+    assert "8,167" in out and "12,345.60" in out, "the input archive should be on the page"
+    # Charts carry the adapter and the compute: `iceberg` beside `duckrun` reads as an engine
+    # difference when it is a writer difference.
+    spec = json.loads(out.split("<!--chart:")[1].split("-->")[0])
+    assert spec["rows"][0][2] == "dbt-duckrun · 64 vCores"
 
 
-def test_a_record_with_no_analytics_is_not_a_broken_page(tmp_path, capsys):
-    """A build-only dispatch never queries anything, so its analytics CU is genuinely zero. The page
-    must show the ETL half and simply not draw the other chart."""
-    record(tmp_path, "a.json", since="2026-08-01T10:00:00", written="2026-08-01T04:00",
-           analytics=False)
-    d = load(tmp_path)
-    d.main()
-    out = capsys.readouterr().out
-    assert "ETL \\u2014 what building" in out or "ETL — what building" in out
-    assert "Analytics" not in out.split("Everything this record measured")[0].split(
-        "<!--chart:")[-1]
+def test_the_page_says_when_a_column_is_still_accruing():
+    runs = [rec("a-1.json", "dwh", "2026-08-02T05:00:00+00:00", "2026-08-02T06:00:00+00:00",
+                {"OUT": {"role": "output", "name": "dbt_dwh"}})]
+    open_page = _render(runs, ledger({"OUT": {"Q": {"2026-08-02T15:00:00": 5.0}}}))
+    assert "still accruing" in open_page
+    done_page = _render(runs, ledger({"OUT": {"Q": {"2026-08-02T15:00:00": 5.0}}},
+                                     settled={"OUT": "quiet"}))
+    assert "still accruing" not in done_page
 
 
-def test_the_page_renders_from_the_dashboard_markdown(tmp_path, capsys):
-    """End to end through the real HTML renderer — the artifact copy has to open off a local disk."""
-    record(tmp_path, "a.json", since="2026-08-01T10:00:00", written="2026-08-01T04:00")
-    d = load(tmp_path)
-    d.main()
-    import report_html
-    page = report_html.page(capsys.readouterr().out)
-    assert page.startswith("<!doctype html>") and "</html>" in page
-    assert "<svg" in page and 'class="bar-caption"' in page
-    for forbidden in ("<script", "src=", "@import", "<img", "<link"):
-        assert forbidden not in page
+def test_no_records_explains_the_contract_rather_than_printing_an_empty_page():
+    buf = io.StringIO()
+    with redirect_stdout(buf):
+        d.render_empty("history/runs", "history/cu.json")
+    out = buf.getvalue()
+    assert "No run records" in out and "Benchmark" in out
+    assert "not that the capacity was idle" in out
+
+
+def test_a_missing_directory_is_an_empty_list_not_an_exception(tmp_path):
+    assert d.load_runs(str(tmp_path / "nope")) == []
+    assert d.load_ledger(str(tmp_path / "nope.json"))["cu"] == {}

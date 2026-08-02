@@ -617,7 +617,7 @@ the `cu/` section.
   dashboard's job.
 - **THE TEARDOWN DELETES EVERYTHING THE RUN CREATED, except `dbt_landing`, and it deletes BY GUID.**
   `reset_outputs` and the `reset` job are gone; `provision.py teardown <record>` runs LAST in
-  `all.yml` and removes every item this run's own record names whose `role` is not `landing` or
+  `benchmark.yml` and removes every item this run's own record names whose `role` is not `landing` or
   `folder` — the output lakehouse or warehouse, `dbt_dwh_src`, the benchmark's semantic model. The
   throwaway notebook has already deleted itself in `fabric_run.py`'s `finally`.
   **Why, and it is not tidiness:** an item that outlives its run keeps drawing background CU —
@@ -648,7 +648,7 @@ the `cu/` section.
   `benchmark/` survives because it deploys its models per dispatch — and the recreated warehouse
   comes back with a fresh `connectionString` and **no grants**.
   `python -m pytest .github/scripts/ -q` exercises the whole path against a stubbed Fabric in
-  seconds, and `dbt.yml`'s free `plan` job runs it before any leg spends capacity. Run it before
+  seconds, and the free `checks` job runs it before any leg spends capacity. Run it before
   touching this: the failure mode is deleting the wrong thing.
 - **`full_load` in the record is DERIVED, not an input.** It is `true` when the run's own output
   item carries `created: true` — i.e. the previous run's teardown really did run. An input only ever
@@ -671,36 +671,36 @@ the `cu/` section.
   spent paid capacity nobody asked for, and a batch of edits queued several such runs on the
   concurrency group. `paths-ignore` did not fix that: it is per-PUSH, not per-file, so a commit
   touching a doc *and* anything else still ran. Commit and push freely; start a build with
-  `gh workflow run "Build, benchmark, measure"` when you actually want one.
-  The second load: **`cu.yml` commits a history record back to the repo**, and that is only safe
-  because no workflow answers a push. Give any workflow a `push:` trigger and CI starts paying for
-  its own commits — revisit that step in the same change, not afterwards.
-- **`all.yml` ("Build, benchmark, measure") is the ordinary dispatch, and the other three are its
-  stages.** `dbt.yml`, `benchmark.yml` and `cu.yml` gained `workflow_call` and are otherwise
-  unchanged, so each still runs standalone for a targeted re-run. One dispatch is
-  build → benchmark → lag → measure, ending in a committed `history/` record, with a per-stage skip
-  input. It does **not** publish: the page is `dashboard.yml`, dispatched separately by a human, and
-  the record is the only thing passing between them. Two things the composition
-  buys that a hand-sequenced dispatch could not: the CU floor becomes **this run's own start hour**
-  (so the report describes one generation with no pinned default to bump), and the lag before the CU
-  read is enforced rather than remembered. `workflow_call` inputs cannot be `type: choice`, so
-  `cores` and `spark_resource_profile` are plain strings across that boundary — the dropdown lives
-  on the dispatch form, and a bad value now fails at the leg instead of at the form.
+  `gh workflow run Benchmark` when you actually want one.
+  The second load: **both workflows commit back to the repo** — `Benchmark` a run record, `Dashboard`
+  the CU ledger — and that is only safe because no workflow answers a push. Give any workflow a
+  `push:` trigger and CI starts paying for its own commits — revisit those steps in the same change,
+  not afterwards.
+- **THERE ARE TWO WORKFLOWS: `Benchmark` and `Dashboard`.** `all.yml`, `dbt.yml` and `cu.yml` are
+  deleted. `benchmark.yml` is the whole build-and-measure chain — open the record, offline checks,
+  plan, land, build, layout, resolve, bench, report, teardown, record — and `dashboard.yml` reads
+  capacity and publishes. **They share nothing but the JSON in `history/`.**
+  The composition they replaced charged three taxes, and the third is what finally killed a run.
+  Every input was declared twice, once as a `type: choice` on the dispatch form and once as a plain
+  string across the call boundary (a `workflow_call` input cannot be a choice). The workspace secret
+  had to be re-resolved in each file, because `jobs.<id>.with` is the one place the `secrets` context
+  is unavailable. And **a called workflow can never hold MORE permission than its caller grants** —
+  run 30735526504 died as a `startup_failure` with no jobs and no log because `dbt.yml` asked for
+  `actions: read` after `all.yml` stopped granting it. One file has one permission block.
+  One consequence worth holding: `layout` carries `if: !cancelled() && inputs.build`, and the second
+  half is load-bearing. A status function overrides GitHub's skip-when-a-dependency-skipped rule, so
+  without it a benchmark-only dispatch would run `layout` and read `BUILD_ENGINES` off a `plan` job
+  that never ran.
 - Jobs no longer cancel the run when they fail, and no matrix is `fail-fast`. Every leg runs to
   its own conclusion, so `gh run view <id> --json jobs` reads straight: `failure` means that
   leg failed. Cancelling never saved the Fabric compute anyway — the notebook or Livy session
   keeps running workspace-side after the GitHub job dies — it only erased the evidence.
-- **The parity dashboard is the last job of `dbt.yml` again (`layout`), and it exists in the
-  dispatch-only `layout` job too.** Same steps in both — change them together. In
-  `dbt.yml` it carries **no `if:`**, which is load-bearing: the default `success()` means it runs
-  only when every leg of `fabric` and `server` is green, so a partial run cannot publish a table
-  with holes in it that reads as drift that isn't there. The standalone copy is for asking the
-  question without spending four Fabric legs, and it keeps the hazard the split introduced —
-  dispatched by hand it can read four lakehouses mid-build. It shares `onelake-<ref>` so it queues
-  behind a build rather than racing one, which covers the GitHub-side case but not a Fabric
-  notebook still finishing after its job went green. The cost of having it back in the build is
-  ~10 minutes of OneLake reads per dispatch for numbers that only move when tables are rewritten;
-  that was the reason for the split, and it is now accepted so that drift cannot go unnoticed.
+- **The `layout` job is part of the build and there is no standalone copy.** It costs ~10 minutes
+  of OneLake reads per dispatch (the iceberg item alone 12m+) for numbers that only move when tables
+  are REWRITTEN, which was once the argument for splitting it into its own dispatch-only workflow.
+  That lost: nothing else compares the engines, and a dashboard nobody remembers to dispatch reports
+  nothing. It must run BEFORE the teardown — it reads every table through the Delta log, and the
+  teardown deletes them.
 - Every leg is `dbt build` — the engine tests its own output, in the same DAG walk that wrote it.
   This replaced a separate test job that graded all four items with one neutral duckrun reader.
   What was bought: a failure stops at the node that broke, and four jobs disappeared. What was
@@ -741,12 +741,17 @@ the `cu/` section.
   when the tables are **rewritten**, and the facts are append-only incrementals. That is the cost
   every green dispatch now pays, and it was the argument for splitting it out; it lost to the fact
   that nothing else compares the engines, so a dashboard nobody remembers to dispatch reports
-  nothing. What the split bought and is now gone: asking the question *without* spending four
-  Fabric legs. What survives is the **reusable** half — `stats.py` writes `STATS_JSON`, the job
-  uploads it as the `stats` artifact, and `cu/` downloads it from the latest successful `dbt` run
-  to print the layout beside the CU. A cached reading is sound *because* the layout is near-static.
-  The JSON is a data contract with `cu/`: renaming a `DETAIL_KEYS` entry makes the layout table
-  disappear over there with a note, not an error, so change both together.
+  nothing. What the split bought and is now gone: asking the question *without* spending Fabric
+  legs. `stats.py` writes the same document to two sinks — `STATS_JSON`, uploaded as the `stats`
+  artifact, and the RUN RECORD, which is what outlives the 90-day retention and what the page reads.
+  Renaming a `DETAIL_KEYS` entry makes the layout table disappear on the page with a note, not an
+  error, so change both together.
+  It also reports the INPUT side: `landing` — files and bytes under `dbt_landing/Files`, in total
+  and per folder. Everything else in that document describes what came out, so without it a record
+  can say a run wrote 143,980,961 rows and not say from how much. Read by LISTING (`obstore.list`,
+  already a duckrun dependency), because DuckDB's `glob()` returns paths and no sizes and the archive
+  is uncompressed CSV whose bytes are the point. Best-effort: a failure leaves the key ABSENT, never
+  `{}`, because an empty dict reads as "an empty archive" rather than "not measured".
 - It runs `stats.py` and nothing else, over **every shared table** in pipeline order —
   the staging view, the four facts, then `dim_calendar`/`dim_duid`/`fct_summary`. It was briefly
   cut to the three mart tables on the argument that the facts are inputs whose rows are implied by
@@ -759,7 +764,7 @@ the `cu/` section.
 
 ## The run record: one JSON per dispatch, and the item GUID is the point
 
-`all.yml` commits `history/runs/<UTC ts>-<run id>.json`. Every stage writes a JSON *fragment* naming
+`benchmark.yml` commits `history/runs/<UTC ts>-<run id>.json`. Every stage writes a JSON *fragment* naming
 the Fabric items it touched **under their GUIDs**; the final `record` job downloads them all and
 merges them into one document (`.github/scripts/record.py`, `finish`). Raw facts, no analysis.
 
@@ -791,14 +796,14 @@ Things that are load-bearing rather than stylistic:
   ids through `report.merge(obj, path=os.environ["RUN_RECORD"])`, reusing the deep-merge it already
   had. Twenty duplicated lines are cheaper than making `benchmark/` non-deletable, which is a stated
   property of that directory.
-- `python -m pytest .github/scripts/test_record.py -q` is the offline gate, and `dbt.yml`'s free
-  `plan` job runs it **before any leg spends capacity**. Everything it covers fails silently: a
+- `python -m pytest .github/scripts/ -q` is the offline gate, and the free `checks` job runs it
+  **before any leg spends capacity**. Everything it covers fails silently: a
   fragment that never lands, an entry a later stage overwrote, a merge order that dropped a deletion
   timestamp — each produces a record that looks fine and attributes CU to the wrong run.
 
 ## The query benchmark is a second workflow, and it only reads
 
-`benchmark/` + `.github/workflows/benchmark.yml` ("Direct Lake benchmark") ask the question `dbt.yml`
+`benchmark/` — the second half of the `Benchmark` workflow — asks the question the build half
 does not: the parity table says the four engines hold the *same rows*, this measures how long Power BI
 takes to **query** them. Ported from `djouallah/duckrun`'s `parquet_layout.yml`.
 [benchmark/README.md](benchmark/README.md) has the detail; what matters when touching this repo:
@@ -808,11 +813,11 @@ takes to **query** them. Ported from `djouallah/duckrun`'s `parquet_layout.yml`.
   default to be weighed against convenience. The benchmark's query passes are **interactive CU** on
   shared Fabric capacity, which is the class of usage a capacity admin sees and asks about; a run
   nobody chose to start is the one that causes trouble.
-  **`workflow_call` from `all.yml` is the one carve-out, and it does not weaken the rule**: `all.yml`
-  is itself `workflow_dispatch` only, so a human still chose every run that reaches this. What the
-  rule was always about is *nobody chose it*, not *another file mentioned it* — an earlier wording
-  said "no `needs:` from another workflow", which read as forbidding composition and is now stated
-  as the trigger list above. The old wording would also have banned the ordinary way this now runs.
+  It now lives in the same workflow as the build, which does not weaken the rule: that workflow is
+  `workflow_dispatch` only, so a human still chose every run that reaches this. The rule was always
+  about *nobody chose it*, not about which file the jobs live in — an earlier wording said "no
+  `needs:` from another workflow", which read as forbidding composition and is now stated as the
+  trigger list above.
 - **It measures a USER SESSION, and nothing is ever cleared. The pass number is the tier.**
   `deploy_models.py` **deletes and recreates** each semantic model, so it starts with an empty
   VertiPaq store; `xmla_compare.py` then walks the whole 25-query suite `runs` times — pass 1 **cold**,
@@ -868,10 +873,10 @@ takes to **query** them. Ported from `djouallah/duckrun`'s `parquet_layout.yml`.
   — the laptop is not a supported way to spend this capacity, and a second orchestration shape kept
   alive to serve it meant two implementations answering the same question. `dbt`-style scouting is
   still a dispatch, just with `engines=duckrun,spark runs=3 think_seconds=0 gap_seconds=0`.
-- **It shares `dbt.yml`'s concurrency group (`onelake-<ref>`) deliberately.** Not for correctness, but
-  because a concurrent dbt build contends for the same capacity, and capacity contention is the one
-  thing a wall-clock benchmark cannot absorb. So a benchmark dispatch queues behind a `dbt` dispatch
-  rather than racing it. Do not give it its own group to make it start sooner.
+- **It runs after the build in the same workflow, on the same `onelake-<ref>` group.** Not for
+  correctness — nothing here writes — but because a concurrent dbt build contends for the same
+  capacity, and capacity contention is the one thing a wall-clock benchmark cannot absorb. `resolve`
+  therefore `needs: layout`. Do not parallelise it to make the run shorter.
 - **The test is: identical DAX, identical semantic models, four dbt adapters.** The adapter that
   wrote the parquet is the only variable, so everything above it is held constant — ONE `.bim`, ONE
   storage mode, one query suite. `deploy()` takes exactly one per-engine argument,
@@ -945,434 +950,104 @@ takes to **query** them. Ported from `djouallah/duckrun`'s `parquet_layout.yml`.
   its log — the deploy printed a **different item id** than last time (`replaced <guid>`, so pass 1
   really was cold) and pass 1 > pass 2 > pass 3.
 
-## `cu/` is a third workflow, and it shares nothing with the other two
+## `cu/` is the SECOND workflow, and it joins the run records on the item GUID
 
-`cu/` + `.github/workflows/cu.yml` ("Capacity units") answer what the workspace *cost*: CU per item,
-read from the Fabric Capacity Metrics app's own semantic model by DAX over the Power BI
-`executeQueries` REST endpoint. Fabric exposes **no per-operation CU REST API** — that model is the
-only authoritative source, which is why this exists at all. [cu/README.md](cu/README.md) has the
-detail.
+`cu/` + `.github/workflows/dashboard.yml` ("Dashboard") answer what the workspace *cost*: CU per
+Fabric item, read from the Capacity Metrics app's own semantic model by DAX over the Power BI
+`executeQueries` endpoint. Fabric exposes **no per-operation CU REST API** — that model is the only
+authoritative source, which is why this exists. [cu/README.md](cu/README.md) has the detail.
 
-**Two programs, one contract, and the contract is the JSON.** `capacity_cu.py` measures and files a
-record in `history/`; `cu/dashboard.py` + `.github/workflows/dashboard.yml` ("Dashboard") read those
-records and publish the page, dispatched by a human. Nothing else passes between them — no artifact,
-no shared env, no `needs:`. Read the split's bullets below before touching either side; most of what
-follows describes the measurement, and anything about the PAGE now lives in the dashboard.
+**There are two workflows in this repo now, and this is one of them.** `Benchmark` builds, measures
+query time, deletes what it created and commits `history/runs/<ts>-<run id>.json`; `Dashboard` reads
+capacity for the GUIDs in those records, tops up `history/cu.json`, and publishes the page. `all.yml`,
+`dbt.yml` and `cu.yml` are gone.
 
-- **The report is ENGINE-MAJOR, and that orientation is what makes the width work.** Four columns,
-  one per engine; `etl` (lakehouses, warehouse, notebooks, Livy) and `analytics` (semantic models)
-  as bold subtotal rows with their operation types broken out underneath; the same shape again per
-  run. Reporting anything beyond the semantic models was tried once and reverted because an
-  ITEM-major table needs a column per operation type and a lakehouse alone brings a dozen — turn it
-  ninety degrees and those are rows, which markdown handles fine. So do not "simplify" it back to
-  items-down/operations-across; that is the shape that failed. `CLASS_BY_KIND` and
-  `CU_GROUP_PREFIXES` do the rest of the bounding, `etl: false` restores the old scope exactly (which
-  is what keeps an older dispatch's numbers comparable), and `CU_ITEM_DETAIL=1` prints the item-major
-  table underneath when a column looks wrong.
-- **Attribution to an engine is by item NAME, and an ambiguous name goes to `shared`.** The metrics
-  model carries no item-to-engine relationship and nothing else in the row could supply one, so
-  `engine_of()` matches the display name — with `delta` as an alias for duckrun, because the output
-  lakehouse is `dbt_delta`. What is left in `shared` is the legacy `duckrun-py-*` notebooks (both
-  DuckDB legs used that name) and anything nothing could name. Do not make it guess: a wrong column
-  is worse than an honest one, and `shared` is the honest one.
-- **`landing` is a column but NOT an engine, and the table says so under itself.** `dbt_landing`
-  holds the downloaded AEMO archive — `download_aemo.py` writes it — so its CU is a shared input
-  cost that must not be added to an engine's column. It has a column because "the download cost X"
-  is a real answer where `shared` was a shrug, not because it is comparable.
-- **The legs' READS of landing are split per engine now, by a shortcut each, and this file used to
-  say that was impossible.** It said the split could not be made because the hourly metrics rows
-  carry no consumer dimension, the legs read concurrently, and they read as the same service
-  principal. All three are still true. The fix was to stop needing a consumer dimension: **OneLake
-  accounts a transaction against the REQUESTED PATH**, so a read through a shortcut is booked to
-  the item hosting the shortcut. Each leg therefore reads the same bytes through a `Files/landing`
-  → `dbt_landing/Files` shortcut **inside its own lakehouse**, and `engine_of` maps that item to a
-  column as it already did. What is left in the `landing` column is the download's write plus
-  `fabric_run.py`'s result/log round-trip. Four things are load-bearing rather than stylistic:
-  - **No new items, except one.** duckrun/iceberg/spark put the shortcut in the output lakehouse
-    they already have, so a leg's landing reads land in the same column as its writes. **dwh
-    cannot host a shortcut at all** — a Fabric Warehouse has no `Files` section — so it alone gets
-    a lakehouse, `dbt_dwh_src`, holding that shortcut and nothing else.
-  - **`dbt_dwh_src`, never `dbt_dwh_landing`.** `engine_of` substring-matches `CU_ENGINES` **in
-    order** and `landing` is first, so the `_landing` spelling matches `landing` and puts dwh's
-    reads straight back where they came from. Pinned by a test.
-  - **The shortcut is ensured in each ENGINE's provision mode, not in `land`.** The teardown
-    deletes `dbt_delta`/`dbt_iceberg`/`dbt_spark`/`dbt_dwh_src` at the end of the previous run and
-    takes their shortcuts with them, so at `land` time those lakehouses do not exist. The leg that
-    recreates the item recreates the shortcut, find-or-create, on the way in. `dbt_dwh_src` now goes
-    down with the rest — it was kept alive to dodge the `ItemDisplayNameNotAvailableYet` 409 from
-    run 30639018466, which deleting at the END of a run removes the occasion for.
-  - **`dbt.yml` must not set a job-level `FILES_PATH`.** It outranks what `provision.py <engine>`
-    writes to `$GITHUB_ENV`, so a leftover `FILES_PATH: ${{ needs.land.outputs.files_path }}` keeps
-    every leg on the shared direct path and the split silently does not happen. The `land` job's
-    `outputs:` block was removed for the same reason.
-  Verified against the live warehouse before shipping: parquet `OPENROWSET`, the explicit
-  multi-file `BULK (…)` CSV list `openrowset_csv_files` builds, and the `*.CSV` + `filepath(1)`
-  fallback all return byte-identical results through the shortcut and direct. `[file]` is
-  untouched — `parse_filename` stores the stem, not the path, so no merge key moves. What is still
-  unproven is the attribution itself: read the first dispatch's report, and if `landing` still
-  holds the read row, the item does not follow the shortcut and this bought nothing.
-- **Livy bills against the LAKEHOUSE. There is no Spark item of any kind.** So `dbt_spark`'s ETL row
-  is its OneLake operations *and* the whole spark leg's compute added together, and the operation
-  column is the only thing that separates them. Three attribution shapes in one table, so the ETL
-  rows are **not** "compute for this leg": spark's compute is on its lakehouse, the two DuckDB legs'
-  is on the throwaway `duckrun.run_python` notebook, dwh's is warehouse queries. Compare them as
-  "what this item spent", not as a like-for-like engine benchmark — that is what `benchmark/` is for.
-- **`fabric_run.py` names its throwaway notebook `dbt-<engine>-<random>`, and the RANDOM SUFFIX is
-  what is still load-bearing.** The notebook is deleted after every run, Fabric keeps a deleted
-  item's DISPLAY NAME reserved for minutes (the 409 that killed three legs on run 30639018466), and
-  duckrun's `_execute_notebook` creates the item with no retry around it — so a fixed name would 409
-  the next build. The *engine in the prefix* used to be load-bearing for the same reason the whole
-  name was: `cu/` could only tell one leg's compute from the other's by matching the display name,
-  and duckrun's default `duckrun-py-<runid>` is identical for both DuckDB legs. **That is no longer
-  how attribution works.** `fabric_run.py` now passes `keep_notebook=True`, resolves the item's GUID
-  by display name, records it in the run record and deletes it itself — so the GUID is the join key
-  and the name is a convenience. Keep the prefix anyway: it is what makes a workspace listing
-  readable, and it costs nothing.
-- **Recording the GUID is the reason the notebook is deleted by us and not by duckrun.**
-  `run_python` hands back a `ScriptResult` with `returncode`/`log` and no item id, and its own
-  teardown fires before the caller sees anything — so the only way to write the GUID down is to keep
-  the notebook and delete it a couple of HTTP calls later. The delete sits in a `finally` (a
-  session-level failure *raises* out of `run_python`, and a kept notebook that outlives the leg is
-  the one regression this must not introduce) and swallows its own errors (an exception raised
-  inside `finally` replaces the build's, and losing a real failure to a bookkeeping one is worse
-  than an unrecorded GUID). A `LEFT BEHIND` or `CHECK THE WORKSPACE` line in the log means a
-  billable item is still standing.
-- **An unrecognised item kind lands in `other` and is logged, never dropped.** That log line
-  (`kind X: N CU -> other`) is the route by which a kind gets into `CLASS_BY_KIND`. Do not guess a
-  kind into the mapping; dispatch once and read stderr.
-- **The page leads with a source link and CU bar charts, and ends with the hardware; there are no
-  totals.** Two charts — ETL and analytics per engine, lower is better — drawn as inline SVG with one
-  hue, because a single series needs no legend and colouring four bars differently would encode what
-  the axis labels already say. **Each bar carries a second line naming the adapter and the compute**
-  (`dbt-duckdb · 64 vCores`, `dbt-fabricspark · writeHeavy · NEE on`), because `iceberg` beside
-  `duckrun` reads as an engine difference and it is a *writer* difference — same DuckDB, same
-  notebook size. The adapter comes from `STACK` in `capacity_cu.py`, deliberately not from
-  `stats.py`'s artifact: it is a static fact of `profiles.yml`, and recording it per run would only
-  mean older artifacts could not be labelled. The config beside it does come from the artifact and
-  is **absent rather than defaulted** when the run did not record it. **Sorted cheapest first**: "lower is better" makes the ranking the finding, so
-  the chart answers "who cost least" before any two bars are compared. The cost is that an engine
-  sits at a different height in the two charts — the tables keep the fixed column order and are the
-  lookup. A **zero sorts to the bottom**, never the top: zero means the engine did no such work, and
-  at the top under that caption it would read as the winner. The
-  grand-total row and the total column are gone: they summed ACROSS engines, which is the one sum on
-  this page that answers nothing, since the engines are four alternatives to each other. Class
-  subtotals stay — those sum down a column.
-  **The chart travels as an HTML comment** (`<!--chart:{…}-->`) that `report_html.py` turns into
-  SVG. The same markdown goes to the GitHub job summary, which sanitises inline SVG, so a comment is
-  the one form that is invisible there and drawable here. Do not "simplify" it into raw SVG in the
-  markdown — the summary would carry a broken blob and the page would gain nothing.
-- **The PAGE's columns are each engine's LATEST measurement, one per config — composed from every
-  record, not read from the newest one.** `dashboard.py`'s `columns_for` keys on **(engine, config)**:
-  spark under `writeHeavy` and spark under `readHeavyForPBI` are two columns, because the profile is
-  the variable being tested and one number cannot answer for both, and an engine nobody has rebuilt
-  keeps its last real column instead of vanishing. Rendering the newest record alone was the previous
-  behaviour and it broke the moment dispatches went partial: `engines=spark` files a record naming one
-  engine, so the page came out with **one column** — a comparison page with nothing to compare.
-  What it costs is stated rather than smoothed: the columns are different dispatches on different
-  `since` floors, so a **provenance table** names the build, the date and the floor behind each, and
-  `CU_RECORD=<run id>` still renders one generation alone. `landing` and `shared` are **not** columns
-  here — neither is a thing being compared, so neither has an (engine, config) key to be latest for —
-  and both are still in `capacity_cu.py`'s own job summary. The column id is `engine·tag`, which is
-  why `base_engine()` exists in `capacity_cu.py`: `STACK` and `render_hardware`'s per-engine branches
-  are the only lookups that must see through it, since the CU, the layout and the config all arrive
-  keyed by the column id itself. A tag joins its parts with `+`, never `·`, or the split stops working.
-- **The MEASUREMENT still prints the hardware table and the dispatch-after-dispatch table; the PAGE
-  does not.** Both were dropped from `dashboard.py` when the columns became composed: the generations
-  table asked "is this number normal" by putting `since` floors across the top, which the composed
-  page now answers by construction, and the hardware table's compute column now rides in the column
-  id and in the chart captions. `render_hardware` and `render_history` are unchanged and still run in
-  `capacity_cu.py`'s report, which is a single window and where both still say something. Do not
-  wire them back into the page without deciding what a per-column config table would add over the
-  column id.
-- **The layout is ALL EIGHT tables in DETAIL, one block each, the mart first.** This replaced a pair
-  of sections — a `files · MB` summary of the eight, then the mart broken out. The summary was
-  dropped, not the detail: it said less per row than the table it sat above, and a reader comparing
-  engines wants rows, row groups and V-Order for whichever table they are looking at rather than for
-  the one the page chose. `LAYOUT_TABLE` now only decides which block leads and carries the **CU
-  column** — the analytics CU is one number per engine, not per table, so `render_layout` draws that
-  column only when it is passed a `cu_by_engine`, and printing it under eight headings would read as
-  eight measurements. `render_tables` is still there and still runs in the measurement's own report.
-- **`history/` is read back, not just written** — and since the page is composed from it, every
-  record is load-bearing rather than an archive. The test suite points `CU_HISTORY_DIR` at an empty
-  directory for every test that does not ask for history, or the end-to-end assertions would silently
-  read last week's committed CU.
-- **The `stats` artifact lookup tries THIS run before any run list, and that is a fix, not a
-  shortcut.** `dbt.yml` normally runs as a `workflow_call` from `all.yml`, and a called workflow
-  gets **no run of its own** — the run belongs to the caller and its artifacts are uploaded there.
-  So `gh run list --workflow dbt.yml` lists only standalone `dbt` dispatches and cannot see the
-  build that just ran. On run 30685959678 it therefore reached past that build to 30676635835,
-  whose stats predated the `config` block, and the page printed "not recorded by dbt run
-  30676635835" beside CU produced by a 64-vCore dispatch — a stale id AND a blank hardware table,
-  for exactly the run that had chosen the hardware. Order is now `$GITHUB_RUN_ID`, then recent
-  successful runs of `all.yml`, then `dbt.yml`. Anything else that reaches for a sibling
-  workflow's artifacts has the same trap waiting.
-- **`history/` is the only storage that outlives retention.** Artifacts expire (90 days, the Pages
-  one sooner) and the Capacity Metrics model keeps ~14 days, so every generation writes
-  `history/<timestamp>-<run id>.json`: `schema: 2`, the run ids, the `since` floor, the hardware
-  config, CU per class per engine per operation, the table ORDER, and the layout. **It is a published
-  interface now, not a private dump** — `dashboard.py` renders from it, so a key rename breaks the
-  page rather than a debugging aid. Schema versions are ADDED to `SCHEMAS`, never swapped: a reader
-  that ignores last month's records is the same failure as never having written them. 2 added
-  `tables` (pipeline order, which `sort_keys=True` destroys) and `layout_written` (the dbt build's
-  clock, so a page rendered months later still dates the layout honestly). Written **only** from `all.yml`
-  (`history: true`), never from a standalone `cu.yml` dispatch — that measures an arbitrary window,
-  and filing it as a generation would poison the series with records that mean something else. It
-  deliberately holds no benchmark timings, which is what keeps the `run_report.json` isolation
-  intact. `schema` is there from the first file so a later reader can tell records apart by reading
-  one, rather than guessing from which keys are present.
-- **A record covers the ENGINES THAT DISPATCH BUILT, in all three of its halves.** `layout` and
-  `config` come from `stats.py`, which cuts itself to `BUILD_ENGINES`; `cu` is cut by
-  `write_history()` against the same set, read off the stats doc's `engines` keys. Before that it
-  was not, and an `engines=spark` dispatch filed a record naming all four — the CU was **real**
-  (the other three items still exist and OneLake still bills background reads against them, 1,578
-  for iceberg on run 30699626723), it just answered a different question than the document it sat
-  in, and a reader saw four columns from a run that compared nothing. Two things this pins.
-  `landing` and `shared` are never dropped — neither is an engine a dispatch could have selected —
-  which is what `BUILDABLE` in `capacity_cu.py` is for. And the drop is **logged with its CU
-  total**, because leaving real spend out of the series is a decision, not a filter. The measured
-  half of `cu.yml`'s own job summary is deliberately still unscoped: that is a capacity read over a
-  window, and a standalone dispatch has no build to scope to. The one record written before this
-  (`2026-08-01T1314Z-30699626723.json`) was rewritten in place by the same rule rather than deleted
-  — its spark numbers are sound, only its columns were wrong.
-- **MEASURING and PUBLISHING are two workflows, and the contract between them is the JSON record.**
-  `cu.yml` reads the metrics model and commits one `history/` record; **`dashboard.yml`
-  (`cu/dashboard.py`) reads `history/` and publishes the page**, `workflow_dispatch` only, never
-  chained off `all.yml`. They were one job, which meant every measurement republished whether or not
-  anyone had looked at it, and meant the page could only show the window the last dispatch happened
-  to measure. What the split buys: any past generation republishes **by name** from the file it came
-  from, the page can be fixed and re-rendered for zero CU, and the dashboard **cannot fail for a
-  Fabric reason** — no token, no network, and no third-party package, which is why `capacity_cu.py`
-  imports `requests` inside a `try` and the `Dashboard` job installs only `pytest`. What it costs:
-  a fresh measurement is not live on the page until a human dispatches `Dashboard`. Do not put
-  `upload-pages-artifact` back in `cu.yml`, and do not add a `dashboard` job to `all.yml`.
-- **A record renders whatever it CONTAINS — one engine, two, or four.** The dashboard's columns come
-  from the record's own `cu`/`layout` keys, not from `CU_ENGINES`: a record is a closed document, and
-  an engine it never measured has no zero to print. That is why `_engine_cols`, `_engine_table`,
-  `render_hardware` and `render_history` all take an `engines=` override, why the hardware heading no
-  longer counts to four, and why its two asides (the duckrun/iceberg pairing, the Livy pool) print
-  only when those engines are on the page. A page that describes the project instead of the document
-  in front of the reader is the failure being avoided.
-- **The published page is PUBLIC** — <https://djouallah.github.io/fabric-dbt-benchmark/>, built from
-  Actions with no `gh-pages` branch and nothing committed, holding the **latest render** only; the
-  per-run copy is that run's `dashboard` artifact (markdown + HTML). `publish` is its own job because
-  `deploy-pages` needs the `github-pages` environment, and `needs: build` means a failed render
-  cannot overwrite a good page. `cu/report_html.py` renders it — a parser for the report's own
-  markdown subset, written a few lines away, which is why it is not a markdown dependency in a
-  directory whose whole property is having almost no dependencies. The page is self-contained by
-  construction (inline CSS, no script/font/image, nothing fetched to render) because the artifact
-  copy has to open off a local disk years later; the only URLs are links back to the repo and its
-  runs.
-- **The isolation is the design, not an accident.** No imports from `benchmark/`, no
-  `run_report.json`, no `needs:` from another workflow, no shared concurrency group, no ADOMD, no
-  .NET, no duckrun — `requests` is the whole runtime dependency list of the MEASUREMENT and the
-  dashboard has none at all, plus `pytest` for `cu/`'s own offline suite, which imports nothing but
-  those two scripts. It is speculative tooling, so it is built to be deleted by removing one
-  directory and two workflow files. Do not "DRY it up" against
-  `benchmark/xmla_compare.py`; the duplication is what keeps that deletion free.
-- **`FABRIC_TOKEN` is a SECOND token on a different audience, and it is for naming items only.** The
-  datasets endpoint `PBI_TOKEN` reaches lists semantic models and nothing else, so the lakehouses and
-  the warehouse would otherwise be named from the metrics app's lagging `'Items'` snapshot alone, and
-  unnamed means unclassified — a bare GUID in `shared`. Minted from the same OIDC login,
-  `continue-on-error`, and the script degrades with a log line rather than failing. **It cannot name
-  the throwaway notebooks and is not expected to**: `run_python` deletes its notebook on the way out,
-  so no live listing can hold it. `'Items'` is the only route to those names, and it does carry them —
-  the earlier attempt at this width produced a row per `duckrun-py-*` notebook, which is where those
-  names came from.
-- **`python -m pytest cu/ -q` is the gate, and `cu.yml` runs it before the Azure login.** Offline, no
-  token, ~2s. It pins the two run-allocation rules (exact by GUID for a redeployed item, by hour for
-  one that outlives a run), that every (item, hour) pair lands in **exactly one** run, the class
-  rollup agreeing with the item rows it sits above, and the operation fold losing nothing. All of
-  those fail the same way when wrong — a plausible number, printed with confidence. It also pins
-  `render_empty`, which was *called and never defined* until this change: the whole empty-report
-  diagnosis raised `NameError`, and an empty report is precisely when you need it.
-- **It correlates nothing with a GitHub run, and that is still true after the per-run split.** It
-  cannot say which *query* produced a number. It can now say which *run* and which *engine*, and
-  neither needed coupling to `benchmark/`: an engine has its own semantic model, so it is already its
-  own row, and a run is inferred as **one deployment generation** — every dispatch deletes and
-  recreates the models, so a repeated model *name* among the item GUIDs is the next run — identified
-  by its own GUIDs and time window. `benchmark/` still records durations but no absolute timestamps,
-  and adding them is the coupling this avoids.
-- **There is no chart, and that was tried.** A per-hour bar chart of the same rows was built and removed: at the hour bucket a real run is two or three bars per engine, which reads as noise next to the numbers it was drawn from. The app's own chart is drawn at 30 seconds, and that resolution lives only in `'Timepoint Interactive Detail'` — one request per bucket, **120 per hour per capacity**, rows carrying no timestamp column (the MPARAMETER *is* the timestamp) so a batch could not be attributed even if the parameter took a list. Real capacity to redraw numbers already in hand, so it stays tables. If it comes up again: sum `Timepoint CU (s)`, never `Total CU (s)` — the smoothing-duplication trap below applies to that table too.
-- **The per-run split costs zero extra requests, and it keys on the ITEM GUID — the hour bucket is no
-  longer its floor.** Both signals were always in the row: the hour has to be projected or `since`
-  cannot be verified to bind, and the GUID has to be read to resolve a name. Neither costs a request,
-  so the split is still post-processing of rows already in hand. **Hour-clustering alone was not
-  enough and this was measured, not assumed:** with `CU_RUN_GAP_HOURS=2` a window holding four
-  benchmark dispatches printed **two** columns — one pair was 1h20m apart, and the other pair was ten
-  minutes apart, i.e. inside one hour bucket, where no gap value could ever have separated them.
-  Because `deploy_models.py` deletes and recreates each model, a dispatch mints a fresh GUID per
-  engine and a model cannot appear twice in one run, so a repeated model name IS the boundary.
-  **The rule needs an item created fresh per run, which is the semantic models and the throwaway
-  notebooks** — a *collapsed* name is exactly that signal, so `dbt-duckrun-*` repeating dates a dbt
-  build the same way. Runs are formed from those; a lakehouse or warehouse keeps one GUID for years,
-  never repeats a name, and is instead allocated to the formed windows **by hour** (containment,
-  then adjacency within the gap), with hours belonging to no window clustering into a run of their
-  own. The honest cost: that allocation is only as sharp as the hour bucket, so an hour shared by two
-  overlapping runs goes to one of them rather than being split. Generational allocation stays exact.
-  Two
-  consequences: adjacent columns may **overlap by an hour** (allocation is by GUID, so this costs no
-  accuracy), and `CU_RUN_GAP_HOURS` now only splits a model that was *not* redeployed. Do not reach
-  for the timepoint detail table to sharpen this further — the dedup trap below is why, and this
-  change is what keeps it unnecessary. When everything lands in one generation the report says so
-  rather than printing a one-column "runs" table that repeats the aggregate — which is the expected
-  output at the default `since`, because that floor is pinned to the newest dispatch.
-- **`CU_SINCE` is pinned to the last ATTRIBUTION change, and that is a floor to keep bumping.** It is
-  `2026-08-01T15:00:00` (model clock) — the hour holding `dbt` run 30685959678, the first build in
-  which each leg reads the landing archive through **its own shortcut** (`ec04534`). Before it, every
-  leg's read of the same bytes was booked to `dbt_landing`: 7,488 CU in a column that is not an
-  engine, with each engine's ETL understating by its own share. Two floors' numbers therefore answer
-  different questions about the same work and must not be summed, which is also why the three
-  records below the line were **deleted from `history/`** rather than kept as a series nobody could
-  read straight. The previous floor was `2026-08-01T10:00:00`, the from-scratch run 30676635835 that
-  ran with the outputs reset — all four output items deleted and recreated, so rows before IT belong to
-  items that no longer exist under the same display names; and the one before that was pinned to a
-  benchmark methodology change (`8c037c8`/`debef3a`). Each reasoning still holds, each is simply
-  superseded — a floor is bumped, never widened. Older rows stay retained and readable with a wider
-  `since`; they are a different experiment. Bump the default the next time the outputs are reset, the
-  attribution changes, or the suite changes what it measures; the value lives in both
-  `cu/capacity_cu.py` and `cu.yml`.
-- **The runs table is model-down / run-across, and the transpose was the earlier shape.** One row per
-  semantic model, one column per run, so "what did iceberg cost yesterday against today" is one row
-  read left to right — and it matches the aggregate table above it instead of making the eye re-learn
-  the layout halfway down. A column is a whole run, never an hour: a pass spanning 12:00→15:00 is one
-  column, and the per-run hour *count* sits in the footnote precisely so the columns are not read as
-  hourly. Runs being columns is also why `CU_RUN_COLS`
-  (default 8, env-only, no dispatch input) folds the oldest into one `earlier` column — named in the
-  header and logged, never a silent cap. Deliberately **no Δ / change column**: a run-over-run
-  percentage only means anything if both dispatches used the same `runs`, and `cu/`
-  correlates with no GitHub run so it cannot know that.
-- **Deduplication by operation id is load-bearing.** `'Timepoint Interactive Detail'` is gated by a
-  single 30-second `TimePoint` MPARAMETER, so the window is walked one bucket at a time — but an
-  interactive operation is smoothed across 10–128 buckets and **reappears in every one carrying its
-  full `Total CU`**. Summing the rows multiplies each operation by the buckets it spans. A five-minute
-  window over one operation reports 140 CU deduplicated and 1,540 summed. Anyone replacing
-  `collect()`'s keyed dict with a `SUM` produces numbers wrong by one to two orders of magnitude that
-  still look plausible.
-- **Column names are version-pinned; nothing hardcodes them.** Microsoft's own fabric-toolbox
-  accelerator ships four DAX variants (v53/v47/v40/v37) because the schema moves between app
-  versions. `discover_columns()` reads the real schema with `INFO.VIEW.COLUMNS()` first and resolves
-  each role from candidate lists — `REQUIRED` roles fail with the actual column list printed,
-  `OPTIONAL` ones degrade to "not filtering on it". This caught a real miss on the first dispatch:
-  the candidates said `Item Name`, the app says `Item`.
-- **The metrics model is refreshed and waited on BEFORE any DAX runs** (`CU_REFRESH`, on by
-  default; `CU_REFRESH_TIMEOUT` 900s). A dispatch creates four semantic models the app has never
-  seen, and **without the refresh their CU does not show up at all** — confirmed by the person who
-  runs this capacity. Do not argue it away from the fact that `'Timepoint Interactive Detail'` is
-  DirectQuery and reads live: that is true, and it is not sufficient, because the report only
-  surfaces an item the model has catalogued. Live name resolution (the bullet below) fixes the
-  LABEL, not this. **The service principal is a contributor on the metrics workspace**, so the
-  refresh is expected to succeed; it is non-fatal only so that an already-running scheduled refresh
-  or a misbehaving one still yields a report. A `refresh NOT started (403 …)` line means the SP's
-  access changed — chase it. `cu.yml`'s job timeout is 45 minutes to cover the wait.
-  **A 429 is retried, and that is not theoretical.** On run 30685959678 the POST drew
-  `429 … Retry in 120 seconds`, the refresh was skipped, and the two throwaway `dbt-<engine>-*`
-  notebooks the build had just created and deleted resolved to **no name anywhere** — so 41,887 CU
-  of DuckDB-leg compute printed in `shared` / `other` instead of in the duckrun and iceberg
-  columns. Nothing failed and nothing looked broken; the report was simply wrong, because the one
-  call that makes a minutes-old item visible had not run. `execute_dax` had honoured `Retry-After`
-  for the same cap all along; this path gave up on the first response. Only the 429 retries — a 403
-  is answered immediately, since retrying it buries the reason — and the delay is read from the
-  **body** (`Retry in N seconds`), because that response carries no `Retry-After` header. Both are
-  pinned by tests. A report whose notebook CU sits in `shared` is this bug, not an attribution
-  limit: **re-measure the same window** rather than reaching for `engine_of`.
-  **But the retry did not rescue that run, and the reason is PER-IDENTITY throttling.** Runs
-  30685959678 (07:39) and 30691130030 (08:12), half an hour apart, were refused on every attempt —
-  yet a **manual** refresh by the human at 08:18 completed immediately. That is the whole
-  diagnosis: Power BI throttles the REST API per user, the **service principal** had spent its
-  budget, and a different identity has a different budget. So the SP can be locked out of an
-  endpoint that answers a human instantly. **Where that budget actually goes is not where it
-  looks:** the DAX is only **6 queries** per run (`INFO.VIEW.COLUMNS`, `VALUES('Capacities')`, then
-  `items_for` + `cu_for` per capacity × this tenant's two — pin `CU_CAPACITY_ID` and it is 3). The
-  refresh path polled `GET …/refreshes?$top=1` every 20s for up to `CU_REFRESH_TIMEOUT` — **up to
-  45 requests**, ~7× the measurement, on an endpoint that only ever answers "not yet", and it was
-  almost certainly what spent the budget that then refused it. That poll now **backs off** (30s,
-  doubling, 5-minute ceiling), reaching the same 900s deadline in six requests; a test pins it at
-  ≤8. An earlier version of this bullet said "~60 executeQueries per run"; that described the
-  deleted timepoint-detail design and is retracted.
-- **Every real GUID is a SECRET, and the fallback cannot live where you would put it.** Four:
-  `FABRIC_WORKSPACE_ID`, `CU_CAPACITY_ID`, `CU_METRICS_WORKSPACE_ID`, `CU_METRICS_MODEL_ID`. No
-  tracked file outside `history/` holds a real one — the `model.bim`'s Direct Lake URL carries a
-  zeros placeholder (`deploy()` rewrites both ids anyway, and the checked-in item id had already
-  gone stale when the teardown recreated `dbt_delta`), and `benchmark/.platform`'s `logicalId`
-  identifies the template, not anything in the tenant. Keep the placeholder URL's SHAPE though, and
-  for the repoint rather than the detection: `deploy(lakehouse=…)` finds the ids to rewrite with
-  `_ONELAKE_REF` = `onelake\.dfs\.fabric\.microsoft\.com/([0-9a-fA-F-]{36})/([0-9a-fA-F-]{36})`
-  and **raises** when nothing matches, so the zeros have to stay 36 chars of hex and dashes. It is
-  *not* what makes the model Direct Lake — `_is_directlake_bim()` is
-  `"directLake" in text or _ONELAKE_REF.search(text)`, and every partition already carries
-  `"mode": "directLake"`. Every workflow input defaults
-  to `""` and each **called workflow resolves the secret itself**. Two GitHub rules force that
-  shape: an input's `default:` accepts no context at all, and `jobs.<id>.with.<id>` is the one
-  place the `secrets` context is **not** available — so `all.yml` cannot pass either value down.
-  Workflow-level and job-level `env` both do allow `secrets`, which is where the
-  `${{ inputs.x || secrets.X }}` lines sit. `capacity_cu.py` deliberately keeps **no default GUID**
-  either: a hardcoded fallback would put the value back in the repo and outvote the secret whenever
-  the env var arrived empty. Pinning the capacity is not only about secrecy — unpinned, the script
-  asks the model which capacities exist and then reads items + CU for each, so this tenant's two
-  turn 3 DAX queries into 6.
-  **A secret value can never travel as a JOB OUTPUT, and this nearly shipped broken.** GitHub
-  evaluates outputs on the runner and silently DROPS any whose value matches a secret — logging
-  `Skip output <key> since it may contain secret` and handing the next job an empty string.
-  `benchmark.yml`'s `resolve` job published `ws_id`, so every bench job would have run with a blank
-  `WS_ID`. That output is gone and the bench jobs resolve the secret themselves; it was only ever
-  echoing back what it was handed. `pbi_workspace` (a display NAME) and `bench_items` (item GUIDs,
-  which are not secrets) still pass through. Anything needing a secret in a later job must re-read
-  it from `secrets`, never receive it.
-  Two smaller consequences: the GUID now prints as `***` in logs, so a `FILES_PATH` line is less
-  readable when debugging; and `stats.py` no longer records `run.workspace`, because that document
-  ships as a **public-repo artifact** and nothing ever read the field back.
-  **A wrong answer was recorded here first and is retracted:** that this was the shared-capacity
-  *"maximum of eight requests per day, including scheduled refresh"* from the
-  [refresh API limitations](https://learn.microsoft.com/en-us/rest/api/power-bi/datasets/refresh-dataset-in-group).
-  The metrics workspace IS on shared capacity (`isOnDedicatedCapacity: False`) and the day did hold
-  7 prior refreshes, so it fit — and the human's 8th refresh going straight through disproved it.
-  Check the refresh history (`GET …/datasets/{id}/refreshes`) before believing either story; it is
-  one request and it names the identity's fate directly.
-  Consequences: a 429 here is not transient, so the 4 minutes of retries buy nothing, and `refresh`
-  is now an input on `all.yml` (default true) so a re-read can skip it. The route back to named
-  notebooks is a refresh by any identity that still has budget, then a re-measure with
-  `refresh=false`. Do not raise `CU_REFRESH_TRIES` to fight throttling.
-- **A deploy mints a NEW item GUID, and `'Items'` is a lagging snapshot — this made the whole report
-  read empty.** The metrics tables hold item GUIDs; a semantic model that was just created (or deleted
-  and recreated — `overwrite=True` keeps its id, a recreate does not) has a GUID `'Items'` has not seen
-  yet, so it resolves to no name, fails the `CU_MODELS` name filter, and its CU vanishes while the
-  report prints "No semantic model activity" — indistinguishable from an idle capacity. Names are now
-  resolved **live** from `GET /groups/{ws}/datasets` first (one request, same host and token as
-  `executeQueries`, so no new dependency), `'Items'` only as fallback. Do not "simplify" that back to
-  the Items join alone. Related and equally load-bearing: an empty result now prints its own
-  diagnosis — rows returned after the floor, which filter dropped them and how many, any item whose
-  name matched but whose workspace did not (with the real id), and the top spenders it did see. A bare
-  GUID in that last table IS this trap. The same fact is now also **load-bearing in the other
-  direction**: a fresh GUID per dispatch is exactly what the per-run split keys on, so anything that
-  made a redeploy reuse an id (an `overwrite=True` deploy, say) would silently merge two runs into
-  one column rather than break anything.
-- **`'Timepoint Interactive Detail'[Item]` is a GUID, and the table has no name or kind column** —
-  the real columns are `Item`, `Operation`, `Operation Id`, `Total CU (s)`, `Workspace Id`, `User`,
-  `Billing type`, `Status`, `Duration (s)`, `Timepoint CU (s)`. So `discover_items()` joins to
-  `'Items'` (`Item Id`, `Item name`, `Item kind`) and that join is load-bearing twice over: without
-  it the report is GUIDs against CU, and it is the only route to a semantic-model filter. An id
-  missing from `'Items'` is kept under its raw GUID — dropping it would lose CU silently.
-- **One capacity per query.** The detail table is DirectQuery and resolves one data location per
-  query, so `CapacitiesList` takes exactly one capacity; several fails with an opaque
-  `Internal Error: Error obtaining data location` naming neither cause nor capacity. This tenant has
-  two, so `usable_capacities()` probes each before spending ~60 requests on it. Casing was *not* the
-  cause (both work uppercase), but the probe tries other spellings anyway — one request, and the
-  parameter is undocumented.
-- **The service principal works against that model.** The community consensus says it does not, and
-  this was built expecting a 401 — measured otherwise on run 30536137179, which read it on the OIDC
-  SP, so `cu.yml` mints `PBI_TOKEN` from it and **no repo secret is involved**. The
-  `secrets.PBI_TOKEN` branch that used to take precedence was deleted — it never fired and only
-  produced "context access might be invalid" warnings for a secret that deliberately did not exist.
-  A user token (~1h) remains the manual escape hatch if the SP is ever refused.
-- **`workflow_dispatch` only, same standing rule as the benchmark** — for `cu.yml` (plus the
-  `workflow_call` from `all.yml`) and for `dashboard.yml` alike. No `schedule`, no `push`, no
-  `workflow_run`. For the measurement the reason is capacity: interactive reads against shared
-  capacity are what a capacity admin notices. For the dashboard it is different and just as firm —
-  publishing is a decision, and a page that republishes itself whenever a measurement lands will
-  eventually publish one nobody looked at, on a repo whose page is public. Both keep their **own**
-  concurrency group, not `onelake-<ref>`: neither measures anything timing-sensitive, and queueing
-  either behind a five-hour benchmark would push the read toward the app's 14-day retention edge for
-  no benefit.
-- 14-day retention, ~6 minute lag, 5–64 minute smoothing: dispatch it ~10 minutes *after* whatever
-  you want to measure. And timepoints are stamped in the offset configured **in the app**, not
-  yours — a wrong `utc_offset_hours` reads as "no activity" rather than an error.
+- **EVERYTHING IS KEYED ON THE ITEM GUID, and that is the whole design.** The old reader matched item
+  DISPLAY NAMES: `engine_of()` substring matching against `CU_ENGINES` in order, a `shared` column for
+  anything ambiguous, a join to the app's lagging `'Items'` snapshot for names and kinds, and
+  `sessionize()` guessing run boundaries from idle-hour gaps and repeated model names. All of it is
+  deleted. Every item except `dbt_landing` is created and destroyed inside one run, so a GUID belongs
+  to exactly one run; the class (`etl` vs `analytics`) comes from the `role` **we** recorded, not from
+  an item kind read out of a snapshot. There is no `shared` bucket any more, because nothing is left
+  that cannot be attributed.
+- **THE REFRESH IS GONE, and the earlier claim that it was load-bearing is RETRACTED.** This file used
+  to say a new item's CU "does not show up at all" without a pre-read refresh. That was the
+  name-resolution failure misdiagnosed: an item resolving to no name failed the kind filter and its CU
+  vanished from the report. The fact table is DirectQuery and carries `Item` and `Workspace Id` as
+  columns of its own, so the workspace filter binds with no join and the GUID needs no resolving. What
+  the refresh actually cost was real: Power BI throttles the REST API **per identity**, the service
+  principal spent its budget, and on runs 30685959678 and 30691130030 every attempt drew 429 while a
+  human refreshing by hand went straight through — leaving 41,887 CU of DuckDB compute in `shared`.
+  Do not reintroduce it.
+- **The ledger has three rules and every one of them fails as a plausible number.** Upsert only, never
+  remove (a key that stops being returned keeps its value — the app retains ~14 days, and that is what
+  the ledger is FOR). Latest read wins per `(guid, operation, hour)` — an hour keeps growing for ~70
+  minutes after the fact, so overwriting is correct and SUMMING repeated reads would multiply every
+  hour by how often it was read. And settle-then-freeze: an item is final once a read changed nothing
+  about it **and** it has been quiet for `CU_SETTLE_HOURS` (3). Requiring two agreeing reads is also
+  what makes the missing refresh safe — an item the first read could not see is picked up by the
+  second.
+- **A fresh run is a LOWER BOUND and the page says so per column.** Dispatch `Dashboard` twice. The
+  second read is nearly free: `measure.py` queries only from the earliest hour belonging to an
+  unsettled item, so settled time is never re-read.
+- **`landing` is a stage, not an engine**, and it is the ONLY inexact attribution left. `dbt_landing`
+  outlives every run, so its CU is allocated by hour containment in the run's own `started`/`finished`
+  window — which the record now carries and the old code had to infer. A run boundary falling mid-hour
+  puts that hour in one run rather than splitting it. It is reported on its own row and never added to
+  an engine's column.
+- **The measurement can fail; the page cannot.** `measure` is `continue-on-error` and `render` is
+  `always()`, so a throttled metrics model costs a stale number and never a stale page. The render job
+  installs **no `requests`** — `measure.py` imports it optionally so that job proves by running that
+  the render path never reaches the network.
+- **The render job checks out `ref: ${{ github.ref_name }}`, not the default SHA.** `measure` commits
+  the ledger; a default checkout takes the triggering commit and would read the version from *before*
+  that, so every page would be one dispatch stale. Exactly the kind of bug that produces a plausible
+  page.
+- **`workflow_dispatch` only, same standing rule as the build.** No `schedule`, no `push`, no
+  `workflow_run`. For the measurement the reason is capacity; for the page it is that publishing is a
+  decision, and a page that republishes itself whenever a measurement lands will eventually publish
+  one nobody looked at, on a repo whose page is public. Committing the ledger from CI is only safe
+  because nothing answers a push.
+- **Every real GUID is a SECRET.** `FABRIC_WORKSPACE_ID`, `CU_CAPACITY_ID`, `CU_METRICS_WORKSPACE_ID`,
+  `CU_METRICS_MODEL_ID`. No tracked file outside `history/` holds one — the `model.bim`'s Direct Lake
+  URL carries a zeros placeholder, and `deploy()` rewrites both ids anyway. Keep that placeholder's
+  SHAPE though: `_ONELAKE_REF` matches 36 chars of hex and dashes and **raises** when nothing matches.
+  An input's `default:` takes no context, so the secret fallback lives in job-level `env`;
+  `measure.py` keeps no default of its own, because a hardcoded fallback would put the value back in
+  the repo and outvote the secret whenever the env var arrived empty.
+- **The `since` filter is verified, not trusted.** `CALCULATETABLE` with a plain boolean predicate,
+  never `FILTER(VALUES(...))` inside `SUMMARIZECOLUMNS` — the latter is ACCEPTED and silently changes
+  nothing, and three different windows once returned byte-identical totals before anyone noticed. The
+  hour is projected and the returned range is checked against the floor; a mismatch dies rather than
+  writing a ledger that includes excluded time.
+- **One capacity per query.** These tables are DirectQuery and resolve one data location per query;
+  passing several fails with an opaque `Internal Error: Error obtaining data location` naming neither
+  the cause nor the capacity. Pinning `CU_CAPACITY_ID` also halves the request count on this tenant's
+  two.
+- **Column names are version-pinned; nothing hardcodes them.** Microsoft's own accelerator ships four
+  DAX variants because the schema moves between app versions. `discover_columns()` reads the real
+  schema with `INFO.VIEW.COLUMNS()` and fails naming what was actually present. This caught a real
+  miss: the candidates said `Item Name`, the app says `Item`.
+- **`CU_MODEL_OFFSET_HOURS` is the app's own offset (+10), not UTC**, and it is applied in two places
+  that must agree — `measure.py` turning a run's UTC start into a floor, and `dashboard.py` turning
+  the run window into ledger hours for the landing allocation. A wrong value reads as "no activity"
+  rather than as an error.
+- **`python -m pytest cu/ -q` is the gate and both jobs run it.** Offline, no token, ~1s. It pins the
+  three ledger rules, the settle conditions, the GUID join, the landing window allocation, and that a
+  variant tag never contains the column separator (`base_engine` splits on it, so a tag carrying one
+  would make a column id unparseable back to its engine and every `STACK` lookup would silently miss).
+- **`history/legacy/` holds five records from the name-matching era.** Nothing reads them. They carry
+  no item GUIDs so they cannot be joined to a ledger, and their numbers were measured under an
+  attribution that put whole notebooks in `shared`. Kept for a human, not for the code.
+- **The isolation is the design, not an accident.** No imports from `benchmark/`, no `run_report.json`,
+  no shared concurrency group, no ADOMD, no .NET, no duckrun — `requests` is the whole runtime
+  dependency of the measurement and the render layer has none at all. It is built to be deleted by
+  removing one directory and one workflow file. Do not "DRY it up" against `benchmark/xmla_compare.py`;
+  the duplication is what keeps that deletion free.
+- **There is no chart of CU over time, and that was tried.** A per-hour bar chart reads as noise at the
+  hour bucket. The app's own chart is drawn at 30 seconds, and that resolution lives only in
+  `'Timepoint Interactive Detail'` — one request per 30-second bucket, 120 per hour per capacity, rows
+  carrying no timestamp column. Real capacity spent to redraw numbers already in hand. If it comes up
+  again: that table smooths one operation across 10-128 buckets and **repeats its full CU in every
+  one**, so summing it multiplies by one to two orders of magnitude while still looking plausible —
+  which is why the aggregate table is the one being read.

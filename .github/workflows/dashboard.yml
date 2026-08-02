@@ -1,41 +1,54 @@
 name: Dashboard
 
-# THE PAGE, and nothing else. It reads `history/` out of the checkout and publishes
-# https://djouallah.github.io/fabric-dbt-benchmark/. It does not measure, build, benchmark, or touch Fabric.
+# THE PAGE, and one of only two workflows in this repo. It reads capacity units for the item GUIDs
+# the `Benchmark` workflow recorded, tops up the ledger, and publishes
+# https://djouallah.github.io/fabric-dbt-benchmark/.
 #
-# **The contract is the JSON.** A measurement workflow does the expensive, credentialed work and
-# commits ONE record to `history/`; this renders those records. There is no other channel between
-# them — no artifact, no shared env, no `needs:`. Everything that follows from that is the point:
+#   measure (cu/measure.py -> history/cu.json)  ->  render (cu/dashboard.py -> the page)
 #
-#   - No token, no Azure login, no `requests`, no duckrun, no ADOMD. `python` and the standard
-#     library. It cannot fail for a reason that has anything to do with Fabric, and it costs nothing
-#     to run — which is what makes republishing a free, repeatable act rather than a measurement.
-#   - It renders whatever a record CONTAINS. One engine, two, four; a build-only dispatch with no
-#     analytics CU at all. Columns come from the record, never from a configured list.
-#   - Any past generation can be republished by name, years later, from the file it came from. That
-#     is not true of anything depending on a 90-day artifact or the metrics app's ~14-day retention.
+# **Two JSON documents, joined on the item GUID.** `Benchmark` commits
+# `history/runs/<ts>-<run id>.json` naming every Fabric item it created, with its role; `measure`
+# builds `history/cu.json`, a cumulative `{item GUID: {operation: {hour: CU}}}` ledger. The page is
+# the join. Nothing else passes between the two workflows — no artifact, no shared env, no `needs:`.
+#
+# **The measurement does not refresh the metrics model and resolves no names.** That refresh is what
+# Power BI throttled per-identity — every attempt 429 on two consecutive runs, and 41,887 CU of
+# notebook compute landing under `shared` because the items resolved to no name. The fact table
+# carries the item GUID and the workspace id as columns of its own, so neither is needed.
+#
+# **Re-dispatching is the top-up.** An hour's CU keeps growing for ~70 minutes after the fact, so a
+# run measured minutes ago is a LOWER BOUND — the page says so per column. `measure` re-reads only
+# the time that can still move: an item is frozen once a read changed nothing about it and it has
+# been quiet for three hours, and its window is never queried again. So dispatching this twice is
+# how a number becomes final, and dispatching it ten times costs almost nothing.
 #
 # **`workflow_dispatch` only, and that is the standing rule.** No `schedule`, no `push`, no
-# `workflow_run`, no `workflow_call` — this is deliberately NOT chained off `all.yml`, which is the
-# whole change: publishing is a decision. A page that republishes itself whenever a measurement
-# lands will eventually publish one nobody looked at, and the published page is the public face of
-# this repo. `cu.yml` still prints its own markdown into its job summary — that is the
-# measurement's log, not the dashboard.
+# `workflow_run`, no `workflow_call` — deliberately NOT chained off `Benchmark`. Publishing is a
+# decision: a page that republishes itself whenever a measurement lands will eventually publish one
+# nobody looked at, and this page is the public face of the repo. Committing the ledger from CI is
+# only safe because nothing here answers a push.
 on:
   workflow_dispatch:
     inputs:
+      measure:
+        description: "read capacity units and top up history/cu.json before rendering. OFF re-renders from what is already committed — free, offline, and the way to fix the page without spending a metrics query."
+        type: boolean
+        default: true
       record:
-        description: "which record to render — a substring of its filename, so a run id (30691610866) or a date (2026-08-01) both work. Blank = the newest."
+        description: "render ONE run alone — a substring of its filename, so a run id (30733912205) or a date (2026-08-02) both work. Blank = every engine's latest run, one column each."
         type: string
         default: ""
-      history_cols:
-        description: "generations to show in the trend table, oldest folded away first"
+      since:
+        description: "override the CU floor, IN THE MODEL'S CLOCK (the app's own offset, +10, not UTC). Blank = computed from the earliest run whose items have not settled, which is what you want. Set it to re-read a window by hand."
         type: string
-        default: "6"
+        default: ""
+      workspace:
+        description: "Fabric workspace GUID whose items to count. Blank = the FABRIC_WORKSPACE_ID repo secret."
+        type: string
+        default: ""
 
-# Its own group. It shares nothing with the build or the benchmark and measures nothing
-# timing-sensitive, so it has no reason to queue behind them — and cancel-in-progress because a
-# superseded publish has nothing worth finishing.
+# Its own group. It measures nothing timing-sensitive, so it has no reason to queue behind a build —
+# and cancel-in-progress because a superseded publish has nothing worth finishing.
 concurrency:
   group: dashboard-${{ github.ref_name }}
   cancel-in-progress: true
@@ -44,46 +57,132 @@ permissions:
   contents: read
 
 jobs:
-  build:
+  # The only job here that touches Fabric, spends anything, or can fail for a Fabric reason. It is
+  # `continue-on-error` for exactly that reason: a throttled or unavailable metrics model must cost a
+  # stale number, never a stale page.
+  measure:
+    name: read capacity units
+    if: inputs.measure
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    timeout-minutes: 20
+    permissions:
+      id-token: write     # OIDC -> the Power BI token
+      contents: write     # commits history/cu.json
+    env:
+      # Every one of these is a real GUID and therefore a SECRET: no tracked file holds one. An
+      # input's `default:` cannot take a context, so the fallback lives here, where `secrets` IS
+      # available. measure.py keeps no default either — a hardcoded fallback would put the value back
+      # in the repo and outvote the secret whenever the env var arrived empty.
+      CU_METRICS_WORKSPACE_ID: ${{ secrets.CU_METRICS_WORKSPACE_ID }}
+      CU_METRICS_MODEL_ID: ${{ secrets.CU_METRICS_MODEL_ID }}
+      CU_CAPACITY_ID: ${{ secrets.CU_CAPACITY_ID }}
+      CU_WORKSPACE_FILTER: ${{ inputs.workspace || secrets.FABRIC_WORKSPACE_ID }}
+      CU_SINCE: ${{ inputs.since }}
+      PYTHONIOENCODING: utf-8
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: {python-version: "3.11"}
+      # `requests` is the entire runtime dependency of the measurement. No duckrun, no ADOMD, no
+      # .NET — this talks to the Power BI executeQueries REST endpoint, which takes DAX as a JSON
+      # string.
+      - run: pip install requests pytest
+
+      # Free, offline, ~1s, before the login. Everything it covers fails as a plausible number rather
+      # than as an error: summing instead of overwriting multiplies an hour by how often it was read,
+      # removing on absence erases everything past the app's 14-day retention, settling too early
+      # freezes a partial total forever.
+      - name: Test the ledger and the render layer offline
+        run: python -m pytest cu/ -q
+
+      # Same OIDC federated identity as the Benchmark workflow. allow-no-subscriptions because the
+      # deploy app is a workspace principal, not an Azure RBAC one.
+      - uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          allow-no-subscriptions: true
+
+      # Minted here, not a repo secret. The community consensus is that a service principal cannot
+      # read the Capacity Metrics model; it can, measured on run 30536137179. If it is ever refused,
+      # the manual hatch is the same command against a user account, exported as PBI_TOKEN.
+      - name: Acquire a Power BI token
+        run: |
+          set -euo pipefail
+          TOKEN=$(az account get-access-token \
+            --resource https://analysis.windows.net/powerbi/api \
+            --query accessToken -o tsv)
+          echo "::add-mask::$TOKEN"
+          echo "PBI_TOKEN=$TOKEN" >> "$GITHUB_ENV"
+
+      - name: Top up the CU ledger
+        run: python cu/measure.py
+
+      # The ledger is the only storage that outlives the app's ~14-day retention, so committing it IS
+      # the measurement's output. `pull --rebase` because a queued dispatch can have moved main since
+      # checkout; the diff check exits 0 so a re-read that changed nothing does not fail the job —
+      # which is the expected outcome once everything has settled.
+      - name: Commit the ledger
+        run: |
+          set -euo pipefail
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add history/cu.json
+          git diff --cached --quiet && { echo "ledger unchanged — everything settled" >&2; exit 0; }
+          git commit -m "cu: capacity units as of run ${{ github.run_id }}"
+          git pull --rebase --autostash origin "${{ github.ref_name }}"
+          git push origin "HEAD:${{ github.ref_name }}"
+
+  # Free, offline, and it CANNOT fail for a Fabric reason — no token, no Azure login, no `requests`.
+  # That last one is enforced by not installing it: `measure.py` imports it optionally, so this job
+  # proves by running that the render path never reaches the network. It is what makes republishing a
+  # free, repeatable act rather than a measurement.
+  #
+  # `always()` so a throttled measurement still publishes the page from what is already committed.
+  render:
     name: render the page
+    needs: measure
+    if: ${{ always() }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
     env:
       CU_RECORD: ${{ inputs.record }}
-      CU_HISTORY_COLS: ${{ inputs.history_cols }}
       PYTHONIOENCODING: utf-8
     steps:
+      # `ref:` MATTERS. The default checkout takes `github.sha` — the commit that triggered the
+      # dispatch — so it would read the ledger as it was BEFORE the measure job committed to it, and
+      # every page would be one dispatch stale. Take the branch head instead.
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.ref_name }}
 
       - uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
-
-      # pytest and nothing else — the renderer itself needs no package. `requests` is deliberately
-      # NOT installed here: `capacity_cu.py` imports it optionally so that this job proves, by
-      # running, that the render path never reaches the network.
+        with: {python-version: "3.11"}
       - run: pip install pytest
 
       - name: Test the render layer offline
         run: python -m pytest cu/ -q
 
-      # stdout is the markdown; diagnostics (which record was chosen, what was folded) go to stderr.
+      # stdout is the markdown; diagnostics (which runs were composed, what was folded) go to stderr.
       - name: Render the dashboard
         run: |
           set -o pipefail
           python cu/dashboard.py | tee dashboard.md | tee -a "$GITHUB_STEP_SUMMARY"
 
       # Markdown -> one self-contained HTML file: inline CSS, no script, font or image, so the
-      # artifact copy opens off a local disk with no network years later.
+      # artifact copy opens off a local disk with no network years later. The bar charts travel
+      # through the markdown as HTML comments because GitHub sanitises inline SVG in a job summary —
+      # invisible there, drawn here.
       - name: Render it as a page
         run: |
           set -euo pipefail
           mkdir -p site
           python cu/report_html.py dashboard.md \
             "Rendered by the \`Dashboard\` workflow, run ${{ github.run_id }} \
-             (\`${{ github.sha }}\`), from a record committed under \`history/\` — no capacity was \
-             read to produce this page. Each dispatch replaces it; the per-run copy is that run's \
-             \`dashboard\` artifact." > site/index.html
+             (\`${{ github.sha }}\`), from the run records and the CU ledger under \`history/\`. \
+             Each dispatch replaces this page; the per-run copy is that run's \`dashboard\` \
+             artifact." > site/index.html
 
       - uses: actions/upload-artifact@v4
         with:
@@ -97,11 +196,11 @@ jobs:
         with:
           path: site
 
-  # Separate job because `deploy-pages` needs the `github-pages` environment. `needs: build` means a
+  # Separate job because `deploy-pages` needs the `github-pages` environment. `needs: render` means a
   # render that failed cannot overwrite a good page with a half-written one.
   publish:
     name: publish
-    needs: build
+    needs: render
     runs-on: ubuntu-latest
     permissions:
       pages: write
