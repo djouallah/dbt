@@ -116,54 +116,79 @@ def load_ledger(path=None):
         with open(path, encoding="utf-8") as f:
             doc = json.load(f)
     except (OSError, ValueError):
-        return {"items": {}, "runs": {}, "reads": []}
-    for key in ("items", "runs"):
-        doc.setdefault(key, {})
+        return {"items": {}, "reads": []}
+    doc.setdefault("items", {})
     doc.setdefault("reads", [])
     return doc
 
 
 def item_cu(ledger, guid):
-    """`{operation: total}` for one item. Cumulative, whether it has settled or not.
+    """Total CU for one Fabric item. `None` when the ledger has never seen it.
 
-    ONE place, deliberately. `measure.py` keeps hour detail only while an item can still move and
-    collapses it on settle, so a reader that summed hours would see nothing for a settled item — the
-    exact case the ledger exists to preserve.
+    `None` and `0.0` are different claims — "not measured yet" against "cost nothing" — and the
+    sources table has to be able to say which.
     """
-    return (ledger["items"].get(guid) or {}).get("cu") or {}
-
-
-def settled(ledger, guid):
-    return bool((ledger["items"].get(guid) or {}).get("settled"))
+    v = ledger["items"].get(guid)
+    return None if v is None else float(v)
 
 
 # ------------------------------------------------------------------------------------- the join
 
 def run_cu(rec, ledger):
-    """`{(class, operation): CU}` for one run, plus its landing rollup and its open items.
+    """`({class: {item label: CU}}, landing CU, unmeasured items)` for one run.
 
-    THE join, and it is a dictionary lookup. Every GUID in the record is looked up in the ledger and
-    its cumulative operations added to the class its ROLE implies. No allocation and no heuristic,
-    because the teardown means a GUID belongs to exactly one run.
+    THE join, and it is a dictionary lookup: every GUID the run recorded, looked up in the ledger,
+    filed under the class its ROLE implies. No allocation and no heuristic, because the teardown
+    means a GUID belongs to exactly one run.
 
-    `dbt_landing` is the one exception — it is never deleted, so it never settles and has no total of
-    its own. `measure.py` rolls it up per run instead, over the hours inside that run's window; this
-    reads that rollup rather than re-deriving it, so both sides cannot disagree about which hour
-    belonged to which run.
+    Broken down by ITEM rather than by operation type. The item names come from the run record, so
+    they cost nothing and say more: `dbt-duckrun-*` at 29,571 CU beside `dbt_delta` at 1,509 is the
+    whole story of where a DuckDB leg's cost goes, and no operation name carries that.
+
+    `dbt_landing` is the exception — never deleted, read by every engine — so its total is cumulative
+    over the measured window rather than this run's share. It is returned separately and never added
+    to an engine.
     """
-    cells, open_items = {}, []
-    rid = str((rec.get("run") or {}).get("id") or rec.get("_file"))
-    landing = dict(((ledger["runs"].get(rid) or {}).get("landing")) or {})
+    cells, landing, unmeasured = {}, None, []
     for guid, item in (rec.get("items") or {}).items():
         role = item.get("role") or "?"
-        if role in NON_ENGINE_ROLES:
+        if role == "folder":                     # a workspace folder never accrues a capacity unit
             continue
-        if not settled(ledger, guid):
-            open_items.append(f"{role}/{item.get('name') or guid}")
+        value = item_cu(ledger, guid)
+        if role == "landing":
+            landing = (landing or 0.0) + value if value is not None else landing
+            continue
+        if value is None:
+            unmeasured.append(f"{role}/{item.get('name') or guid}")
+            continue
         cls = "analytics" if role in ANALYTICS_ROLES else "etl"
-        for op, value in item_cu(ledger, guid).items():
-            cells[(cls, op)] = cells.get((cls, op), 0.0) + value
-    return cells, landing, open_items
+        label = f"{item.get('name') or guid} ({role})"
+        cells.setdefault(cls, {})[label] = cells.setdefault(cls, {}).get(label, 0.0) + value
+    return cells, landing, unmeasured
+
+
+def class_total(cells, cls):
+    return sum((cells.get(cls) or {}).values())
+
+
+def still_accruing(rec, hours=2.0):
+    """True when this run finished recently enough that its CU can still rise.
+
+    DERIVED, never stored. An hour's CU keeps growing for ~70 minutes after the fact, so a number
+    read minutes after a run is a lower bound — but that is a property of the clock, not a fact worth
+    writing into a file and keeping in step.
+    """
+    from datetime import datetime, timezone
+    stamp = (rec.get("run") or {}).get("finished")
+    if not stamp:
+        return False
+    try:
+        t = datetime.fromisoformat(str(stamp).replace("Z", "+00:00"))
+    except ValueError:
+        return False
+    if t.tzinfo is None:
+        t = t.replace(tzinfo=timezone.utc)
+    return (datetime.now(timezone.utc) - t).total_seconds() < hours * 3600
 
 
 def variant(rec):
@@ -259,81 +284,95 @@ def chart(title, subtitle, rows):
 
 
 def engine_table(per_col, cols):
-    """Engines across, operations down, grouped by class — the shape the whole repo reads in.
+    """Engines across, ITEMS down, grouped by class — the shape the whole repo reads in.
 
-    ENGINE-MAJOR, and that orientation is what makes the width work: an item-major table needs a
-    column per operation type and a lakehouse alone brings a dozen. Turned ninety degrees those are
-    rows, which markdown handles fine. Do not "simplify" it back.
+    ENGINE-MAJOR, and that orientation is what makes the width work: item-major (one column per
+    item) would need a column per Fabric item and every run creates different ones. Turned ninety
+    degrees those are rows, which markdown handles fine.
 
     **No total column and no grand-total row.** Both would sum ACROSS engines, which is the one sum
     on this page that answers nothing — the engines are alternatives to each other. The class
     subtotals stay: they sum DOWN a column, which is "what this engine spent building".
     """
     names = [c for c, _e, _r in cols]
-    op_total, cls_total = {}, {}
-    for col in names:
-        for (cls, op), value in (per_col.get(col) or {}).items():
-            op_total[(cls, op)] = op_total.get((cls, op), 0.0) + value
-            cls_total[(cls, col)] = cls_total.get((cls, col), 0.0) + value
+    labels = {}
+    for cls in ("etl", "analytics"):
+        seen = {}
+        for col in names:
+            for label, value in ((per_col.get(col) or {}).get(cls) or {}).items():
+                seen[label] = seen.get(label, 0.0) + value
+        labels[cls] = sorted(seen, key=lambda k: -seen[k])
     # The corner cell names the measure. Every number in the table is one, and a matrix whose values
     # carry no unit gets quoted as "26,128" with no idea what of.
     print("| CU (s) | " + " | ".join(names) + " |")
     print("|:--|" + "---:|" * len(names))
     for cls in ("etl", "analytics"):
-        ops = sorted((op for (c, op) in op_total if c == cls), key=lambda o: -op_total[(cls, o)])
-        if not ops:
+        if not labels[cls]:
             continue
-        print(f"| **{cls}** | " + " | ".join(f"**{cls_total.get((cls, c), 0.0):,.1f}**"
-                                             for c in names) + " |")
-        for op in ops:
-            print(f"| {op} | " + " | ".join(f"{(per_col.get(c) or {}).get((cls, op), 0.0):,.1f}"
-                                            for c in names) + " |")
+        print(f"| **{cls}** | "
+              + " | ".join(f"**{class_total(per_col.get(c) or {}, cls):,.1f}**" for c in names)
+              + " |")
+        for label in labels[cls]:
+            row = []
+            for col in names:
+                v = ((per_col.get(col) or {}).get(cls) or {}).get(label)
+                # An em dash, not 0.0: this engine never created an item of that name, which is a
+                # different statement from one that cost nothing.
+                row.append("—" if v is None else f"{v:,.1f}")
+            print(f"| `{label}` | " + " | ".join(row) + " |")
+    print("\n<sub>Broken down by the Fabric ITEM that was billed, named from the run record. `etl` "
+          "against `analytics` comes from each item's recorded role, not from an operation name: a "
+          "semantic model is only ever queried, everything else is work done to build the "
+          "tables.</sub>")
 
 
-def render_sources(cols, ledger):
-    """Which dispatch each column came from, and whether its CU has stopped moving.
+def render_sources(cols, ledger, unmeasured):
+    """Which dispatch each column came from, and whether its CU can still rise.
 
     The one thing a composed page owes the reader that a single-run page did not: the columns are
-    different dispatches, so a column can be days older than the one beside it. `settled` is the
-    other half — a run measured minutes ago is still accruing, and a number that will change is not
-    the same claim as one that cannot.
+    different dispatches, so a column can be days older than the one beside it. The other half is
+    that a run measured minutes ago is a LOWER BOUND — an hour's CU keeps growing for ~70 minutes
+    after the fact — so the reader is told to dispatch again rather than left to wonder.
     """
     print("\n<sub>Each column is that engine's latest run. They are different dispatches:</sub>\n")
-    print("| column | run | built | items | CU settled |")
+    print("| column | run | built | items | CU |")
     print("|:--|:--|:--|--:|:--|")
     for col, _engine, rec in cols:
         rid = (rec.get("run") or {}).get("id")
         link = f"[{rid}]({run_url(rid)})" if rid else "—"
-        items = {g: it for g, it in (rec.get("items") or {}).items()
-                 if (it.get("role") or "") not in NON_ENGINE_ROLES}
-        done = sum(1 for g in items if settled(ledger, g))
+        items = [g for g, it in (rec.get("items") or {}).items()
+                 if (it.get("role") or "") not in NON_ENGINE_ROLES]
         started = ((rec.get("run") or {}).get("started") or "?")[:16].replace("T", " ")
-        state = "yes" if done == len(items) and items else f"{done}/{len(items)} — still accruing"
+        missing = unmeasured.get(col) or []
+        if missing:
+            state = f"{len(items) - len(missing)}/{len(items)} items measured"
+        elif still_accruing(rec):
+            state = "may still rise"
+        else:
+            state = "settled"
         load = "full" if rec.get("full_load") else "incremental"
         print(f"| {col} | {link} | {started} ({load}) | {len(items)} | {state} |")
-    print("\n<sub>`CU settled` means every item that run created has gone two consecutive reads "
-          "without changing, at least three hours after its last activity — so the number is final. "
-          "Anything else is a lower bound: dispatch **Dashboard** again to top it up. A run's items "
-          "are deleted when it finishes, which is what makes a GUID belong to exactly one run and "
-          "the attribution exact.</sub>")
+    print("\n<sub>An hour's CU keeps growing for up to ~70 minutes after the work happened, so a run "
+          "measured just now is a lower bound — dispatch **Dashboard** again and the numbers rise to "
+          "their final value. Every item a run creates is deleted when it finishes, which is what "
+          "makes a Fabric item GUID belong to exactly one run and the attribution exact.</sub>")
 
 
 def render_landing(cols, per_landing):
     """The shared input cost, kept OUT of every engine column.
 
-    `dbt_landing` holds the downloaded AEMO archive. Its CU is the download's write plus the
-    result/log round-trip, and it is a stage every engine reads from — not a fifth competitor. It is
-    the only item that outlives a run, so it is the only thing here allocated by hour rather than by
-    GUID, and a run boundary that falls mid-hour puts that hour in one run rather than splitting it.
+    `dbt_landing` holds the downloaded AEMO archive and is the one item no run deletes, so its total
+    is cumulative over the measured window rather than any single run's share. It is a stage every
+    engine reads from, not a fifth competitor.
     """
-    rows = [(col, sum((per_landing.get(col) or {}).values())) for col, _e, _r in cols]
-    if not any(v for _c, v in rows):
+    rows = [(col, per_landing.get(col)) for col, _e, _r in cols]
+    if not any(v for _c, v in rows if v):
         return
-    print("\n<sub>`dbt_landing` — the shared archive, allocated to whichever run was active. NOT "
-          "part of any engine's column:</sub>\n")
+    print("\n<sub>`dbt_landing` — the shared archive every engine reads. Cumulative over the "
+          "measured window, and NOT part of any engine's column:</sub>\n")
     print("| | " + " | ".join(c for c, _v in rows) + " |")
     print("|:--|" + "---:|" * len(rows))
-    print("| landing | " + " | ".join(f"{v:,.1f}" for _c, v in rows) + " |")
+    print("| landing | " + " | ".join("—" if v is None else f"{v:,.1f}" for _c, v in rows) + " |")
 
 
 def render_input(cols):
@@ -409,12 +448,13 @@ def render_layouts(cols, analytics):
 
 def render(cols, runs, ledger):
     """The whole page, on stdout, as the markdown subset `report_html.py` renders."""
-    per_col, per_landing, analytics = {}, {}, {}
+    per_col, per_landing, analytics, unmeasured = {}, {}, {}, {}
     for col, _engine, rec in cols:
-        cells, landing, _open = run_cu(rec, ledger)
+        cells, landing, missing = run_cu(rec, ledger)
         per_col[col] = cells
         per_landing[col] = landing
-        analytics[col] = sum(v for (cls, _op), v in cells.items() if cls == "analytics")
+        unmeasured[col] = missing
+        analytics[col] = class_total(cells, "analytics")
 
     newest = max((((r.get("run") or {}).get("started") or "") for _c, _e, r in cols), default="")
     print(f"## Capacity units — the latest run per engine, as of "
@@ -434,11 +474,11 @@ def render(cols, runs, ledger):
                       f"`{LEDGER}` — {len(ledger['items'])} item GUID(s) over {reads} read(s)"])
           + "\n")
 
-    render_sources(cols, ledger)
+    render_sources(cols, ledger, unmeasured)
 
     chart("ETL — what building the tables cost", "capacity units, lower is better",
-          [[col, round(sum(v for (cls, _op), v in (per_col[col] or {}).items() if cls == "etl"), 1),
-            engine_caption(rec, col)] for col, _e, rec in cols])
+          [[col, round(class_total(per_col[col], "etl"), 1), engine_caption(rec, col)]
+           for col, _e, rec in cols])
     chart("Analytics — what querying them cost", "capacity units, lower is better",
           [[col, round(analytics.get(col, 0.0), 1), engine_caption(rec, col)]
            for col, _e, rec in cols])

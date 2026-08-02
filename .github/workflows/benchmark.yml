@@ -36,6 +36,14 @@ name: Benchmark
 # One engine per dispatch, so the report is a timing record rather than a comparison — comparing
 # engines is the dashboard's job, from the records.
 #
+# **ONE ENGINE PER DISPATCH**, and the form cannot express more. So a four-engine comparison is four
+# dispatches: the layout table, the record and the benchmark report all cover the single engine
+# built, and the report therefore carries no ranking and no `x fastest`. `cu/dashboard.py` is what
+# compares them, composing the page from every record. The teardown means every build starts from
+# nothing, so with `skip_download` two dispatches of one commit differ only by what was changed.
+# The teardown is not optional: a deleted item keeps its CU rows in the metrics model, so there is
+# nothing to be gained by leaving one standing and background CU to be paid for if you do.
+#
 # **`workflow_dispatch` only, and that is the standing rule, not a default.** No `schedule`, no
 # `push`, no `workflow_run`, no `repository_dispatch`. Every run lands Fabric legs on paid capacity
 # and the query passes are INTERACTIVE CU on shared capacity — the class of usage a capacity admin
@@ -49,76 +57,63 @@ name: Benchmark
 on:
   workflow_dispatch:
     inputs:
-      build:
-        description: "run the dbt build (land the archive, then dbt build on the selected engine)"
-        type: boolean
-        default: true
-      benchmark:
-        description: "run the Direct Lake query benchmark over what the build wrote"
-        type: boolean
-        default: true
-      teardown:
-        description: "DELETE every item this run created when it finishes — the output lakehouse/warehouse, dbt_dwh_src, the semantic model. ON BY DEFAULT, and it is what stops an idle item drawing background CU into the NEXT run's measurement. Never touches dbt_landing. Turn OFF only to keep a run's tables alive for debugging; the next build is then an incremental, which the record says."
-        type: boolean
-        default: true
-      skip_download:
-        description: "DON'T download new data — reuse the archive already landed. On by default: with the teardown, that is what makes a run reproducible — the same input files, rebuilt from nothing, so two dispatches differ only by what was changed."
-        type: boolean
-        default: true
+      # THE FOUR THAT GET CHANGED. Everything below them is a default nobody touches from one
+      # dispatch to the next, so it sits at the bottom of the form.
       engines:
-        description: "the engine to build AND benchmark. One per dispatch. Scopes THREE things: which build leg runs, which output item is created and torn down, and which semantic model is measured. The other three engines are not touched at all."
-        # ONE ENGINE PER DISPATCH. A dropdown of the four names and nothing else, so a run always
-        # covers exactly one engine and the form cannot express more. The value is still the
-        # comma-separated string `plan` and `engines.selected()` parse, and both still accept a list,
-        # so `gh workflow run -f engines=a,b` works; the FORM just cannot ask for it.
-        # Keep `dwh` first: GitHub preselects the first option, and `default:` must match one.
-        # Consequence, stated because it is the point rather than a side effect: a four-engine
-        # comparison is four dispatches. The layout table, the record and the benchmark report all
-        # cover the single engine built, so the report carries no ranking and no `x fastest`.
-        # `cu/dashboard.py` is what compares them, from every record.
+        description: "engine — one per dispatch"
         type: choice
         default: "dwh"
-        options:
-          - "dwh"
-          - "duckrun"
-          - "iceberg"
-          - "spark"
+        options: ["dwh", "duckrun", "iceberg", "spark"]
       cores:
-        description: "Fabric Python-notebook vCores for the duckdb-family legs"
+        description: "vCores (duckrun / iceberg only)"
         type: choice
         options: ["4", "8", "16", "32", "64"]
         default: "8"
       spark_resource_profile:
-        description: "spark leg only: writeHeavy = workspace default (no V-Order); readHeavyForPBI turns V-Order on and moves file layout broadly"
+        description: "spark write profile — readHeavyForPBI is the only one with V-Order"
         type: choice
         options: ["writeHeavy", "readHeavyForPBI", "readHeavyForSpark"]
         default: "writeHeavy"
       native_execution_engine:
-        description: "spark leg only: Fabric Native Execution Engine (NEE). Documented semantic divergences — round(), DECIMAL to FLOAT — so expect small value differences while it is on."
+        description: "spark NEE"
         type: boolean
         default: false
+
+      # ---- rarely touched ----------------------------------------------------------------------
+      build:
+        description: "run the dbt build"
+        type: boolean
+        default: true
+      benchmark:
+        description: "run the Direct Lake query benchmark"
+        type: boolean
+        default: true
+      skip_download:
+        description: "reuse the landed archive instead of fetching more"
+        type: boolean
+        default: true
       download_limit:
-        description: "files to download per source, when skip_download is off"
+        description: "files per source when skip_download is off"
         type: string
         default: "200"
       runs:
-        description: "PASSES over the whole query suite. The pass number is the tier: 1 cold (a freshly created model), 2 warm, 3+ hot (median). Below 3 there is no hot tier."
+        description: "benchmark passes — 1 cold, 2 warm, 3+ hot"
         type: string
         default: "6"
       think_seconds:
-        description: "idle seconds BETWEEN queries — a user reading a visual before clicking the next. Outside every timed region, so it changes what is reproduced, not what is measured."
+        description: "idle between queries"
         type: string
         default: "4"
       gap_seconds:
-        description: "idle seconds before each engine after the first (>5min CU smoothing => clean gaps in the capacity chart). NOT think time — this is between ENGINES."
+        description: "idle before each engine after the first"
         type: string
         default: "600"
       top_duid:
-        description: "optional: pin the DUID the selectivity ladder filters on. Pinned, the ladder runs from pass 1; unpinned it is resolved AFTER the cold pass (resolving it transcodes DUID and mw) and joins at pass 2."
+        description: "pin the selectivity ladder's DUID (blank = resolve after the cold pass)"
         type: string
         default: ""
       workspace:
-        description: "Fabric workspace GUID. Blank = the FABRIC_WORKSPACE_ID repo secret, which is where it normally comes from."
+        description: "Fabric workspace GUID (blank = the repo secret)"
         type: string
         default: ""
 
@@ -182,7 +177,6 @@ jobs:
           RUN_ENGINE: ${{ inputs.engines }}
           RUNIN_BUILD: ${{ inputs.build }}
           RUNIN_BENCHMARK: ${{ inputs.benchmark }}
-          RUNIN_TEARDOWN: ${{ inputs.teardown }}
           RUNIN_CORES: ${{ inputs.cores }}
           RUNIN_SPARK_RESOURCE_PROFILE: ${{ inputs.spark_resource_profile }}
           RUNIN_NATIVE_EXECUTION_ENGINE: ${{ inputs.native_execution_engine }}
@@ -532,6 +526,13 @@ jobs:
   bench:
     name: benchmark ${{ matrix.engine }}
     needs: resolve
+    # EXPLICIT, and it has to be. With no `if:` a job defaults to `success()`, which evaluates the
+    # ENTIRE TRANSITIVE needs graph — so `fabric` being skipped on a spark-only dispatch propagated
+    # all the way down here and this job never ran, while `resolve` sat green above it with a
+    # perfectly good matrix. It worked before the fold only because `bench` lived in a called
+    # workflow whose graph started at `checks`. Name the one dependency that actually matters, the
+    # same way `report` below already did.
+    if: ${{ !cancelled() && needs.resolve.result == 'success' }}
     runs-on: ubuntu-latest
     strategy:
       # Serialized on purpose. Not for correctness — nothing here writes — but because two models
@@ -685,7 +686,11 @@ jobs:
   teardown:
     name: delete this run's items
     needs: [open, layout, bench]
-    if: ${{ always() && inputs.teardown }}
+    # UNCONDITIONAL. There was a `teardown` input; it is gone. A deleted item keeps its CU rows in
+    # the metrics model — verified against the live model, every item still there after teardown —
+    # so deleting costs nothing in measurement, and an item that survives its run keeps drawing
+    # background CU into the NEXT dispatch's window. There is no case for keeping one.
+    if: ${{ always() }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
     env:

@@ -606,9 +606,9 @@ the `cu/` section.
   changed. Each on its own is weaker: a from-scratch build over a grown archive still measures a
   different workload, and a frozen archive on top of yesterday's tables still measures yesterday's
   incremental state. What it costs is real and was accepted knowingly: **every dispatch is a
-  from-scratch build of 370M rows for the selected engine**, not a top-up. Turn `teardown` off to
-  keep the tables for a cheap incremental next run; turn `skip_download` off to extend the archive,
-  which is a different question and deserves its own run. `land` still runs either way — it
+  from-scratch build of 370M rows for the selected engine**, not a top-up, and that is not optional:
+  the teardown always runs. Turn `skip_download` off to extend the archive, which is a different
+  question and deserves its own run. `land` still runs either way — it
   provisions the landing lakehouse; only the DOWNLOAD is skipped.
 - **`engines` selects which leg runs, and everything is scoped to it.** The `plan` job computes both
   matrices with `fromJSON` and `stats.py` reads only `BUILD_ENGINES`. An unknown engine name is
@@ -626,6 +626,9 @@ the `cu/` section.
   from an older generation. Run 30699626723 measured 1,578 CU for an iceberg item the dispatch had
   not even selected. Deleting per run is what makes an item GUID belong to exactly one run, which is
   the whole basis of GUID-keyed attribution.
+  **It is UNCONDITIONAL — there is no `teardown` input.** A deleted item keeps its CU rows in the
+  metrics model (verified by hand against the live model), so deleting costs nothing in measurement
+  and there is no case for leaving one standing.
   **By GUID, not by name, is the safety property.** A name-driven teardown would delete a `dbt_spark`
   a concurrent dispatch had just created, and there is no undo. `dbt_landing` is refused twice over
   — by role, and by name in `drop_guid()` — because it holds the downloaded AEMO archive, the one
@@ -979,37 +982,34 @@ capacity for the GUIDs in those records, tops up `history/cu.json`, and publishe
   principal spent its budget, and on runs 30685959678 and 30691130030 every attempt drew 429 while a
   human refreshing by hand went straight through — leaving 41,887 CU of DuckDB compute in `shared`.
   Do not reintroduce it.
-- **The ledger has three rules and every one of them fails as a plausible number.** Upsert only, never
-  remove (a key that stops being returned keeps its value — the app retains ~14 days, and that is what
-  the ledger is FOR). Latest read wins per `(guid, operation, hour)` — an hour keeps growing for ~70
-  minutes after the fact, so overwriting is correct and SUMMING repeated reads would multiply every
-  hour by how often it was read. And settle-then-freeze: an item is final once a read changed nothing
-  about it **and** it has been quiet for `CU_SETTLE_HOURS` (3). Requiring two agreeing reads is also
-  what makes the missing refresh safe — an item the first read could not see is picked up by the
-  second.
-- **`items` is the permanent record and `hours` is scaffolding.** The hour grain exists for exactly
-  one reason — making a re-read idempotent while the numbers move — and that reason expires when the
-  item settles, so a settled item COLLAPSES to `{operation: total}` and its hours are dropped.
-  Cumulative CU per item is the only form still meaningful once the app has forgotten the window it
-  came from, and keeping every hour forever would grow the file without bound to preserve a
-  resolution nothing can check. The dashboard therefore reads `items[guid].cu` and never touches
-  `hours` — a reader that summed hours would show every settled item as having cost nothing.
-- **`dbt_landing` has NO `items` entry, deliberately.** It is never deleted, so it never settles and
-  has no final cost; an entry there would carry only the part not yet attributed to a run, which is a
-  half-total that reads like a whole one. Its CU lives in `runs[<run id>].landing` once attributed
-  and in `hours` while it is not, and an hour matching no run's window stays in `hours` indefinitely
-  — real CU nothing can attribute *yet*, and dropping it to keep the file small is the one thing this
-  file must never do. A run's landing share freezes when the rest of that run's items settle, and the
-  `dbt` FOLDER is excluded from that check: it never accrues a capacity unit, so waiting on it held
-  every run open forever (a real bug, caught in the end-to-end simulation before it shipped).
-- **A fresh run is a LOWER BOUND and the page says so per column.** Dispatch `Dashboard` twice. The
-  second read is nearly free: `measure.py` queries only from the earliest hour belonging to an
-  unsettled item, so settled time is never re-read.
+- **THE LEDGER IS ONE NUMBER PER ITEM.** `history/cu.json` is `{item GUID: CU}` and nothing else —
+  the same shape as the app's own `Items` visual. Three facts make everything else unnecessary: a
+  DELETED item keeps its CU rows (verified by hand against the live model, which is why the teardown
+  is unconditional); every item is deleted when its run ends, so a total can only ever be INCOMPLETE,
+  never wrong; and a run's items belong to that run alone, so a total per item already is a total per
+  run per engine. There is no hour grain, no operation grain, no per-run window allocation and no
+  settle-and-freeze bookkeeping. There used to be all four, and removing them removed most of the
+  file.
+- **Three rules, none of which needs any state, and each fails as a plausible number.** Only items
+  the read RETURNED are touched, so one that has aged past retention keeps its last value —
+  "upsert only, never remove", for free. `max(old, new)`, never a blind overwrite and never `+`: CU
+  per item over a fixed window start only ever grows, so the larger value is the more complete one,
+  which makes a re-read idempotent, an undercounted first read self-correcting, and an older item
+  safe from truncation when the floor walks forward. Adding would multiply an item's cost by the
+  number of reads. And the floor is the earliest recorded run start CLAMPED to `now - 14 days`, so
+  one query covers everything still learnable and never more.
+- **The page's engine table is broken down by ITEM, not by operation type.** The item names come
+  from the run record, so they cost nothing and say more: `dbt-duckrun-*` at 29,571 CU beside
+  `dbt_delta` at 1,509 is the whole story of where a DuckDB leg's cost goes, and no operation name
+  carries that. A dash means the engine never created an item of that name, which is a different
+  statement from a zero.
+- **A fresh run is a LOWER BOUND and the page says so per column.** Dispatch `Dashboard` twice: the
+  second read returns bigger numbers and `max()` takes them. "May still rise" on the page is DERIVED
+  from `run.finished` being under two hours old — a property of the clock, not a flag written into a
+  file that then has to be kept in step.
 - **`landing` is a stage, not an engine**, and it is the ONLY inexact attribution left. `dbt_landing`
-  outlives every run, so its CU is allocated by hour containment in the run's own `started`/`finished`
-  window — which the record now carries and the old code had to infer. A run boundary falling mid-hour
-  puts that hour in one run rather than splitting it. It is reported on its own row and never added to
-  an engine's column.
+  is the one item no run deletes, so its total is cumulative over the measured window rather than any
+  single run's share. Reported on its own row, never added to an engine's column.
 - **The measurement can fail; the page cannot.** `measure` is `continue-on-error` and `render` is
   `always()`, so a throttled metrics model costs a stale number and never a stale page. The render job
   installs **no `requests`** — `measure.py` imports it optionally so that job proves by running that

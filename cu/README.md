@@ -13,7 +13,7 @@ authoritative source, which is why this exists at all.
 | file | written by | shape |
 |---|---|---|
 | `history/runs/<ts>-<run id>.json` | the `Benchmark` workflow | every Fabric item GUID that run created, with its `role`, plus the layout, the input archive and the raw query timings |
-| `history/cu.json` | `cu/measure.py` | cumulative CU per item (`items`), the landing share per run (`runs`), and an hour-grain working set (`hours`) for whatever is still moving |
+| `history/cu.json` | `cu/measure.py` | `{item GUID: CU}` — one number per Fabric item |
 
 They are joined on the **item GUID**, and that is the whole design.
 
@@ -38,53 +38,44 @@ None of it was needed. `Metrics By Item Operation And Hour` carries `Item` (a GU
 no resolving. And if a first read cannot see an item at all, the settle rule below picks it up on the
 next one.
 
-## `items` is what lasts; `hours` is scaffolding
+## One number per item
 
-```jsonc
-{"items": {"<GUID>": {"cu": {"<operation>": total},      // THE permanent record
-                      "settled": "<why and when>" | null,
-                      "first_hour": ..., "last_hour": ...}},
- "runs":  {"<run id>": {"landing": {"<op>": total}, "settled": bool}},
- "hours": {"<GUID>": {"<operation>": {"<hour>": CU}}}}   // working set, pruned on settle
+```json
+{"schema": 1, "updated": "...",
+ "reads": [{"at": "...", "since": "...", "items": 6, "changed": 4}],
+ "items": {"<ITEM GUID>": 31080.4}}
 ```
 
-The hour grain exists for exactly one reason — making a re-read idempotent while an item's numbers
-are still moving — and that reason expires the moment the item settles. So a settled item **collapses
-to `{operation: total}` and its hours are dropped**. Cumulative CU per item is the only form still
-meaningful once the app has forgotten the window it came from, and a ledger that kept every hour
-forever would grow without bound to preserve a resolution nothing can check.
+That is the whole file, and it is the same shape as the app's own **Items** visual —
+`Item kind | Item Id | Item name | CU (s)`, one row per item. Three facts make everything else
+unnecessary:
 
-`dbt_landing` is the exception, and it deliberately has **no `items` entry at all**. It is never
-deleted, so it never settles and has no final cost; an entry there would show only the part not yet
-attributed to a run, which is a half-total that reads like a whole one. Its CU lives in exactly two
-places: `runs[*].landing` once attributed to the run whose window contains it, and `hours` while it
-is not. An hour belonging to no run's window is left in `hours` indefinitely — it is real CU that
-nothing can attribute *yet*, and dropping it to keep the file small is the one thing this file must
-never do.
+1. **A deleted item keeps its CU rows in the metrics model.** Verified by hand against the live
+   model: every item is still there after the teardown removed it. So deleting is free of
+   measurement cost, and the teardown is unconditional.
+2. **Every item is deleted when its run finishes**, so a total can only ever be INCOMPLETE, never
+   wrong. The first read after a run usually undercounts — an hour's CU keeps growing for up to ~70
+   minutes (~6 min ingestion lag, 5–64 min smoothing) — and the next read returns a bigger number.
+3. **A run's items belong to that run and nothing else**, so a total per item already IS a total per
+   run per engine.
 
-A run's landing share freezes when the rest of that run's items settle. The `dbt` folder is excluded
-from that check: it never accrues a capacity unit, so waiting on it would hold every run open
-forever.
+There is no hour grain, no operation grain, no per-run window allocation and no settle-and-freeze
+bookkeeping. There used to be all four.
 
-## The three ledger rules
+### Three rules, none of which needs any state
 
-1. **Upsert only, never remove.** A key that stops being returned — retention rolling past it — keeps
-   its last value. This is the whole reason the ledger exists: the app retains about **14 days**.
-   (Collapsing an hour into a settled total is not removal — the CU stays, at a coarser grain.)
-2. **Latest read wins per `(guid, operation, hour)`.** An hour's CU keeps growing for up to ~70
-   minutes after the fact (~6 min ingestion lag, 5–64 min smoothing), so overwriting is correct.
-   Summing repeated reads would multiply every hour by how many times it was read — and still look
-   plausible.
-3. **Settle, then freeze.** An item is settled when a read changed nothing about it **and** its
-   newest hour is at least `CU_SETTLE_HOURS` (3) old. A settled item is never rewritten and its time
-   is never re-read.
+- **Only items the read RETURNED are touched.** One that has aged past retention is simply absent
+  from the result and keeps its last value — "upsert only, never remove", for free.
+- **`max(old, new)`, never a blind overwrite and never `+`.** CU per item over a fixed window start
+  only ever grows, so the larger value is the more complete one. That makes a re-read idempotent,
+  makes an undercounted first read self-correcting, and protects an older item from being truncated
+  when the floor walks forward past part of its window. Adding would multiply an item's cost by the
+  number of times it was read and still look entirely plausible.
+- **The floor is bounded by retention**: the earliest recorded run start, clamped to `now − 14 days`,
+  in the model's clock. One query covers everything that can still be learned and never more.
 
-Rule 3 is what "an item's CU is done when no more CU is being attributed to it" means in practice.
-It also makes re-dispatching cheap: `measure.py` only ever queries from the earliest hour belonging
-to an item that has not settled, so once a generation is final it costs nothing to look again.
-
-**A fresh run is a LOWER BOUND, and the page says so per column.** Dispatch `Dashboard` again an hour
-or two later to turn it into a final number.
+**A run measured just now is a LOWER BOUND, and the page says so per column.** Dispatch `Dashboard`
+again an hour or two later and the numbers rise to their final value. Nothing has to be reconciled.
 
 ## Running it
 
@@ -114,13 +105,17 @@ because that artifact has to open off a local disk years later.
   bar carries the adapter and the compute (`dbt-duckdb · 64 vCores`), because `iceberg` beside
   `duckrun` reads as an engine difference when it is a *writer* difference — same DuckDB, same
   notebook, same size.
-- **Engine-major table**, engines across, operations down, class subtotals in bold. That orientation
+- **Engine-major table**, engines across, **Fabric items** down, class subtotals in bold. The item
+  names come from the run record, so they cost nothing and say more than an operation name would:
+  `dbt-duckrun-*` at 29,571 CU beside `dbt_delta` at 1,509 is the whole story of where a DuckDB
+  leg's cost goes. A dash means the engine never created an item of that name — different from a
+  zero. That orientation
   is what makes the width work: item-major needs a column per operation type and a lakehouse alone
   brings a dozen. **No total column and no grand-total row** — both would sum ACROSS engines, which
   is the one sum on this page that answers nothing, since the engines are alternatives to each other.
-- **`landing` is a stage, not an engine.** `dbt_landing` holds the downloaded AEMO archive and is the
-  only item that outlives a run, so it is the only thing allocated by hour window rather than by
-  GUID, and it is reported on its own row — never added to an engine's column.
+- **`landing` is a stage, not an engine.** `dbt_landing` holds the downloaded AEMO archive and is
+  the one item no run deletes, so its total is cumulative over the measured window rather than any
+  one run's share. Reported on its own row, never added to an engine's column.
 - **Input archive**: files and bytes in the landing archive, from `stats.py`'s listing. Every other
   number on the page describes what came OUT.
 - **Table layout**, every shared table, mart first, with the analytics CU beside the mart alone (it
@@ -154,9 +149,9 @@ is the one form that is invisible there and drawable here. Do not "simplify" it 
   `CU_METRICS_WORKSPACE_ID`, `CU_METRICS_MODEL_ID`. No tracked file holds one, an input's `default:`
   cannot take a context, and `measure.py` keeps no fallback — a hardcoded one would put the value
   back in the repo and outvote the secret whenever the env var arrived empty.
-- **14-day retention, ~6 minute lag, 5–64 minute smoothing.** A run older than the retention is
-  force-settled with the reason recorded, because no further read can improve it and leaving it open
-  would re-query forgotten time forever.
+- **14-day retention, ~6 minute lag, 5–64 minute smoothing.** Which is why the floor is clamped to
+  the retention horizon: reading further back returns nothing, and an unbounded floor would grow the
+  query for the life of the repo.
 - **The render job checks out `ref: <branch>`, not the triggering SHA.** The measure job commits the
   ledger; a default checkout would read the version from before that commit and every page would be
   one dispatch stale.
@@ -170,9 +165,8 @@ is the one form that is invisible there and drawable here. Do not "simplify" it 
 | `CU_CAPACITY_ID` | — | pin it; unpinned costs an extra query plus a full read per capacity |
 | `CU_WORKSPACE_FILTER` | — | the only row filter, and a column of the fact table itself |
 | `CU_SINCE` | computed | override the floor, in the model's clock |
-| `CU_SETTLE_HOURS` | `3` | quiet period before an item can freeze |
 | `CU_MODEL_OFFSET_HOURS` | `10` | the app's own UTC offset |
-| `CU_RETENTION_DAYS` | `14` | past this, an item is frozen whatever its state |
+| `CU_RETENTION_DAYS` | `14` | how far back the floor is allowed to reach |
 | `CU_RUNS_DIR` / `CU_LEDGER` | `history/runs` / `history/cu.json` | |
 | `CU_RECORD` | — | render one run alone (dashboard only) |
 | `CU_LAYOUT_TABLE` | `fct_summary` | which table leads the layout section |
@@ -180,9 +174,9 @@ is the one form that is invisible there and drawable here. Do not "simplify" it 
 ## Tests
 
 `python -m pytest cu/ -q` — offline, no token, ~1s, and both jobs of the workflow run it. Everything
-it pins fails as a plausible number rather than as an error: the three ledger rules, the settle
-conditions, the GUID join, the landing window allocation, and that a variant tag never contains the
-column separator.
+it pins fails as a plausible number rather than as an error: the three ledger rules, the GUID join,
+that an absent item keeps its value, that a smaller later read never lowers a total, and that a
+variant tag never contains the column separator.
 
 ## Isolation
 
