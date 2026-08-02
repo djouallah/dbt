@@ -982,6 +982,15 @@ capacity for the GUIDs in those records, tops up `history/cu.json`, and publishe
   principal spent its budget, and on runs 30685959678 and 30691130030 every attempt drew 429 while a
   human refreshing by hand went straight through — leaving 41,887 CU of DuckDB compute in `shared`.
   Do not reintroduce it.
+- **The no-refresh assumption REPORTS ON ITSELF, every read.** The refresh updated the IMPORT-mode
+  `'Items'` dimension; the fact table is DirectQuery, so a brand-new item GUID should be summable
+  without the model being refreshed to catalogue it. That is an argument, not a measurement — so
+  `measure.py`'s `coverage()` compares the GUIDs the run records name against the GUIDs the query
+  returned and logs `<record>: 3/3 recorded item(s) found`, storing `unfound` in the ledger's `reads`
+  entry. All found minutes after a run ends settles it; still missing hours later disproves it, and
+  the fix is an opt-in refresh rather than a guess. Separately and already known: a **deleted** item
+  keeps its rows — run 30743411308's `dbt_spark` (`3CD6810A-…`) was created at 10:16 and deleted at
+  10:34, and shows 30,940 CU in the app.
 - **THE LEDGER IS ONE NUMBER PER ITEM.** `history/cu.json` is `{item GUID: CU}` and nothing else —
   the same shape as the app's own `Items` visual. Three facts make everything else unnecessary: a
   DELETED item keeps its CU rows (verified by hand against the live model, which is why the teardown

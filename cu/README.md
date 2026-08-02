@@ -35,8 +35,22 @@ name.
 
 None of it was needed. `Metrics By Item Operation And Hour` carries `Item` (a GUID) and
 `Workspace Id` as columns of its own, so the workspace filter binds with no join and the GUID needs
-no resolving. And if a first read cannot see an item at all, the settle rule below picks it up on the
-next one.
+no resolving.
+
+**The one assumption, and how it reports on itself.** The refresh updated the IMPORT-mode `'Items'`
+dimension; the metrics fact table is DirectQuery, so a brand-new item GUID should be summable without
+the model being refreshed to catalogue it. Every read checks: `measure.py` compares the GUIDs the run
+records name against the GUIDs the query returned and logs
+
+    history/runs/2026-08-02T1034Z-30743411308.json: 3/3 recorded item(s) found
+
+A run whose items are all found minutes after it finished settles the question. Items still missing
+hours later would disprove it, and the fix would be an opt-in refresh — not a guess. `unfound` is
+recorded in the ledger's `reads` entry either way.
+
+What is already known: a **deleted** item keeps its rows. Run 30743411308 created `dbt_spark`
+(`3CD6810A-0BD4-4CCC-9370-127E8F6B206A`) at 10:16 UTC and the teardown deleted it at 10:34; it shows
+in the app with 30,940 CU.
 
 ## One number per item
 

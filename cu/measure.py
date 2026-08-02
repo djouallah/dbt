@@ -291,6 +291,36 @@ def apply(ledger, read):
     return changed
 
 
+def coverage(runs, read):
+    """Which recorded items this read did and did not find. Returns `[(file, found, missing)]`.
+
+    **This is what answers the one open question about the whole design.** The Capacity Metrics app
+    refreshes on its own schedule, and the old reader refreshed it before every read so that items
+    minutes old would be catalogued. That refresh is gone, on the argument that it only ever updated
+    the IMPORT-mode `'Items'` dimension — while the metrics fact table is DirectQuery and carries
+    `Item` as a column of its own, so a GUID needs no cataloguing to be summed.
+
+    Sound in theory, and this is the measurement. A run whose items are all found by a read taken
+    minutes after it finished says the fact table is live and the refresh really was only ever about
+    names. A run whose newest items are missing and then appear hours later says the opposite, and
+    the fix would be to re-add an opt-in refresh — not to guess.
+
+    A `folder` is excluded: a workspace folder never accrues a capacity unit, so its absence means
+    nothing either way.
+    """
+    out = []
+    for rec in runs:
+        items = {g: it for g, it in (rec.get("items") or {}).items()
+                 if (it.get("role") or "") != "folder"}
+        if not items:
+            continue
+        missing = [f"{it.get('role', '?')}/{it.get('name') or g}"
+                   for g, it in sorted(items.items(), key=lambda kv: kv[1].get("role", ""))
+                   if g not in read]
+        out.append((rec.get("_file", "?"), len(items) - len(missing), missing))
+    return out
+
+
 def floor_for(runs, now_model):
     """The earliest hour worth asking about: the first recorded run start, clamped to retention.
 
@@ -363,17 +393,32 @@ def main():
                 f"Refusing to write a ledger that silently includes excluded time.")
 
     changed = apply(ledger, read)
+
+    # Did the read find what the runs say exists? See coverage() — this is the standing check on the
+    # one assumption the no-refresh design rests on.
+    cover = coverage(runs, read)
+    unfound = sum(len(m) for _f, _n, m in cover)
+    for name, found, missing in cover:
+        log(f"  {name}: {found}/{found + len(missing)} recorded item(s) found"
+            + (f" — MISSING {', '.join(missing)}" if missing else ""))
+    if unfound:
+        log(f"  {unfound} recorded item(s) returned no rows. Expected for a run that finished in "
+            f"the last ~10 minutes (ingestion lag) — dispatch Dashboard again. If they are still "
+            f"missing hours later, the metrics model needs a refresh to surface a new item GUID "
+            f"and this file's central assumption is wrong.")
+
     ledger["schema"] = SCHEMA
     ledger["updated"] = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
     ledger["reads"].append({"at": ledger["updated"], "since": floor.isoformat(),
-                            "items": len(read), "changed": changed})
+                            "items": len(read), "changed": changed, "unfound": unfound})
     path = save_ledger(ledger)
 
     for guid, value in sorted(read.items(), key=lambda kv: -kv[1])[:12]:
         log(f"    {guid}  {value:>12,.1f} CU")
     log(f"  {rows_seen} row(s) read, {len(read)} item(s) in this workspace, {changed} updated")
     print(f"{path}: {len(ledger['items'])} item GUID(s), "
-          f"{sum(ledger['items'].values()):,.1f} CU total")
+          f"{sum(ledger['items'].values()):,.1f} CU total"
+          + (f", {unfound} recorded item(s) not yet visible" if unfound else ""))
     return 0
 
 

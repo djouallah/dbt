@@ -128,3 +128,17 @@ def test_the_ledger_round_trips_and_sorts_its_keys(tmp_path):
 def test_a_missing_ledger_starts_empty_rather_than_raising(tmp_path):
     led = measure.load_ledger(str(tmp_path / "nope.json"))
     assert led["items"] == {} and led["schema"] == measure.SCHEMA
+
+
+def test_coverage_names_the_recorded_items_a_read_did_not_find():
+    """The standing check on the one assumption the no-refresh design rests on: the metrics FACT
+    table is DirectQuery, so a brand-new item GUID should be summable without the model being
+    refreshed to catalogue it. A run whose items are all found minutes after it ended proves it; one
+    whose items are still missing hours later disproves it. Either way the log says so."""
+    runs = [{"_file": "r.json", "items": {
+        "OUT": {"role": "output", "name": "dbt_spark"},
+        "SEM": {"role": "semantic_model", "name": "aemo_spark"},
+        "F": {"role": "folder", "name": "dbt"}}}]
+    assert measure.coverage(runs, {"OUT": 1.0, "SEM": 2.0}) == [("r.json", 2, [])]
+    # A folder never accrues a capacity unit, so its absence means nothing and must not be reported.
+    assert measure.coverage(runs, {"OUT": 1.0}) == [("r.json", 1, ["semantic_model/aemo_spark"])]
