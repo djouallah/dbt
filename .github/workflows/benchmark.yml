@@ -56,18 +56,26 @@ on:
         type: string
         default: ""
       engines:
-        description: "engines to benchmark, comma-separated. Order is the order they are MEASURED in — no reference engine, no number in the report depends on it. Defaults to dwh alone; type the full list to compare engines."
-        type: string
-        # `dwh`, not all four, matching dbt.yml and all.yml. This is the most expensive default in
-        # the repo to get wrong: the query passes are INTERACTIVE CU on shared capacity — the class
-        # of usage a capacity admin notices — and the paid work is `max-parallel: 1`, so four
-        # engines is four sequential jobs of 25 queries x `runs` passes with two 600s gaps each.
-        # A single engine still exercises deploy -> XMLA -> render end to end, which is what a
-        # standalone dispatch is usually for; comparing layouts is what the full list is for.
+        description: "the engine to benchmark. One per dispatch — its semantic model is deleted, recreated and measured; the other three are not touched."
+        # ONE ENGINE PER DISPATCH, picked from a dropdown — see all.yml for the reasoning. The
+        # value is still the comma-separated string `engines.selected()` parses, and it still
+        # accepts a list, so `all.yml` and a by-hand `gh workflow run -f engines=a,b` are
+        # unaffected; the FORM just cannot express more than one.
+        # This is the most expensive form in the repo to get wrong: the query passes are
+        # INTERACTIVE CU on shared capacity — the class of usage a capacity admin notices — and the
+        # paid work is `max-parallel: 1`, so every extra engine is another full sequential job of
+        # 25 queries x `runs` passes with two 600s gaps.
         # NOTE this is the one workflow where a single engine changes what the REPORT means, not
         # just its width: with one column there is no ranking and no `x fastest`, so it reads as a
         # timing record for that engine rather than a comparison.
+        # Keep `dwh` first: GitHub preselects the first option, and `default:` must match one.
+        type: choice
         default: "dwh"
+        options:
+          - "dwh"
+          - "duckrun"
+          - "iceberg"
+          - "spark"
       runs:
         description: "PASSES over the whole query suite. The pass number is the tier: 1 cold (a freshly created model), 2 warm, 3+ hot (median). Below 3 there is no hot tier."
         type: string

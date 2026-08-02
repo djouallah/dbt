@@ -56,19 +56,19 @@ on:
         type: string
         default: ""
       engines:
-        description: "engines to build, comma-separated (duckrun,iceberg,spark,dwh). Fewer means fewer legs AND a narrower reset — only the named engines' items are deleted, and only they are recorded. Defaults to dwh alone; type the full list for a four-engine comparison."
-        type: string
-        # `dwh`, not all four. A standalone dispatch of THIS workflow is the targeted re-run — one
-        # leg you are iterating on — and defaulting it to four means the cheap habit (open the
-        # form, hit Run) spends four Fabric legs plus a ~10-minute four-item `layout` read for a
-        # question about one engine. `all.yml` is the ordinary full dispatch and passes its own
-        # four-engine list explicitly, so it is UNAFFECTED by this default.
-        # The scoping is the point and it cuts both ways: `engines` also narrows the reset, so a
-        # default dispatch now deletes and rebuilds `dbt_dwh` ALONE and leaves the other three
-        # items untouched — it does not reset what it will not rebuild. The `layout` table and the
-        # history record then cover dwh only, which is correct (a record renders what it contains)
-        # but is NOT a cross-engine comparison. Name the engines when that is the question.
+        description: "the engine to build. One per dispatch. Scopes the leg AND the reset — only this engine's item is deleted, rebuilt and recorded; the other three are not touched."
+        # ONE ENGINE PER DISPATCH, picked from a dropdown — see all.yml for the reasoning. The
+        # value is still the comma-separated string the `plan` job parses, and `plan` still accepts
+        # a list, so `all.yml` and a by-hand `gh workflow run -f engines=a,b` are unaffected; the
+        # FORM just cannot express more than one.
+        # Keep `dwh` first: GitHub preselects the first option, and `default:` must match one.
+        type: choice
         default: "dwh"
+        options:
+          - "dwh"
+          - "duckrun"
+          - "iceberg"
+          - "spark"
       skip_download:
         description: "DON'T download new data — reuse the archive already landed. On by default: with a reset, that makes a run reproducible (same input files, rebuilt from nothing). Turn off to extend the archive first."
         type: boolean
