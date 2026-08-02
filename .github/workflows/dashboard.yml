@@ -30,20 +30,26 @@ name: Dashboard
 on:
   workflow_dispatch:
     inputs:
+      # Off re-renders from the committed ledger: free, offline, and the way to fix the page
+      # without spending a metrics query.
       measure:
-        description: "read capacity units and top up history/cu.json before rendering. OFF re-renders from what is already committed — free, offline, and the way to fix the page without spending a metrics query."
+        description: "measure CU before rendering"
         type: boolean
         default: true
+      # A substring of the record's FILENAME, so a run id or a date both work.
       record:
-        description: "render ONE run alone — a substring of its filename, so a run id (30733912205) or a date (2026-08-02) both work. Blank = every engine's latest run, one column each."
+        description: "render one run alone — run id or date; blank = latest per engine"
         type: string
         default: ""
+      # In the MODEL'S clock (the app's own +10 offset, not UTC) — a wrong value reads as "no
+      # activity" rather than as an error. Blank is computed from the earliest unsettled run,
+      # which is what you want; set it to re-read a window by hand.
       since:
-        description: "override the CU floor, IN THE MODEL'S CLOCK (the app's own offset, +10, not UTC). Blank = computed from the earliest run whose items have not settled, which is what you want. Set it to re-read a window by hand."
+        description: "CU floor override, in the model's clock (+10)"
         type: string
         default: ""
       workspace:
-        description: "Fabric workspace GUID whose items to count. Blank = the FABRIC_WORKSPACE_ID repo secret."
+        description: "workspace GUID; blank = the repo secret"
         type: string
         default: ""
 
