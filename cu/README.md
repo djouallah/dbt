@@ -100,7 +100,7 @@ again an hour or two later and the numbers rise to their final value. Nothing ha
 ```
 gh workflow run Dashboard                       # measure, then publish
 gh workflow run Dashboard -f measure=false      # re-render from what is committed — free, offline
-gh workflow run Dashboard -f record=30733912205 # render one run alone
+gh workflow run Dashboard -f record=30752070535 # render one run alone
 ```
 
 Locally, with no credentials and nothing installed:

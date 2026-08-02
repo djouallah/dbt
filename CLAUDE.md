@@ -1035,12 +1035,13 @@ capacity for the GUIDs in those records, tops up `history/cu.json`, and publishe
   else by name. Run 30743411308 is the live example: its `bench` job was skipped by the `needs` bug,
   so it has an ETL half and no analytics, which on a chart reads as "querying spark was free". It
   lives in `history/runs/legacy/`.
-- **A run that was never TORN DOWN renders WITH A CAVEAT, not rejected.** Run 30733912205 predates
-  the teardown job, so `dbt_delta` and `aemo_duckrun` are still alive and Fabric keeps billing them —
-  its total is an upper bound on that run rather than a measurement of it. It was briefly moved to
-  `legacy/` for that; the creep is small and a missing column costs more than a caveated one, so
-  `drifting()` marks it **still billing — N item(s) never deleted** in the sources table, the loudest
-  of the three states because it is the only one that does not resolve by waiting.
+- **A run that was never TORN DOWN renders WITH A CAVEAT, not rejected.** The creep is small and a
+  missing column costs more than a caveated one, so `drifting()` marks such a run **still billing —
+  N item(s) never deleted** in the sources table, the loudest of the three states because it is the
+  only one that does not resolve by waiting. Run 30733912205 was the live example and was moved to
+  `legacy/` for that, then moved back out; it is in `legacy/` again now for an unrelated reason —
+  it built at `threads: 1`, which `variant()` cannot see, so it would have keyed to the same column
+  as a `threads: 4` duckrun run.
   **Moving a record in or out of `legacy/` MOVES THE FLOOR**, which is easy to miss: `measure.py`
   derives it from the earliest remaining run start, so parking a record narrows the window and the
   items of any run outside it stop being read. That is what made duckrun read 14.8 CU for a moment —
