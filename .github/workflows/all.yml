@@ -61,17 +61,34 @@ on:
         type: string
         default: "200"
       engines:
-        description: "engines to build AND benchmark, comma-separated (duckrun,iceberg,spark,dwh). Fewer means fewer build legs, a reset scoped to just those engines, and fewer benchmark models — nothing is deleted or rebuilt for an engine not named here. Defaults to dwh alone; type the full list for a four-engine comparison."
-        type: string
-        # `dwh`, not all four, matching dbt.yml and benchmark.yml — the default everywhere is one
-        # engine, and the full comparison is something you ask for. Four legs plus four benchmark
-        # models plus a four-item `layout` read is the most expensive thing this repo can do, and
-        # it was what you got by opening the form and pressing Run.
-        # Read this together with `reset_outputs`, which is ALSO on by default: a default dispatch
-        # deletes and rebuilds `dbt_dwh` alone, from scratch, and never touches the other three
-        # items. The report it produces is one column — correct, since a record renders what it
-        # contains, but it compares nothing. Name the engines when comparison is the question.
+        description: "engines to build AND benchmark. Scopes THREE things: which build legs run, which items reset_outputs deletes and rebuilds, and which semantic models the benchmark measures. An engine not listed is not touched at all."
+        # A DROPDOWN, not a typed list. The option VALUE is the comma-separated string the called
+        # workflows already take, so nothing downstream changes — `choice` only stops the form
+        # accepting a value the run would later die on. The typed field had no validation at the
+        # point of entry: a typo travelled all the way to dbt.yml's `plan` job, which is fatal by
+        # design (a typo that silently builds nothing looks exactly like a build that worked), so
+        # a dispatch was spent finding out. It also showed nothing about which names were legal.
+        # Same shape as `cores` and `spark_resource_profile`: the dropdown lives here, on the
+        # dispatch form, because workflow_call inputs CANNOT be `type: choice` — the called
+        # workflows keep plain strings across that boundary.
+        # Adding a combination now means adding an option, which is the trade for validation, and
+        # the right one here because the useful combinations are few and each costs real capacity.
+        # Keep `dwh` first: GitHub preselects the first option, and `default:` must match one.
+        type: choice
         default: "dwh"
+        options:
+          - "dwh"
+          - "duckrun"
+          - "iceberg"
+          - "spark"
+          # The pair the CU dashboard calls the sharpest comparison: same DuckDB, same notebook,
+          # same DuckDB settings, differing only in the writer and duckrun's adapter-forced
+          # threads=1.
+          - "duckrun,iceberg"
+          # The full comparison this repo exists to make, and the most expensive thing it can do:
+          # four build legs, four benchmark models measured one at a time (max-parallel: 1), and a
+          # ~10-minute four-item layout read.
+          - "duckrun,iceberg,spark,dwh"
       runs:
         description: "benchmark passes over the query suite. 1 cold, 2 warm, 3+ hot."
         type: string
