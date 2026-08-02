@@ -21,6 +21,11 @@ aemo_electricity:
       type: duckrun
       schema: "{{ env_var('DBT_SCHEMA', 'mart') }}"
       root_path: "{{ env_var('ONELAKE_TABLES_PATH') }}"
+      # 4, matching the other three targets — but it is NOT in force yet: the adapter still
+      # hard-pins config.threads = 1 (impl.py), so a run reads 1 whatever this says. Written as
+      # the value we want for when a future duckrun lifts the pin; until then the duckrun/iceberg
+      # pair still differs by threads. See the note on the iceberg target.
+      threads: 4
 
     # --- DuckDB + Iceberg REST catalog on OneLake.
     iceberg:
