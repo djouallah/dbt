@@ -61,9 +61,17 @@ on:
         type: string
         default: "200"
       engines:
-        description: "engines to build AND benchmark, comma-separated (duckrun,iceberg,spark,dwh). Fewer means fewer build legs, a reset scoped to just those engines, and fewer benchmark models — nothing is deleted or rebuilt for an engine not named here."
+        description: "engines to build AND benchmark, comma-separated (duckrun,iceberg,spark,dwh). Fewer means fewer build legs, a reset scoped to just those engines, and fewer benchmark models — nothing is deleted or rebuilt for an engine not named here. Defaults to dwh alone; type the full list for a four-engine comparison."
         type: string
-        default: "duckrun,iceberg,spark,dwh"
+        # `dwh`, not all four, matching dbt.yml and benchmark.yml — the default everywhere is one
+        # engine, and the full comparison is something you ask for. Four legs plus four benchmark
+        # models plus a four-item `layout` read is the most expensive thing this repo can do, and
+        # it was what you got by opening the form and pressing Run.
+        # Read this together with `reset_outputs`, which is ALSO on by default: a default dispatch
+        # deletes and rebuilds `dbt_dwh` alone, from scratch, and never touches the other three
+        # items. The report it produces is one column — correct, since a record renders what it
+        # contains, but it compares nothing. Name the engines when comparison is the question.
+        default: "dwh"
       runs:
         description: "benchmark passes over the query suite. 1 cold, 2 warm, 3+ hot."
         type: string

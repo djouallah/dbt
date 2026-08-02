@@ -43,7 +43,8 @@ on:
   workflow_call:
     inputs:
       workspace: { type: string, required: false, default: "" }
-      engines: { type: string, required: false, default: "duckrun,iceberg,spark,dwh" }
+      # `dwh`, not all four — see the dispatch input below. `all.yml` passes its own value down.
+      engines: { type: string, required: false, default: "dwh" }
       runs: { type: string, required: false, default: "6" }
       think_seconds: { type: string, required: false, default: "4" }
       gap_seconds: { type: string, required: false, default: "600" }
@@ -55,9 +56,18 @@ on:
         type: string
         default: ""
       engines:
-        description: "engines to benchmark, comma-separated. Order is the order they are MEASURED in — no reference engine, no number in the report depends on it."
+        description: "engines to benchmark, comma-separated. Order is the order they are MEASURED in — no reference engine, no number in the report depends on it. Defaults to dwh alone; type the full list to compare engines."
         type: string
-        default: "duckrun,iceberg,spark,dwh"
+        # `dwh`, not all four, matching dbt.yml and all.yml. This is the most expensive default in
+        # the repo to get wrong: the query passes are INTERACTIVE CU on shared capacity — the class
+        # of usage a capacity admin notices — and the paid work is `max-parallel: 1`, so four
+        # engines is four sequential jobs of 25 queries x `runs` passes with two 600s gaps each.
+        # A single engine still exercises deploy -> XMLA -> render end to end, which is what a
+        # standalone dispatch is usually for; comparing layouts is what the full list is for.
+        # NOTE this is the one workflow where a single engine changes what the REPORT means, not
+        # just its width: with one column there is no ranking and no `x fastest`, so it reads as a
+        # timing record for that engine rather than a comparison.
+        default: "dwh"
       runs:
         description: "PASSES over the whole query suite. The pass number is the tier: 1 cold (a freshly created model), 2 warm, 3+ hot (median). Below 3 there is no hot tier."
         type: string
