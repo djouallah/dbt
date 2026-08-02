@@ -217,7 +217,18 @@ DEBUG = os.environ.get("CU_DEBUG", "").strip().lower() in ("1", "true", "yes")
 # settled, where the refresh is pure latency. See refresh_metrics_model() for why a failure here
 # is logged rather than fatal.
 REFRESH = os.environ.get("CU_REFRESH", "1").strip().lower() not in ("0", "false", "no", "")
-REFRESH_TIMEOUT = int(os.environ.get("CU_REFRESH_TIMEOUT", "900"))
+# 1800s (30 min), raised from 900. A refresh of the metrics model that has not finished when this
+# gives up is the WORST outcome available: the run still queries, still spends its DAX budget, and
+# still reports — but against a model that has not catalogued the items the build just created, so
+# minutes-old notebooks resolve to no name and their CU lands in `shared`/`other` instead of the
+# engine columns. That is a report that is wrong rather than one that failed, which is the failure
+# mode this whole file is built to avoid. Waiting longer costs only latency on a job nothing else
+# blocks on. The price is paid in REQUESTS, and it is small because the poll backs off: the 30s→300s
+# ladder reaches 1800s in NINE polls against six for 900s. Three extra requests on the endpoint most
+# likely to have spent the service principal's per-identity budget is a real cost, just a much
+# smaller one than the fixed-20s loop this replaced (45 requests). Raise `cu.yml`'s job timeout
+# alongside this, or the job dies before the wait does.
+REFRESH_TIMEOUT = int(os.environ.get("CU_REFRESH_TIMEOUT", "1800"))
 # POST attempts for the refresh, and it exists because of a 429. Only a 429 is retried — every
 # other non-2xx is answered on the first response, since retrying a 403 only buries the reason.
 # Two spare attempts at the advertised ~120s cover the per-user cap without pushing the job's own
@@ -488,8 +499,9 @@ def refresh_metrics_model():
     is **6 queries** — `INFO.VIEW.COLUMNS`, `VALUES('Capacities')`, then `items_for` + `cu_for` per
     capacity, twice for this tenant's two. The expensive caller is the loop below, which polls
     `GET …/refreshes?$top=1` every 20s for up to REFRESH_TIMEOUT — **up to 45 requests** — so the
-    refresh path spends roughly seven times what the measurement does, and then gets refused. If
-    throttling has to be attacked, attack that poll interval, not the query count.
+    refresh path spent roughly seven times what the measurement does, and then got refused. That
+    poll now backs off (30s doubling to a 5-minute ceiling), which is nine requests at the current
+    1800s timeout. If throttling has to be attacked, attack that poll interval, not the query count.
     """
     base = f"{PBI}/groups/{WS}/datasets/{MODEL}/refreshes"
     headers = {"Authorization": f"Bearer {TOKEN}", "Content-Type": "application/json"}
@@ -522,8 +534,10 @@ def refresh_metrics_model():
     # capacity is pinned) — spent on an endpoint that only ever answers "not yet". That is the
     # likeliest thing that put the service principal into per-identity throttling, which then
     # refused the very refresh this loop was waiting on. Doubling from 30s to a 5-minute ceiling
-    # reaches the same 900s deadline in SIX requests. The cost is up to 5 minutes of latency
-    # between a refresh finishing and this noticing, against a refresh that takes minutes anyway.
+    # reaches a 900s deadline in SIX requests and the current 1800s one in NINE. The cost is up to
+    # 5 minutes of latency between a refresh finishing and this noticing, against a refresh that
+    # takes minutes anyway — and the ceiling is what keeps the request count near-flat as the
+    # timeout grows, so raising REFRESH_TIMEOUT again is cheap in requests and only costs latency.
     deadline = time.time() + REFRESH_TIMEOUT
     delay, polls = 30, 0
     while time.time() < deadline:
@@ -1452,12 +1466,13 @@ def render_hardware(doc, engines=None):
     # Two differences, not one. The claim was "differ only in what writes the table", which was
     # wrong twice: dbt_project.yml capped duckrun's DuckDB at 4GB while iceberg ran at the default
     # (removed — they are on identical DuckDB settings now), and duckrun's adapter hard-pins
-    # threads=1 because its Delta write path is not thread-safe, against iceberg's 8. The thread
-    # count cannot be equalised, so it is stated instead of claimed away.
+    # threads=1 because its Delta write path is not thread-safe, against iceberg's 4 (every engine
+    # that can take a thread count now takes 4; iceberg was 8). The thread count cannot be
+    # equalised, so it is stated instead of claimed away.
     pair = ("`duckrun` and `iceberg` are the SAME DuckDB on the same notebook size and the same "
             "DuckDB settings, so their two bars are the sharpest comparison here — but they "
             "differ in two things, not one: the writer, and dbt threads (duckrun's adapter pins "
-            "1, iceberg runs 8). " if {"duckrun", "iceberg"} <= set(named) else "")
+            "1, every other leg runs 4). " if {"duckrun", "iceberg"} <= set(named) else "")
     livy = ("spark runs on the workspace Livy pool, which this cannot see beyond the profile it "
             "asked for." if "spark" in named else "")
     print(f"\n<sub>The adapter and writer are facts of this repo's `profiles.yml`; the compute is "

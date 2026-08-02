@@ -552,7 +552,10 @@ ugly row.
 snapshot: `deploy_models.py` deletes and recreates each semantic model, so every benchmark dispatch
 mints four item GUIDs the app has never seen, and CU attached to an item the model does not know
 about cannot be reported at all. So the run POSTs a refresh, polls until it completes
-(`CU_REFRESH_TIMEOUT`, default 900s), and only then queries. It is **non-fatal by construction** —
+(`CU_REFRESH_TIMEOUT`, default 1800s — 30 min, raised from 15 because giving up early produces a
+report that is *wrong* rather than one that failed: the run still queries and still reports, but
+against a model that has not catalogued the items the build just made, so their CU lands in
+`shared`/`other` instead of the engine columns), and only then queries. It is **non-fatal by construction** —
 the app's dataset is not ours, the service principal may hold no refresh rights on that workspace,
 and a scheduled refresh may already be running (that one is waited on instead). Any of those logs a
 line and reads the model as it stands, which is exactly what this tool did before the refresh

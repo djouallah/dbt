@@ -813,6 +813,33 @@ def test_refresh_status_poll_backs_off_instead_of_hammering(monkeypatch):
     assert max(slept) <= 300, "a single sleep longer than the 5-minute ceiling delays the finish"
 
 
+def test_refresh_poll_count_stays_flat_as_the_timeout_grows(monkeypatch):
+    """The 5-minute ceiling is what makes CU_REFRESH_TIMEOUT cheap to raise: doubling the wait must
+    cost a handful of extra requests, not double them. The default went 900s -> 1800s to stop the
+    run reporting against a model that has not catalogued the items the build just made — CU landing
+    in `shared`/`other` is a WRONG report, not a failed one. That trade only holds while the poll
+    count stays in single digits on the endpoint most likely to have spent the SP's per-identity
+    budget."""
+    m = load(CU_REFRESH="1")
+    assert m.REFRESH_TIMEOUT == 1800, "the default wait is the thing this test is about"
+    slept, clock = [], [1000.0]
+
+    def fake_sleep(s):
+        slept.append(s)
+        clock[0] += s
+
+    monkeypatch.setattr(m.time, "sleep", fake_sleep)
+    monkeypatch.setattr(m.time, "time", lambda: clock[0])
+    monkeypatch.setattr(m.requests, "post", lambda *a, **k: _Resp(202))
+    monkeypatch.setattr(m.requests, "get", lambda *a, **k: type(
+        "R", (), {"status_code": 200, "json": staticmethod(lambda: {"value": [{"status": "Unknown"}]})})())
+    m.refresh_metrics_model()
+    assert len(slept) <= 10, (
+        f"{len(slept)} status polls to cover 1800s — doubling the timeout must not double the "
+        f"requests, or the ceiling has been removed")
+    assert sum(slept) >= 1800, "the wait must actually cover the full timeout"
+
+
 def test_refresh_does_not_retry_a_403(monkeypatch):
     """A 403 means the SP's access changed. Retrying it buries the reason — one attempt, then say so."""
     m = load(CU_REFRESH="1")

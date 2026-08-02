@@ -28,7 +28,14 @@ aemo_electricity:
       path: ':memory:'
       database: onelake
       schema: "{{ env_var('DBT_SCHEMA', 'mart') }}"
-      threads: 8
+      # 4, matching dwh and spark. Every engine that CAN take a thread count takes the SAME one,
+      # so DAG-level concurrency stops being a hidden variable between the legs — it was 8 here
+      # against spark's 4, and a benchmark comparing engines should not also be comparing how many
+      # models each was allowed to build at once. duckrun is the one exception and it is not a
+      # choice: its adapter hard-pins config.threads = 1 (impl.py, and it RAISES if the pin fails)
+      # because the delta-rs write path is not thread-safe. So the duckrun/iceberg pair still
+      # differs by threads, just 1 vs 4 rather than 1 vs 8, and the dashboard caption says so.
+      threads: 4
       settings:
         preserve_insertion_order: false
       secrets:
@@ -62,7 +69,8 @@ aemo_electricity:
       access_token: "{{ env_var('FABRIC_ACCESS_TOKEN', '') }}"
       encrypt: true
       trust_cert: false
-      threads: 8
+      # 4, matching iceberg and spark — see the note on the iceberg target. Was 8.
+      threads: 4
       retries: 1
 
     # --- Fabric Spark (Livy) via dbt-fabricspark, writes Delta to the Lakehouse.
@@ -76,6 +84,9 @@ aemo_electricity:
       lakehouse: "{{ env_var('FABRIC_LAKEHOUSE_NAME') }}"
       schema: "{{ env_var('DBT_SCHEMA', 'mart') }}"
       authentication: "{{ env_var('FABRIC_AUTH', 'CLI') }}"
+      # 4 is now the shared value across iceberg, dwh and spark (see the iceberg target), but here
+      # it is also a HARD CAP rather than a convention — do not raise this one to match a future
+      # change elsewhere:
       # 4, not 8: dbt-fabricspark defaults to high_concurrency, which opens one HC session
       # (= one Spark REPL) PER THREAD, and Fabric packs at most five REPLs into one Livy
       # session. 8 threads therefore spilled into a second Livy session — a second Spark

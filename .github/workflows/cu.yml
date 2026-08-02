@@ -136,11 +136,14 @@ jobs:
       id-token: write
       contents: write
       actions: read
-    # 45, not 20: the pre-query refresh of the metrics model waits up to CU_REFRESH_TIMEOUT (15
+    # 60, not 20: the pre-query refresh of the metrics model waits up to CU_REFRESH_TIMEOUT (30
     # min) before giving up. The read itself is six DAX queries, or three with the capacity pinned
     # — the "~60 sequential timepoint requests" this comment used to cite belonged to the deleted
     # timepoint-detail design.
-    timeout-minutes: 45
+    # This MUST stay comfortably above CU_REFRESH_TIMEOUT. If the job dies while the wait is still
+    # running, the run neither measures nor reports — strictly worse than the timeout expiring,
+    # which at least still produces numbers. It was 45 against a 15-minute wait; the wait is now 30.
+    timeout-minutes: 60
     env:
       # Same secret-fallback shape as the workspace below: no GUID is written into this repo, the
       # input `default:` cannot hold one (a default takes no context), and `capacity_cu.py` keeps
