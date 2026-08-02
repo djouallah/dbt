@@ -23,9 +23,15 @@ document. The artifact is how a run's layout is read back without a checkout; th
 outlives artifact retention and what the page joins against the CU ledger. `engines[e].guid` is the
 join key, and it was resolved here and discarded one line later until this was written.
 
+It also reports the INPUT side — `landing`: how many files and how many bytes sit in the archive
+every engine reads. Everything else here describes what came out; without that, the record can say a
+run wrote 143,980,961 rows and not say from how much. It is read by listing the store rather than
+querying it, because DuckDB's `glob()` returns paths and no sizes and the archive is uncompressed
+CSV whose bytes are the point.
+
 That JSON is a data contract with a consumer outside this file. Its shape is
-`{"run": {...}, "config": {...}, "engines": {...}, "tables": [...], "stats": {engine: {table:
-{detail}}}}` and the detail keys are DETAIL_KEYS below. `config` is what the build ran ON — vCores,
+`{"run": {...}, "config": {...}, "engines": {...}, "tables": [...], "landing": {...},
+"stats": {engine: {table: {detail}}}}` and the detail keys are DETAIL_KEYS below. `config` is what the build ran ON — vCores,
 Spark resource profile, native execution engine — read from the env the legs were actually given, so
 the page can state the hardware instead of asserting it. Adding a key is safe; renaming or removing one breaks `cu/`'s layout
 table, which degrades to a note rather than an error — so a rename fails QUIETLY over there. Change
@@ -48,6 +54,7 @@ FAB = "https://api.fabric.microsoft.com/v1"
 TRANSPORT = os.environ.get("AZURE_TRANSPORT_OPTION_TYPE", "curl")
 
 # (engine label, Fabric item name, item kind)
+LANDING = "dbt_landing"
 ALL_ENGINES = [("duckrun", "dbt_delta", "lakehouses"),
                ("iceberg", "dbt_iceberg", "lakehouses"),
                ("spark", "dbt_spark", "lakehouses"),
@@ -111,6 +118,71 @@ def find_guid(kind, name):
 
 def tables_path(guid):
     return f"abfss://{WS}@onelake.dfs.fabric.microsoft.com/{guid}/Tables"
+
+
+def landing_stats():
+    """How much raw data went IN: files and bytes under `dbt_landing/Files`, and per folder.
+
+    Everything else in this document describes what came OUT. Without this the record says a run
+    wrote 143,980,961 rows and cannot say from how much input — which is the number that makes a
+    duration, a file count or a CU total mean anything, and the one that moves when `skip_download`
+    is turned off.
+
+    Read by LISTING, not by querying: DuckDB's `glob()` returns paths and no sizes, and the archive
+    is uncompressed CSV whose bytes are the whole point. `obstore.list` is one paginated listing over
+    the same store `download_aemo.py` already writes through, so this adds no dependency the `land`
+    job does not have.
+
+    Best-effort: any failure returns `{}` and the record simply has no `landing` key. A layout report
+    is worth having without it, and this is the one part of stats.py that reads an item no engine
+    owns.
+    """
+    try:
+        import obstore
+        from dbt.adapters.duckrun import objectstore, secret
+        guid = find_guid("lakehouses", LANDING)
+        if not guid:
+            sys.stderr.write(f"  {LANDING} not found — no landing stats\n")
+            return {}
+        base = f"abfss://{WS}@onelake.dfs.fabric.microsoft.com/{guid}/Files"
+        dr = duckrun.connect(base, read_only=True)
+        store = objectstore.build_store(base, secret.refreshed(dr.storage_options))
+        folders, files, size = {}, 0, 0
+        for batch in obstore.list(store):
+            for o in batch:
+                path, n = o["path"], int(o["size"] or 0)
+                files += 1
+                size += n
+                # The directory holding the file: `csv_raw/<source>` for the archive,
+                # `(root)` for the archive log parquet that sits beside it.
+                folder = path.rsplit("/", 1)[0] if "/" in path else "(root)"
+                f = folders.setdefault(folder, {"files": 0, "size_mb": 0.0})
+                f["files"] += 1
+                f["size_mb"] += n / 1048576
+        for f in folders.values():
+            f["size_mb"] = round(f["size_mb"], 2)
+        doc = {"item": LANDING, "guid": guid, "files": files,
+               "size_mb": round(size / 1048576, 2),
+               "folders": dict(sorted(folders.items()))}
+        sys.stderr.write(f"  {LANDING}: {files:,} files, {doc['size_mb']:,.2f} MB "
+                         f"across {len(folders)} folder(s)\n")
+        return doc
+    except Exception as e:                              # noqa: BLE001 — never fail the layout job
+        sys.stderr.write(f"  landing stats unavailable ({type(e).__name__}: {e})\n")
+        return {}
+
+
+def landing_table(doc):
+    """The input side of the step summary, above the parity table."""
+    if not doc:
+        return
+    print(f"### Input archive — `{doc['item']}`\n")
+    print("| folder | files | size MB |")
+    print("|---|--:|--:|")
+    for name, f in doc["folders"].items():
+        print(f"| `{name}` | {f['files']:,} | {f['size_mb']:,.2f} |")
+    print(f"| **total** | **{doc['files']:,}** | **{doc['size_mb']:,.2f}** |")
+    print()
 
 
 def reader(guid):
@@ -211,7 +283,7 @@ def detail_tables(per_engine, engines):
     # Per-engine totals now live as the last two rows of the parity table above.
 
 
-def build_doc(per_engine, engines, guids=None):
+def build_doc(per_engine, engines, guids=None, landing=None):
     """The layout document: run stamp, hardware config, per-engine item + GUID, per-table detail.
 
     Carries the run stamp too: a consumer reading this out of an artifact needs to know WHICH dbt run
@@ -254,6 +326,10 @@ def build_doc(per_engine, engines, guids=None):
         "tables": list(TABLES),
         "detail_keys": list(DETAIL_KEYS),
         "stats": {e: per_engine.get(e) or {} for e in engines},
+        # The INPUT side: files and bytes in the landing archive every engine reads. Absent, never
+        # empty, when the listing failed — `{}` would read as "an empty archive", which is a
+        # different statement from "not measured".
+        **({"landing": landing} if landing else {}),
     }
     return doc
 
@@ -283,9 +359,12 @@ def one_engine(item, kind):
 
 def main():
     per_engine, guids = {}, {}
-    # The four items are independent and the iceberg one alone can take >10 minutes to read
-    # over OneLake, so fetch them concurrently: wall-clock = slowest engine, not the sum.
-    with ThreadPoolExecutor(max_workers=len(ENGINES)) as pool:
+    # The items are independent and the iceberg one alone can take >10 minutes to read over
+    # OneLake, so fetch them concurrently: wall-clock = slowest engine, not the sum. The landing
+    # listing rides along in the same pool — it is a different item and a different question, and
+    # doing it in series would add its minute to a job that is already the slowest in the run.
+    with ThreadPoolExecutor(max_workers=len(ENGINES) + 1) as pool:
+        landing = pool.submit(landing_stats)
         futures = {engine: pool.submit(one_engine, item, kind) for engine, item, kind in ENGINES}
     for engine, item, kind in ENGINES:
         try:
@@ -298,9 +377,11 @@ def main():
             sys.stderr.write(f"  {engine} ({item}) FAILED: {e}\n")
 
     engines = [e for e, _, _ in ENGINES]
+    land = landing.result()
+    landing_table(land)
     parity_table(per_engine, engines)
     detail_tables(per_engine, engines)
-    write_json(build_doc(per_engine, engines, guids), engines)
+    write_json(build_doc(per_engine, engines, guids, land), engines)
 
 
 if __name__ == "__main__":
