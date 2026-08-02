@@ -6,7 +6,7 @@
 **Two JSON documents, joined on one key.** `history/runs/<ts>-<run id>.json` is written by the
 `Benchmark` workflow and names every Fabric item GUID that run created, with its role, plus the
 layout, the input archive and the raw query timings. `history/cu.json` is the cumulative ledger
-`measure.py` builds, `{item GUID: {operation: {hour: CU}}}`. Nothing else passes between them.
+`measure.py` builds, `{item GUID: {operation: CU}}`. Nothing else passes between them.
 
 That join replaces the whole apparatus the old page needed. Attribution used to be substring matching
 on item DISPLAY NAMES, with a `shared` column for everything ambiguous, a lagging `'Items'` snapshot
@@ -65,17 +65,29 @@ COL_SEP = "·"
 # work done to BUILD the tables; a semantic model is only ever queried. This replaces classification
 # by Fabric item kind, read out of a snapshot that had usually not catalogued a minutes-old item.
 ANALYTICS_ROLES = {"semantic_model"}
-# Role -> the bucket its CU is reported under. TWO buckets, deliberately, and not the item names:
-# every engine creates a different set of items (dwh alone has a warehouse AND the `dbt_dwh_src`
-# lakehouse), so naming them would grow a row per engine and compare nothing across columns.
-# `compute` and `storage` are the only distinction that means the same thing for all four.
-BUCKET = {"compute": "compute", "output": "storage", "dwh_src": "storage"}
+# OPERATION -> bucket. `OneLake …` is storage; everything else is compute. Measured against the live
+# model 2026-08-02, and it is the only split that works, because compute and storage share an ITEM:
+#
+#   dbt_spark  [Lakehouse]  High Concurrency Session Livy Run  188,636   <- compute
+#                           OneLake Write via Redirect          20,268   <- storage
+#   dbt_dwh    [Warehouse]  Warehouse Query                    129,177   <- compute
+#                           OneLake Write via Redirect           1,640   <- storage
+#
+# Bucketing by the item's ROLE was wrong for exactly that reason and this replaces it. Checked
+# against every operation name on the capacity: the `OneLake` prefix separates them cleanly.
+STORAGE_PREFIX = "OneLake"
+
+
 # Skipped entirely — not a column, not a row, not a footnote. This page compares ENGINES. The
 # landing lakehouse is the ingestion staging area that no run deletes and every run reads, so its CU
 # is one cumulative figure belonging to no engine; a workspace `folder` never accrues a capacity unit
 # at all. The archive's SIZE is still reported (render_input) — that is the input volume, which is a
 # different question from what ingesting it cost.
 NON_ENGINE_ROLES = {"landing", "folder"}
+
+
+def bucket(op):
+    return "storage" if str(op).startswith(STORAGE_PREFIX) else "compute"
 
 
 def log(msg):
@@ -176,13 +188,13 @@ def load_ledger(path=None):
 
 
 def item_cu(ledger, guid):
-    """Total CU for one Fabric item. `None` when the ledger has never seen it.
+    """`{operation: CU}` for one Fabric item. `None` when the ledger has never seen it.
 
-    `None` and `0.0` are different claims — "not measured yet" against "cost nothing" — and the
+    `None` and `{}` are different claims — "not measured yet" against "cost nothing" — and the
     sources table has to be able to say which.
     """
     v = ledger["items"].get(guid)
-    return None if v is None else float(v)
+    return None if v is None else dict(v)
 
 
 # ------------------------------------------------------------------------------------- the join
@@ -215,8 +227,9 @@ def run_cu(rec, ledger):
             unmeasured.append(f"{role}/{item.get('name') or guid}")
             continue
         cls = "analytics" if role in ANALYTICS_ROLES else "etl"
-        label = BUCKET.get(role, role)
-        cells.setdefault(cls, {})[label] = cells.setdefault(cls, {}).get(label, 0.0) + value
+        for op, cu in value.items():
+            label = bucket(op)
+            cells.setdefault(cls, {})[label] = cells.setdefault(cls, {}).get(label, 0.0) + cu
     return cells, unmeasured
 
 

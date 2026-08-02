@@ -58,7 +58,12 @@ KIND = {"lakehouses": "Lakehouse", "warehouses": "Warehouse", "folders": "Folder
 # workspace folder that landing itself lives in. Everything else a run creates is disposable by
 # construction, which is the point: an item that outlives its run keeps drawing background CU into
 # the NEXT run's window, and there is nothing in a capacity reading that says it did.
-TEARDOWN_KEEP = {"landing", "folder"}
+#
+# `sql_endpoint` is in here for a different reason from the other two: it is not ours to delete.
+# Fabric creates a SQL analytics endpoint alongside every lakehouse and removes it with the
+# lakehouse, so attempting a DELETE would either fail or race the parent's. It is recorded — its CU
+# is real and belongs to its engine — and then left alone.
+TEARDOWN_KEEP = {"landing", "folder", "sql_endpoint"}
 
 # Every leg reads the landed CSVs through a `Files/landing` SHORTCUT to dbt_landing sitting in its
 # OWN lakehouse, and that is what splits the read CU: OneLake accounts a transaction against the
@@ -197,11 +202,41 @@ def teardown(src):
     sys.stderr.write(f"  teardown complete; {LANDING} untouched\n")
 
 
+def record_sql_endpoint(item_id, name):
+    """Record the SQL analytics endpoint Fabric creates alongside every lakehouse.
+
+    It is a SEPARATE BILLABLE ITEM, of kind `Warehouse`, carrying the same display name — and it was
+    invisible to this repo until it was measured: `dbt_spark` 306.3 CU, `dbt_iceberg` 245.7,
+    `dbt_delta` 278.9, all of it `SQL Endpoint Query` and none of it in any run record, so the CU
+    ledger's join could never see it. Small, but it is the difference between a total and nearly a
+    total.
+
+    Best-effort: the endpoint is provisioned asynchronously after the lakehouse, so a fresh one may
+    have no id yet. Missing it costs a couple of hundred CU of attribution, never the build.
+    """
+    try:
+        r = requests.get(f"{FAB}/workspaces/{ws}/lakehouses/{item_id}", headers=H, timeout=60)
+        if r.status_code != 200:
+            return None
+        ep = ((r.json().get("properties") or {}).get("sqlEndpointProperties") or {}).get("id")
+        if not ep:
+            sys.stderr.write(f"  {name}: SQL endpoint not provisioned yet — not recorded\n")
+            return None
+        sys.stderr.write(f"  {name}: SQL endpoint {ep}\n")
+        record.item(ep, "sql_endpoint", "Warehouse", name, created=False, at=record.now())
+        return ep
+    except Exception as ex:                            # noqa: BLE001 — never fail a build for this
+        sys.stderr.write(f"  {name}: could not read the SQL endpoint ({type(ex).__name__})\n")
+        return None
+
+
 def ensure(kind, name, payload=None, role="output"):
     it = find(kind, name)
     if it:
         sys.stderr.write(f"  {kind}/{name} exists ({it['id']})\n")
         record.item(it["id"], role, KIND.get(kind, kind), name, created=False, at=record.now())
+        if kind == "lakehouses":
+            record_sql_endpoint(it["id"], name)
         return it["id"]
     sys.stderr.write(f"  creating {kind}/{name} in folder dbt ...\n")
     body = {"displayName": name, "folderId": FOLDER_ID}
@@ -236,6 +271,8 @@ def ensure(kind, name, payload=None, role="output"):
         it = find(kind, name)
         if it:
             record.item(it["id"], role, KIND.get(kind, kind), name, created=True, at=record.now())
+            if kind == "lakehouses":
+                record_sql_endpoint(it["id"], name)
             return it["id"]
         time.sleep(5)
     raise SystemExit(f"timed out waiting for {kind}/{name}")

@@ -182,3 +182,17 @@ def test_landing_is_refused_even_if_its_role_is_wrong(tmp_path, monkeypatch):
                      record_items={"LAND": {"role": "output", "kind": "Lakehouse",
                                             "name": "dbt_landing"}})
     assert "refusing to drop dbt_landing" in str(ex.value)
+
+
+def test_the_sql_endpoint_is_recorded_but_never_deleted(tmp_path, monkeypatch):
+    """Fabric creates a SQL analytics endpoint alongside every lakehouse and removes it WITH the
+    lakehouse, so a DELETE here would either fail or race the parent's. Its CU is real — 245-306 CU
+    per engine of `SQL Endpoint Query`, invisible until it was measured — so it is recorded and then
+    left alone."""
+    fab, rec = run_teardown(
+        tmp_path, monkeypatch,
+        items={"OUT": "dbt_spark", "EP": "dbt_spark"},
+        record_items={"OUT": {"role": "output", "kind": "Lakehouse", "name": "dbt_spark"},
+                      "EP": {"role": "sql_endpoint", "kind": "Warehouse", "name": "dbt_spark"}})
+    assert fab.deletes == ["OUT"], "the endpoint goes down with its lakehouse, not separately"
+    assert "EP" not in rec

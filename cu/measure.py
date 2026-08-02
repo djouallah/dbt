@@ -3,7 +3,11 @@
 Fabric exposes no per-operation CU REST API. The Capacity Metrics app's own semantic model is the
 only authoritative source, and it is read here with DAX over the Power BI `executeQueries` endpoint.
 
-**The output is the app's own `Items` visual: item GUID -> CU (s).** One row per item, one number.
+**The output is item GUID -> operation -> CU (s), cumulative.** The operation is there for exactly
+one reason: it is the ONLY thing that separates COMPUTE from STORAGE. Both live inside one item — a
+spark lakehouse bills 188,636 CU of `High Concurrency Session Livy Run` and ~31,800 of OneLake
+operations against the same GUID, and a warehouse bills `Warehouse Query` beside its OneLake ops. No
+per-item total can tell them apart.
 That is all this repo needs, because of three facts:
 
 1. **A deleted item keeps its CU rows.** Measured against the live model: run 30743411308's
@@ -34,7 +38,7 @@ land, with no refresh, because this reader never joins `'Items'`.
 
     {"schema": 1, "updated": "...",
      "reads": [{"at": ..., "since": ..., "items": N, "changed": M}],
-     "items": {"<ITEM GUID>": 31080.4}}
+     "items": {"<ITEM GUID>": {"<operation>": 31080.4}}}
 
 It exists because the app retains about **14 days**. Everything measured is gone within a fortnight
 unless it is written down; a run record's GUIDs stay meaningful for years.
@@ -106,6 +110,12 @@ REQUIRED = {
     "workspace_id": ["Workspace Id", "WorkspaceId", "Workspace"],
     "cu": ["CU (s)", "CU(s)", "Total CU (s)", "CU"],
     "when": ["Datetime", "Date Hour", "DateHour", "Date/Time"],
+    # The operation is what separates COMPUTE from STORAGE, and it is the only thing that can:
+    # both live inside one item. `dbt_spark` bills 188,636 CU of `High Concurrency Session Livy Run`
+    # and ~31,800 of OneLake operations against the SAME lakehouse; `dbt_dwh` bills 129,177 of
+    # `Warehouse Query` and ~3,300 of OneLake against the same warehouse. Split by item and the two
+    # are inseparable. Measured 2026-08-02.
+    "operation": ["Operation name", "Operation", "Operation Name"],
 }
 
 
@@ -183,7 +193,12 @@ def capacities():
 
 
 def read_cu(cap, since, c):
-    """CU per ITEM for one capacity, from `since` onward, summed server-side. One row per item.
+    """CU per (item, operation) for one capacity, from `since` onward, summed server-side.
+
+    The operation is in the grain because it is the ONLY thing that separates compute from storage —
+    a spark lakehouse bills its Livy compute and its OneLake operations against one item, and so does
+    a warehouse. The hour is not: nothing downstream wants it, and cumulative CU per item is the form
+    that stays meaningful once the app has forgotten the window.
 
     `FirstHour` is projected for one reason and it is not decoration: a DAX filter that is accepted
     and then silently ignored produces a plausible wrong number, which is the worst failure this tool
@@ -199,6 +214,7 @@ def read_cu(cap, since, c):
     inner = f"""SUMMARIZECOLUMNS (
         '{TABLE}'[{c['item_id']}],
         '{TABLE}'[{c['workspace_id']}],
+        '{TABLE}'[{c['operation']}],
         "CU", SUM ( '{TABLE}'[{c['cu']}] ),
         "FirstHour", MIN ( '{TABLE}'[{c['when']}] )
     )"""
@@ -267,7 +283,7 @@ def load_runs(directory=None):
 
 
 def fold(rows, cols):
-    """`({guid: CU}, [earliest hours seen])` for the rows this workspace owns.
+    """`({guid: {operation: CU}}, [earliest hours seen])` for the rows this workspace owns.
 
     The workspace test is the only filter, and it is applied here rather than in DAX because the
     query is one round trip either way and a rejected row is easier to explain from this side.
@@ -284,7 +300,9 @@ def fold(rows, cols):
         first = str(r.get("FirstHour") or "")[:19]
         if first:
             stamps.append(first)
-        out[guid] = round(out.get(guid, 0.0) + float(value), 3)
+        op = str(r.get(cols["operation"]) or "(unnamed)").strip()
+        per = out.setdefault(guid, {})
+        per[op] = round(per.get(op, 0.0) + float(value), 3)
     return out, stamps
 
 
@@ -298,12 +316,18 @@ def apply(ledger, read):
     of times it was read, and still look entirely plausible.
     """
     changed = 0
-    for guid, value in read.items():
-        old = ledger["items"].get(guid)
-        if old is None or value > old:
-            ledger["items"][guid] = value
-            changed += 1
+    for guid, ops in read.items():
+        cur = ledger["items"].setdefault(guid, {})
+        for op, value in ops.items():
+            if cur.get(op) is None or value > cur[op]:
+                cur[op] = value
+                changed += 1
     return changed
+
+
+def total(ledger, guid):
+    """One item's CU across every operation it was billed for."""
+    return sum((ledger["items"].get(guid) or {}).values())
 
 
 def coverage(runs, read):
@@ -396,8 +420,10 @@ def main():
         rows_seen += len(rows)
         per_item, stamps = fold(rows, cols)
         log(f"  capacity {cap}: {len(rows)} row(s), {len(per_item)} in this workspace")
-        for guid, value in per_item.items():
-            read[guid] = round(read.get(guid, 0.0) + value, 3)
+        for guid, ops in per_item.items():
+            per = read.setdefault(guid, {})
+            for op, value in ops.items():
+                per[op] = round(per.get(op, 0.0) + value, 3)
         seen += stamps
 
     # Verify the floor actually BOUND — see read_cu.
@@ -429,11 +455,11 @@ def main():
                             "items": len(read), "changed": changed, "unfound": unfound})
     path = save_ledger(ledger)
 
-    for guid, value in sorted(read.items(), key=lambda kv: -kv[1])[:12]:
-        log(f"    {guid}  {value:>12,.1f} CU")
+    for guid, ops in sorted(read.items(), key=lambda kv: -sum(kv[1].values()))[:12]:
+        log(f"    {guid}  {sum(ops.values()):>12,.1f} CU  ({len(ops)} operation(s))")
     log(f"  {rows_seen} row(s) read, {len(read)} item(s) in this workspace, {changed} updated")
     print(f"{path}: {len(ledger['items'])} item GUID(s), "
-          f"{sum(ledger['items'].values()):,.1f} CU total"
+          f"{sum(total(ledger, g) for g in ledger['items']):,.1f} CU total"
           + (f", {unfound} recorded item(s) not yet visible" if unfound else ""))
     return 0
 

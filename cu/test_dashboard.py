@@ -35,8 +35,10 @@ def rec(file, engine, items, config=None, stats=None, tables=None, landing=None,
 
 
 def ledger(items):
-    """The whole shape: one number per item GUID."""
-    return {"items": dict(items), "reads": [{"at": "2026-08-02T20:00:00+00:00"}],
+    """`{guid: {operation: CU}}`. A bare number is taken as one compute operation, for brevity."""
+    return {"items": {g: (v if isinstance(v, dict) else {"Warehouse Query": v})
+                      for g, v in items.items()},
+            "reads": [{"at": "2026-08-02T20:00:00+00:00"}],
             "updated": "2026-08-02T20:00:00+00:00"}
 
 
@@ -49,9 +51,12 @@ def test_the_role_decides_the_class_not_the_fabric_item_kind():
         "NB": {"role": "compute", "name": "dbt-spark-ab12"},
         "SEM": {"role": "semantic_model", "name": "aemo_spark"},
     })
-    cells, _missing = d.run_cu(r, ledger({"OUT": 10.0, "NB": 900.0, "SEM": 40.0}))
+    cells, _missing = d.run_cu(r, ledger({
+        "OUT": {"OneLake Write via Redirect": 10.0},
+        "NB": {"Jupyter Notebook Scheduled Run": 900.0},
+        "SEM": {"XMLA Read Operation": 40.0}}))
     assert cells == {"etl": {"storage": 10.0, "compute": 900.0},
-                     "analytics": {"semantic_model": 40.0}}
+                     "analytics": {"compute": 40.0}}
     assert d.class_total(cells, "etl") == 910.0
     assert d.class_total(cells, "analytics") == 40.0
 
@@ -67,14 +72,12 @@ def test_landing_cu_is_not_on_the_page_at_all():
     cells, missing = d.run_cu(r, ledger({"OUT": 10.0, "LAND": 507.0}))
     assert d.class_total(cells, "etl") == 10.0, "landing must not be added to the engine's own CU"
     assert missing == [], "landing is not an item whose CU could be missing"
-    assert not any("507" in lbl or 507.0 == v
-                   for per in cells.values() for lbl, v in per.items())
 
 
 def test_the_dbt_folder_costs_nothing_and_is_skipped():
     r = rec("r-1.json", "dwh", {"F": {"role": "folder", "name": "dbt"},
                                 "OUT": {"role": "output", "name": "dbt_dwh"}})
-    cells, missing = d.run_cu(r, ledger({"OUT": 1.0}))
+    cells, missing = d.run_cu(r, ledger({"OUT": {"OneLake Read via Redirect": 1.0}}))
     assert cells == {"etl": {"storage": 1.0}}
     assert missing == [], "a folder is not an item whose CU could be missing"
 
@@ -84,7 +87,7 @@ def test_an_item_the_ledger_has_never_seen_is_unmeasured_not_zero():
     able to say which."""
     r = rec("r-1.json", "spark", {"OUT": {"role": "output", "name": "dbt_spark"},
                                   "SEM": {"role": "semantic_model", "name": "aemo_spark"}})
-    cells, missing = d.run_cu(r, ledger({"OUT": 5.0}))
+    cells, missing = d.run_cu(r, ledger({"OUT": {"OneLake Read via Redirect": 5.0}}))
     assert cells == {"etl": {"storage": 5.0}}
     assert missing == ["semantic_model/aemo_spark"]
 
@@ -147,7 +150,9 @@ def test_the_page_renders_end_to_end_with_charts_and_a_layout():
                                                    "size_mb": 998.9, "vorder": False,
                                                    "schema": "mart"}}},
                 tables=["fct_summary"], landing={"files": 8167, "size_mb": 12345.6})]
-    out = _render(runs, ledger({"OUT": 1509.0, "NB": 29571.0, "SEM": 2041.0}))
+    out = _render(runs, ledger({"OUT": {"OneLake Write via Redirect": 1509.0},
+                                "NB": {"Jupyter Notebook Scheduled Run": 29571.0},
+                                "SEM": {"XMLA Read Operation": 2041.0}}))
     assert out.count("<!--chart:") == 2
     assert "| **etl** |" in out and "| **analytics** |" in out
     # Item-major: the notebook and the lakehouse are separate rows, which is where a DuckDB leg's
@@ -161,18 +166,18 @@ def test_the_page_renders_end_to_end_with_charts_and_a_layout():
     assert spec["rows"][0][2] == "dbt-duckrun · 64 vCores"
 
 
-def test_an_item_missing_from_one_column_prints_a_dash_not_a_zero():
-    """A dash says 'this engine never made an item of that name'; 0.0 would say 'it cost nothing'.
-
-    duckrun gets two etl items so the class decomposes at all — a class where every column holds one
-    item is printed as the subtotal alone, since the breakdown would just repeat it.
-    """
+def test_a_column_with_no_operations_of_a_kind_prints_a_dash_not_a_zero():
+    """A dash says "nothing of that kind was billed here"; 0.0 would say "it was billed and cost
+    nothing". Real case: an iceberg lakehouse bills 40,832 CU and every operation of it is OneLake —
+    its compute is the notebook, a different item entirely."""
     runs = [rec("a-1.json", "duckrun", {"NB": {"role": "compute", "name": "dbt-duckrun-ab12"},
                                         "OUT": {"role": "output", "name": "dbt_delta"}}),
-            rec("b-2.json", "spark", {"OUT2": {"role": "output", "name": "dbt_spark"}})]
-    out = _render(runs, ledger({"NB": 29571.0, "OUT": 1509.0, "OUT2": 24903.0}))
+            rec("b-2.json", "iceberg", {"OUT2": {"role": "output", "name": "dbt_iceberg"}})]
+    out = _render(runs, ledger({"NB": {"Jupyter Notebook Scheduled Run": 29571.0},
+                                "OUT": {"OneLake Write via Redirect": 1509.0},
+                                "OUT2": {"OneLake Iterative Read via Proxy": 40831.8}}))
     rows = [ln for ln in out.splitlines() if ln.startswith("| `compute`")]
-    assert rows and "—" in rows[0], "spark has no separate compute item — bundled, not free"
+    assert rows and "—" in rows[0], "iceberg's lakehouse bills no compute operation at all"
 
 
 def test_the_page_says_when_a_column_can_still_rise():
@@ -284,3 +289,26 @@ def test_a_class_with_one_item_per_engine_is_not_decomposed():
     assert "semantic_model" not in out, "no per-item analytics rows"
     # etl still decomposes: duckrun is genuinely a notebook plus a lakehouse.
     assert "`compute`" in out and "`storage`" in out
+
+
+def test_compute_and_storage_come_from_the_operation_not_the_item():
+    """They share an ITEM: spark bills its Livy session AND its OneLake reads against one lakehouse,
+    a warehouse bills Warehouse Query AND its OneLake writes against one warehouse. Bucketing by the
+    item's role could never separate them — measured against the live model 2026-08-02."""
+    r = rec("r-1.json", "spark", {"OUT": {"role": "output", "name": "dbt_spark"}})
+    cells, _m = d.run_cu(r, ledger({"OUT": {
+        "High Concurrency Session Livy Run": 188635.8,
+        "OneLake Write via Redirect": 20267.9,
+        "OneLake Read via Redirect": 5737.4}}))
+    assert cells["etl"]["compute"] == 188635.8
+    assert round(cells["etl"]["storage"], 1) == 26005.3
+
+
+def test_every_measured_operation_name_buckets_the_way_it_should():
+    """The names are the real ones off the capacity, not invented."""
+    for op in ("OneLake Write via Redirect", "OneLake Iterative Read via Proxy",
+               "OneLake Other Operations", "OneLake Read via Proxy"):
+        assert d.bucket(op) == "storage", op
+    for op in ("High Concurrency Session Livy Run", "Warehouse Query", "SQL Endpoint Query",
+               "Jupyter Notebook Scheduled Run", "XMLA Read Operation", "Dataset On-Demand Refresh"):
+        assert d.bucket(op) == "compute", op

@@ -124,14 +124,19 @@ because that artifact has to open off a local disk years later.
   `duckrun` reads as an engine difference when it is a *writer* difference — same DuckDB, same
   notebook, same size.
 - **Engine-major table**, engines across, **`compute` and `storage`** down, class subtotals in bold.
-  Two buckets, not item names: every engine creates a different set of items — dwh alone has a
-  warehouse *and* the `dbt_dwh_src` lakehouse — so naming them would grow a row per engine and
-  compare nothing across columns. **`compute` is only broken out where Fabric bills it separately**:
-  the DuckDB legs run in a throwaway notebook, so theirs really does split (26,403 compute against
-  2,464 storage — the notebook is 91% of it), while Livy bills against the LAKEHOUSE and dwh against
-  the WAREHOUSE, so for those `storage` is storage *and* compute together. A dash under `compute`
-  means bundled, never free. A class is only decomposed at all when some column holds more than one
-  bucket in it, so `analytics` — always one semantic model per engine — stays a single bold row. That orientation
+  The split comes from the OPERATION, and it has to: compute and storage share an ITEM. Measured
+  against the live model — `dbt_spark` [Lakehouse] bills 188,636 CU of `High Concurrency Session Livy
+  Run` and 20,268 of `OneLake Write via Redirect` against one GUID; `dbt_dwh` [Warehouse] bills
+  129,177 of `Warehouse Query` beside its own OneLake writes. **Every `OneLake …` operation is
+  storage; everything else is compute.** A dash means no operation of that kind was billed there at
+  all — an iceberg lakehouse is 40,832 CU of pure OneLake, because its compute is the notebook, a
+  different item. A class is only decomposed when some column holds more than one bucket, so
+  `analytics` stays a single bold row.
+- **Every lakehouse has a paired SQL analytics endpoint**, a separate billable `Warehouse` item with
+  the same display name: `dbt_spark` 306.3 CU, `dbt_iceberg` 245.7, `dbt_delta` 278.9, all of it
+  `SQL Endpoint Query`. It was invisible to the ledger until `provision.py` started recording it —
+  the GUID is not the lakehouse's. It is never deleted by the teardown: Fabric removes it with its
+  parent. That orientation
   is what makes the width work: item-major needs a column per operation type and a lakehouse alone
   brings a dozen. **No total column and no grand-total row** — both would sum ACROSS engines, which
   is the one sum on this page that answers nothing, since the engines are alternatives to each other.

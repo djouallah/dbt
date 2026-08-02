@@ -16,13 +16,20 @@ import pytest
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import measure  # noqa: E402
 
-COLS = {"item_id": "Item", "workspace_id": "Workspace Id", "cu": "CU (s)", "when": "Date Hour"}
+COLS = {"item_id": "Item Id", "workspace_id": "Workspace Id", "cu": "CU (s)",
+        "when": "Datetime", "operation": "Operation name"}
 WS = "WORKSPACE-1"
 NOW = datetime(2026, 8, 2, 18, 0, 0)
 
 
-def row(guid, cu, first="2026-08-02T15:00:00", ws=WS):
-    return {"Item": guid, "Workspace Id": ws, "CU": cu, "FirstHour": first}
+def row(guid, value, op="Warehouse Query", first="2026-08-02T15:00:00", ws=WS):
+    return {"Item Id": guid, "Workspace Id": ws, "Operation name": op, "CU": value,
+            "FirstHour": first}
+
+
+def cu(led, guid):
+    """The item's total, which is what most of these tests are really about."""
+    return measure.total(led, guid)
 
 
 @pytest.fixture(autouse=True)
@@ -40,7 +47,7 @@ def read(led, rows):
 def test_one_row_per_item_is_taken_as_that_item_s_total():
     led = measure.blank()
     read(led, [row("G1", 31080.4), row("G2", 2041.0)])
-    assert led["items"] == {"G1": 31080.4, "G2": 2041.0}
+    assert cu(led, "G1") == 31080.4 and cu(led, "G2") == 2041.0
 
 
 def test_a_re_read_of_the_same_number_changes_nothing():
@@ -48,7 +55,7 @@ def test_a_re_read_of_the_same_number_changes_nothing():
     led = measure.blank()
     read(led, [row("G1", 100.0)])
     assert read(led, [row("G1", 100.0)]) == 0
-    assert led["items"] == {"G1": 100.0}
+    assert cu(led, "G1") == 100.0
 
 
 def test_an_undercounted_first_read_is_raised_by_the_next_one():
@@ -57,7 +64,7 @@ def test_an_undercounted_first_read_is_raised_by_the_next_one():
     led = measure.blank()
     read(led, [row("G1", 40.0)])
     read(led, [row("G1", 125.0)])
-    assert led["items"]["G1"] == 125.0
+    assert cu(led, "G1") == 125.0
 
 
 def test_a_smaller_later_read_never_lowers_a_total():
@@ -67,7 +74,7 @@ def test_a_smaller_later_read_never_lowers_a_total():
     led = measure.blank()
     read(led, [row("G1", 125.0)])
     assert read(led, [row("G1", 4.0)]) == 0
-    assert led["items"]["G1"] == 125.0
+    assert cu(led, "G1") == 125.0
 
 
 def test_repeated_reads_never_accumulate():
@@ -76,7 +83,7 @@ def test_repeated_reads_never_accumulate():
     led = measure.blank()
     for _ in range(5):
         read(led, [row("G1", 100.0)])
-    assert led["items"]["G1"] == 100.0
+    assert cu(led, "G1") == 100.0
 
 
 def test_an_item_absent_from_a_read_keeps_its_value():
@@ -85,7 +92,7 @@ def test_an_item_absent_from_a_read_keeps_its_value():
     led = measure.blank()
     read(led, [row("G1", 100.0), row("G2", 7.0)])
     read(led, [row("G2", 9.0)])
-    assert led["items"] == {"G1": 100.0, "G2": 9.0}
+    assert cu(led, "G1") == 100.0 and cu(led, "G2") == 9.0
 
 
 def test_rows_outside_the_workspace_are_dropped():
@@ -119,10 +126,10 @@ def test_the_ledger_round_trips_and_sorts_its_keys(tmp_path):
     """sort_keys so a read that moves one number is a one-line diff in the commit."""
     p = tmp_path / "cu.json"
     led = measure.blank()
-    led["items"] = {"B": 1.0, "A": 2.0}
+    led["items"] = {"B": {"Query": 1.0}, "A": {"Query": 2.0}}
     measure.save_ledger(led, str(p))
     assert list(json.loads(p.read_text(encoding="utf-8"))["items"]) == ["A", "B"]
-    assert measure.load_ledger(str(p))["items"] == {"A": 2.0, "B": 1.0}
+    assert measure.load_ledger(str(p))["items"] == {"A": {"Query": 2.0}, "B": {"Query": 1.0}}
 
 
 def test_a_missing_ledger_starts_empty_rather_than_raising(tmp_path):
@@ -142,3 +149,14 @@ def test_coverage_names_the_recorded_items_a_read_did_not_find():
     assert measure.coverage(runs, {"OUT": 1.0, "SEM": 2.0}) == [("r.json", 2, [])]
     # A folder never accrues a capacity unit, so its absence means nothing and must not be reported.
     assert measure.coverage(runs, {"OUT": 1.0}) == [("r.json", 1, ["semantic_model/aemo_spark"])]
+
+
+def test_compute_and_storage_are_kept_apart_within_one_item():
+    """The whole reason the operation is still in the grain: a spark lakehouse bills its Livy session
+    and its OneLake reads against the SAME GUID, and no per-item total can separate them."""
+    led = measure.blank()
+    read(led, [row("G1", 188635.8, op="High Concurrency Session Livy Run"),
+               row("G1", 20267.9, op="OneLake Write via Redirect")])
+    assert led["items"]["G1"] == {"High Concurrency Session Livy Run": 188635.8,
+                                  "OneLake Write via Redirect": 20267.9}
+    assert round(cu(led, "G1"), 1) == 208903.7
