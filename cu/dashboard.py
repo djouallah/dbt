@@ -65,6 +65,11 @@ COL_SEP = "·"
 # work done to BUILD the tables; a semantic model is only ever queried. This replaces classification
 # by Fabric item kind, read out of a snapshot that had usually not catalogued a minutes-old item.
 ANALYTICS_ROLES = {"semantic_model"}
+# Role -> the bucket its CU is reported under. TWO buckets, deliberately, and not the item names:
+# every engine creates a different set of items (dwh alone has a warehouse AND the `dbt_dwh_src`
+# lakehouse), so naming them would grow a row per engine and compare nothing across columns.
+# `compute` and `storage` are the only distinction that means the same thing for all four.
+BUCKET = {"compute": "compute", "output": "storage", "dwh_src": "storage"}
 # Skipped entirely — not a column, not a row, not a footnote. This page compares ENGINES. The
 # landing lakehouse is the ingestion staging area that no run deletes and every run reads, so its CU
 # is one cumulative figure belonging to no engine; a workspace `folder` never accrues a capacity unit
@@ -210,7 +215,7 @@ def run_cu(rec, ledger):
             unmeasured.append(f"{role}/{item.get('name') or guid}")
             continue
         cls = "analytics" if role in ANALYTICS_ROLES else "etl"
-        label = f"{item.get('name') or guid} ({role})"
+        label = BUCKET.get(role, role)
         cells.setdefault(cls, {})[label] = cells.setdefault(cls, {}).get(label, 0.0) + value
     return cells, unmeasured
 
@@ -374,18 +379,16 @@ def engine_table(per_col, cols):
                 # different statement from one that cost nothing.
                 row.append("—" if v is None else f"{v:,.1f}")
             print(f"| `{label}` | " + " | ".join(row) + " |")
-    print("\n<sub>Broken down by the Fabric ITEM that was billed, named from the run record. `etl` "
-          "against `analytics` comes from each item's recorded role, not from an operation name: a "
-          "semantic model is only ever queried, everything else is work done to build the "
-          "tables.<br>"
-          "**Compare the bold subtotals, not the item rows.** Fabric attributes compute in three "
-          "different shapes and the rows inherit that: the DuckDB legs run in a throwaway NOTEBOOK, "
-          "so their compute is its own item and the lakehouse beside it is only OneLake operations; "
-          "Livy bills against the LAKEHOUSE, so a spark `(output)` row is its OneLake operations "
-          "*and* the whole leg's compute added together; and dwh is warehouse queries. Reading one "
-          "engine's `(output)` row against another's therefore compares different things — "
-          "`dbt_spark` at 34,046 beside `dbt_delta` at 2,464 is not a lakehouse costing 14x more, it "
-          "is a lakehouse with a Spark cluster inside it.</sub>")
+    print("\n<sub>`etl` against `analytics` comes from each item's recorded ROLE, not from an "
+          "operation name: a semantic model is only ever queried, everything else is work done to "
+          "build the tables.<br>"
+          "**`compute` is only broken out where Fabric bills it separately.** The DuckDB legs run in "
+          "a throwaway notebook, which is its own item, so their compute and storage really do "
+          "split. **Spark's Livy compute is billed against the LAKEHOUSE and dwh's against the "
+          "WAREHOUSE** — there is no Spark item of any kind — so for those engines `storage` is "
+          "storage *and* compute together, and a dash under `compute` means "
+          "\"bundled\", never \"free\". Compare the bold subtotals across engines; the split is only "
+          "meaningful down a DuckDB column.</sub>")
 
 
 def render_sources(cols, ledger, unmeasured):

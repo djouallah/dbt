@@ -1025,11 +1025,17 @@ capacity for the GUIDs in those records, tops up `history/cu.json`, and publishe
   `history/runs/legacy/` with a README saying which is which. `measure.py` deliberately does NOT
   filter — those items really did cost capacity and the ledger is the ledger; it is the PAGE that
   must only compare like with like.
-- **The page's engine table is broken down by ITEM, not by operation type.** The item names come
-  from the run record, so they cost nothing and say more: `dbt-duckrun-*` at 29,571 CU beside
-  `dbt_delta` at 1,509 is the whole story of where a DuckDB leg's cost goes, and no operation name
-  carries that. A dash means the engine never created an item of that name, which is a different
-  statement from a zero.
+- **The page's engine table splits `compute` from `storage`, and nothing finer.** Not operation
+  types (a lakehouse alone brings a dozen) and not item names (every engine creates a different set —
+  dwh has a warehouse *and* `dbt_dwh_src` — so the rows would grow per engine and compare nothing).
+  **The split is only real for the DuckDB legs**, which run in a throwaway notebook that Fabric bills
+  as its own item: 26,403 compute against 2,464 storage, so the notebook is 91% of that column.
+  Livy bills against the LAKEHOUSE and dwh against the WAREHOUSE, so for those engines `storage` is
+  storage AND compute added together and the `compute` cell is a dash meaning BUNDLED, not free —
+  which the footnote says, because `dbt_spark` at 34,046 beside `dbt_delta` at 2,464 otherwise reads
+  as one lakehouse costing 14x the other. A class is decomposed only when some column holds more than
+  one bucket, so `analytics` — always exactly one semantic model per engine — stays one bold row
+  rather than repeating itself under every column.
 - **A fresh run is a LOWER BOUND and the page says so per column.** Dispatch `Dashboard` twice: the
   second read returns bigger numbers and `max()` takes them. "May still rise" on the page is DERIVED
   from `run.finished` being under two hours old — a property of the clock, not a flag written into a

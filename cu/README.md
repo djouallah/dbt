@@ -123,11 +123,15 @@ because that artifact has to open off a local disk years later.
   bar carries the adapter and the compute (`dbt-duckdb · 64 vCores`), because `iceberg` beside
   `duckrun` reads as an engine difference when it is a *writer* difference — same DuckDB, same
   notebook, same size.
-- **Engine-major table**, engines across, **Fabric items** down, class subtotals in bold. The item
-  names come from the run record, so they cost nothing and say more than an operation name would:
-  `dbt-duckrun-*` at 29,571 CU beside `dbt_delta` at 1,509 is the whole story of where a DuckDB
-  leg's cost goes. A dash means the engine never created an item of that name — different from a
-  zero. That orientation
+- **Engine-major table**, engines across, **`compute` and `storage`** down, class subtotals in bold.
+  Two buckets, not item names: every engine creates a different set of items — dwh alone has a
+  warehouse *and* the `dbt_dwh_src` lakehouse — so naming them would grow a row per engine and
+  compare nothing across columns. **`compute` is only broken out where Fabric bills it separately**:
+  the DuckDB legs run in a throwaway notebook, so theirs really does split (26,403 compute against
+  2,464 storage — the notebook is 91% of it), while Livy bills against the LAKEHOUSE and dwh against
+  the WAREHOUSE, so for those `storage` is storage *and* compute together. A dash under `compute`
+  means bundled, never free. A class is only decomposed at all when some column holds more than one
+  bucket in it, so `analytics` — always one semantic model per engine — stays a single bold row. That orientation
   is what makes the width work: item-major needs a column per operation type and a lakehouse alone
   brings a dozen. **No total column and no grand-total row** — both would sum ACROSS engines, which
   is the one sum on this page that answers nothing, since the engines are alternatives to each other.

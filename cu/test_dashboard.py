@@ -50,8 +50,8 @@ def test_the_role_decides_the_class_not_the_fabric_item_kind():
         "SEM": {"role": "semantic_model", "name": "aemo_spark"},
     })
     cells, _missing = d.run_cu(r, ledger({"OUT": 10.0, "NB": 900.0, "SEM": 40.0}))
-    assert cells == {"etl": {"dbt_spark (output)": 10.0, "dbt-spark-ab12 (compute)": 900.0},
-                     "analytics": {"aemo_spark (semantic_model)": 40.0}}
+    assert cells == {"etl": {"storage": 10.0, "compute": 900.0},
+                     "analytics": {"semantic_model": 40.0}}
     assert d.class_total(cells, "etl") == 910.0
     assert d.class_total(cells, "analytics") == 40.0
 
@@ -75,7 +75,7 @@ def test_the_dbt_folder_costs_nothing_and_is_skipped():
     r = rec("r-1.json", "dwh", {"F": {"role": "folder", "name": "dbt"},
                                 "OUT": {"role": "output", "name": "dbt_dwh"}})
     cells, missing = d.run_cu(r, ledger({"OUT": 1.0}))
-    assert cells == {"etl": {"dbt_dwh (output)": 1.0}}
+    assert cells == {"etl": {"storage": 1.0}}
     assert missing == [], "a folder is not an item whose CU could be missing"
 
 
@@ -85,7 +85,7 @@ def test_an_item_the_ledger_has_never_seen_is_unmeasured_not_zero():
     r = rec("r-1.json", "spark", {"OUT": {"role": "output", "name": "dbt_spark"},
                                   "SEM": {"role": "semantic_model", "name": "aemo_spark"}})
     cells, missing = d.run_cu(r, ledger({"OUT": 5.0}))
-    assert cells == {"etl": {"dbt_spark (output)": 5.0}}
+    assert cells == {"etl": {"storage": 5.0}}
     assert missing == ["semantic_model/aemo_spark"]
 
 
@@ -152,8 +152,8 @@ def test_the_page_renders_end_to_end_with_charts_and_a_layout():
     assert "| **etl** |" in out and "| **analytics** |" in out
     # Item-major: the notebook and the lakehouse are separate rows, which is where a DuckDB leg's
     # cost actually goes.
-    assert "`dbt-duckrun-baf95ac5 (compute)`" in out and "29,571.0" in out
-    assert "`dbt_delta (output)`" in out and "1,509.0" in out
+    assert "`compute`" in out and "29,571.0" in out
+    assert "`storage`" in out and "1,509.0" in out
     assert "fct_summary" in out and "delta-rs" in out
     assert "8,167" in out and "12,345.60" in out, "the input archive should be on the page"
     spec = json.loads(out.split("<!--chart:")[1].split("-->")[0])
@@ -171,8 +171,8 @@ def test_an_item_missing_from_one_column_prints_a_dash_not_a_zero():
                                         "OUT": {"role": "output", "name": "dbt_delta"}}),
             rec("b-2.json", "spark", {"OUT2": {"role": "output", "name": "dbt_spark"}})]
     out = _render(runs, ledger({"NB": 29571.0, "OUT": 1509.0, "OUT2": 24903.0}))
-    rows = [ln for ln in out.splitlines() if ln.startswith("| `dbt-duckrun-ab12")]
-    assert rows and "—" in rows[0]
+    rows = [ln for ln in out.splitlines() if ln.startswith("| `compute`")]
+    assert rows and "—" in rows[0], "spark has no separate compute item — bundled, not free"
 
 
 def test_the_page_says_when_a_column_can_still_rise():
@@ -264,7 +264,7 @@ def test_the_table_warns_that_item_rows_are_not_like_for_like():
     So one engine's (output) row against another's compares different things, and the page has to
     say so — it is the most misreadable thing on it."""
     out = _render([_full("a-1.json", "spark")], ledger({"OUT": 34046.3, "SEM": 1514.0}))
-    assert "Compare the bold subtotals" in out and "Livy bills against the LAKEHOUSE" in out
+    assert "billed against the LAKEHOUSE" in out and "never \"free\"" in out
 
 
 def test_a_class_with_one_item_per_engine_is_not_decomposed():
@@ -281,6 +281,6 @@ def test_a_class_with_one_item_per_engine_is_not_decomposed():
     out = _render(runs, ledger({"NB": 26403.5, "OUT": 2463.9, "SEM": 2157.8,
                                 "OUT2": 34046.3, "SEM2": 1514.0}))
     assert "| **analytics** |" in out and "2,157.8" in out and "1,514.0" in out
-    assert "aemo_duckrun" not in out and "aemo_spark" not in out, "no per-item analytics rows"
+    assert "semantic_model" not in out, "no per-item analytics rows"
     # etl still decomposes: duckrun is genuinely a notebook plus a lakehouse.
-    assert "`dbt-duckrun-ab12 (compute)`" in out and "`dbt_delta (output)`" in out
+    assert "`compute`" in out and "`storage`" in out
