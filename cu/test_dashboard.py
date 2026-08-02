@@ -251,3 +251,12 @@ def test_incomplete_records_are_skipped_by_the_loader_and_named(tmp_path, capsys
     loaded = d.load_runs(str(tmp_path))
     assert [r["_file"] for r in loaded] == ["a-1.json"]
     assert "skipping b-2.json" in capsys.readouterr().err
+
+
+def test_the_table_warns_that_item_rows_are_not_like_for_like():
+    """Fabric attributes compute three different ways and the rows inherit that: a DuckDB leg's
+    compute is its own notebook item, Livy bills against the lakehouse, dwh against the warehouse.
+    So one engine's (output) row against another's compares different things, and the page has to
+    say so — it is the most misreadable thing on it."""
+    out = _render([_full("a-1.json", "spark")], ledger({"OUT": 34046.3, "SEM": 1514.0}))
+    assert "Compare the bold subtotals" in out and "Livy bills against the LAKEHOUSE" in out

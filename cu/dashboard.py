@@ -371,7 +371,15 @@ def engine_table(per_col, cols):
     print("\n<sub>Broken down by the Fabric ITEM that was billed, named from the run record. `etl` "
           "against `analytics` comes from each item's recorded role, not from an operation name: a "
           "semantic model is only ever queried, everything else is work done to build the "
-          "tables.</sub>")
+          "tables.<br>"
+          "**Compare the bold subtotals, not the item rows.** Fabric attributes compute in three "
+          "different shapes and the rows inherit that: the DuckDB legs run in a throwaway NOTEBOOK, "
+          "so their compute is its own item and the lakehouse beside it is only OneLake operations; "
+          "Livy bills against the LAKEHOUSE, so a spark `(output)` row is its OneLake operations "
+          "*and* the whole leg's compute added together; and dwh is warehouse queries. Reading one "
+          "engine's `(output)` row against another's therefore compares different things — "
+          "`dbt_spark` at 34,046 beside `dbt_delta` at 2,464 is not a lakehouse costing 14x more, it "
+          "is a lakehouse with a Spark cluster inside it.</sub>")
 
 
 def render_sources(cols, ledger, unmeasured):
