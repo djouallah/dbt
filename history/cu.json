@@ -86,6 +86,9 @@
    "OneLake Iterative Read via Proxy": 0.976,
    "OneLake Other Operations Via Redirect": 6.438
   },
+  "6339A3CC-331E-4A42-B527-F0733BBC8C2D": {
+   "OneLake Write via Proxy": 1.138
+  },
   "6C5F714B-A3B6-4417-BACF-ADAED1DEDBF8": {
    "SQL Endpoint Query": 2.212
   },
@@ -220,8 +223,15 @@
    "items": 22,
    "since": "2026-08-02T21:00:00",
    "unfound": 0
+  },
+  {
+   "at": "2026-08-02T15:19:45+00:00",
+   "changed": 1,
+   "items": 23,
+   "since": "2026-08-02T21:00:00",
+   "unfound": 0
   }
  ],
  "schema": 1,
- "updated": "2026-08-02T15:05:20+00:00"
+ "updated": "2026-08-02T15:19:45+00:00"
 }
