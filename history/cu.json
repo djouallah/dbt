@@ -76,7 +76,7 @@
   "5A197DD0-9BA3-4D73-89EB-1242450A4929": {
    "OneLake Iterative Read via Proxy": 89.918,
    "OneLake Other Operations": 10.067,
-   "OneLake Other Operations Via Redirect": 367.806,
+   "OneLake Other Operations Via Redirect": 384.779,
    "OneLake Read via Proxy": 7.28,
    "OneLake Read via Redirect": 1018.846,
    "OneLake Write via Proxy": 63.089,
@@ -161,7 +161,7 @@
    "Dataset On-Demand Refresh": 74.016,
    "Dataset Scheduled Refresh": 1.264,
    "Query": 16.064,
-   "XMLA Read Operation": 1261.424
+   "XMLA Read Operation": 1287.184
   }
  },
  "reads": [
@@ -213,8 +213,15 @@
    "items": 29,
    "since": "2026-08-02T15:00:00",
    "unfound": 0
+  },
+  {
+   "at": "2026-08-02T15:05:20+00:00",
+   "changed": 2,
+   "items": 22,
+   "since": "2026-08-02T21:00:00",
+   "unfound": 0
   }
  ],
  "schema": 1,
- "updated": "2026-08-02T14:57:04+00:00"
+ "updated": "2026-08-02T15:05:20+00:00"
 }
