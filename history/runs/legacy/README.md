@@ -1,6 +1,6 @@
 # Incomplete run records
 
-Runs that are not a whole generation, kept for reference and read by nothing. `cu/dashboard.py`
+Runs that are not a whole generation, kept for reference and read by nothing. The page (`dashboard/app.js`)
 skips a record for any of the reasons in its `incomplete()`; this one is here so it cannot even be
 offered to it, and so `measure.py`'s floor is not held back by a run nobody will render.
 

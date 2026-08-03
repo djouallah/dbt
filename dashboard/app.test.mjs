@@ -1,0 +1,1115 @@
+/**
+ * Offline tests for the page. No token, no network, no Fabric, no browser — which is the property
+ * being kept. `node --test cu/`
+ *
+ * What matters here is the JOIN. Attribution used to be substring matching on display names with a
+ * `shared` bucket for anything ambiguous; it is now a dictionary lookup on the item GUID, and the class
+ * comes from the role the run itself recorded. If that join is wrong the page prints a confident number
+ * under the wrong engine, which is the failure this directory exists to avoid.
+ *
+ * These are the tests `cu/test_dashboard.py` carried, ported when the render layer moved from Python to
+ * the browser. That port is the reason they exist in this file rather than being rewritten: the rules
+ * they pin — that landing CU never reaches a column, that a dash is not a zero, that a variant tag
+ * never contains the column separator — were each learned from a page that printed something wrong,
+ * and none of them became less true for being enforced in a different language.
+ *
+ * The render layer produces STRINGS, so `plain()` and `rows()` turn a fragment back into something an
+ * assertion can read: `<strong>` becomes `**` and `<code>` becomes a backtick, which is exactly what
+ * the markdown-era assertions were written against.
+ */
+import { test } from "node:test";
+import assert from "node:assert/strict";
+
+import * as d from "./app.js";
+
+// ------------------------------------------------------------------------------------ HTML → text
+
+const UNESC = { "&amp;": "&", "&lt;": "<", "&gt;": ">", "&quot;": '"', "&#39;": "'" };
+
+/** A fragment as readable text: emphasis and code spans come back as their markdown, everything else
+ *  is dropped. An assertion should be about what the page SAYS. */
+function plain(html) {
+  return String(html)
+    .replace(/<\/?strong>/g, "**")
+    .replace(/<\/?code>/g, "`")
+    .replace(/<[^>]+>/g, "")
+    .replace(/&amp;|&lt;|&gt;|&quot;|&#39;/g, (m) => UNESC[m]);
+}
+
+/** Every table row on the page, as `| cell | cell |` — the shape the markdown-era assertions used. */
+function rows(html) {
+  return [...String(html).matchAll(/<tr[^>]*>([\s\S]*?)<\/tr>/g)].map(([, tr]) =>
+    "| " + [...tr.matchAll(/<t[dh][^>]*>([\s\S]*?)<\/t[dh]>/g)]
+      .map(([, c]) => plain(c).trim()).join(" | ") + " |");
+}
+
+/**
+ * The section a heading opens, up to the next heading of any level.
+ *
+ * Cutting on `<h4` alone is not enough and the difference is not cosmetic: the LAST block on the page
+ * is followed by an `<h3>`, so a `<h4>`-only cut swallowed the sources table and a "one row per writer"
+ * assertion counted five rows and called it a pass in the other direction.
+ */
+function block(html, heading) {
+  const at = String(html).indexOf(heading);
+  if (at < 0) return "";
+  const rest = String(html).slice(at + heading.length);
+  const end = rest.search(/<h[234][\s>]/);
+  return end < 0 ? rest : rest.slice(0, end);
+}
+
+/** `[{title, subtitle, labels, values, captions}]` for each chart drawn, in page order. */
+function charts(html) {
+  return [...String(html).matchAll(/<figure class="chart">([\s\S]*?)<\/figure>/g)].map(([, f]) => ({
+    title: plain((f.match(/<span class="chart-title">([\s\S]*?)<\/span>/) || [])[1] || ""),
+    subtitle: plain((f.match(/<span class="chart-sub">([\s\S]*?)<\/span>/) || [])[1] || ""),
+    labels: [...f.matchAll(/<text class="bar-label"[^>]*>([\s\S]*?)<\/text>/g)].map((m) => plain(m[1])),
+    values: [...f.matchAll(/<text class="bar-value"[^>]*>([\s\S]*?)<\/text>/g)].map((m) => plain(m[1])),
+    captions: [...f.matchAll(/<text class="bar-caption"[^>]*>([\s\S]*?)<\/text>/g)]
+      .map((m) => plain(m[1])),
+    svg: f,
+  }));
+}
+
+// ------------------------------------------------------------------------------------- fixtures
+
+const ago = (hours) => new Date(Date.now() - hours * 3600 * 1000).toISOString();
+
+/** An item the teardown deleted — the normal case, and the one that is not `drifting`. */
+const gone = (role, name) => ({ role, name, deleted: ago(1) });
+
+function rec(file, engine, items, opts = {}) {
+  const { config, stats, tables, landing, full_load = true, finishedHoursAgo = 48 } = opts;
+  const r = {
+    _file: file, schema: 1, engine, full_load,
+    run: {
+      id: file.split("-").pop().split(".")[0],
+      started: ago(finishedHoursAgo + 1), finished: ago(finishedHoursAgo),
+    },
+    items,
+    layout: { config: config || {}, stats: stats || {}, tables: tables || [] },
+  };
+  if (landing) r.layout.landing = landing;
+  return r;
+}
+
+/** `{guid: {operation: CU}}`. A bare number is taken as one compute operation, for brevity. */
+function ledger(items) {
+  const out = {};
+  for (const [g, v] of Object.entries(items)) {
+    out[g] = typeof v === "object" ? v : { "Warehouse Query": v };
+  }
+  return {
+    items: out, seconds: {},
+    reads: [{ at: "2026-08-02T20:00:00+00:00" }], updated: "2026-08-02T20:00:00+00:00",
+  };
+}
+
+const secs = (items) => Object.fromEntries(Object.entries(items)
+  .map(([g, v]) => [g, typeof v === "object" ? v : { "Warehouse Query": v }]));
+
+/**
+ * A record that IS a whole generation: torn down, built, benchmarked.
+ *
+ * The DEFAULT `timings` carries no tier keys at all — only `ms_by_pass`, which is what `incomplete()`
+ * checks for and nothing a tier column can read. That is deliberate: it keeps every other test
+ * exercising the "no timings, no columns" path, and `timings:` is how the query-time tests opt in.
+ */
+function full(file, engine, opts = {}) {
+  const { timings, ...rest } = opts;
+  const r = rec(file, engine, {
+    OUT: { role: "output", name: `dbt_${engine}`, deleted: ago(1) },
+    SEM: { role: "semantic_model", name: `aemo_${engine}`, deleted: ago(1) },
+    L: { role: "landing", name: "dbt_landing" },
+  }, { stats: { [engine]: { fct_summary: { total_rows: 1 } } }, tables: ["fct_summary"], ...rest });
+  r.benchmark = { timings: { [`aemo_${engine}`]: timings || { q: { ms_by_pass: [1] } } } };
+  return r;
+}
+
+/** `{query: [cold, warm, hot]}` → the record's timing shape. A `null` cold is the real ladder-query
+ *  shape: no first-pass sample at all. */
+function timings(perQuery) {
+  const out = {};
+  for (const [q, [cold, warm, hot]] of Object.entries(perQuery)) {
+    out[q] = { warm_ms: warm, hot_median_ms: hot, hot_spread_pct: 5.0 };
+    if (cold !== null) out[q].cold_ms = cold;
+  }
+  return out;
+}
+
+/** A record whose mart layout is spelled out, so grouping has something to group on. */
+function lay(engine, files, rgs, opts = {}) {
+  const { vorder = false, cfg = {}, file = "x.json", ...rest } = opts;
+  return full(file, engine, {
+    config: { [engine]: cfg },
+    stats: {
+      [engine]: {
+        fct_summary: {
+          total_rows: 143980961, num_files: files, num_row_groups: rgs,
+          avg_row_group: 1, size_mb: 1.0, vorder, schema: "mart",
+        },
+      },
+    },
+    ...rest,
+  });
+}
+
+const render = (runs, led) =>
+  d.renderPage(d.columnsFor(runs), runs, d.normaliseLedger(led), { now: Date.now() });
+
+// ------------------------------------------------------------------------------------- the join
+
+test("the role decides the class, not the Fabric item kind", () => {
+  // A semantic model is only ever queried; everything else is work done to BUILD the tables. This
+  // replaced classification from the metrics app's item-kind snapshot, which routinely had not
+  // catalogued a minutes-old item at all.
+  const r = rec("r-1.json", "spark", {
+    OUT: { role: "output", name: "dbt_spark" },
+    NB: { role: "compute", name: "dbt-spark-ab12" },
+    SEM: { role: "semantic_model", name: "aemo_spark" },
+  });
+  const { cells } = d.runCu(r, d.normaliseLedger(ledger({
+    OUT: { "OneLake Write via Redirect": 10.0 },
+    NB: { "Jupyter Notebook Scheduled Run": 900.0 },
+    SEM: { "XMLA Read Operation": 40.0 },
+  })));
+  assert.deepEqual(cells, {
+    etl: { storage: 10.0, compute: 900.0 },
+    analytics: { compute: 40.0 },
+  });
+  assert.equal(d.classTotal(cells, "etl"), 910.0);
+  assert.equal(d.classTotal(cells, "analytics"), 40.0);
+});
+
+test("landing CU is not on the page at all", () => {
+  // The page compares ENGINES. `dbt_landing` is the ingestion staging area — no run deletes it and
+  // every run reads it, so its CU is one cumulative figure belonging to no engine. It is skipped
+  // outright, not given a row: the same number repeated under every column read as "each of them spent
+  // this". The archive's SIZE still appears — input volume is a different question from cost.
+  const r = rec("r-1.json", "spark", {
+    OUT: { role: "output", name: "dbt_spark" },
+    LAND: { role: "landing", name: "dbt_landing" },
+  });
+  const { cells, unmeasured } = d.runCu(r, d.normaliseLedger(ledger({ OUT: 10.0, LAND: 507.0 })));
+  assert.equal(d.classTotal(cells, "etl"), 10.0, "landing must not be added to the engine's own CU");
+  assert.deepEqual(unmeasured, [], "landing is not an item whose CU could be missing");
+});
+
+test("the dbt folder costs nothing and is skipped", () => {
+  const r = rec("r-1.json", "dwh", {
+    F: { role: "folder", name: "dbt" },
+    OUT: { role: "output", name: "dbt_dwh" },
+  });
+  const { cells, unmeasured } = d.runCu(r,
+    d.normaliseLedger(ledger({ OUT: { "OneLake Read via Redirect": 1.0 } })));
+  assert.deepEqual(cells, { etl: { storage: 1.0 } });
+  assert.deepEqual(unmeasured, [], "a folder is not an item whose CU could be missing");
+});
+
+test("an item the ledger has never seen is unmeasured, not zero", () => {
+  // "not measured yet" and "cost nothing" are different claims, and the sources table has to say which.
+  const r = rec("r-1.json", "spark", {
+    OUT: { role: "output", name: "dbt_spark" },
+    SEM: { role: "semantic_model", name: "aemo_spark" },
+  });
+  const { cells, unmeasured } = d.runCu(r,
+    d.normaliseLedger(ledger({ OUT: { "OneLake Read via Redirect": 5.0 } })));
+  assert.deepEqual(cells, { etl: { storage: 5.0 } });
+  assert.deepEqual(unmeasured, ["semantic_model/aemo_spark"]);
+});
+
+test("compute and storage come from the operation, not the item", () => {
+  // They share an ITEM: spark bills its Livy session AND its OneLake reads against one lakehouse, a
+  // warehouse bills Warehouse Query AND its OneLake writes against one warehouse. Bucketing by the
+  // item's role could never separate them — measured against the live model 2026-08-02.
+  const r = rec("r-1.json", "spark", { OUT: { role: "output", name: "dbt_spark" } });
+  const { cells } = d.runCu(r, d.normaliseLedger(ledger({
+    OUT: {
+      "High Concurrency Session Livy Run": 188635.8,
+      "OneLake Write via Redirect": 20267.9,
+      "OneLake Read via Redirect": 5737.4,
+    },
+  })));
+  assert.equal(cells.etl.compute, 188635.8);
+  assert.equal(d.round1(cells.etl.storage), 26005.3);
+});
+
+test("every measured operation name buckets the way it should", () => {
+  // The names are the real ones off the capacity, not invented.
+  for (const op of ["OneLake Write via Redirect", "OneLake Iterative Read via Proxy",
+    "OneLake Other Operations", "OneLake Read via Proxy"]) {
+    assert.equal(d.bucket(op), "storage", op);
+  }
+  for (const op of ["High Concurrency Session Livy Run", "Warehouse Query", "SQL Endpoint Query",
+    "Jupyter Notebook Scheduled Run", "XMLA Read Operation", "Dataset On-Demand Refresh"]) {
+    assert.equal(d.bucket(op), "compute", op);
+  }
+});
+
+test("the landing lakehouse's SQL endpoint is not an engine's CU", () => {
+  // Fabric pairs every lakehouse with a SQL analytics endpoint — a separate billable `Warehouse` item
+  // with its own GUID and the role `sql_endpoint`, not `landing`. So landing CU reached the page
+  // through the one door the role check does not cover: the SAME endpoint item appears in every run
+  // record and charged every engine 130.4 CU it did not spend. Caught by NAME against the record's own
+  // landing items, so an engine's OWN endpoint is untouched.
+  const r = rec("r-1.json", "spark", {
+    L: { role: "landing", name: "dbt_landing" },
+    LEP: { role: "sql_endpoint", name: "dbt_landing" },   // landing's — not this engine's
+    OEP: { role: "sql_endpoint", name: "dbt_spark" },     // the engine's own — keep
+    OUT: { role: "output", name: "dbt_spark" },
+  });
+  assert.deepEqual([...d.landingGuids(r)], ["LEP"]);
+  const { cells, unmeasured } = d.runCu(r, d.normaliseLedger(ledger({
+    L: { "Warehouse Query": 70.2 },
+    LEP: { "SQL Endpoint Query": 130.4 },
+    OEP: { "SQL Endpoint Query": 306.3 },
+    OUT: { "High Concurrency Session Livy Run": 900.0 },
+  })));
+  assert.equal(d.classTotal(cells, "etl"), 1206.3, "900 + the engine's own endpoint, nothing else");
+  assert.deepEqual(unmeasured, [], "landing's endpoint is not an item whose CU could be missing");
+});
+
+test("seconds split by role exactly like CU", () => {
+  // Same GUIDs, same roles, same read — the duration rides in the same Capacity Metrics row, so the
+  // join cannot disagree with the CU one.
+  const r = rec("r-1.json", "spark", {
+    OUT: { role: "output", name: "dbt_spark" },
+    SEM: { role: "semantic_model", name: "aemo_spark" },
+    L: { role: "landing", name: "dbt_landing" },
+  });
+  const led = ledger({
+    OUT: { "High Concurrency Session Livy Run": 900.0 },
+    SEM: { "XMLA Read Operation": 40.0 }, L: { "Warehouse Query": 70.2 },
+  });
+  led.seconds = secs({
+    OUT: { "High Concurrency Session Livy Run": 30.0 },
+    SEM: { "XMLA Read Operation": 4.0 }, L: { "Warehouse Query": 9.9 },
+  });
+  const { cells } = d.runCu(r, d.normaliseLedger(led), "seconds");
+  assert.equal(d.classTotal(cells, "etl"), 30.0);
+  assert.equal(d.classTotal(cells, "analytics"), 4.0, "landing is skipped here as it is for CU");
+});
+
+test("still accruing is derived from the clock, not stored", () => {
+  // An hour's CU keeps growing for ~70 minutes after the fact. That is a property of the clock, not a
+  // fact worth writing into a file and keeping in step.
+  assert.ok(d.stillAccruing(rec("a.json", "dwh", {}, { finishedHoursAgo: 0.5 })));
+  assert.ok(!d.stillAccruing(rec("a.json", "dwh", {}, { finishedHoursAgo: 48 })));
+  assert.ok(!d.stillAccruing({ run: {} }), "no finished stamp, no claim");
+});
+
+// ---------------------------------------------------------------------------------- the columns
+
+test("columns are the latest run per engine and config", () => {
+  // One dispatch builds ONE engine, so rendering the newest record alone gives a comparison page with
+  // a single column. And spark under readHeavyForPBI answers a different question from spark under
+  // writeHeavy: one number cannot stand for both.
+  const runs = [
+    rec("a-1.json", "spark", {}, {
+      config: { spark: { resource_profile: "writeHeavy" } }, finishedHoursAgo: 72,
+    }),
+    rec("b-2.json", "spark", {}, {
+      config: { spark: { resource_profile: "writeHeavy" } }, finishedHoursAgo: 48,
+    }),
+    rec("c-3.json", "spark", {}, {
+      config: { spark: { resource_profile: "readHeavyForPBI" } }, finishedHoursAgo: 24,
+    }),
+    rec("d-4.json", "dwh", {}, { finishedHoursAgo: 12 }),
+  ];
+  const cols = d.columnsFor(runs);
+  assert.deepEqual(cols.map((c) => c.col), ["spark·V-Order", "spark·default", "dwh"]);
+  const byCol = Object.fromEntries(cols.map((c) => [c.col, c.rec._file]));
+  assert.equal(byCol["spark·default"], "b-2.json", "the LATER run of a config wins its column");
+});
+
+test("one config per engine gets a bare column name", () => {
+  assert.deepEqual(d.columnsFor([rec("a-1.json", "dwh", {})]).map((c) => c.col), ["dwh"]);
+});
+
+test("a variant tag never contains the column separator", () => {
+  // baseEngine splits on COL_SEP; a tag containing one would make the column id unparseable back to
+  // its engine, and STACK lookups would silently miss.
+  const tag = d.variantTag([["native_execution_engine", "true"],
+    ["resource_profile", "readHeavyForPBI"], ["vcores", "64"]]);
+  assert.ok(!tag.includes(d.COL_SEP));
+  assert.equal(d.baseEngine(`spark${d.COL_SEP}${tag}`), "spark");
+});
+
+test("a column header names a profile by its effect", () => {
+  // `spark·readHeavyForPBI+noNEE` is Microsoft's name for an intended workload plus a double negative,
+  // in a header repeated across every table and both charts.
+  assert.equal(d.variantTag([["resource_profile", "readHeavyForPBI"]]), "V-Order");
+  assert.equal(d.variantTag([["resource_profile", "writeHeavy"]]), "default");
+  // An unmapped profile keeps its own name — guessing at readHeavyForSpark would be wrong.
+  assert.equal(d.variantTag([["resource_profile", "readHeavyForSpark"]]), "readHeavyForSpark");
+});
+
+test("a flag that is off is absent from the header rather than negated", () => {
+  const on = [["native_execution_engine", "true"], ["resource_profile", "writeHeavy"]];
+  const off = [["native_execution_engine", "false"], ["resource_profile", "writeHeavy"]];
+  assert.equal(d.variantTag(on), "default+NEE");
+  assert.equal(d.variantTag(off), "default");
+});
+
+test("a column is named for its writer and still resolves to its engine", () => {
+  // `iceberg` reads as a format beside three engines when the writer is the same DuckDB duckrun uses,
+  // pointed at an Iceberg REST catalog. Naming the column is only safe because `baseEngine` reverses
+  // the label — otherwise the STACK lookup and the (engine, variant) join to a record would both
+  // silently miss, and a caption or a chart row would quietly go blank.
+  const runs = [
+    rec("a-1.json", "iceberg", {}, { config: { iceberg: { vcores: "64" } }, finishedHoursAgo: 48 }),
+    rec("b-2.json", "iceberg", {}, { config: { iceberg: { vcores: "32" } }, finishedHoursAgo: 24 }),
+  ];
+  const names = d.columnsFor(runs).map((c) => c.col);
+  assert.deepEqual(names, ["duckdb iceberg·32c", "duckdb iceberg·64c"]);
+  assert.ok(names.every((c) => d.baseEngine(c) === "iceberg"));
+  assert.equal(d.baseEngine("duckdb iceberg"), "iceberg");
+  // An engine the map says nothing about is left exactly as it is, both ways.
+  assert.deepEqual(d.columnsFor([rec("c-3.json", "dwh", {})]).map((c) => c.col), ["dwh"]);
+  assert.equal(d.baseEngine("spark·V-Order"), "spark");
+});
+
+test("two configs that would share a header are spelled out instead", () => {
+  // Absence-means-off is only unambiguous while every config of the engine RECORDS the flag. A record
+  // predating the dispatch input has no key at all, which would collide with an explicit `false` — and
+  // a page printing one column name twice is unreadable and says nothing about why.
+  const runs = [
+    rec("a-1.json", "spark", {}, {
+      config: { spark: { resource_profile: "writeHeavy" } }, finishedHoursAgo: 48,
+    }),
+    rec("b-2.json", "spark", {}, {
+      config: { spark: { resource_profile: "writeHeavy", native_execution_engine: "false" } },
+      finishedHoursAgo: 24,
+    }),
+  ];
+  const names = d.columnsFor(runs).map((c) => c.col);
+  assert.equal(new Set(names).size, 2, names.join(","));
+  assert.deepEqual(names, ["spark·default", "spark·default+noNEE"]);
+});
+
+// ------------------------------------------------------------------------------- whole-page shape
+
+test("the page renders end to end with charts and a layout", () => {
+  const runs = [rec("a-1.json", "duckrun", {
+    OUT: { role: "output", name: "dbt_delta" },
+    NB: { role: "compute", name: "dbt-duckrun-baf95ac5" },
+    SEM: { role: "semantic_model", name: "aemo_duckrun" },
+  }, {
+    config: { duckrun: { vcores: "64" } },
+    stats: {
+      duckrun: {
+        fct_summary: {
+          total_rows: 143980961, num_files: 4, num_row_groups: 79, avg_row_group: 1822544,
+          size_mb: 998.9, vorder: false, schema: "mart",
+        },
+      },
+    },
+    tables: ["fct_summary"], landing: { files: 8167, size_mb: 12345.6 },
+  })];
+  const out = render(runs, ledger({
+    OUT: { "OneLake Write via Redirect": 1509.0 },
+    NB: { "Jupyter Notebook Scheduled Run": 29571.0 },
+    SEM: { "XMLA Read Operation": 2041.0 },
+  }));
+  const c = charts(out);
+  assert.equal(c.length, 2);
+  const text = plain(out);
+  const rr = rows(out);
+  assert.ok(rr.some((r) => r.startsWith("| **etl** |")));
+  assert.ok(rr.some((r) => r.startsWith("| **analytics** |")));
+  // Bucket-major: the notebook's compute and the lakehouse's storage are separate rows, which is
+  // where a DuckDB leg's cost actually goes.
+  assert.ok(rr.some((r) => r.startsWith("| `compute` |") && r.includes("29,571.0")));
+  assert.ok(rr.some((r) => r.startsWith("| `storage` |") && r.includes("1,509.0")));
+  assert.ok(text.includes("fct_summary") && text.includes("1.8M"),
+    "the layout block, with row-group size abbreviated");
+  assert.ok(text.includes("8,167") && text.includes("12,345.60"),
+    "the input archive should be on the page");
+  // ANALYTICS leads: it is the interactive CU that throttles, which is the point of the project.
+  assert.ok(c[0].title.includes("Analytics") && c[0].subtitle.includes("INTERACTIVE"));
+  assert.ok(c[1].title.includes("ETL") && c[1].subtitle.includes("background"));
+  // ANALYTICS is labelled by the LAYOUT's writer and captioned by the shape; ETL is labelled by the
+  // column and captioned by the adapter and its compute. That asymmetry is the point of both charts.
+  assert.deepEqual(c[0].labels, ["duckrun"]);
+  assert.deepEqual(c[0].captions, ["4 files · 79 RG"], "the shape is the sub-label");
+  assert.ok(c[0].values[0].startsWith("2,041.0"));
+  assert.deepEqual(c[1].labels, ["duckrun"]);
+  assert.deepEqual(c[1].captions, ["dbt-duckrun · 64 vCores"]);
+  assert.ok(c[1].values[0].startsWith("31,080.0"));
+});
+
+test("a column with no operations of a kind prints a dash, not a zero", () => {
+  // A dash says "nothing of that kind was billed here"; 0.0 would say "it was billed and cost
+  // nothing". Real case: an iceberg lakehouse bills 40,832 CU and every operation of it is OneLake —
+  // its compute is the notebook, a different item entirely.
+  const runs = [
+    rec("a-1.json", "duckrun", {
+      NB: { role: "compute", name: "dbt-duckrun-ab12" },
+      OUT: { role: "output", name: "dbt_delta" },
+    }),
+    rec("b-2.json", "iceberg", { OUT2: { role: "output", name: "dbt_iceberg" } }),
+  ];
+  const out = render(runs, ledger({
+    NB: { "Jupyter Notebook Scheduled Run": 29571.0 },
+    OUT: { "OneLake Write via Redirect": 1509.0 },
+    OUT2: { "OneLake Iterative Read via Proxy": 40831.8 },
+  }));
+  const row = rows(out).find((r) => r.startsWith("| `compute` |"));
+  assert.ok(row && row.includes("—"), "iceberg's lakehouse bills no compute operation at all");
+});
+
+test("the page says when a column can still rise", () => {
+  const fresh = [rec("a-1.json", "dwh", { OUT: gone("output", "dbt_dwh") },
+    { finishedHoursAgo: 0.5 })];
+  assert.ok(plain(render(fresh, ledger({ OUT: 5.0 }))).includes("may still rise"));
+  const old = [rec("a-1.json", "dwh", { OUT: gone("output", "dbt_dwh") }, { finishedHoursAgo: 48 })];
+  assert.ok(!plain(render(old, ledger({ OUT: 5.0 }))).includes("may still rise"));
+});
+
+test("no records explains the contract rather than printing an empty page", () => {
+  const out = plain(d.renderEmpty());
+  assert.ok(out.includes("No run records") && out.includes("Benchmark"));
+  assert.ok(out.includes("not that the capacity was idle"));
+});
+
+test("no records and no ledger is an empty page, not an exception", () => {
+  const { html, cols } = d.compose([], null, {});
+  assert.deepEqual(cols, []);
+  assert.ok(plain(html).includes("No run records"));
+  assert.deepEqual(d.normaliseLedger(null).items, {});
+});
+
+test("the rendered page mentions no landing CU anywhere", () => {
+  // Belt and braces on the whole render path, not just the join.
+  const runs = [
+    rec("a-1.json", "duckrun", {
+      OUT: { role: "output", name: "dbt_delta" }, L: { role: "landing", name: "dbt_landing" },
+    }),
+    rec("b-2.json", "spark", {
+      OUT2: { role: "output", name: "dbt_spark" }, L: { role: "landing", name: "dbt_landing" },
+    }),
+  ];
+  const out = plain(render(runs, ledger({ OUT: 1.0, OUT2: 2.0, L: 70.2 })));
+  assert.ok(!out.includes("70.2") && !out.includes("dbt_landing ("));
+});
+
+test("the numbers come before the methodology", () => {
+  // The charts and the table are what the page is for. A reader who already knows what a capacity unit
+  // is should not have to scroll past a paragraph explaining it, and a provenance table, to reach them.
+  const out = render([full("a-1.json", "spark")], ledger({ OUT: 34046.3, SEM: 1514.0 }));
+  const firstChart = out.indexOf('<figure class="chart">');
+  assert.ok(firstChart > 0);
+  assert.ok(firstChart < out.indexOf("Capacity units (CU-seconds) are what this page leads with"));
+  assert.ok(firstChart < out.indexOf("About these numbers"));
+  assert.ok(firstChart < out.indexOf("Each column is that engine's latest run"));
+  assert.ok(firstChart < out.indexOf("[source]".replace("[", "").replace("]", "")) ||
+    firstChart < out.lastIndexOf("<p>"));
+  // ...and the heading still leads.
+  assert.ok(out.indexOf("<h2>Capacity units") < firstChart);
+});
+
+test("the page says which of its measures is the comparable one", () => {
+  // A capacity unit already prices in how much compute an engine was given — that is the whole reason
+  // CU leads. The two time measures do NOT have that property.
+  const out = plain(render([full("a-1.json", "spark")], ledger({ OUT: 1.0, SEM: 2.0 })));
+  assert.ok(out.includes("The CU columns are directly comparable"));
+  assert.ok(out.includes("reason to lead with cost"));
+  assert.ok(out.includes("sample of a shared capacity"), "the ms caveat has to be stated");
+});
+
+test("the table says where the compute/storage split comes from", () => {
+  // Compute and storage share an item, so a reader who assumes the rows are per-item will misread
+  // every column.
+  const out = plain(render([full("a-1.json", "spark")], ledger({ OUT: 34046.3, SEM: 1514.0 })));
+  assert.ok(out.includes("comes from the OPERATION"));
+  assert.ok(out.includes("share an ITEM"));
+  assert.ok(out.includes("Every `OneLake …` operation is storage"));
+});
+
+test("a class with one item per engine is not decomposed", () => {
+  // analytics is always exactly one semantic model per engine, so bucket rows there would repeat the
+  // subtotal and add a row of em dashes for every other engine. etl splits because a DuckDB leg really
+  // is a notebook plus a lakehouse.
+  //
+  // The lakehouse bills a OneLake operation on purpose: the Python original gave it a compute one, so
+  // `etl` held a single bucket and did not decompose at all — and the assertion passed anyway, on the
+  // words `compute` and `storage` in the note underneath. Rows, not prose.
+  const runs = [
+    rec("a-1.json", "duckrun", {
+      NB: gone("compute", "dbt-duckrun-ab12"), OUT: gone("output", "dbt_delta"),
+      SEM: gone("semantic_model", "aemo_duckrun"),
+    }),
+    rec("b-2.json", "spark", {
+      OUT2: gone("output", "dbt_spark"), SEM2: gone("semantic_model", "aemo_spark"),
+    }),
+  ];
+  const out = render(runs, ledger({
+    NB: 26403.5, OUT: { "OneLake Write via Redirect": 2463.9 }, SEM: 2157.8,
+    OUT2: 34046.3, SEM2: 1514.0,
+  }));
+  const rr = rows(out);
+  const analytics = rr.find((r) => r.startsWith("| **analytics** |"));
+  assert.ok(analytics.includes("2,157.8") && analytics.includes("1,514.0"));
+  assert.ok(!plain(out).includes("semantic_model"), "no per-item analytics rows");
+  // etl still decomposes: duckrun is genuinely a notebook plus a lakehouse.
+  assert.ok(rr.some((r) => r.startsWith("| `compute` |")));
+  assert.ok(rr.some((r) => r.startsWith("| `storage` |")));
+});
+
+// ------------------------------------------------------------------------------------- validity
+
+test("a whole generation is accepted", () => {
+  assert.equal(d.incomplete(full("a-1.json", "spark")), null);
+});
+
+test("a run that was not torn down is caveated, not rejected", () => {
+  // Its items are still alive and Fabric keeps billing them, so its total creeps upward — but the
+  // creep is small, and a column that disappears costs more than one carrying a caveat.
+  const r = full("a-1.json", "duckrun");
+  delete r.items.OUT.deleted;
+  assert.equal(d.incomplete(r), null, "it still renders");
+  assert.deepEqual(d.drifting(r), ["output/dbt_duckrun"], "and it is named as still billing");
+});
+
+test("a torn-down run is not drifting", () => {
+  assert.deepEqual(d.drifting(full("a-1.json", "spark")), []);
+});
+
+test("the sources table says which column is still billing", () => {
+  const good = full("a-1.json", "spark");
+  const bad = full("b-2.json", "duckrun");
+  delete bad.items.OUT.deleted;
+  const out = plain(render([good, bad], ledger({ OUT: 1.0, SEM: 2.0 })));
+  assert.ok(out.includes("**still billing** — 1 item(s) never deleted"));
+  assert.ok(out.includes("predates that teardown and still owns `output/dbt_duckrun`"));
+  assert.ok(out.includes("upper bound on that run rather than a measurement of it"));
+});
+
+test("a run with no benchmark is rejected", () => {
+  // An empty analytics column reads as "querying this engine was free" rather than "nobody measured
+  // it". Run 30743411308 is exactly this — the bench job was skipped by a needs bug.
+  const r = full("a-1.json", "spark");
+  r.benchmark = {};
+  assert.match(d.incomplete(r), /query half did not run/);
+});
+
+test("a run with no layout is rejected", () => {
+  const r = full("a-1.json", "spark");
+  r.layout.stats = {};
+  assert.match(d.incomplete(r), /build half did not report/);
+});
+
+test("incomplete records are skipped by the loader and named", () => {
+  // Skipped, never silently dropped: a page that quietly ignores a record is indistinguishable from
+  // one that never had it.
+  const good = full("a-1.json", "spark"), bad = full("b-2.json", "dwh");
+  bad.benchmark = {};
+  const { runs, skipped } = d.selectRuns([good, bad]);
+  assert.deepEqual(runs.map((r) => r._file), ["a-1.json"]);
+  assert.equal(skipped.length, 1);
+  assert.match(skipped[0], /^b-2\.json: /);
+});
+
+// ------------------------------------------------------------------------------- the input archive
+
+test("the input archive is one table, not a column per engine", () => {
+  // dbt_landing holds ONE copy of the CSVs and every engine reads the same bytes.
+  const landing = {
+    files: 8338, size_mb: 170491.40,
+    folders: {
+      "csv_raw/daily": { files: 3042, size_mb: 170004.56 },
+      "csv_raw/price_today": { files: 2550, size_mb: 381.24 },
+    },
+  };
+  const runs = [full("a-1.json", "duckrun", { landing }), full("b-2.json", "spark", { landing })];
+  const out = render(runs, ledger({ OUT: 1.0, SEM: 2.0 }));
+  const block = plain(out.split("Input archive")[1].split("<h3")[0]);
+  assert.ok(block.includes("folder") && block.includes("size MB"));
+  assert.ok(!block.includes("duckrun") && !block.includes("spark"), "no engine column");
+  assert.ok(block.includes("csv_raw/daily") && block.includes("170,004.56"));
+  assert.ok(block.includes("**8,338**") && block.includes("**170,491.40**"));
+  assert.equal(block.split("170,491.40").length - 1, 1, "the total is stated once, not per engine");
+});
+
+test("a changed archive between runs is stated, not averaged", () => {
+  const runs = [
+    full("a-1.json", "duckrun", { landing: { files: 8000, size_mb: 150000.0, folders: {} } }),
+    full("b-2.json", "spark", { landing: { files: 8338, size_mb: 170491.4, folders: {} } }),
+  ];
+  const out = plain(render(runs, ledger({ OUT: 1.0, SEM: 2.0 })));
+  assert.ok(out.includes("did not all read the same archive") && out.includes("150,000.0"));
+});
+
+// ------------------------------------------------------------------------------------- the charts
+
+test("the chart shows the mean and the range across runs", () => {
+  // One dispatch is one sample of a SHARED capacity, so a single number is a reading rather than a
+  // result. The bar is the mean; the range is what tells a reader when two averages are closer
+  // together than either engine's own spread.
+  const runs = [full("a-1.json", "spark", { finishedHoursAgo: 72 }),
+    full("b-2.json", "spark", { finishedHoursAgo: 48 }),
+    full("c-3.json", "spark", { finishedHoursAgo: 24 })];
+  runs.forEach((r, i) => {
+    r.items = { [`S${i}`]: gone("semantic_model", "aemo_spark"), [`O${i}`]: gone("output", "dbt_spark") };
+  });
+  const led = ledger({
+    S0: { "XMLA Read Operation": 1000.0 }, O0: { "Warehouse Query": 1.0 },
+    S1: { "XMLA Read Operation": 2000.0 }, O1: { "Warehouse Query": 1.0 },
+    S2: { "XMLA Read Operation": 1500.0 }, O2: { "Warehouse Query": 1.0 },
+  });
+  const out = render(runs, led);
+  const c = charts(out)[0];
+  assert.deepEqual(c.labels, ["spark"], "the analytics bar is NAMED for its writer");
+  assert.equal(c.values[0], "1,500.0  (1,000–2,000)");
+  assert.ok(c.subtitle.includes("mean of 3 runs"));
+});
+
+test("the chart sorts by the mean", () => {
+  const runs = [full("a-1.json", "spark"), full("b-2.json", "dwh")];
+  runs[0].items = { S0: gone("semantic_model", "aemo_spark"), O0: gone("output", "dbt_spark") };
+  runs[1].items = { S1: gone("semantic_model", "aemo_dwh"), O1: gone("output", "dbt_dwh") };
+  const out = render(runs, ledger({
+    S0: { "XMLA Read Operation": 9.0 }, O0: { "Warehouse Query": 1.0 },
+    S1: { "XMLA Read Operation": 3.0 }, O1: { "Warehouse Query": 1.0 },
+  }));
+  assert.deepEqual(charts(out)[0].labels, ["dwh", "spark"], "cheapest mean first");
+});
+
+test("the svg draws a whisker only when there is a range", () => {
+  // A single run is a point, and drawing a zero-width whisker on it would suggest a spread that was
+  // never measured.
+  const wide = d.chartSvg("t", "s", [["spark", 1500.0, 1000.0, 2000.0, "cap"]]);
+  assert.equal((wide.match(/class="whisker"/g) || []).length, 1);
+  assert.equal((wide.match(/whisker-cap/g) || []).length, 2);
+  assert.ok(wide.includes("(1,000–2,000)"));
+  const flat = d.chartSvg("t", "s", [["dwh", 1853.5, 1853.5, 1853.5, "cap"]]);
+  assert.ok(!flat.includes('class="whisker"'));
+});
+
+test("the svg still takes the older three-field row", () => {
+  // `[label, value, caption]` — so a chart spec from an artifact rendered months ago still draws.
+  const svg = d.chartSvg("t", "s", [["spark", 42.0, "cap"]]);
+  assert.ok(svg.includes("42.0") && !svg.includes('class="whisker"'));
+});
+
+test("a chart with nothing but zeros is not drawn", () => {
+  assert.equal(d.chartSvg("t", "s", [["spark", 0, 0, 0, ""]]), "");
+  assert.equal(d.chartSvg("t", "s", []), "");
+});
+
+// ------------------------------------------------------- one bar per LAYOUT, not per engine
+
+test("the same parquet is one bar however many engines wrote it", () => {
+  // Power BI never sees the engine — it opens parquet through Direct Lake and transcodes row groups.
+  // duckrun at 64 cores and at 32 wrote 4 files and 27 row groups either way, so two bars 50% apart
+  // was not a comparison: it was one layout measured twice, presented as two results.
+  const runs = [
+    lay("duckrun", 4, 27, { cfg: { vcores: "64" }, file: "a-1.json", finishedHoursAgo: 72 }),
+    lay("duckrun", 4, 27, { cfg: { vcores: "32" }, file: "b-2.json", finishedHoursAgo: 48 }),
+  ];
+  runs[0].items = { S0: gone("semantic_model", "aemo_duckrun"), O0: gone("output", "dbt_delta") };
+  runs[1].items = { S1: gone("semantic_model", "aemo_duckrun"), O1: gone("output", "dbt_delta") };
+  const out = render(runs, ledger({
+    S0: { "XMLA Read Operation": 1000.0 }, O0: 1.0,
+    S1: { "XMLA Read Operation": 2000.0 }, O1: 1.0,
+  }));
+  const c = charts(out);
+  assert.deepEqual(c[0].labels, ["duckrun"], "one layout, one bar");
+  assert.equal(c[0].values[0], "1,500.0  (1,000–2,000)");
+  assert.deepEqual(c[0].captions, ["4 files · 27 RG"], "the shape it grouped on sits underneath");
+  // ...while the ETL chart keeps BOTH columns, because there the writer and the compute it was given
+  // are the entire subject. That asymmetry is the change, and it must not be tidied away.
+  assert.deepEqual(c[1].labels.sort(), ["duckrun·32c", "duckrun·64c"]);
+});
+
+test("an engine is named for who writes when the target name misleads", () => {
+  assert.equal(d.producer(lay("iceberg", 357, 1172)), "duckdb iceberg");
+  assert.equal(d.producer(lay("duckrun", 4, 27)), "duckrun", "only where the name misleads");
+});
+
+test("V-Order never merges with anything", () => {
+  // The sharpest experiment on the page: the same file band with V-Order on and off.
+  const a = lay("spark", 11, 11, { vorder: true, cfg: { resource_profile: "readHeavyForPBI" } });
+  const b = lay("spark", 14, 14, { vorder: false, cfg: { resource_profile: "writeHeavy" } });
+  assert.notDeepEqual(d.layoutKey(a), d.layoutKey(b));
+  assert.equal(d.layoutKey(a)[1], d.layoutKey(b)[1], "same file band, on purpose");
+});
+
+test("a band absorbs drift but not a real difference", () => {
+  // 78 files and 80 are the same writer with the same settings and one more incremental run.
+  assert.equal(d.layoutBand(78), d.layoutBand(80));
+  assert.equal(d.layoutBand(10), d.layoutBand(11));
+  assert.equal(d.layoutBand(11), d.layoutBand(14));
+  assert.notEqual(d.layoutBand(27), d.layoutBand(1172));
+  assert.notEqual(d.layoutBand(1172), d.layoutBand(4));
+  assert.equal(d.layoutBand(0), -1);
+  assert.equal(d.layoutBand(null), -1);
+});
+
+test("an unmeasured layout is never grouped with another one", () => {
+  // Two records carrying no file count are not two identical layouts, they are two unmeasured ones.
+  const a = full("a-1.json", "spark"), b = full("b-2.json", "dwh");   // stats carry total_rows only
+  assert.equal(d.layoutKey(a), null);
+  assert.equal(d.layoutKey(b), null);
+  assert.equal(d.layoutGroups(d.columnsFor([a, b])).length, 2);
+});
+
+test("the producer name drops what never reached the parquet", () => {
+  assert.equal(d.producer(lay("spark", 11, 11, {
+    cfg: { resource_profile: "readHeavyForPBI", native_execution_engine: "true" },
+  })), "spark V-Order");
+  assert.equal(d.producer(lay("spark", 14, 14, {
+    cfg: { resource_profile: "writeHeavy", native_execution_engine: "false" },
+  })), "spark default");
+  assert.equal(d.producer(lay("duckrun", 4, 27, { cfg: { vcores: "64" } })), "duckrun");
+  // An unmapped profile keeps its own name — `readHeavyForSpark` reads like it enables V-Order and
+  // sets no vorder at all.
+  assert.equal(d.producer(lay("spark", 4, 4, { cfg: { resource_profile: "readHeavyForSpark" } })),
+    "spark readHeavyForSpark");
+});
+
+test("a group of genuinely different writers names both", () => {
+  const members = [
+    { col: "duckrun·64c", rec: lay("duckrun", 4, 27, { cfg: { vcores: "64" } }) },
+    { col: "duckrun·32c", rec: lay("duckrun", 4, 27, { cfg: { vcores: "32" } }) },
+    { col: "spark·writeHeavy", rec: lay("spark", 4, 27, { cfg: { resource_profile: "writeHeavy" } }) },
+  ];
+  assert.equal(d.producers(members), "duckrun, spark default", "deduplicated, and both kept");
+});
+
+test("the layout table is one row per writer and agrees with the chart", () => {
+  // The table groups by the DECLARED producer and the chart by the MEASURED parquet — two directions
+  // onto the same rows. And both quote the same CU.
+  const runs = [
+    lay("duckrun", 4, 27, { cfg: { vcores: "64" }, file: "a-1.json", finishedHoursAgo: 72 }),
+    lay("duckrun", 4, 27, { cfg: { vcores: "32" }, file: "b-2.json", finishedHoursAgo: 48 }),
+  ];
+  runs[0].items = { S0: gone("semantic_model", "aemo_duckrun"), O0: gone("output", "dbt_delta") };
+  runs[1].items = { S1: gone("semantic_model", "aemo_duckrun"), O1: gone("output", "dbt_delta") };
+  const out = render(runs, ledger({
+    S0: { "XMLA Read Operation": 1000.0 }, O0: 1.0,
+    S1: { "XMLA Read Operation": 2000.0 }, O1: 1.0,
+  }));
+  const body = rows(block(out, "the mart the queries land on"));
+  assert.equal(body.length, 2, "a header and ONE row — duckrun, not duckrun twice");
+  assert.ok(body[1].startsWith("| duckrun | 1,500 |"), body[1]);
+  assert.equal(charts(out)[0].values[0].split(" ")[0], "1,500.0", "the same number as the bar");
+  assert.ok(!body[0].includes("| writer |"), "the row label IS the writer now");
+});
+
+test("the row count lives in the heading until the engines disagree", () => {
+  const same = [lay("duckrun", 4, 27, { file: "a-1.json" }), lay("dwh", 78, 78, { file: "b-2.json" })];
+  let out = render(same, ledger({ OUT: 1.0, SEM: 2.0 }));
+  assert.ok(plain(out).includes("143,980,961 rows on every engine"));
+  assert.ok(!rows(out).some((r) => r.includes("| rows |")));
+  const drifted = [lay("duckrun", 4, 27, { file: "a-1.json" }),
+    lay("dwh", 78, 78, { file: "b-2.json" })];
+  drifted[1].layout.stats.dwh.fct_summary.total_rows = 143980960;
+  out = render(drifted, ledger({ OUT: 1.0, SEM: 2.0 }));
+  assert.ok(plain(out).includes("row counts DISAGREE"));
+  assert.ok(rows(out).some((r) => r.includes("| rows |")), "and the numbers come back");
+});
+
+// ---------------------------------------------------------------- query time, in the mart block
+
+test("a tier is summed over the queries every column has", () => {
+  // A total over different queries is not a comparison. A query one engine never ran is dropped from
+  // EVERY column's total, not counted for the engines that have it.
+  const runs = [
+    full("a-1.json", "duckrun", { timings: timings({ a: [10, 5, 4], b: [100, 50, 40] }) }),
+    full("b-2.json", "dwh", { timings: timings({ a: [20, 6, 5] }) }),
+  ];
+  const perCol = { duckrun: d.benchTimings(runs[0]), dwh: d.benchTimings(runs[1]) };
+  const { totals, n } = d.benchTotals(perCol, "cold_ms");
+  assert.equal(n, 1, "`b` is duckrun's alone and must not inflate its total");
+  assert.deepEqual(totals, { duckrun: 10.0, dwh: 20.0 });
+});
+
+test("the three tiers are columns of the mart block, not a section", () => {
+  const t = timings({ a: [10, 5, 4], b: [20, 6, 5] });
+  const runs = [
+    full("a-1.json", "duckrun", {
+      timings: t, stats: { duckrun: { fct_summary: { total_rows: 1, num_files: 4 } } },
+    }),
+    full("b-2.json", "dwh", {
+      timings: t, stats: { dwh: { fct_summary: { total_rows: 1, num_files: 78 } } },
+    }),
+  ];
+  const out = render(runs, ledger({ OUT: 1.0, SEM: 2.0 }));
+  assert.ok(!plain(out).includes("Query time"), "no section of its own");
+  const rr = rows(block(out, "the mart the queries land on"));
+  assert.ok(rr[0].startsWith("| layout | CU | cold ms | warm ms | hot ms | files |"), rr[0]);
+  const row = rr.find((r) => r.startsWith("| duckrun |"));
+  assert.ok(row.includes("| 30 | 11 | 9 |"), `cold/warm/hot beside the layout: ${row}`);
+  assert.ok(row.trimEnd().endsWith("| 4 | — | — | — | · |"), row);
+  assert.ok(!rr[0].includes("| writer |"), "the row label IS the writer now");
+});
+
+test("the tiers appear on the mart block alone", () => {
+  // One number per ENGINE, not per table — on every block it would read as one measurement per table.
+  const runs = [full("a-1.json", "duckrun", {
+    timings: timings({ a: [10, 5, 4] }),
+    stats: {
+      duckrun: { fct_summary: { total_rows: 1 }, fct_scada: { total_rows: 9, schema: "landing" } },
+    },
+    tables: ["fct_summary", "fct_scada"],
+  })];
+  const out = render(runs, ledger({ OUT: 1.0, SEM: 2.0 }));
+  assert.ok(block(out, "the mart the queries land on").includes("cold ms"));
+  assert.ok(!block(out, "landing.fct_scada").includes("cold ms"));
+});
+
+test("cold covers fewer queries than hot and the note says so", () => {
+  // The selectivity-ladder queries have NO cold sample — the top DUID is resolved after pass 1.
+  const t = timings({ probe: [10, 5, 4], sel_1duid: [null, 7, 6] });
+  const runs = [full("a-1.json", "duckrun", { timings: t }), full("b-2.json", "dwh", { timings: t })];
+  assert.ok(plain(render(runs, ledger({ OUT: 1.0, SEM: 2.0 })))
+    .includes("cold over 1, warm over 2, hot over 2"));
+});
+
+test("a record with no tier timings adds no columns", () => {
+  // Absent columns say "not measured"; zeros would say "instant".
+  const out = render([full("a-1.json", "spark")], ledger({ OUT: 1.0, SEM: 2.0 }));
+  assert.ok(!plain(out).includes("cold ms"));
+  assert.ok(rows(out).some((r) => r.startsWith("| layout | CU | files |")),
+    "the block itself still renders");
+});
+
+// -------------------------------------------------------------------------------------- the rate
+
+test("the rate is a row of the engine table, not a section", () => {
+  const runs = [lay("spark", 11, 11, { file: "a-1.json" })];
+  const led = ledger({
+    OUT: { "High Concurrency Session Livy Run": 900.0 }, SEM: { "XMLA Read Operation": 40.0 },
+  });
+  led.seconds = secs({
+    OUT: { "High Concurrency Session Livy Run": 30.0 }, SEM: { "XMLA Read Operation": 4.0 },
+  });
+  const out = render(runs, led);
+  assert.ok(!plain(out).includes("### Time"), "no section of its own");
+  const rr = rows(out);
+  assert.ok(rr.some((r) => r === "| **etl** | **900.0** |"));
+  assert.ok(rr.some((r) => r === "| `compute CU per second` | 30.0 |"), "under its class");
+  assert.ok(!rr.some((r) => r.startsWith("| `seconds` |")), "the raw seconds are not shown");
+  assert.equal(charts(out).length, 2, "and it brought no bar with it");
+});
+
+test("a class the ledger has not read yet is a dash, not a zero", () => {
+  // `**0.0**` on a subtotal says the engine did that work for FREE, which is the one reading this
+  // whole page is built to prevent. Live case: a record landed from CI mid-render and printed 0.0
+  // down an entire column.
+  const runs = [lay("duckrun", 4, 27, { file: "a-1.json" }), lay("dwh", 78, 78, { file: "b-2.json" })];
+  runs[0].items = { O0: gone("output", "dbt_delta"), S0: gone("semantic_model", "aemo") };
+  runs[1].items = { O1: gone("output", "dbt_dwh"), S1: gone("semantic_model", "aemo_dwh") };
+  const led = ledger({
+    O0: { "Jupyter Notebook Scheduled Run": 900.0 }, S0: { "XMLA Read Operation": 40.0 },
+  });                                                            // nothing for dwh at all
+  led.seconds = secs({
+    O0: { "Jupyter Notebook Scheduled Run": 30.0 }, S0: { "XMLA Read Operation": 4.0 },
+  });
+  const rr = rows(render(runs, led));
+  assert.ok(rr.some((r) => r === "| **etl** | **900.0** | — |"), "measured, then not-yet-measured");
+  assert.ok(rr.some((r) => r === "| `compute CU per second` | 30.0 | — |"));
+  assert.ok(!rr.some((r) => r.includes("| 0.0 |") || r.includes("**0.0**")), "no cell reads as free");
+});
+
+test("a ledger with no seconds renders no rate row", () => {
+  const out = render([full("a-1.json", "spark")], ledger({ OUT: 1.0, SEM: 2.0 }));
+  assert.ok(!rows(out).some((r) => r.startsWith("| `compute CU per second` |")), "no ROW");
+  assert.equal(charts(out).length, 2, "no seconds, no third chart");
+});
+
+test("the rate is compute over compute, never total over total", () => {
+  // A storage operation bills real CU over a duration of essentially nothing — 383.25 CU in 0.049 s,
+  // measured — so putting it in the ratio does not dilute the rate, it detonates it. Live symptom: the
+  // same DuckDB in the same 64-vCore notebook read 36.1 for iceberg and 31.2 for duckrun.
+  const runs = [full("a-1.json", "duckrun")];
+  runs[0].items = {
+    NB: gone("compute", "dbt-duckrun-ab12"), OUT: gone("output", "dbt_delta"),
+    SEM: gone("semantic_model", "aemo_duckrun"),
+  };
+  const led = ledger({
+    NB: { "Jupyter Notebook Scheduled Run": 20665.6 },
+    OUT: { "OneLake Write via Redirect": 384.1 },
+    SEM: { "XMLA Read Operation": 1287.2 },
+  });
+  led.seconds = secs({
+    NB: { "Jupyter Notebook Scheduled Run": 645.79 },
+    OUT: { "OneLake Write via Redirect": 0.031 },
+    SEM: { "XMLA Read Operation": 25.93 },
+  });
+  const rr = rows(render(runs, led));
+  assert.ok(rr.some((r) => r === "| `compute CU per second` | 32.0 |"), "the node's own draw");
+  // And the compute CU row still stands beside it — it is the rate alone that must exclude storage.
+  assert.ok(rr.some((r) => r === "| `compute` | 20,665.6 |"));
+});
+
+test("the rate scales with the cores the column was given", () => {
+  // It is `cores` ÷ 2 for a single-node Python notebook — 32 at 64 vCores, 16 at 32 — NOT the constant
+  // 32 it is tempting to read it as. The invariant is that two legs at the SAME cores agree.
+  const big = full("a-1.json", "duckrun", { config: { duckrun: { vcores: "64" } } });
+  const small = full("b-2.json", "duckrun", { config: { duckrun: { vcores: "32" } } });
+  big.items = { NB: gone("compute", "dbt-duckrun-big") };
+  small.items = { NB2: gone("compute", "dbt-duckrun-small") };
+  const led = ledger({
+    NB: { "Jupyter Notebook Scheduled Run": 3200.0 },
+    NB2: { "Jupyter Notebook Scheduled Run": 1600.0 },
+  });
+  led.seconds = secs({
+    NB: { "Jupyter Notebook Scheduled Run": 100.0 },
+    NB2: { "Jupyter Notebook Scheduled Run": 100.0 },
+  });
+  assert.deepEqual(d.columnsFor([big, small]).map((c) => c.col), ["duckrun·32c", "duckrun·64c"],
+    "never one blended column");
+  const out = render([big, small], led);
+  const rate = rows(out).find((r) => r.startsWith("| `compute CU per second`"));
+  assert.equal(rate, "| `compute CU per second` | 16.0 | 32.0 |", "cores ÷ 2, per column");
+  const text = plain(out);
+  assert.ok(text.includes("64 vCores") && text.includes("32 vCores"), "the caption names the size");
+});
+
+test("the rate is computed per class", () => {
+  const runs = [full("a-1.json", "spark")];
+  const led = ledger({
+    OUT: { "High Concurrency Session Livy Run": 900.0 }, SEM: { "XMLA Read Operation": 40.0 },
+  });
+  led.seconds = secs({
+    OUT: { "High Concurrency Session Livy Run": 30.0 }, SEM: { "XMLA Read Operation": 4.0 },
+  });
+  const out = render(runs, led);
+  const rr = rows(out);
+  assert.ok(rr.some((r) => r === "| **etl** | **900.0** |"));
+  assert.ok(rr.some((r) => r === "| `compute CU per second` | 30.0 |"), "900 CU over 30 s");
+  assert.ok(rr.some((r) => r === "| **analytics** | **40.0** |"));
+  assert.ok(rr.some((r) => r === "| `compute CU per second` | 10.0 |"), "40 CU over 4 s");
+  assert.equal(charts(out).length, 2, "the two CU charts and no third");
+});
+
+// ------------------------------------------------------------------------ live loading, new here
+
+test("the loader reads raw for files and the contents API for the listing", async () => {
+  // raw.githubusercontent serves the repo's own files with CORS and a CDN; it has no directory index,
+  // which is the only reason the contents API is touched at all. A `legacy/` DIRECTORY entry must not
+  // become a fetch — those records predate the item GUIDs and cannot be joined to a ledger.
+  const seen = [];
+  const fake = async (url) => {
+    seen.push(url);
+    if (url.includes("api.github.com")) {
+      return {
+        ok: true, json: async () => [
+          { type: "file", name: "b-2.json" },
+          { type: "file", name: "a-1.json" },
+          { type: "dir", name: "legacy" },
+          { type: "file", name: "notes.md" },
+        ],
+      };
+    }
+    if (url.endsWith("cu.json")) return { ok: true, json: async () => ledger({ OUT: 1.0 }) };
+    return { ok: true, json: async () => full(url.split("/").pop(), "spark") };
+  };
+  const { records, names, ledger: led } = await d.loadRemote({ fetch: fake, repo: "o/r", ref: "main" });
+  assert.deepEqual(names, ["a-1.json", "b-2.json"], "sorted, files only");
+  assert.equal(records.length, 2);
+  assert.ok(records.every((r) => r._file), "each record remembers the file it came from");
+  assert.ok(led.items.OUT);
+  assert.ok(seen.some((u) => u.startsWith("https://api.github.com/repos/o/r/contents/history/runs")));
+  assert.ok(seen.some((u) =>
+    u === "https://raw.githubusercontent.com/o/r/main/history/runs/a-1.json"));
+  assert.ok(!seen.some((u) => u.includes("legacy") || u.includes("notes.md")));
+});
+
+test("one unreadable record does not cost the whole page", async () => {
+  const fake = async (url) => {
+    if (url.includes("api.github.com")) {
+      return { ok: true, json: async () => [{ type: "file", name: "a-1.json" },
+        { type: "file", name: "b-2.json" }] };
+    }
+    if (url.endsWith("cu.json")) return { ok: true, json: async () => ledger({ OUT: 1.0 }) };
+    if (url.endsWith("b-2.json")) return { ok: false, status: 404, statusText: "Not Found" };
+    return { ok: true, json: async () => full("a-1.json", "spark") };
+  };
+  const { records } = await d.loadRemote({ fetch: fake, repo: "o/r", ref: "main" });
+  assert.equal(records.length, 1);
+});
+
+test("a failed listing rejects rather than rendering an empty page", async () => {
+  // An empty page and a rate-limited API look identical to a reader, and only one of them means
+  // "nothing has been measured". The boot handler says which.
+  const fake = async () => ({ ok: false, status: 403, statusText: "rate limit exceeded" });
+  await assert.rejects(() => d.loadRemote({ fetch: fake, repo: "o/r", ref: "main" }), /403/);
+});
+
+test("the dispatch inputs are query params now", () => {
+  // `?record=30776174056` is a link to one run's page. It used to be a workflow dispatch.
+  assert.deepEqual(d.optsFromSearch("?record=30776174056&ref=topic&table=fct_scada"), {
+    repo: d.DEFAULTS.repo, ref: "topic", table: "fct_scada", record: "30776174056",
+  });
+  assert.deepEqual(d.optsFromSearch(""), { ...d.DEFAULTS });
+});
+
+test("compose renders one run alone when a record is pinned", () => {
+  const runs = [full("a-1.json", "spark"), full("b-2.json", "dwh")];
+  const led = ledger({ OUT: 1.0, SEM: 2.0 });
+  assert.deepEqual(d.compose(runs, led, { record: "b-2" }).cols.map((c) => c.col), ["dwh"]);
+  // A pin that matches nothing renders the newest rather than an empty page.
+  assert.deepEqual(d.compose(runs, led, { record: "nope" }).cols.map((c) => c.col), ["dwh"]);
+  assert.deepEqual(d.compose(runs, led, {}).cols.map((c) => c.col).sort(), ["dwh", "spark"]);
+});
+
+test("the offline copy links back to the live page it was frozen from", () => {
+  assert.equal(d.pagesUrl("djouallah/fabric-dbt-benchmark"),
+    "https://djouallah.github.io/fabric-dbt-benchmark/");
+});
+
+/** The smallest thing `boot()` will accept: three elements it can look up and write into. */
+function fakeDoc(snapshot) {
+  const el = () => ({ innerHTML: "", textContent: "" });
+  const nodes = { app: el(), status: el(), snapshot: { ...el(), textContent: snapshot || "" } };
+  return { getElementById: (id) => nodes[id] || null, nodes };
+}
+
+test("boot prefers an inlined snapshot over the network", async () => {
+  // This is what makes the offline artifact copy work, and it has to be the SAME render path — the
+  // whole reason there is one implementation now is that a frozen copy and a live page cannot be
+  // allowed to disagree about what the numbers are.
+  const snap = JSON.stringify({
+    built: "2026-08-03 11:00 UTC",
+    records: [full("a-1.json", "spark")],
+    ledger: ledger({ OUT: 900.0, SEM: 40.0 }),
+  });
+  const doc = fakeDoc(snap);
+  // No fetch is stubbed: reaching the network at all would throw and fail this test.
+  await d.boot(doc, { search: "" });
+  assert.ok(plain(doc.nodes.app.innerHTML).includes("Capacity units"));
+  assert.ok(rows(doc.nodes.app.innerHTML).some((r) => r.startsWith("| **etl** |")));
+  assert.ok(plain(doc.nodes.status.innerHTML).includes("Offline copy"));
+  assert.ok(plain(doc.nodes.status.innerHTML).includes("2026-08-03 11:00 UTC"));
+});
+
+test("a page that cannot read its data says so instead of reading as empty", async () => {
+  // The API's 60/hour anonymous rate limit, a renamed branch and a private fork all land here, and
+  // an empty page would claim the far more alarming thing: that nothing has ever been measured.
+  const doc = fakeDoc("");
+  globalThis.fetch = async () => ({ ok: false, status: 403, statusText: "rate limit exceeded" });
+  try {
+    await d.boot(doc, { search: "" });
+  } finally {
+    delete globalThis.fetch;
+  }
+  const text = plain(doc.nodes.app.innerHTML);
+  assert.ok(text.includes("Could not read the data"));
+  assert.ok(text.includes("403"), "the reason has to be on the page, not only in the console");
+  assert.ok(!text.includes("No run records"), "never the empty-repo message");
+});
+
+test("an item name cannot inject markup", () => {
+  // The page escapes before it interprets markdown, so a `<` in a Fabric display name is text.
+  const r = rec("a-1.json", "spark", {
+    OUT: { role: "output", name: "<img src=x onerror=alert(1)>" },
+  });
+  const out = d.renderSources([{ col: "spark", engine: "spark", rec: r }],
+    d.normaliseLedger(ledger({ OUT: 1.0 })), { spark: ["output/<img src=x onerror=alert(1)>"] },
+    "o/r");
+  assert.ok(!out.includes("<img"));
+  assert.ok(out.includes("&lt;img"));
+});

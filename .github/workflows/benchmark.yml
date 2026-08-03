@@ -38,7 +38,7 @@ name: Benchmark
 #
 # **ONE ENGINE PER DISPATCH**, and the form cannot express more. So a four-engine comparison is four
 # dispatches: the layout table, the record and the benchmark report all cover the single engine
-# built, and the report therefore carries no ranking and no `x fastest`. `cu/dashboard.py` is what
+# built, and the report therefore carries no ranking and no `x fastest`. The `dashboard/` page is what
 # compares them, composing the page from every record. The teardown means every build starts from
 # nothing, so with `skip_download` two dispatches of one commit differ only by what was changed.
 # The teardown is not optional: a deleted item keeps its CU rows in the metrics model, so there is

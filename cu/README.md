@@ -1,9 +1,16 @@
 # `cu/` — what the work cost, by Fabric item GUID
 
-Two programs and one published page. `measure.py` reads capacity units — and duration — from the
-Fabric Capacity Metrics app's own semantic model and keeps a cumulative ledger; `dashboard.py` joins
-that ledger to the run records and renders. Both run in the `Dashboard` workflow, one of only two
-workflows in this repo.
+**One program, one output.** `measure.py` reads capacity units — and duration — from the Fabric
+Capacity Metrics app's own semantic model and keeps a cumulative ledger at `history/cu.json`. That is
+the whole of this directory: an exporter. It renders nothing, draws nothing and has no opinion about
+what a page should look like.
+
+The page that reads its output lives in [`dashboard/`](../dashboard/README.md) and is JavaScript
+running in the reader's browser. **The two share no file and neither imports the other** — what
+passes between them is `history/cu.json`, on disk and in git. Either can be deleted without touching
+the other, which is the same property this directory has always had against `benchmark/`.
+
+Both halves are driven by the `Dashboard` workflow, one of only two workflows in this repo.
 
 Fabric exposes **no per-operation CU REST API**. The metrics app's semantic model is the only
 authoritative source, which is why this exists at all.
@@ -15,7 +22,8 @@ authoritative source, which is why this exists at all.
 | `history/runs/<ts>-<run id>.json` | the `Benchmark` workflow | every Fabric item GUID that run created, with its `role`, plus the layout, the input archive and the raw query timings |
 | `history/cu.json` | `cu/measure.py` | `{item GUID: {operation: CU}}`, and a `seconds` sibling of the same shape |
 
-They are joined on the **item GUID**, and that is the whole design.
+They are joined on the **item GUID**, and that is the whole design. `measure.py` reads the run records
+only to learn which GUIDs to ask about and how far back to reach; the join itself happens in the page.
 
 Attribution used to be substring matching on item DISPLAY NAMES — `engine_of()`, a `shared` column
 for everything ambiguous, a join to the app's lagging `'Items'` snapshot for kinds, and heuristics
@@ -69,7 +77,10 @@ That is the whole file, and it is the same shape as the app's own **Items** visu
 `Operation name | CU (s) | Duration (s)`, one row per item per operation.
 
 **The operation is in the grain because it is the ONLY thing that separates COMPUTE from STORAGE**,
-which share an item — see the engine-major bullet under *The page*.
+which share an item: `dbt_spark` [Lakehouse] bills 188,636 CU of `High Concurrency Session Livy Run`
+and 20,268 of `OneLake Write via Redirect` against one GUID. Every `OneLake …` operation is storage;
+everything else is compute. Bucketing by the item's ROLE was tried and was wrong for exactly that
+reason. The page depends on this grain being here — it cannot recover a split the ledger threw away.
 
 **`seconds` is a SIBLING of `items`, not a nesting inside it.** Both leaves stay plain floats, so one
 merge rule serves both and no reader's expected type changed. It is read from `Duration (s)` in the
@@ -81,7 +92,7 @@ dbt's own `run_results.json` never reaches the run record, and the Fabric notebo
 read cannot be trusted, so it dies naming what the table actually had. Duration sits in `OPTIONAL`
 instead, because its name is not measured against this app version the way the other five are, and a
 guessed name in `REQUIRED` could kill the CU read that works today to gain a number the page can live
-without. A miss costs the two time sections, logs what the table does have, and nothing else.
+without. A miss costs the rate row on the page, logs what the table does have, and nothing else.
 
 Three facts make everything else unnecessary:
 
@@ -114,224 +125,28 @@ bookkeeping. There used to be all four.
 **A run measured just now is a LOWER BOUND, and the page says so per column.** Dispatch `Dashboard`
 again an hour or two later and the numbers rise to their final value. Nothing has to be reconciled.
 
+**Committing the ledger is how the numbers reach the page.** Nothing has to be rendered or deployed
+afterwards: the published page fetches `history/cu.json` on every load. A pure top-up is therefore
+`gh workflow run Dashboard -f publish=false`, and the page shows the new numbers to the next reader.
+
 ## Running it
 
 ```
-gh workflow run Dashboard                       # measure, then publish
-gh workflow run Dashboard -f measure=false      # re-render from what is committed — free, offline
-                                                #   `publish` needs a status function for this path:
-                                                #   GitHub's skip propagates past render's always()
-gh workflow run Dashboard -f record=30752070535 # render one run alone
+gh workflow run Dashboard                        # measure, then deploy the page
+gh workflow run Dashboard -f publish=false       # measure only — the live page picks it up anyway
+gh workflow run Dashboard -f measure=false       # deploy only, when dashboard/ changed
+gh workflow run Dashboard -f since='2026-08-01 00:00:00'   # re-read a window by hand
 ```
 
-Locally, with no credentials and nothing installed:
+Locally, with a token in `PBI_TOKEN` and the four GUIDs in the environment:
 
 ```
-python cu/dashboard.py > dashboard.md
-python cu/report_html.py dashboard.md "footer" > index.html
+python cu/measure.py
 ```
 
-The published page is <https://djouallah.github.io/fabric-dbt-benchmark/>, built from Actions with no
-`gh-pages` branch and nothing committed; the per-run copy is that run's `dashboard` artifact. It is
-self-contained by construction — inline CSS, no script, font or image, nothing fetched to render —
-because that artifact has to open off a local disk years later.
-
-## The page
-
-- **Bar charts first**, analytics then ETL, **cheapest first** because "lower is better" makes the
-  ranking the finding. A **zero sorts to the bottom**, never the top: zero means the engine did no
-  such work, and at the top under that caption it would read as the winner.
-- **The two charts are keyed on DIFFERENT THINGS, and that is the design.** **Analytics is one bar
-  per PARQUET LAYOUT**, because Power BI never sees the engine — it opens parquet through Direct Lake
-  and transcodes row groups, so what a query costs belongs to what was written and the writer is
-  metadata. The bar is **named for its writer and captioned with the shape** — `spark V-Order` over
-  `V-Order · 10–11 files · 10–11 RG`: the grouping is the layout, but a file count is a poor name
-  even when it is the real subject, so the shape sits underneath where it explains why two writers
-  would ever share a bar. **ETL is one bar per column**, because there the writer and the compute it
-  was given are the entire subject, and it keeps the adapter-and-vCores caption.
-  What forced this: duckrun at 64 cores and at 32 wrote 4 files and 27 row groups either way, so two
-  bars 50% apart was not a comparison — it was one layout measured twice, presented as two results.
-  Grouping merges them and the range says what the gap really was.
-  **Grouping is MEASURED, labelling is DECLARED.** The key is
-  `(V-Order, power-of-two band of files, power-of-two band of row groups)` read off the parquet as
-  `stats.py` saw it, so two unrelated engines that wrote the same shape *do* share a bar. The caption
-  comes from `LAYOUT_CONFIG`, so it does not re-word itself every time a record lands. On the current
-  records that yields five groups from seven columns, and it surfaces two things the old chart hid:
-  V-Order on and off sit in the same file band and differ 2.8× (1,332 against 3,769), which is the
-  sharpest experiment on the page; and NEE on and off produce the same layout, so the gap between
-  them was never an NEE effect.
-  Banded, not exact: exact equality splits dwh's own two runs from each other (78 files and 80) and
-  splits duckrun on 1.1 MB of size. The accepted cost is the boundary — 15 row groups and 17 land in
-  different bands. A record with **no** file count is `None` and keeps a bar of its own; two
-  unmeasured layouts are not one identical layout.
-- **A column header is an engine plus the SHORTEST config that still tells it apart** (`variant_tag`).
-  It appears in every table and both charts, so width is a real cost, and it used to read
-  `spark·readHeavyForPBI+NEE` — Microsoft's name for an intended workload plus a double negative on
-  its sibling. Two rules cut it to `spark·V-Order+NEE` / `spark·V-Order` / `spark·default+NEE` /
-  `spark·default`. The profile is named by its **effect**, through the same `PROFILE_LABEL` the layout
-  captions use, so a profile is called the same thing wherever it appears on the page. And a flag that
-  is **off is absent** rather than negated — `+noNEE` spends header width saying nothing happened, and
-  the contrast with the run that did enable it is what a reader is looking for.
-  Absence-means-off is only unambiguous while every config of that engine RECORDS the flag, so
-  `columns_for` checks it: where two configs would collapse to one header — a record predating the
-  dispatch input has no key at all and would collide with an explicit `false` — the whole engine falls
-  back to the explicit spelling. A page printing one column name twice is unreadable and silent about
-  why. The tag still never contains `COL_SEP`; `base_engine` splits on it.
-  The **engine half** takes `ENGINE_LABEL` too, so a column reads `duckdb iceberg·64c` and the page
-  calls that engine one thing throughout — the layout rows had said `duckdb iceberg` while the columns
-  said `iceberg`, which read as two subjects. That is only safe because **`base_engine` reverses the
-  label**: `STACK`, the adapter caption and the (engine, variant) join to a record are all keyed on
-  `iceberg`, and without the reversal each would silently miss — a blank caption, a chart row quietly
-  gone — rather than raise.
-- **Engine-major table**, engines across, **`compute` and `storage`** down, class subtotals in bold.
-  The split comes from the OPERATION, and it has to: compute and storage share an ITEM. Measured
-  against the live model — `dbt_spark` [Lakehouse] bills 188,636 CU of `High Concurrency Session Livy
-  Run` and 20,268 of `OneLake Write via Redirect` against one GUID; `dbt_dwh` [Warehouse] bills
-  129,177 of `Warehouse Query` beside its own OneLake writes. **Every `OneLake …` operation is
-  storage; everything else is compute.** A dash means no operation of that kind was billed there at
-  all — an iceberg lakehouse is 40,832 CU of pure OneLake, because its compute is the notebook, a
-  different item. A class is only decomposed when some column holds more than one bucket, so
-  `analytics` stays a single bold row.
-- **Every lakehouse has a paired SQL analytics endpoint**, a separate billable `Warehouse` item with
-  the same display name: `dbt_spark` 306.3 CU, `dbt_iceberg` 245.7, `dbt_delta` 278.9, all of it
-  `SQL Endpoint Query`. It was invisible to the ledger until `provision.py` started recording it —
-  the GUID is not the lakehouse's. It is never deleted by the teardown: Fabric removes it with its
-  parent. **`dbt_landing` has one too, and it is the one door landing CU got onto the page through:**
-  its role is `sql_endpoint`, not `landing`, so the role filter never saw it, and the same item
-  appeared in every run record charging every engine 130.4 CU it did not spend. `landing_guids()`
-  catches it by NAME against the record's own `landing` items, leaving an engine's own endpoint
-  alone.
-- **Engine-major is what makes the width work**: item-major needs a column per operation type and a
-  lakehouse alone brings a dozen. **No total column and no grand-total row** — both would sum ACROSS
-  engines, which is the one sum on this page that answers nothing, since the engines are alternatives
-  to each other.
-- **`landing` CU is not on the page at all.** The page compares ENGINES. `dbt_landing` is the
-  ingestion staging area — no run deletes it, every run reads it — so its CU is one cumulative figure
-  belonging to no engine, and it answers no question this page asks. It was briefly given a row of
-  its own; the same number repeated under every column read as "each of them spent this". The
-  archive's SIZE is still reported, because input volume is a different question from what ingesting
-  it cost.
-- **Input archive, LAST on the page**: files and bytes in the landing archive, from `stats.py`'s
-  listing. Every other number describes what came OUT, and this is the one copy of what went in —
-  shared by every engine, so it belongs with the provenance rather than among the columns it is not
-  one of. It used to sit between the engine table and the layout, where a table with no engine in it
-  read as a column that had gone missing.
-- **Table layout**, every shared table, mart first, **one row per WRITER, and no `writer` column** —
-  the row label IS the writer, so a `duckdb (iceberg)` cell beside a `duckdb iceberg` label was one
-  fact printed twice. `spark V-Order`,
-  `spark default`, `duckrun`, not `spark·V-Order+NEE` and `duckrun·64c`. The resource profile
-  is named by what it does to the parquet rather than by Microsoft's name for the workload it was
-  designed for, and the core count and NEE flag are dropped because two runs each showed they never
-  reach it. duckrun's two core counts and spark's two NEE settings therefore collapse to one row —
-  they had written identical layouts, so the rows they replaced were the same row printed twice. This
-  is also what makes the table agree with the chart above it: the table groups by the DECLARED writer
-  and the chart by the MEASURED parquet, two directions onto the same rows, and a disagreement
-  between them would be worth knowing.
-  The mart block alone carries the analytics CU and the three query-time columns — both are one
-  number per writer, not per table — and it quotes the **same** CU as the chart above it, the mean
-  over every run, not that column's latest.
-  **The row count is in the heading, not a column**: it is identical on every row by design, which is
-  the parity statement the whole project rests on, and 143,980,961 repeated down a table is a wide
-  column carrying one fact. When the engines DISAGREE the heading says so and the column comes back,
-  because that disagreement is the loudest signal this page has. `rows per RG` is abbreviated
-  (`13.1M`, `122.9K`) — that number spans four orders of magnitude across these engines and the ratio
-  is the finding, not the twelve digits.
-  `iceberg` is written **`duckdb iceberg`** (`ENGINE_LABEL`): it reads as a format beside three
-  engines, when the writer is the same DuckDB that duckrun uses pointed at an Iceberg REST catalog
-  instead of delta-rs — and on a page about what got written, that is the entire reason the pair
-  exists.
-- **The Time section is a TABLE and gets no chart, deliberately.** The page has two bars and both are
-  capacity units, the measure it leads with and can defend. A third in the same visual language,
-  drawn from billed operation seconds that sum across concurrent operations and are not wall clock,
-  invites exactly the reading the note under it spends four sentences withdrawing. Numbers that need
-  a caveat belong in a table where the caveat sits beside them.
-- **`cold` / `warm` / `hot` are THREE COLUMNS OF THE MART BLOCK, not a section.** The one thing on
-  the page that is not capacity units, and it comes from the run records rather than the ledger:
-  `benchmark.timings.<model>.<query>` is already on every record. `benchmark/render_report.py`
-  renders it per dispatch, but a dispatch builds ONE engine, so that report always has a single
-  column and a degenerate ranking — composed here from every engine's latest run, this is the only
-  place the three tiers can be read ACROSS engines at all.
-  They were briefly a table of their own. **That was wrong, and the placement is the whole point:** a
-  separate table put the layout and the speed it produced on two different tables, when the only
-  question worth asking of these numbers is whether one explains the other. On one row, `files`,
-  `row groups`, `size MB` and `vorder` sit beside the milliseconds they produced, per engine, and a
-  reader can see for themselves whether a smaller file count bought a faster first visit — iceberg's
-  357 files and 122k-row row groups next to its 103,328 ms cold, against duckrun's 4 files and
-  23,491 ms. **cold** is the first visit to a freshly deployed semantic model, **warm** the second,
-  **hot** the median of the passes after that; the record's own `tier` field is something else
-  entirely (the query CATEGORY — `probe`/`composite`/`raw`/`hot_only`) and must not be confused with
-  them. Cold is the tier layout can actually MOVE — it is the one that transcodes columns out of
-  parquet, while warm and hot converge on what the model already holds in memory.
-  Mart block only, for the same reason the CU column is: one number per ENGINE, not per table, so on
-  every block it would read as one measurement per table. Each tier is summed over the queries
-  **every column carries at that tier**, and the closing note counts them, because it genuinely
-  differs — the selectivity-ladder queries have no `cold_ms` at all, the top DUID being resolved only
-  after pass 1, so cold is two queries short of warm and hot.
-  Deliberately **reimplemented rather than imported** — `render_report._totals`/`rank` take exactly
-  this shape, and `cu/` importing `benchmark/` would end the isolation that makes this directory
-  deletable by removing one folder and one workflow file.
-- **`compute CU per second` is a ROW OF THE ENGINE TABLE, not a section, and the raw seconds are
-  not shown at all.** It comes off the SAME Capacity Metrics row as the CU above it — same GUIDs,
-  same roles, same compute/storage split — so a table of its own restated the whole join to add two
-  numbers per class. The seconds themselves are gone because they are BILLED OPERATION seconds that
-  sum across concurrent operations — spark's five Livy REPLs total more than the clock they ran on —
-  so the number needed four sentences of hedging to be read at all, while the rate needs none: the
-  concurrency is in the numerator and the denominator alike, so it cancels. The rate was the only
-  thing the seconds were there to support.
-  **Seconds here are BILLED OPERATION seconds, not wall clock**, and the difference is not small on
-  every engine: a duckrun leg is one long notebook run so the two nearly agree, while spark opens
-  five concurrent Livy REPLs under one session whose durations sum to more than the clock ever
-  showed. **The rate is the sturdiest number in the section** — the average capacity the node drew
-  while it ran, and the concurrency that makes spark's seconds hard to read appears in the numerator
-  and the denominator alike, so it cancels. A high rate is a WIDE engine, not a slow one.
-  **It is COMPUTE ÷ COMPUTE, and that is not a refinement — a total-over-total rate is wrong.** A
-  storage operation bills real CU over a duration of essentially nothing (one `OneLake Write via
-  Redirect`: 383.25 CU in **0.049 s**), so including storage does not dilute the rate, it detonates
-  it, by an amount tracking only how much OneLake traffic the engine made. `CU (s)` is literally
-  capacity-units × seconds, so `CU ÷ duration` is capacity units DRAWN — for a single-node Python
-  notebook that is **`cores` ÷ 2**, fixed for a given core count and not a constant: 32.0 at the 64
-  vCores dispatched by default, 16.0 at 32. The check when this reads oddly is two DuckDB legs at the
-  **same** `cores` reading the **same** number, never that they read 32; `vcores` is part of
-  `variant()`, so two core counts are two columns and the caption names each. The rows are **absent**
-  when the ledger has no seconds — a ledger written before the duration read, or a model that does
-  not expose the column — because absent says "not measured" and a zero would say "instant". Same
-  rule on a class subtotal: a column the ledger has not read yet is a **dash**, never `0.0`, which
-  would say the engine did that work for free.
-- **A record has to be built and benchmarked to reach the page.** `dashboard.py`'s `incomplete()`
-  skips anything else and names why — a run with no benchmark shows an empty analytics column, which
-  reads as "querying this engine was free" rather than "nobody measured it".
-- **A run that was never TORN DOWN still renders, with a caveat.** Its items are alive and Fabric
-  keeps billing them, so its total creeps upward and is an upper bound on that run rather than a
-  measurement of it. It was briefly rejected outright; the creep is small and a column that
-  disappears costs more than one carrying a caveat, so `drifting()` marks it **still billing** in the
-  sources table instead — the loudest of the three states, because it is the only one that does not
-  resolve by waiting. Deleting the items settles it.
-- **Columns are each engine's latest run, once per config.** One dispatch builds one engine, so
-  rendering the newest record alone would give a comparison page with one column. spark under
-  `readHeavyForPBI` and spark under `writeHeavy` are two columns, because one number cannot answer
-  for both. The cost — columns are different dispatches, days apart — is stated in the sources table
-  rather than smoothed over.
-
-The chart travels through the markdown as an HTML comment (`<!--chart:{…}-->`) that `report_html.py`
-turns into SVG. The same markdown goes to the job summary, which sanitises inline SVG, so a comment
-is the one form that is invisible there and drawable here. Do not "simplify" it into raw SVG.
-
-## The CU columns are comparable, and that is the point of the unit
-
-The engines are handed different compute — a 64-vCore notebook, a Livy pool, a warehouse — and it
-does not qualify the comparison. **A capacity unit already prices that in.** 64 vCores for ten
-minutes costs more CU than 8 vCores for ten minutes, which is exactly why CU leads: it is the bill.
-
-**The two time sections do not have that property, and the page says which is which.** Billed
-operation seconds SUM across concurrent operations, so a spark leg totals more than the clock it ran
-on; query milliseconds are one sample of a shared capacity rather than a bill. They are on the page
-because they answer a question CU cannot — how long a person waits, and how hard the engine drew
-while they did — and each section states where its own number bends. Do not flatten the three into
-one ranking.
-
-The chart captions still name the configuration (`dbt-duckrun · 64 vCores`) because it says which
-setting produced the number — a run at a different core count is a different data point, not an
-invalid one.
+`RUN_RECORD` unset is deliberately a no-op elsewhere in the repo; here the run records are read from
+`CU_RUNS_DIR` and the ledger written to `CU_LEDGER`, both overridable, so a by-hand read can be
+pointed at a copy rather than at the committed file.
 
 ## Things that will bite
 
@@ -347,7 +162,9 @@ invalid one.
   two.
 - **Column names move between app versions.** Microsoft's own accelerator ships four DAX variants for
   this reason. Every role is resolved against the real schema with `INFO.VIEW.COLUMNS()`, and a miss
-  fails naming what was actually there.
+  fails naming what was actually there. This caught a real miss: the candidate list said `Item Name`,
+  the app says `Item`. Watch `Datetime` in particular — the table also has a DATE-ONLY `Date` column,
+  and resolving the floor to that would compare against midnight and silently widen every window.
 - **Every real GUID is a secret.** `FABRIC_WORKSPACE_ID`, `CU_CAPACITY_ID`,
   `CU_METRICS_WORKSPACE_ID`, `CU_METRICS_MODEL_ID`. No tracked file holds one, an input's `default:`
   cannot take a context, and `measure.py` keeps no fallback — a hardcoded one would put the value
@@ -355,9 +172,12 @@ invalid one.
 - **14-day retention, ~6 minute lag, 5–64 minute smoothing.** Which is why the floor is clamped to
   the retention horizon: reading further back returns nothing, and an unbounded floor would grow the
   query for the life of the repo.
-- **The render job checks out `ref: <branch>`, not the triggering SHA.** The measure job commits the
-  ledger; a default checkout would read the version from before that commit and every page would be
-  one dispatch stale.
+- **Moving a record in or out of `history/runs/legacy/` MOVES THE FLOOR.** It is derived from the
+  earliest remaining run start, so parking a record narrows the window and the items of any run
+  outside it stop being read. That is what made duckrun read 14.8 CU for a moment. Re-dispatch
+  `Dashboard` after moving one.
+- **`measure.py` deliberately does NOT skip incomplete records.** Those items really did cost
+  capacity and the ledger is the ledger; it is the PAGE that must only compare like with like.
 
 ## Env
 
@@ -371,26 +191,26 @@ invalid one.
 | `CU_MODEL_OFFSET_HOURS` | `10` | the app's own UTC offset |
 | `CU_RETENTION_DAYS` | `14` | how far back the floor is allowed to reach |
 | `CU_RUNS_DIR` / `CU_LEDGER` | `history/runs` / `history/cu.json` | |
-| `CU_RECORD` | — | render one run alone (dashboard only) |
-| `CU_LAYOUT_TABLE` | `fct_summary` | which table leads the layout section |
+
+The page's own knobs are query parameters now, not environment variables — see
+[`dashboard/`](../dashboard/README.md).
 
 ## Tests
 
-`python -m pytest cu/ -q` — offline, no token, ~1s, and both jobs of the workflow run it. Everything
-it pins fails as a plausible number rather than as an error: the three ledger rules, the GUID join,
-that an absent item keeps its value, that a smaller later read never lowers a total, and that a
-variant tag never contains the column separator.
+`python -m pytest cu/ -q` — offline, no token, ~1s, and the measure job runs it before the login.
+Everything it pins fails as a plausible number rather than as an error: the three ledger rules, the
+settle conditions, that an absent item keeps its value, and that a smaller later read never lowers a
+total.
 
 ## Isolation
 
-No imports from `benchmark/`, no `run_report.json`, no shared concurrency group, no ADOMD, no .NET,
-no duckrun. `requests` is the entire runtime dependency of the measurement and the render layer has
-none at all, plus `pytest` for the offline suite. It is built to be deleted by removing one directory
-and one workflow file — do not "DRY it up" against `benchmark/`; the duplication is what keeps that
-deletion free.
+No imports from `benchmark/` and none from `dashboard/`. No `run_report.json`, no shared concurrency
+group, no ADOMD, no .NET, no duckrun. `requests` is the entire runtime dependency, plus `pytest` for
+the offline suite. It is built to be deleted by removing one directory — do not "DRY it up" against
+`benchmark/xmla_compare.py`; the duplication is what keeps that deletion free.
 
-## `history/legacy/`
+## `history/runs/legacy/`
 
-Five records from the name-matching era, kept and read by nothing. They carry no item GUIDs, so they
-cannot be joined to a ledger, and their numbers were measured under an attribution that put whole
-notebooks in `shared`. They are there to be read by a human, not by this code.
+Records that are not a whole generation, kept and read by nothing on the page. The oldest carry no
+item GUIDs at all, so they cannot be joined to a ledger, and their numbers were measured under an
+attribution that put whole notebooks in `shared`. They are there to be read by a human.

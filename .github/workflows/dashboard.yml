@@ -4,46 +4,65 @@ name: Dashboard
 # the `Benchmark` workflow recorded, tops up the ledger, and publishes
 # https://djouallah.github.io/fabric-dbt-benchmark/.
 #
-#   measure (cu/measure.py -> history/cu.json)  ->  render (cu/dashboard.py -> the page)
+#   measure (cu/measure.py        -> history/cu.json)   commits the ledger
+#   page    (dashboard/build.mjs  -> site/index.html)   deploys the SHELL, which carries no data
 #
-# **Two JSON documents, joined on the item GUID.** `Benchmark` commits
-# `history/runs/<ts>-<run id>.json` naming every Fabric item it created, with its role; `measure`
-# builds `history/cu.json`, a cumulative `{item GUID: {operation: {hour: CU}}}` ledger. The page is
-# the join. Nothing else passes between the two workflows — no artifact, no shared env, no `needs:`.
+# **TWO DIRECTORIES, AND THE SPLIT IS THE JOB EACH DOES.** `cu/` EXPORTS: it reads the Capacity
+# Metrics model over DAX and writes `history/cu.json`, and that is all it does — Python, `requests`,
+# no rendering. `dashboard/` PRESENTS: `app.js`, the shell it lives in, and the build that emits both
+# copies of it — JavaScript, no network of its own beyond the two JSON documents it fetches. Neither
+# imports the other and they share no file; what passes between them is `history/`, on disk and in
+# git. Either can be deleted without touching the other.
+#
+# **THE PAGE IS DYNAMIC, AND THAT IS THE POINT OF THIS SHAPE.** `site/index.html` holds the stylesheet
+# and `dashboard/app.js` and NOTHING ELSE. It reads `history/runs/*.json` and `history/cu.json` from
+# `raw.githubusercontent.com` in the reader's browser, on every load — so a `Benchmark` run that
+# commits a record, or a `measure` job that commits the ledger, shows up on the published page with no
+# deploy at all. Publishing is what you do when the VISUALISATION changes. It used to be what you did
+# when a number changed, which meant every measurement dragged a Pages deploy behind it and a page
+# nobody had looked at could be published by a workflow nobody had watched.
+#
+# That is why `render` is gone and there is no `dashboard.md`: `cu/dashboard.py` and
+# `cu/report_html.py` were DELETED rather than kept beside `app.js`. Two implementations of the GUID
+# join is exactly the drift the rest of this repo is built to avoid, so the browser's is the only one.
+#
+# **Two JSON documents, joined on the item GUID.** `Benchmark` commits `history/runs/<ts>-<run id>.json`
+# naming every Fabric item it created, with its role; `measure` builds `history/cu.json`, a cumulative
+# `{item GUID: {operation: CU}}` ledger. The page is the join. Nothing else passes between the two
+# workflows — no artifact, no shared env, no `needs:`.
 #
 # **The measurement does not refresh the metrics model and resolves no names.** That refresh is what
 # Power BI throttled per-identity — every attempt 429 on two consecutive runs, and 41,887 CU of
 # notebook compute landing under `shared` because the items resolved to no name. The fact table
 # carries the item GUID and the workspace id as columns of its own, so neither is needed.
 #
-# **Re-dispatching is the top-up.** An hour's CU keeps growing for ~70 minutes after the fact, so a
-# run measured minutes ago is a LOWER BOUND — the page says so per column. `measure` re-reads only
-# the time that can still move: an item is frozen once a read changed nothing about it and it has
-# been quiet for three hours, and its window is never queried again. So dispatching this twice is
-# how a number becomes final, and dispatching it ten times costs almost nothing.
+# **Re-dispatching is the top-up.** An hour's CU keeps growing for ~70 minutes after the fact, so a run
+# measured minutes ago is a LOWER BOUND — the page says so per column. Dispatching this twice is how a
+# number becomes final, and dispatching it ten times costs almost nothing. With the page live, a
+# top-up needs no publish: untick `publish` and the deploy is skipped while the numbers still land.
 #
 # **`workflow_dispatch` only, and that is the standing rule.** No `schedule`, no `push`, no
-# `workflow_run`, no `workflow_call` — deliberately NOT chained off `Benchmark`. Publishing is a
-# decision: a page that republishes itself whenever a measurement lands will eventually publish one
-# nobody looked at, and this page is the public face of the repo. Committing the ledger from CI is
-# only safe because nothing here answers a push.
+# `workflow_run`, no `workflow_call` — deliberately NOT chained off `Benchmark`. Committing the
+# ledger from CI is only safe because nothing here answers a push.
 on:
   workflow_dispatch:
     inputs:
-      # Off re-renders from the committed ledger: free, offline, and the way to fix the page
+      # Off re-publishes from the committed ledger: free, offline, and the way to fix the page
       # without spending a metrics query.
       measure:
-        description: "measure CU before rendering"
+        description: "measure CU before publishing"
         type: boolean
         default: true
-      # A substring of the record's FILENAME, so a run id or a date both work.
-      record:
-        description: "render one run alone — run id or date; blank = latest per engine"
-        type: string
-        default: ""
+      # The page reads its data live, so a deploy only carries `dashboard/app.js` and the stylesheet.
+      # Untick it when this dispatch is a pure top-up of the numbers — the published page will
+      # show them anyway, on the next load, because it fetches them itself.
+      publish:
+        description: "deploy the page (only needed when dashboard/ changed)"
+        type: boolean
+        default: true
       # In the MODEL'S clock (the app's own +10 offset, not UTC) — a wrong value reads as "no
-      # activity" rather than as an error. Blank is computed from the earliest unsettled run,
-      # which is what you want; set it to re-read a window by hand.
+      # activity" rather than as an error. Blank is computed from the earliest unsettled run, which is
+      # what you want; set it to re-read a window by hand.
       since:
         description: "CU floor override, in the model's clock (+10)"
         type: string
@@ -99,7 +118,7 @@ jobs:
       # than as an error: summing instead of overwriting multiplies an hour by how often it was read,
       # removing on absence erases everything past the app's 14-day retention, settling too early
       # freezes a partial total forever.
-      - name: Test the ledger and the render layer offline
+      - name: Test the ledger offline
         run: python -m pytest cu/ -q
 
       # Same OIDC federated identity as the Benchmark workflow. allow-no-subscriptions because the
@@ -126,9 +145,11 @@ jobs:
         run: python cu/measure.py
 
       # The ledger is the only storage that outlives the app's ~14-day retention, so committing it IS
-      # the measurement's output. `pull --rebase` because a queued dispatch can have moved main since
-      # checkout; the diff check exits 0 so a re-read that changed nothing does not fail the job —
-      # which is the expected outcome once everything has settled.
+      # the measurement's output — and, now that the page reads `history/` directly, it is also how
+      # the numbers REACH the page. Nothing downstream has to run for a reader to see them.
+      # `pull --rebase` because a queued dispatch can have moved main since checkout; the diff check
+      # exits 0 so a re-read that changed nothing does not fail the job, which is the expected outcome
+      # once everything has settled.
       - name: Commit the ledger
         run: |
           set -euo pipefail
@@ -140,78 +161,71 @@ jobs:
           git pull --rebase --autostash origin "${{ github.ref_name }}"
           git push origin "HEAD:${{ github.ref_name }}"
 
-  # Free, offline, and it CANNOT fail for a Fabric reason — no token, no Azure login, no `requests`.
-  # That last one is enforced by not installing it: `measure.py` imports it optionally, so this job
-  # proves by running that the render path never reaches the network. It is what makes republishing a
-  # free, repeatable act rather than a measurement.
+  # Free, offline, and it CANNOT fail for a Fabric reason — no token, no Azure login, no Python. It
+  # builds two HTML files out of the same `dashboard/app.js`:
   #
-  # `always()` so a throttled measurement still publishes the page from what is already committed.
-  render:
-    name: render the page
+  #   site/index.html   the LIVE page. No data in it; it fetches `history/` on load.
+  #   dashboard.html    the artifact copy, with `history/` inlined, for opening off a disk with no
+  #                     network years later. Same module, same render path — which is the only reason
+  #                     a frozen copy and the live page cannot disagree about a number.
+  #
+  # `always()` so a throttled measurement still publishes.
+  page:
+    name: build the page
     needs: measure
-    if: ${{ always() }}
+    # `!cancelled()`, not `always()`: a skipped or failed `measure` must still publish (that is the
+    # `-f measure=false` path, and the whole point of `continue-on-error` on the job above), but a
+    # cancelled run has nothing worth finishing. A status function is required either way — GitHub
+    # skips a job when ANY ancestor was skipped.
+    if: ${{ !cancelled() && inputs.publish }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
-    env:
-      CU_RECORD: ${{ inputs.record }}
-      PYTHONIOENCODING: utf-8
     steps:
       # `ref:` MATTERS. The default checkout takes `github.sha` — the commit that triggered the
-      # dispatch — so it would read the ledger as it was BEFORE the measure job committed to it, and
-      # every page would be one dispatch stale. Take the branch head instead.
+      # dispatch — so the ARTIFACT copy would be frozen from the ledger as it stood BEFORE the measure
+      # job committed to it. The live page is immune (it reads the branch head at view time), which is
+      # precisely the class of one-dispatch-stale bug this whole change removes; the snapshot is not.
       - uses: actions/checkout@v4
         with:
           ref: ${{ github.ref_name }}
 
-      - uses: actions/setup-python@v5
-        with: {python-version: "3.11"}
-      - run: pip install pytest
+      - uses: actions/setup-node@v4
+        with: {node-version: "22"}
 
-      - name: Test the render layer offline
-        run: python -m pytest cu/ -q
+      # The whole join, the labelling rules and both charts, offline, in about a second. This is the
+      # only gate on the page — there is no Python left in this job, which is what proves by running
+      # that the render path reaches no network of its own.
+      - name: Test the page offline
+        run: node --test dashboard/app.test.mjs
 
-      # stdout is the markdown; diagnostics (which runs were composed, what was folded) go to stderr.
-      - name: Render the dashboard
-        run: |
-          set -o pipefail
-          python cu/dashboard.py | tee dashboard.md | tee -a "$GITHUB_STEP_SUMMARY"
-
-      # Markdown -> one self-contained HTML file: inline CSS, no script, font or image, so the
-      # artifact copy opens off a local disk with no network years later. The bar charts travel
-      # through the markdown as HTML comments because GitHub sanitises inline SVG in a job summary —
-      # invisible there, drawn here.
-      - name: Render it as a page
+      - name: Build the live page and the offline copy
         run: |
           set -euo pipefail
-          mkdir -p site
-          python cu/report_html.py dashboard.md \
-            "Rendered by the \`Dashboard\` workflow, run ${{ github.run_id }} \
-             (\`${{ github.sha }}\`), from the run records and the CU ledger under \`history/\`. \
-             Each dispatch replaces this page; the per-run copy is that run's \`dashboard\` \
-             artifact." > site/index.html
+          node dashboard/build.mjs --out site/index.html
+          node dashboard/build.mjs --out dashboard.html --snapshot
+          # The live shell must not have picked up a snapshot: a page that ships its own data is a
+          # page that goes stale silently, which is the whole failure this arrangement removes.
+          grep -q '<script id="snapshot" type="application/json"></script>' site/index.html \
+            || { echo "site/index.html carries inlined data — it must not" >&2; exit 1; }
 
       - uses: actions/upload-artifact@v4
         with:
           name: dashboard
-          path: |
-            dashboard.md
-            site/index.html
+          path: dashboard.html
           if-no-files-found: error
 
       - uses: actions/upload-pages-artifact@v3
         with:
           path: site
 
-  # Separate job because `deploy-pages` needs the `github-pages` environment. `needs: render` means a
-  # render that failed cannot overwrite a good page with a half-written one.
-  publish:
+  # Separate job because `deploy-pages` needs the `github-pages` environment. `needs: page` means a
+  # build that failed cannot overwrite a good page with a half-written one.
+  deploy:
     name: publish
-    needs: render
-    # A status function, for the same reason `layout` carries one in benchmark.yml: GitHub skips a
-    # job when ANY ancestor was skipped, and it propagates straight through `render`'s `always()`.
-    # So `measure=false` — the documented free, offline re-render — rendered a page and silently
-    # published nothing, which looks exactly like a page that did not change.
-    if: ${{ !cancelled() && needs.render.result == 'success' }}
+    needs: page
+    # A status function, for the same reason `layout` carries one in benchmark.yml: GitHub skips a job
+    # when ANY ancestor was skipped, and it propagates straight through `page`'s `always()`.
+    if: ${{ !cancelled() && needs.page.result == 'success' }}
     runs-on: ubuntu-latest
     permissions:
       pages: write

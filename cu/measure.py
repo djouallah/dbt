@@ -464,7 +464,7 @@ def floor_for(runs, now_model):
 def main():
     if requests is None:
         die("`requests` is not installed, and reading the metrics model needs it. "
-            "(Only the reader does — cu/dashboard.py renders on the standard library alone.)")
+            "(Only this exporter needs it — the page in dashboard/ is JavaScript and fetches its own data.)")
     if not TOKEN:
         die("PBI_TOKEN is empty — the workflow mints it from the OIDC login.")
     if not (WS and MODEL):

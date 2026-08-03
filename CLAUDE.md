@@ -968,17 +968,66 @@ takes to **query** them. Ported from `djouallah/duckrun`'s `parquet_layout.yml`.
   its log — the deploy printed a **different item id** than last time (`replaced <guid>`, so pass 1
   really was cold) and pass 1 > pass 2 > pass 3.
 
-## `cu/` is the SECOND workflow, and it joins the run records on the item GUID
+## `cu/` and `dashboard/` are the SECOND workflow, and they join the run records on the item GUID
 
-`cu/` + `.github/workflows/dashboard.yml` ("Dashboard") answer what the workspace *cost*: CU per
-Fabric item, read from the Capacity Metrics app's own semantic model by DAX over the Power BI
-`executeQueries` endpoint. Fabric exposes **no per-operation CU REST API** — that model is the only
-authoritative source, which is why this exists. [cu/README.md](cu/README.md) has the detail.
+`cu/` + `dashboard/` + `.github/workflows/dashboard.yml` ("Dashboard") answer what the workspace
+*cost*: CU per Fabric item, read from the Capacity Metrics app's own semantic model by DAX over the
+Power BI `executeQueries` endpoint. Fabric exposes **no per-operation CU REST API** — that model is
+the only authoritative source, which is why this exists. [cu/README.md](cu/README.md) and
+[dashboard/README.md](dashboard/README.md) have the detail.
 
 **There are two workflows in this repo now, and this is one of them.** `Benchmark` builds, measures
 query time, deletes what it created and commits `history/runs/<ts>-<run id>.json`; `Dashboard` reads
 capacity for the GUIDs in those records, tops up `history/cu.json`, and publishes the page. `all.yml`,
 `dbt.yml` and `cu.yml` are gone.
+
+- **TWO DIRECTORIES, AND THE SPLIT IS THE JOB EACH DOES.** `cu/` **EXPORTS** — `measure.py` reads the
+  metrics model and writes `history/cu.json`, and that is all it does: Python, `requests`, no
+  rendering. `dashboard/` **PRESENTS** — `app.js`, the `index.html` shell it lives in, `build.mjs`,
+  and `app.test.mjs`: JavaScript, no third-party package of any kind, no bundler, no CDN. Neither
+  imports the other and they share no file; what passes between them is `history/`, on disk and in
+  git. Either can be deleted without touching the other, which is the same property `cu/` has always
+  had against `benchmark/`.
+- **THE PAGE IS DYNAMIC AND READS `history/` AT VIEW TIME, so PUBLISHING IS FOR THE VISUALISATION,
+  NOT FOR DATA.** `site/index.html` is a SHELL — the stylesheet and `dashboard/app.js`, no numbers in
+  it at all. `app.js` fetches `history/runs/*.json` and `history/cu.json` from
+  `raw.githubusercontent.com` in the reader's browser on every load and does the whole join there. So
+  a `Benchmark` run that commits a record, or a `measure` job that commits the ledger, shows up on the
+  published page **with no deploy** — `gh workflow run Dashboard -f publish=false` is a complete
+  top-up. Three things this pins down:
+  - **It must be `raw.githubusercontent.com`, never the Pages origin.** Raw serves the repo's own
+    files with `Access-Control-Allow-Origin: *` and a ~5 minute CDN TTL. Copying `history/` into
+    `site/` would put the data back inside the published artifact and make every commit a republish
+    again — the exact thing this removed. The repo is public and `history/` has always been
+    committed, so this is not a new disclosure.
+  - **The directory LISTING comes from the GitHub contents API**, because raw serves files and not
+    indexes. That is 60 requests/hour/IP unauthenticated, one per page load. When it refuses, the
+    page says so and names the limit — an empty page and a rate-limited API look identical to a
+    reader, and only one of them means "nothing has ever been measured".
+  - **DuckDB-WASM was considered and rejected.** ~300 KB of JSON, already in the shape the page
+    wants; ~30 MB of wasm from a CDN to query it is a cost with no matching benefit. An ad-hoc SQL
+    explorer over the records would be a different page, not this one.
+- **`cu/dashboard.py` and `cu/report_html.py` ARE DELETED, and keeping one would have been the
+  mistake.** Two implementations of the GUID join — one rendering markdown in Python, one rendering
+  HTML in the browser — is exactly the drift the rest of this repo is built against, so the browser's
+  is the only one. There is no `dashboard.md` and no job summary of the page any more. The whole
+  Python suite moved with it: `node --test dashboard/app.test.mjs` is now what pins the join, the
+  labelling rules and both charts, and `python -m pytest cu/ -q` pins the ledger alone.
+  The port was verified row-for-row against the last Python render — 73 table rows and both charts
+  identical on the real `history/`, with **one** difference: rounding TIES move by one in the last
+  digit, because Python rounds half-to-even and JavaScript half-up (`1,378.5` printed `1,378`, now
+  prints `1,379`). Display only.
+- **`build.mjs` emits TWO files from the same module, and the second is why the offline copy still
+  works.** `--out site/index.html` is the live shell; `--out dashboard.html --snapshot` inlines
+  `history/` into a `<script id="snapshot">` for the per-run artifact, which has to open off a local
+  disk with no network years later. `app.js` prefers an inlined snapshot over the network, so a frozen
+  copy and the live page cannot disagree about a number — same module, same render path. The build
+  parses the snapshot back out of the finished document (a truncated one renders as "no run records",
+  indistinguishable from a repo nobody has measured) and CI checks the LIVE shell carries no snapshot
+  (a page that ships its own data goes stale silently).
+- **The page's knobs are QUERY PARAMS now, not dispatch inputs.** `?record=30776174056` renders one
+  run alone, `?ref=`/`?repo=` read another branch or fork, `?table=` picks the layout table. A link to
+  one run's page is a link. The `record` workflow input and `CU_RECORD` are gone.
 
 - **EVERYTHING IS KEYED ON THE ITEM GUID, and that is the whole design.** The old reader matched item
   DISPLAY NAMES: `engine_of()` substring matching against `CU_ENGINES` in order, a `shared` column for
@@ -1080,7 +1129,7 @@ capacity for the GUIDs in those records, tops up `history/cu.json`, and publishe
   **`dbt_landing` HAS ONE TOO, and it is the one door landing CU got onto the page through.** The
   role is `sql_endpoint`, not `landing`, so `NON_ENGINE_ROLES` never saw it: the same item
   (`A8CF6202-…`, `created: false`) is in EVERY run record and charged EVERY engine 130.4 CU it did
-  not spend. `dashboard.py`'s `landing_guids()` catches it by NAME against the record's own `landing`
+  not spend. `dashboard/app.js`'s `landingGuids()` catches it by NAME against the record's own `landing`
   items — nothing hardcoded, and an engine's own endpoint is untouched. It distorted more than a
   total: that endpoint bills 130.4 CU over 83.2 s, a rate of **1.6**, against a 64-vCore notebook's
   **32.0**, so blending them made duckrun and iceberg — the same DuckDB in the same notebook at the
@@ -1124,18 +1173,18 @@ capacity for the GUIDs in those records, tops up `history/cu.json`, and publishe
   DuckDB duckrun uses, pointed at an Iceberg REST catalog instead of delta-rs — and on a page about
   what got written, that is the entire reason the pair exists. It names the **COLUMN** as well
   (`duckdb iceberg·64c`), so the page calls that engine one thing throughout instead of `iceberg` in
-  every header and `duckdb iceberg` in every layout row. That is only safe because **`base_engine`
+  every header and `duckdb iceberg` in every layout row. That is only safe because **`baseEngine`
   reverses it** — `STACK`, the adapter caption and the (engine, variant) join to a record stay keyed
   on `iceberg`, and without the reversal each would silently MISS rather than raise: a blank caption,
   a chart row quietly gone.
-  `variant_tag()` still names columns everywhere the ENGINE is the subject — the ETL chart, the CU
+  `variantTag()` still names columns everywhere the ENGINE is the subject — the ETL chart, the CU
   table, the sources table — but it now **shares `PROFILE_LABEL`**, so a profile reads the same in a
   header as in a caption, and it **omits a flag that is OFF**: `spark·V-Order+NEE` against
   `spark·V-Order`, never `spark·readHeavyForPBI+noNEE`. That header appears in every table and both
   charts, so its width is a real cost, and `+noNEE` was spending it to say nothing happened.
   Absence-means-off is only unambiguous while every config of the engine RECORDS the flag —
   a record predating the dispatch input has no key at all and would collide with an explicit `false` —
-  so `columns_for` checks for a collision and falls the whole engine back to the explicit spelling.
+  so `columnsFor` checks for a collision and falls the whole engine back to the explicit spelling.
   Two identical column headers is the failure it prevents, and it is silent about why.
   The layout table groups by the DECLARED writer while the chart groups by the MEASURED parquet — two
   directions onto the same rows, and a disagreement between them is worth knowing rather than
@@ -1195,7 +1244,7 @@ capacity for the GUIDs in those records, tops up `history/cu.json`, and publishe
   So the check when this reads oddly is **two DuckDB legs at the SAME `cores` reading the SAME
   number** — never that they read 32. (The page cannot blend two core counts into one column anyway:
   `vcores` is part of `variant()`, so a 32-core duckrun and a 64-core one are separate columns, and
-  `engine_caption` prints the count on the chart.) Both render **nothing** when their
+  `engineCaption` prints the count on the chart.) Both render **nothing** when their
   input is absent — a record with no tier timings adds no columns, a ledger with no `seconds` has no
   time section — which is the correct
   output: an absent section says "not measured", a table of zeros would say "free" or "instant".
@@ -1208,14 +1257,15 @@ capacity for the GUIDs in those records, tops up `history/cu.json`, and publishe
   `NON_ENGINE_ROLES` skips it and the `folder` outright. The archive's SIZE is still reported from
   `stats.py`'s listing — input volume is a different question from what ingesting it cost. With this
   gone there is no inexact attribution left anywhere on the page.
-- **The measurement can fail; the page cannot.** `measure` is `continue-on-error` and `render` is
-  `always()`, so a throttled metrics model costs a stale number and never a stale page. The render job
-  installs **no `requests`** — `measure.py` imports it optionally so that job proves by running that
-  the render path never reaches the network.
-- **The render job checks out `ref: ${{ github.ref_name }}`, not the default SHA.** `measure` commits
-  the ledger; a default checkout takes the triggering commit and would read the version from *before*
-  that, so every page would be one dispatch stale. Exactly the kind of bug that produces a plausible
-  page.
+- **The measurement can fail; the page cannot.** `measure` is `continue-on-error` and `page` is
+  `always()`, so a throttled metrics model costs a stale number and never a stale page. The `page` job
+  installs **no Python at all** — not even `requests` — which is what proves by running that the
+  render path reaches no network of its own beyond the two documents the browser fetches.
+- **The `page` job checks out `ref: ${{ github.ref_name }}`, not the default SHA — and the reason
+  narrowed.** `measure` commits the ledger; a default checkout takes the triggering commit and would
+  read the version from *before* that. The LIVE page is now immune to this, because it reads the
+  branch head at view time — which is exactly the class of one-dispatch-stale bug the whole dynamic
+  arrangement removes. The OFFLINE snapshot is not immune, and that is what the `ref:` still protects.
 - **`workflow_dispatch` only, same standing rule as the build.** No `schedule`, no `push`, no
   `workflow_run`. For the measurement the reason is capacity; for the page it is that publishing is a
   decision, and a page that republishes itself whenever a measurement lands will eventually publish
@@ -1241,14 +1291,17 @@ capacity for the GUIDs in those records, tops up `history/cu.json`, and publishe
   DAX variants because the schema moves between app versions. `discover_columns()` reads the real
   schema with `INFO.VIEW.COLUMNS()` and fails naming what was actually present. This caught a real
   miss: the candidates said `Item Name`, the app says `Item`.
-- **`CU_MODEL_OFFSET_HOURS` is the app's own offset (+10), not UTC**, and it is applied in two places
-  that must agree — `measure.py` turning a run's UTC start into a floor, and `dashboard.py` turning
-  the run window into ledger hours for the landing allocation. A wrong value reads as "no activity"
-  rather than as an error.
-- **`python -m pytest cu/ -q` is the gate and both jobs run it.** Offline, no token, ~1s. It pins the
-  three ledger rules, the settle conditions, the GUID join, the landing window allocation, and that a
-  variant tag never contains the column separator (`base_engine` splits on it, so a tag carrying one
-  would make a column id unparseable back to its engine and every `STACK` lookup would silently miss).
+- **`CU_MODEL_OFFSET_HOURS` is the app's own offset (+10), not UTC.** It is `measure.py`'s alone now
+  — it turns a run's UTC start into a floor in the model's clock. The page never sees it: it used to
+  apply the same offset to turn a run window into ledger hours for the landing allocation, and that
+  allocation is gone with landing CU. A wrong value reads as "no activity" rather than as an error.
+- **THERE ARE TWO OFFLINE GATES, one per directory, and each job runs its own.** `python -m pytest
+  cu/ -q` pins the ledger — the three rules, the settle conditions, that an absent item keeps its
+  value — and runs in `measure` before the login. `node --test dashboard/app.test.mjs` pins the page
+  — the GUID join, the compute/storage split, the layout banding, both charts, and that a variant tag
+  never contains the column separator (`baseEngine` splits on it, so a tag carrying one would make a
+  column id unparseable back to its engine and every `STACK` lookup would silently miss) — and runs in
+  `page`, which installs no Python. Both are offline, tokenless and about a second.
 - **`history/legacy/` holds five records from the name-matching era.** Nothing reads them. They carry
   no item GUIDs so they cannot be joined to a ledger, and their numbers were measured under an
   attribution that put whole notebooks in `shared`. Kept for a human, not for the code.
