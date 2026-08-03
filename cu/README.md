@@ -138,12 +138,30 @@ because that artifact has to open off a local disk years later.
 
 ## The page
 
-- **Bar charts first**, ETL and analytics, one bar per column, **cheapest first** because "lower is
-  better" makes the ranking the finding. A **zero sorts to the bottom**, never the top: zero means
-  the engine did no such work, and at the top under that caption it would read as the winner. Each
-  bar carries the adapter and the compute (`dbt-duckdb · 64 vCores`), because `iceberg` beside
-  `duckrun` reads as an engine difference when it is a *writer* difference — same DuckDB, same
-  notebook, same size.
+- **Bar charts first**, analytics then ETL, **cheapest first** because "lower is better" makes the
+  ranking the finding. A **zero sorts to the bottom**, never the top: zero means the engine did no
+  such work, and at the top under that caption it would read as the winner.
+- **The two charts are keyed on DIFFERENT THINGS, and that is the design.** **Analytics is one bar
+  per PARQUET LAYOUT**, because Power BI never sees the engine — it opens parquet through Direct Lake
+  and transcodes row groups, so what a query costs belongs to what was written and the writer is
+  metadata. The bar is labelled by the layout (`V-Order · 10–11 files · 10–11 RG`, `4 files · 27 RG`)
+  and captioned by the writer. **ETL is one bar per column**, because there the writer and the
+  compute it was given are the entire subject, and it keeps the adapter-and-vCores caption.
+  What forced this: duckrun at 64 cores and at 32 wrote 4 files and 27 row groups either way, so two
+  bars 50% apart was not a comparison — it was one layout measured twice, presented as two results.
+  Grouping merges them and the range says what the gap really was.
+  **Grouping is MEASURED, labelling is DECLARED.** The key is
+  `(V-Order, power-of-two band of files, power-of-two band of row groups)` read off the parquet as
+  `stats.py` saw it, so two unrelated engines that wrote the same shape *do* share a bar. The caption
+  comes from `LAYOUT_CONFIG`, so it does not re-word itself every time a record lands. On the current
+  records that yields five groups from seven columns, and it surfaces two things the old chart hid:
+  V-Order on and off sit in the same file band and differ 2.8× (1,332 against 3,769), which is the
+  sharpest experiment on the page; and NEE on and off produce the same layout, so the gap between
+  them was never an NEE effect.
+  Banded, not exact: exact equality splits dwh's own two runs from each other (78 files and 80) and
+  splits duckrun on 1.1 MB of size. The accepted cost is the boundary — 15 row groups and 17 land in
+  different bands. A record with **no** file count is `None` and keeps a bar of its own; two
+  unmeasured layouts are not one identical layout.
 - **Engine-major table**, engines across, **`compute` and `storage`** down, class subtotals in bold.
   The split comes from the OPERATION, and it has to: compute and storage share an ITEM. Measured
   against the live model — `dbt_spark` [Lakehouse] bills 188,636 CU of `High Concurrency Session Livy
@@ -174,8 +192,24 @@ because that artifact has to open off a local disk years later.
   it cost.
 - **Input archive**: files and bytes in the landing archive, from `stats.py`'s listing. Every other
   number on the page describes what came OUT.
-- **Table layout**, every shared table, mart first. The mart block alone carries the analytics CU and
-  the three query-time columns — both are one number per engine, not per table.
+- **Table layout**, every shared table, mart first, **one row per WRITER** — `spark V-Order`,
+  `spark default`, `duckrun`, not `spark·readHeavyForPBI+NEE` and `duckrun·64c`. The resource profile
+  is named by what it does to the parquet rather than by Microsoft's name for the workload it was
+  designed for, and the core count and NEE flag are dropped because two runs each showed they never
+  reach it. duckrun's two core counts and spark's two NEE settings therefore collapse to one row —
+  they had written identical layouts, so the rows they replaced were the same row printed twice. This
+  is also what makes the table agree with the chart above it: the table groups by the DECLARED writer
+  and the chart by the MEASURED parquet, two directions onto the same rows, and a disagreement
+  between them would be worth knowing.
+  The mart block alone carries the analytics CU and the three query-time columns — both are one
+  number per writer, not per table — and it quotes the **same** CU as the chart above it, the mean
+  over every run, not that column's latest.
+  **The row count is in the heading, not a column**: it is identical on every row by design, which is
+  the parity statement the whole project rests on, and 143,980,961 repeated down a table is a wide
+  column carrying one fact. When the engines DISAGREE the heading says so and the column comes back,
+  because that disagreement is the loudest signal this page has. `rows per RG` is abbreviated
+  (`13.1M`, `122.9K`) — that number spans four orders of magnitude across these engines and the ratio
+  is the finding, not the twelve digits.
 - **`cold` / `warm` / `hot` are THREE COLUMNS OF THE MART BLOCK, not a section.** The one thing on
   the page that is not capacity units, and it comes from the run records rather than the ledger:
   `benchmark.timings.<model>.<query>` is already on every record. `benchmark/render_report.py`

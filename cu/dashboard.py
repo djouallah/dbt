@@ -335,6 +335,165 @@ def variant_tag(sig):
     return "+".join(bits) or "unrecorded"
 
 
+# ------------------------------------------------------------------- what a layout IS, and whose
+#
+# Power BI never sees the engine. It opens parquet through Direct Lake and transcodes row groups, so
+# what a query costs is a property of the LAYOUT and the writer that produced it is metadata. That is
+# why the analytics chart groups by what was written while the ETL chart — where the writer and the
+# compute it was given are the entire subject — does not.
+
+# The dispatch config that is SHOWN to change what gets written. `vcores` and
+# `native_execution_engine` are excluded, and that is measured rather than assumed: duckrun at 64 and
+# at 32 cores wrote 4 files and 27 row groups either way, and spark under `readHeavyForPBI` wrote the
+# same layout with NEE on and off. Neither reaches the parquet, so neither belongs on a caption about
+# parquet — `duckrun·64c, duckrun·32c` names one layout twice and puts a knob in front of the reader
+# that demonstrably had nothing to do with it. `resource_profile` stays because it plainly does:
+# `readHeavyForPBI` writes V-Order at ~10 files, `writeHeavy` writes neither.
+LAYOUT_CONFIG = ("resource_profile",)
+
+# Which table the layout grouping and the mart block are ABOUT.
+LAYOUT_TABLE = os.environ.get("CU_LAYOUT_TABLE", "fct_summary").strip()
+
+# A resource profile named by WHAT IT DOES to the parquet, because that is the only thing a reader of
+# this page needs from it. `readHeavyForPBI` is the one profile that turns V-Order on;
+# `writeHeavy` is the workspace default and turns it off. Microsoft's names describe an intended
+# workload, which is a different question from what came out. An unmapped profile keeps its own name
+# rather than being guessed at — `readHeavyForSpark`, for one, sets no vorder at all despite reading
+# like it would.
+PROFILE_LABEL = {"readHeavyForPBI": "V-Order", "writeHeavy": "default"}
+
+
+def compact(n):
+    """`13,089,178` → `13.1M`. Row-group sizes span four orders of magnitude across these engines —
+    123K against 13.1M — and that ratio is the finding; twelve digits of it is not."""
+    try:
+        n = float(n or 0)
+    except (TypeError, ValueError):
+        return "—"
+    for cut, suffix in ((1e9, "B"), (1e6, "M"), (1e3, "K")):
+        if abs(n) >= cut:
+            return f"{n / cut:,.1f}{suffix}"
+    return f"{n:,.0f}"
+
+
+def layout_band(n):
+    """The power-of-two band a count falls in. `-1` for missing or zero.
+
+    Banded, not exact. Exact equality splits dwh's own two runs from each other — 78 files and 80,
+    same writer, same settings, incremental drift — and splits duckrun on 1.1 MB of size. The
+    accepted cost is the boundary: 15 row groups and 17 land in different bands despite being close.
+    That edge is visible in the mart block, and no tolerance rule avoids it without chaining groups
+    together through their neighbours.
+    """
+    try:
+        n = float(n or 0)
+    except (TypeError, ValueError):
+        return -1
+    from math import log2
+    return int(log2(n)) if n >= 1 else -1
+
+
+def layout_key(rec):
+    """What Power BI can actually tell apart: `(V-Order, files band, row-groups band)` for the mart.
+
+    `avg RG rows` is `total_rows ÷ row groups` and every engine writes the same 143,980,961 rows, so
+    it carries nothing the row-group count does not. `size MB` is excluded deliberately — see
+    `layout_band`.
+
+    `None` when neither metric was recorded, which keeps that column a bar of its OWN rather than
+    filing it into a group it was never measured into. That distinction is the whole point: two
+    records carrying no file count are not two identical layouts, they are two unmeasured ones, and
+    merging them would claim Power BI cannot tell apart two things nobody looked at.
+    """
+    d = ((((rec.get("layout") or {}).get("stats") or {}).get(rec.get("engine")) or {})
+         .get(LAYOUT_TABLE) or {})
+    if d.get("num_files") is None and d.get("num_row_groups") is None:
+        return None
+    return (bool(d.get("vorder")), layout_band(d.get("num_files")),
+            layout_band(d.get("num_row_groups")))
+
+
+def layout_groups(cols):
+    """`[(key, [(column id, record)])]` — the columns that wrote parquet Power BI cannot distinguish.
+
+    Insertion-ordered, so the engine order the caller sorted `cols` into survives into the grouping;
+    `chart()` re-sorts by value anyway. A column with no `layout_key` gets a singleton group keyed on
+    itself — never merged with another unmeasured one.
+    """
+    out = []
+    seen = {}
+    for col, _e, rec in cols:
+        key = layout_key(rec)
+        at = seen.get(key) if key is not None else None
+        if at is None:
+            seen[key] = len(out)
+            out.append((key, [(col, rec)]))
+        else:
+            out[at][1].append((col, rec))
+    return out
+
+
+def layout_label(members):
+    """The bar label: the layout itself, short enough for the chart's 224px label gutter.
+
+    `V-Order · 11 files · 11 RG`, `4 files · 27 RG`, `357 files · 1,172 RG`. A metric that differs
+    across the group's members prints as a range, which is what a band means in practice.
+    """
+    stats = [((((r.get("layout") or {}).get("stats") or {}).get(r.get("engine")) or {})
+              .get(LAYOUT_TABLE) or {}) for _c, r in members]
+    def rng(field):
+        vals = sorted({int(s[field]) for s in stats if s.get(field) is not None})
+        if not vals:
+            return None
+        return f"{vals[0]:,}" if len(vals) == 1 else f"{vals[0]:,}–{vals[-1]:,}"
+    bits = []
+    if any(s.get("vorder") for s in stats):
+        bits.append("V-Order")
+    for field, unit in (("num_files", "files"), ("num_row_groups", "RG")):
+        v = rng(field)
+        if v:
+            bits.append(f"{v} {unit}")
+    # Nothing measured, so there is no layout to name and the writer is all there is to say. Falls
+    # back rather than printing "not recorded" on several bars at once, which would look like one
+    # repeated group when it is several unmeasured ones.
+    return " · ".join(bits) or producers(members)
+
+
+def producer(rec):
+    """Who wrote it, named by the config that reached the parquet and nothing else.
+
+    `duckrun`, `spark V-Order`, `spark default`. No core count, no NEE flag — see `LAYOUT_CONFIG` —
+    and the profile is named by its EFFECT (`PROFILE_LABEL`) rather than by Microsoft's name for the
+    workload it was designed for. `spark·readHeavyForPBI+NEE` is three facts, two of which never
+    reached the parquet; `spark V-Order` is the one that did.
+
+    This is what the analytics chart and the layout blocks carry instead of the column id.
+    `variant_tag()` is untouched and keeps naming columns everywhere the ENGINE is the subject — the
+    ETL chart, the CU table, the Time section, the sources table.
+    """
+    c = ((rec.get("layout") or {}).get("config") or {}).get(rec.get("engine")) or {}
+    bits = [rec.get("engine") or "?"]
+    for k in LAYOUT_CONFIG:
+        if c.get(k):
+            bits.append(PROFILE_LABEL.get(str(c[k]), str(c[k])))
+    return " ".join(bits)
+
+
+def producers(members):
+    """The group's writers, DEDUPLICATED — two members reducing to the same name appear once.
+
+    So duckrun at two core counts reads `duckrun`, and a group holding genuinely different writers
+    keeps both (`duckrun, spark · writeHeavy`), which is the case worth reading: two engines that
+    produced parquet Power BI cannot tell apart.
+    """
+    out = []
+    for _col, rec in members:
+        name = producer(rec)
+        if name not in out:
+            out.append(name)
+    return ", ".join(out)
+
+
 def columns_for(runs):
     """`[(column id, engine, record)]` — each engine's LATEST run, once per configuration.
 
@@ -422,12 +581,40 @@ def chart(title, subtitle, rows):
     print(f"\n<!--chart:{json.dumps({'title': title, 'subtitle': subtitle, 'rows': rows})}-->")
 
 
+def group_rows(cols, spread, latest):
+    """`[label, mean, min, max, caption]` per LAYOUT — the analytics chart's rows.
+
+    One bar per thing Power BI can distinguish, not per engine, because Power BI never sees the
+    engine: it opens parquet through Direct Lake and transcodes row groups. Two producers that wrote
+    the same shape are one bar, and every run of either of them is a sample of it — which is what
+    turns a 50% gap between duckrun at two core counts from a comparison into what it actually is,
+    one layout measured twice.
+
+    The label is the layout; the caption is the writer. That is the whole inversion.
+    """
+    out = []
+    for _key, members in layout_groups(cols):
+        vals = []
+        for col, _rec in members:
+            vals += spread.get(col) or ([latest[col]] if latest.get(col) else [])
+        label = layout_label(members)
+        if not vals:
+            out.append([label, 0, 0, 0, producers(members)])
+            continue
+        out.append([label, round(sum(vals) / len(vals), 1), round(min(vals), 1),
+                    round(max(vals), 1), producers(members)])
+    return out
+
+
 def chart_rows(cols, spread, latest, captions):
     """`[label, mean, min, max, caption]` per column, from every run that column has had.
 
     Sorted by the MEAN, which is what a ranking should be built on — one dispatch of a shared
     capacity is a sample. A column with no history falls back to its latest run, so a first-ever
     engine still charts.
+
+    Per COLUMN, unlike `group_rows` — this is the shape for the ETL chart, where the engine and the
+    compute it was given are the entire subject rather than metadata.
     """
     out = []
     for col, _engine, _rec in cols:
@@ -578,29 +765,56 @@ def render_input(cols):
              if len(differ) > 1 else "") + "</sub>")
 
 
-LAYOUT_TABLE = os.environ.get("CU_LAYOUT_TABLE", "fct_summary").strip()
-
-
 def render_layouts(cols, analytics, qtime=({}, {})):
-    """Every shared table's physical layout, one block each, the mart first.
+    """Every shared table's physical layout, one block each, the mart first, ONE ROW PER PRODUCER.
 
     The mart leads because it is the table the benchmark's queries land on, and it is the only block
-    carrying the CU column AND the three query-time columns — both are one number per engine, not per
-    table, so printing them in every block would read as one measurement per table. That block's rows
-    are ordered by that CU, cheapest first; the rest keep the engine order.
+    carrying the CU column AND the three query-time columns — both are one number per producer, not
+    per table, so printing them in every block would read as one measurement per table. That block's
+    rows are ordered by that CU, cheapest first; the rest keep the engine order.
+
+    **A row is a `producer()`, not a column.** `spark V-Order` and `spark default`, not
+    `spark·readHeavyForPBI+NEE` and `spark·writeHeavy+NEE` — the profile named by what it does to the
+    parquet, and the core count and NEE flag dropped because neither reaches it. duckrun's two core
+    counts and spark's two NEE settings each collapse to one row, and they had written identical
+    layouts, so the rows they replaced were the same row printed twice. This is also what makes the
+    table agree with the chart above it, which groups on the MEASURED parquet: the two arrive at the
+    same rows from opposite directions, and if they ever disagree that is worth knowing.
 
     **`cold`/`warm`/`hot` are here rather than in a section of their own, and that placement is the
     point.** They were briefly a table further down the page, which put the layout and the speed it
     produced on two different tables — and the only question worth asking of these numbers is whether
-    one explains the other. On one row, `files`, `row groups`, `size MB` and `vorder` sit beside the
-    milliseconds they produced, per engine, and a reader can see for themselves whether a smaller
-    file count bought a faster first visit. Cold especially: it is the tier that transcodes columns
-    out of parquet, so it is the one layout can move at all.
+    one explains the other. On one row, `files`, `row groups`, `rows per RG` and `V-Order` sit beside
+    the milliseconds they produced, and a reader can see for themselves whether a smaller file count
+    bought a faster first visit. Cold especially: it is the tier that transcodes columns out of
+    parquet, so it is the one layout can move at all.
     """
     times, counts = qtime
     stats = {col: ((rec.get("layout") or {}).get("stats") or {}).get(rec.get("engine")) or {}
              for col, _e, rec in cols}
-    writers = {col: (STACK.get(base_engine(col)) or ("", "", "—"))[2] for col, _e, _r in cols}
+    # ONE ROW PER PRODUCER, not per column. `producer()` has already dropped the config that never
+    # reached the parquet, so duckrun's two core counts and spark's two NEE settings each collapse to
+    # one name — and they wrote identical layouts, so the rows they replaced were the same row twice.
+    # This is also what makes the table agree with the chart above it, which groups on the measured
+    # parquet: the two arrive at the same five rows from opposite directions.
+    order_by_producer = []
+    members = {}
+    for col, _e, rec in cols:
+        name = producer(rec)
+        if name not in members:
+            members[name] = []
+            order_by_producer.append(name)
+        members[name].append((col, rec))
+    writers = {n: (STACK.get(m[0][1].get("engine")) or ("", "", "—"))[2] for n, m in members.items()}
+    # A producer's numbers are its columns' MEAN — one dispatch is a sample of a shared capacity, and
+    # a producer with two columns has simply been measured twice.
+    def mean_of(name, source):
+        vals = [source[c] for c, _r in members[name] if source.get(c)]
+        return sum(vals) / len(vals) if vals else 0.0
+    cu_of = {n: mean_of(n, analytics) for n in members}
+    ms_of = {n: {lbl: mean_of(n, {c: (times.get(c) or {}).get(lbl) for c, _r in members[n]})
+                 for lbl, _m in TIERS} for n in members}
+
     tables, schema = [], {}
     for col, _e, rec in cols:
         for t in ((rec.get("layout") or {}).get("tables") or []):
@@ -614,13 +828,14 @@ def render_layouts(cols, analytics, qtime=({}, {})):
         return
     mart = LAYOUT_TABLE if LAYOUT_TABLE in tables else tables[0]
     order = [mart] + [t for t in tables if t != mart]
-    metrics = [("total_rows", "rows", 0), ("num_files", "files", 0),
-               ("num_row_groups", "row groups", 0), ("avg_row_group", "avg RG rows", 0),
-               ("size_mb", "size MB", 1)]
+    metrics = [("num_files", "files", 0), ("num_row_groups", "row groups", 0),
+               # One decimal, not zero: the mart reads fine either way but `stg_csv_archive_log` is
+               # 0.37 MB, and rounding that to `0` says the table is empty.
+               ("avg_row_group", "rows per RG", -1), ("size_mb", "size MB", 1)]
     print("\n### Table layout\n")
     for t in order:
-        present = [(c, (stats.get(c) or {}).get(t)) for c, _e, _r in cols]
-        present = [(c, d) for c, d in present if d]
+        present = [(n, (stats.get(members[n][0][0]) or {}).get(t)) for n in order_by_producer]
+        present = [(n, d) for n, d in present if d]
         if not present:
             continue
         show_cu = t == mart
@@ -629,29 +844,45 @@ def render_layouts(cols, analytics, qtime=({}, {})):
             # "lower is better" only reads as a ranking if the rows are in that order. A 0 means
             # nothing was measured, not that querying was free, so it sorts to the END. The other
             # blocks carry no CU and keep the engine order.
-            present.sort(key=lambda cd: (analytics.get(cd[0], 0.0) == 0, analytics.get(cd[0], 0.0)))
-        # Only on the mart, and only when a record actually carried timings.
+            present.sort(key=lambda nd: (cu_of.get(nd[0], 0.0) == 0, cu_of.get(nd[0], 0.0)))
         tiers = [lbl for lbl, _m in TIERS if lbl in counts] if show_cu else []
-        head = (f"`{t}` in detail — the mart the queries land on" if t == mart
-                else f"`{(schema.get(t) + '.') if schema.get(t) else ''}{t}`")
+        # The ROW COUNT goes in the heading, not in a column. It is identical on every row — that is
+        # the parity statement the whole project rests on — and a 143,980,961 repeated down the table
+        # is a wide column carrying one fact. When the engines DISAGREE it becomes a column again and
+        # the heading says so, because that disagreement is the loudest signal this page has.
+        counts_seen = sorted({int(d["total_rows"]) for _n, d in present if d.get("total_rows")})
+        agree = len(counts_seen) == 1
+        rows_note = (f" — {counts_seen[0]:,} rows on every engine" if agree else
+                     f" — **row counts DISAGREE**" if counts_seen else "")
+        head = (f"`{t}` — the mart the queries land on{rows_note}" if t == mart
+                else f"`{(schema.get(t) + '.') if schema.get(t) else ''}{t}`{rows_note}")
+        cols_here = ([] if agree else [("total_rows", "rows", 0)]) + metrics
         print(f"\n#### {head}\n")
-        print("| engine | writer | " + ("CU | " if show_cu else "")
+        print("| layout | writer | " + ("CU | " if show_cu else "")
               + "".join(f"{lbl} ms | " for lbl in tiers)
-              + " | ".join(h for _k, h, _d in metrics) + " | vorder |")
+              + " | ".join(h for _k, h, _d in cols_here) + " | V-Order |")
         print("|:--|:--|" + ("--:|" if show_cu else "") + "--:|" * len(tiers)
-              + "--:|" * len(metrics) + ":--|")
-        for col, d in present:
-            cells = ["—" if d.get(k) is None else f"{float(d[k]):,.{dp}f}" for k, _h, dp in metrics]
-            cu_cell = (f"{analytics.get(col, 0.0):,.1f} | " if show_cu else "")
-            ms = "".join("— | " if (times.get(col) or {}).get(lbl) is None
-                         else f"{times[col][lbl]:,.0f} | " for lbl in tiers)
-            print(f"| {col} | `{writers.get(col, '—')}` | {cu_cell}{ms}" + " | ".join(cells)
-                  + f" | {'yes' if d.get('vorder') else 'no'} |")
+              + "--:|" * len(cols_here) + ":--|")
+        for name, d in present:
+            cells = ["—" if d.get(k) is None else
+                     (compact(d[k]) if dp < 0 else f"{float(d[k]):,.{dp}f}")
+                     for k, _h, dp in cols_here]
+            cu_cell = (f"{cu_of.get(name, 0.0):,.0f} | " if show_cu else "")
+            ms = "".join("— | " if not (ms_of.get(name) or {}).get(lbl)
+                         else f"{ms_of[name][lbl]:,.0f} | " for lbl in tiers)
+            print(f"| {name} | `{writers.get(name, '—')}` | {cu_cell}{ms}" + " | ".join(cells)
+                  + f" | {'**yes**' if d.get('vorder') else '·'} |")
     counted = ", ".join(f"{lbl} over {n}" for lbl, n in counts.items())
     print("\n<sub>Every shared table the project writes, in pipeline order, as `stats.py` read the "
           "Delta log in that run's **layout** job. Sizes are what the tables held at that moment; "
-          "the CU beside the mart is the engine's ANALYTICS total — what querying it cost, not what "
-          "building it did — and the queries read all of these. Nothing here re-read a Delta log."
+          "the CU beside the mart is the ANALYTICS total — what querying it cost, not what building "
+          "it did — and the queries read all of these. Nothing here re-read a Delta log. "
+          "**A row is a WRITER, not a dispatch:** the core count and the NEE flag are left off "
+          "because two runs each showed they never reach the parquet — duckrun wrote 4 files and 27 "
+          "row groups at 64 cores and at 32, and spark wrote the same layout with NEE on and off — "
+          "so the resource profile is named by what it does (`V-Order`, `default`) and everything "
+          "else is one row. Row counts sit in the heading because they are identical by design; if "
+          "they ever stop being, the heading says so and they come back as a column."
           + (" **`cold`, `warm` and `hot` are the DAX suite summed per pass position** — the first "
              "visit to a freshly deployed semantic model, the second, then the median of the rest — "
              "so they sit beside the layout that produced them rather than in a table of their own. "
@@ -850,13 +1081,25 @@ def render(cols, runs, ledger):
                 for col, _e, _r in cols}
     n_runs = max(runs_for.values(), default=1)
     over = f", mean of {n_runs} runs with the range" if n_runs > 1 else ""
-    chart("Analytics — what querying the tables cost",
-          f"capacity units, lower is better — this is the INTERACTIVE CU that throttles{over}",
-          chart_rows(cols, spread_for(runs, ledger, "analytics", key_of), analytics, captions))
+    # ONE BAR PER LAYOUT, not per engine — Power BI never sees the engine. It opens parquet through
+    # Direct Lake and transcodes row groups, so what a query costs belongs to what was written and
+    # the writer is metadata; the caption carries it. The ETL chart below is the exact opposite and
+    # stays per column, because there the writer and the compute it was given ARE the subject.
+    chart("Analytics — what querying each LAYOUT cost",
+          f"capacity units, lower is better — INTERACTIVE CU, and Power BI sees only the parquet{over}",
+          group_rows(cols, spread_for(runs, ledger, "analytics", key_of), analytics))
     chart("ETL — what building them cost",
           f"capacity units, lower is better — background CU, smoothed over 24h{over}",
           chart_rows(cols, spread_for(runs, ledger, "etl", key_of),
                      {c: class_total(per_col[c], "etl") for c in per_col}, captions))
+
+    # The layout table quotes the SAME number as the chart above it: the mean over every run of a
+    # column, not that column's latest. They are one measurement described twice, and a page that
+    # printed dwh at 1,916 in a bar and 1,960 in the row under it would be inviting the reader to
+    # work out which one it meant.
+    ana_spread = spread_for(runs, ledger, "analytics", key_of)
+    ana_mean = {c: (sum(v) / len(v) if v else analytics.get(c, 0.0))
+                for c, v in ((c, ana_spread.get(c) or []) for c, _e, _r in cols)}
 
     print("\nEvery engine's latest run, summed:\n")
     engine_table(per_col, cols)
@@ -865,7 +1108,7 @@ def render(cols, runs, ledger):
     # table put the layout and the speed it produced on two different tables, and the whole question
     # is whether one explains the other — files, row groups, size and V-Order beside cold, warm and
     # hot, on one row per engine, is the comparison. Nothing else on the page can be read that way.
-    render_layouts(cols, analytics, query_time(cols))
+    render_layouts(cols, ana_mean, query_time(cols))
     render_time(cols, runs, ledger)
 
     n = len({base_engine(c) for c, _e, _r in cols})

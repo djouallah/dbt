@@ -1089,6 +1089,44 @@ capacity for the GUIDs in those records, tops up `history/cu.json`, and publishe
   second read returns bigger numbers and `max()` takes them. "May still rise" on the page is DERIVED
   from `run.finished` being under two hours old — a property of the clock, not a flag written into a
   file that then has to be kept in step.
+- **THE TWO CHARTS ARE KEYED ON DIFFERENT THINGS, AND THAT IS THE DESIGN — do not "unify" them.**
+  **Analytics is one bar per PARQUET LAYOUT.** Power BI never sees the engine: it opens parquet
+  through Direct Lake and transcodes row groups, so what a query costs belongs to what was WRITTEN
+  and the writer is metadata — the bar is labelled by the layout (`4 files · 27 RG`) and captioned by
+  the writer. **ETL is one bar per column**, unchanged, because there the writer and the compute it
+  was given are the entire subject.
+  What forced it: duckrun at 64 cores and at 32 wrote 4 files and 27 row groups either way, so two
+  bars 50% apart was not a comparison — it was one layout measured twice, presented as two results.
+  **Grouping is MEASURED, labelling is DECLARED**, and the split matters. The key is
+  `(V-Order, band(files), band(row groups))` from the parquet as `stats.py` read it, so two unrelated
+  engines that wrote the same shape *do* share a bar; the caption comes from `LAYOUT_CONFIG` so it
+  does not re-word itself whenever a record lands. **Banded to powers of two, never exact** — exact
+  equality splits dwh's own two runs from each other (78 files and 80, same writer, incremental
+  drift) and splits duckrun on 1.1 MB of size. Accepted cost: 15 row groups and 17 land in different
+  bands. A record with no file count keys to `None` and keeps its own bar — two UNMEASURED layouts
+  are not one identical layout, and merging them would claim Power BI cannot distinguish two things
+  nobody looked at.
+  It surfaced two things the old chart hid: V-Order on and off sit in the SAME file band and differ
+  2.8× (1,332 against 3,769), which is the sharpest experiment on the page; and NEE on and off
+  produce the same layout, so the gap between them was never an NEE effect.
+- **A LAYOUT ROW IS A WRITER, and `producer()` decides what that means.** `spark V-Order`,
+  `spark default`, `duckrun` — not `spark·readHeavyForPBI+NEE`, not `duckrun·64c`. `LAYOUT_CONFIG` is
+  `("resource_profile",)` and the exclusions are **measured, not tidiness**: duckrun wrote 4 files and
+  27 row groups at 64 cores and at 32, spark wrote the same layout with NEE on and off, so neither
+  reaches the parquet and neither belongs on a chart about parquet. `PROFILE_LABEL` names a profile
+  by its EFFECT (`readHeavyForPBI` → `V-Order`, `writeHeavy` → `default`) because that is the only
+  thing a reader of this page wants from it; an unmapped profile keeps its own name rather than being
+  guessed at — `readHeavyForSpark` reads like it enables V-Order and sets no vorder at all.
+  `variant_tag()` is untouched and still names columns everywhere the ENGINE is the subject: the ETL
+  chart, the CU table, the Time section, the sources table.
+  The layout table groups by the DECLARED writer while the chart groups by the MEASURED parquet — two
+  directions onto the same rows, and a disagreement between them is worth knowing rather than
+  smoothing. Both quote the same CU (the mean over every run), because a page printing 1,916 in a bar
+  and 1,960 in the row under it is asking the reader which one it meant.
+  **Row counts live in the block HEADING**, not a column: identical on every row by design — the
+  parity statement the project rests on — so repeating 143,980,961 down a table is a wide column
+  carrying one fact. When the engines disagree the heading says so and the column returns, because
+  that is the loudest signal this page has.
 - **THE PAGE CARRIES TWO NON-CU MEASURES NOW, and each states where its own number bends.**
   *cold / warm / hot* are **THREE COLUMNS OF THE MART BLOCK, never a section of their own.** They
   come from the RUN RECORDS, not the ledger: every record already holds

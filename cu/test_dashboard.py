@@ -171,7 +171,10 @@ def test_the_page_renders_end_to_end_with_charts_and_a_layout():
     assert "Analytics" in first["title"] and "INTERACTIVE" in first["subtitle"]
     assert "ETL" in second["title"] and "background" in second["subtitle"]
     # [label, mean, min, max, caption] — one run, so the range collapses onto the mean.
-    assert first["rows"][0][:4] == ["duckrun", 2041.0, 2041.0, 2041.0]
+    # ANALYTICS is labelled by the LAYOUT and captioned by the writer; ETL is labelled by the column
+    # and captioned by the adapter and its compute. That asymmetry is the point of both charts.
+    assert first["rows"][0][:4] == ["4 files · 79 RG", 2041.0, 2041.0, 2041.0]
+    assert first["rows"][0][4] == "duckrun"
     assert second["rows"][0][:4] == ["duckrun", 31080.0, 31080.0, 31080.0]
     assert second["rows"][0][4] == "dbt-duckrun · 64 vCores"
 
@@ -423,7 +426,8 @@ def test_the_chart_shows_the_mean_and_the_range_across_runs():
                   "S2": {"XMLA Read Operation": 1500.0}, "O2": {"Warehouse Query": 1.0}})
     out = _render(runs, led)
     spec = json.loads(out.split("<!--chart:")[1].split("-->")[0])
-    assert spec["rows"][0][:4] == ["spark", 1500.0, 1000.0, 2000.0]
+    assert spec["rows"][0][1:4] == [1500.0, 1000.0, 2000.0]
+    assert spec["rows"][0][4] == "spark", "the writer is the caption on the analytics chart"
     assert "mean of 3 runs" in spec["subtitle"]
 
 
@@ -436,7 +440,132 @@ def test_the_chart_sorts_by_the_mean():
     out = _render(runs, ledger({"S0": {"XMLA Read Operation": 9.0}, "O0": {"Warehouse Query": 1.0},
                                 "S1": {"XMLA Read Operation": 3.0}, "O1": {"Warehouse Query": 1.0}}))
     spec = json.loads(out.split("<!--chart:")[1].split("-->")[0])
-    assert [r[0] for r in spec["rows"]] == ["dwh", "spark"], "cheapest mean first"
+    assert [r[4] for r in spec["rows"]] == ["dwh", "spark"], "cheapest mean first"
+
+
+# ------------------------------------------------------------- one bar per LAYOUT, not per engine
+
+def _lay(engine, files, rgs, vorder=False, cfg=None, **kw):
+    """A record whose mart layout is spelled out, so grouping has something to group on."""
+    return _full(kw.pop("file", "x.json"), engine, config={engine: cfg or {}},
+                 stats={engine: {"fct_summary": {"total_rows": 143980961, "num_files": files,
+                                                 "num_row_groups": rgs, "avg_row_group": 1,
+                                                 "size_mb": 1.0, "vorder": vorder,
+                                                 "schema": "mart"}}}, **kw)
+
+
+def _analytics_chart(out):
+    return json.loads(out.split("<!--chart:")[1].split("-->")[0])
+
+
+def test_the_same_parquet_is_one_bar_however_many_engines_wrote_it():
+    """Power BI never sees the engine — it opens parquet through Direct Lake and transcodes row
+    groups. duckrun at 64 cores and at 32 wrote 4 files and 27 row groups either way, so two bars
+    50% apart was not a comparison: it was one layout measured twice, presented as two results."""
+    runs = [_lay("duckrun", 4, 27, cfg={"vcores": "64"}, file="a-1.json", finished_hours_ago=72),
+            _lay("duckrun", 4, 27, cfg={"vcores": "32"}, file="b-2.json", finished_hours_ago=48)]
+    runs[0]["items"] = {"S0": gone("semantic_model", "aemo_duckrun"),
+                        "O0": gone("output", "dbt_delta")}
+    runs[1]["items"] = {"S1": gone("semantic_model", "aemo_duckrun"),
+                        "O1": gone("output", "dbt_delta")}
+    out = _render(runs, ledger({"S0": {"XMLA Read Operation": 1000.0}, "O0": 1.0,
+                                "S1": {"XMLA Read Operation": 2000.0}, "O1": 1.0}))
+    rows = _analytics_chart(out)["rows"]
+    assert len(rows) == 1, "one layout, one bar"
+    assert rows[0][:4] == ["4 files · 27 RG", 1500.0, 1000.0, 2000.0]
+    assert rows[0][4] == "duckrun", "not `duckrun·64c, duckrun·32c` — the cores never reached it"
+    # ...while the ETL chart keeps BOTH columns, because there the writer and the compute it was
+    # given are the entire subject. That asymmetry is the change, and it must not be tidied away.
+    etl = json.loads(out.split("<!--chart:")[2].split("-->")[0])
+    assert [r[0] for r in etl["rows"]] == ["duckrun·32c", "duckrun·64c"]
+
+
+def test_v_order_never_merges_with_anything():
+    """The sharpest experiment on the page: the same file band with V-Order on and off. Merging
+    those two would erase the one comparison the layout job exists to make."""
+    runs = [_lay("spark", 11, 11, vorder=True, cfg={"resource_profile": "readHeavyForPBI"},
+                 file="a-1.json"),
+            _lay("spark", 14, 14, vorder=False, cfg={"resource_profile": "writeHeavy"},
+                 file="b-2.json")]
+    assert d.layout_key(runs[0]) != d.layout_key(runs[1])
+    assert d.layout_key(runs[0])[1] == d.layout_key(runs[1])[1], "same file band, on purpose"
+
+
+def test_a_band_absorbs_drift_but_not_a_real_difference():
+    """78 files and 80 are the same writer with the same settings and one more incremental run.
+    Exact equality would split dwh from itself; a power-of-two band does not. 27 row groups and
+    1,172 are four bands apart and stay apart."""
+    assert d.layout_band(78) == d.layout_band(80)
+    assert d.layout_band(10) == d.layout_band(11) == d.layout_band(14)
+    assert d.layout_band(27) != d.layout_band(1172) != d.layout_band(4)
+    assert d.layout_band(0) == d.layout_band(None) == -1
+
+
+def test_an_unmeasured_layout_is_never_grouped_with_another_one():
+    """Two records carrying no file count are not two identical layouts, they are two unmeasured
+    ones. Merging them would claim Power BI cannot tell apart two things nobody looked at."""
+    a, b = _full("a-1.json", "spark"), _full("b-2.json", "dwh")   # stats carry total_rows only
+    assert d.layout_key(a) is None and d.layout_key(b) is None
+    assert len(d.layout_groups(d.columns_for([a, b]))) == 2
+
+
+def test_the_producer_name_drops_what_never_reached_the_parquet():
+    """`spark V-Order` / `spark default`, not `spark·readHeavyForPBI+NEE`. The profile is named by
+    what it DOES, and the core count and NEE flag are gone because two runs each showed they do not
+    change what is written."""
+    assert d.producer(_lay("spark", 11, 11, cfg={"resource_profile": "readHeavyForPBI",
+                                                 "native_execution_engine": "true"})) \
+        == "spark V-Order"
+    assert d.producer(_lay("spark", 14, 14, cfg={"resource_profile": "writeHeavy",
+                                                 "native_execution_engine": "false"})) \
+        == "spark default"
+    assert d.producer(_lay("duckrun", 4, 27, cfg={"vcores": "64"})) == "duckrun"
+    # An unmapped profile keeps its own name rather than being guessed at — `readHeavyForSpark`
+    # reads like it enables V-Order and sets no vorder at all.
+    assert d.producer(_lay("spark", 4, 4, cfg={"resource_profile": "readHeavyForSpark"})) \
+        == "spark readHeavyForSpark"
+
+
+def test_a_group_of_genuinely_different_writers_names_both():
+    """The case worth reading: two engines that produced parquet Power BI cannot tell apart."""
+    members = [("duckrun·64c", _lay("duckrun", 4, 27, cfg={"vcores": "64"})),
+               ("duckrun·32c", _lay("duckrun", 4, 27, cfg={"vcores": "32"})),
+               ("spark·writeHeavy", _lay("spark", 4, 27, cfg={"resource_profile": "writeHeavy"}))]
+    assert d.producers(members) == "duckrun, spark default", "deduplicated, and both kept"
+
+
+def test_the_layout_table_is_one_row_per_writer_and_agrees_with_the_chart():
+    """The table groups by the DECLARED producer and the chart by the MEASURED parquet — two
+    directions onto the same rows. And both quote the same CU: a page printing 1,916 in a bar and
+    1,960 in the row under it would be asking the reader which one it meant."""
+    runs = [_lay("duckrun", 4, 27, cfg={"vcores": "64"}, file="a-1.json", finished_hours_ago=72),
+            _lay("duckrun", 4, 27, cfg={"vcores": "32"}, file="b-2.json", finished_hours_ago=48)]
+    runs[0]["items"] = {"S0": gone("semantic_model", "aemo_duckrun"),
+                        "O0": gone("output", "dbt_delta")}
+    runs[1]["items"] = {"S1": gone("semantic_model", "aemo_duckrun"),
+                        "O1": gone("output", "dbt_delta")}
+    out = _render(runs, ledger({"S0": {"XMLA Read Operation": 1000.0}, "O0": 1.0,
+                                "S1": {"XMLA Read Operation": 2000.0}, "O1": 1.0}))
+    block = out.split("#### `fct_summary`")[1].split("\n###")[0]
+    body = [ln for ln in block.splitlines() if ln.startswith("| ") and not ln.startswith("|:")]
+    assert len(body) == 2, "a header and ONE row — duckrun, not duckrun twice"
+    assert body[1].startswith("| duckrun | `delta-rs` | 1,500 |")
+    assert _analytics_chart(out)["rows"][0][1] == 1500.0, "the same number as the bar"
+
+
+def test_the_row_count_lives_in_the_heading_until_the_engines_disagree():
+    """It is identical on every row by design — that is the parity statement the project rests on —
+    so a 143,980,961 repeated down the table is a wide column carrying one fact. When they DISAGREE
+    it comes back as a column, because that is the loudest signal this page has."""
+    same = [_lay("duckrun", 4, 27, file="a-1.json"), _lay("dwh", 78, 78, file="b-2.json")]
+    out = _render(same, ledger({"OUT": 1.0, "SEM": 2.0}))
+    assert "143,980,961 rows on every engine" in out
+    assert "| rows |" not in out
+    drifted = [_lay("duckrun", 4, 27, file="a-1.json"), _lay("dwh", 78, 78, file="b-2.json")]
+    drifted[1]["layout"]["stats"]["dwh"]["fct_summary"]["total_rows"] = 143980960
+    out = _render(drifted, ledger({"OUT": 1.0, "SEM": 2.0}))
+    assert "row counts DISAGREE" in out
+    assert "| rows |" in out, "and the numbers come back so the gap can be read"
 
 
 # ---------------------------------------------------------------- query time, in the mart block
@@ -464,10 +593,10 @@ def test_the_three_tiers_are_columns_of_the_mart_block_not_a_section():
     out = _render(runs, ledger({"OUT": 1.0, "SEM": 2.0}))
     assert "### Query time" not in out, "no section of its own"
     block = out.split("#### `fct_summary`")[1].split("####")[0]
-    assert "| engine | writer | CU | cold ms | warm ms | hot ms | rows | files |" in block
+    assert "| layout | writer | CU | cold ms | warm ms | hot ms | files |" in block
     row = next(ln for ln in block.splitlines() if ln.startswith("| duckrun |"))
     assert "| 30 | 11 | 9 |" in row, "cold/warm/hot beside the layout that produced them"
-    assert row.rstrip().endswith("| 4 | — | — | — | no |"), "and the file count on the same row"
+    assert row.rstrip().endswith("| 4 | — | — | — | · |"), "and the file count on the same row"
 
 
 def test_the_tiers_appear_on_the_mart_block_alone():
@@ -498,7 +627,7 @@ def test_a_record_with_no_tier_timings_adds_no_columns():
     tier can read. Absent columns say "not measured"; zeros would say "instant"."""
     out = _render([_full("a-1.json", "spark")], ledger({"OUT": 1.0, "SEM": 2.0}))
     assert "cold ms" not in out and "### Query time" not in out
-    assert "| engine | writer | CU | rows |" in out, "the block itself still renders"
+    assert "| layout | writer | CU | files |" in out, "the block itself still renders"
 
 
 # ------------------------------------------------------------------------------------- build time
