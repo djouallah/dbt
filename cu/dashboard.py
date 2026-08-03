@@ -57,10 +57,19 @@ STACK = {
     "dwh": ("dbt-fabric-samdebruyn", "Fabric Warehouse (T-SQL)", "warehouse"),
 }
 
-# A column is an engine (`spark`) or an engine under one CONFIG (`spark·readHeavyForPBI+NEE`), which
-# is what puts the same engine's two resource profiles side by side. A tag joins its own parts with
-# `+`, never with this, so the split back to the engine is unambiguous.
+# A column is an engine (`spark`) or an engine under one CONFIG (`spark·V-Order+NEE`), which is what
+# puts the same engine's two resource profiles side by side. A tag joins its own parts with `+`, never
+# with this, so the split back to the engine is unambiguous.
 COL_SEP = "·"
+
+# An engine named by WHO WRITES, where the TARGET name misleads. `iceberg` reads as a format beside
+# three engines, when the writer is the same DuckDB that duckrun uses — pointed at an Iceberg REST
+# catalog instead of delta-rs. On a page whose subject is what got written, that distinction is the
+# entire reason the pair exists, and calling it `iceberg` hides it. Matches `STACK`'s writer column.
+# It names the COLUMN as well as the layout row, so the page calls it one thing throughout;
+# `base_engine` reverses it, which is why every lookup downstream still resolves to `iceberg`.
+ENGINE_LABEL = {"iceberg": "duckdb iceberg"}
+_ENGINE_OF_LABEL = {v: k for k, v in ENGINE_LABEL.items()}
 
 # Role -> which half of the page an item's CU belongs to. Everything that is not a semantic model is
 # work done to BUILD the tables; a semantic model is only ever queried. This replaces classification
@@ -120,8 +129,12 @@ def log(msg):
 
 
 def base_engine(col):
-    """`spark·readHeavyForPBI+NEE` → `spark`; `spark` → `spark`."""
-    return str(col).split(COL_SEP, 1)[0].strip()
+    """`spark·V-Order+NEE` → `spark`; `spark` → `spark`; `duckdb iceberg·64c` → `iceberg`.
+
+    The label reversal is what lets a column be NAMED for its writer while every lookup keyed on the
+    engine — `STACK`, the (engine, variant) join to a record — still finds it."""
+    head = str(col).split(COL_SEP, 1)[0].strip()
+    return _ENGINE_OF_LABEL.get(head, head)
 
 
 def run_url(run_id):
@@ -378,12 +391,6 @@ LAYOUT_CONFIG = ("resource_profile",)
 # Which table the layout grouping and the mart block are ABOUT.
 LAYOUT_TABLE = os.environ.get("CU_LAYOUT_TABLE", "fct_summary").strip()
 
-# An engine named by WHO WRITES, where the target name misleads. `iceberg` reads as a format beside
-# three engines, when the writer is the same DuckDB that duckrun uses — pointed at an Iceberg REST
-# catalog instead of delta-rs. On a page whose subject is what got written, that distinction is the
-# entire reason the pair exists, and calling it `iceberg` hides it. Matches `STACK`'s writer column.
-ENGINE_LABEL = {"iceberg": "duckdb iceberg"}
-
 
 def compact(n):
     """`13,089,178` → `13.1M`. Row-group sizes span four orders of magnitude across these engines —
@@ -545,7 +552,10 @@ def columns_for(runs):
     cols = []
     for (e, sig), rec in latest.items():
         tag = variant_tag(sig, terse=terse.get(e, True))
-        cols.append((e if len(sigs[e]) < 2 else f"{e}{COL_SEP}{tag}", e, rec))
+        # The column is NAMED for its writer (`duckdb iceberg`) and keyed on its engine; `base_engine`
+        # reverses the label, so `STACK` and the (engine, variant) join both still resolve.
+        name = ENGINE_LABEL.get(e, e)
+        cols.append((name if len(sigs[e]) < 2 else f"{name}{COL_SEP}{tag}", e, rec))
     order = {e: i for i, e in enumerate(ENGINES)}
     cols.sort(key=lambda c: (order.get(c[1], len(order)), c[1], c[0]))
     return cols

@@ -177,6 +177,12 @@ because that artifact has to open off a local disk years later.
   dispatch input has no key at all and would collide with an explicit `false` — the whole engine falls
   back to the explicit spelling. A page printing one column name twice is unreadable and silent about
   why. The tag still never contains `COL_SEP`; `base_engine` splits on it.
+  The **engine half** takes `ENGINE_LABEL` too, so a column reads `duckdb iceberg·64c` and the page
+  calls that engine one thing throughout — the layout rows had said `duckdb iceberg` while the columns
+  said `iceberg`, which read as two subjects. That is only safe because **`base_engine` reverses the
+  label**: `STACK`, the adapter caption and the (engine, variant) join to a record are all keyed on
+  `iceberg`, and without the reversal each would silently miss — a blank caption, a chart row quietly
+  gone — rather than raise.
 - **Engine-major table**, engines across, **`compute` and `storage`** down, class subtotals in bold.
   The split comes from the OPERATION, and it has to: compute and storage share an ITEM. Measured
   against the live model — `dbt_spark` [Lakehouse] bills 188,636 CU of `High Concurrency Session Livy

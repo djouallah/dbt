@@ -156,6 +156,25 @@ def test_a_flag_that_is_off_is_absent_from_the_header_rather_than_negated():
     assert d.variant_tag(off) == "default"
 
 
+def test_a_column_is_named_for_its_writer_and_still_resolves_to_its_engine():
+    """`iceberg` reads as a format beside three engines when the writer is the same DuckDB duckrun
+    uses, pointed at an Iceberg REST catalog. The layout rows already said `duckdb iceberg`; the
+    columns saying `iceberg` made one thing read as two. Naming the column is only safe because
+    `base_engine` reverses the label — otherwise the STACK lookup and the (engine, variant) join to a
+    record would both silently miss, and a caption or a chart row would quietly go blank."""
+    runs = [rec("a-1.json", "iceberg", {}, config={"iceberg": {"vcores": "64"}},
+                finished_hours_ago=48),
+            rec("b-2.json", "iceberg", {}, config={"iceberg": {"vcores": "32"}},
+                finished_hours_ago=24)]
+    names = [c for c, _e, _r in d.columns_for(runs)]
+    assert names == ["duckdb iceberg·32c", "duckdb iceberg·64c"]
+    assert all(d.base_engine(c) == "iceberg" for c in names)
+    assert d.base_engine("duckdb iceberg") == "iceberg"
+    # An engine the map says nothing about is left exactly as it is, both ways.
+    assert [c for c, _e, _r in d.columns_for([rec("c-3.json", "dwh", {})])] == ["dwh"]
+    assert d.base_engine("spark·V-Order") == "spark"
+
+
 def test_two_configs_that_would_share_a_header_are_spelled_out_instead():
     """Absence-means-off is only unambiguous while every config of the engine RECORDS the flag. A
     record predating the dispatch input has no key at all, which would collide with an explicit

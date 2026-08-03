@@ -1122,7 +1122,12 @@ capacity for the GUIDs in those records, tops up `history/cu.json`, and publishe
   `ENGINE_LABEL` does the same job for an engine whose TARGET name misleads: `iceberg` is written
   **`duckdb iceberg`**, because it reads as a format beside three engines when the writer is the same
   DuckDB duckrun uses, pointed at an Iceberg REST catalog instead of delta-rs — and on a page about
-  what got written, that is the entire reason the pair exists.
+  what got written, that is the entire reason the pair exists. It names the **COLUMN** as well
+  (`duckdb iceberg·64c`), so the page calls that engine one thing throughout instead of `iceberg` in
+  every header and `duckdb iceberg` in every layout row. That is only safe because **`base_engine`
+  reverses it** — `STACK`, the adapter caption and the (engine, variant) join to a record stay keyed
+  on `iceberg`, and without the reversal each would silently MISS rather than raise: a blank caption,
+  a chart row quietly gone.
   `variant_tag()` still names columns everywhere the ENGINE is the subject — the ETL chart, the CU
   table, the sources table — but it now **shares `PROFILE_LABEL`**, so a profile reads the same in a
   header as in a caption, and it **omits a flag that is OFF**: `spark·V-Order+NEE` against
