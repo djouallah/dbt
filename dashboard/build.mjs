@@ -24,6 +24,8 @@ import { fileURLToPath } from "node:url";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const ROOT = resolve(HERE, "..");
+/** Where the live page is published — only the offline copy needs it, to reach `dag.html`. */
+const PAGES = "https://djouallah.github.io/fabric-dbt-benchmark";
 
 const argv = process.argv.slice(2);
 const flag = (name, dflt = null) => {
@@ -98,6 +100,15 @@ if (flag("snapshot")) {
   }
   process.stderr.write(`  snapshot: ${data.records.length} record(s), ` +
     `${data.ledger ? Object.keys(data.ledger.items || {}).length : 0} ledger item(s)\n`);
+
+  // The DAG link is RELATIVE on the live page, where `dag.html` sits beside `index.html` in the
+  // Pages artifact. The offline copy is one loose file with no sibling, so the same href would
+  // dangle — silently, since a 404 off a disk looks like nothing happened. Point it at the published
+  // copy instead: it needs a network, which is exactly what the GitHub link beside it already needs.
+  const linked = html.replace('<a id="daglink" href="dag.html">',
+    `<a id="daglink" href="${PAGES}/dag.html">`);
+  if (linked === html) throw new Error("index.html no longer carries the relative dag.html link");
+  html = linked;
 }
 
 mkdirSync(dirname(resolve(out)), { recursive: true });

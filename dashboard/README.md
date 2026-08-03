@@ -13,6 +13,7 @@ had looked at could be published by a workflow nobody had watched.
 
 ```
 index.html   the shell: one stylesheet, the title, three empty elements
+dag.html     the dbt DAG -- `dbt docs generate --static` output, one self-contained file
 app.js       the whole page — loader, join, layout grouping, render, charts
 build.mjs    index.html + app.js -> one file, twice (live, and offline with data inlined)
 app.test.mjs 88 offline tests, no browser, no network
@@ -140,6 +141,26 @@ without a build, a token or a dispatch.
   sight with the `170,491.5 MB` in the *Input archive* table on the same page; raw bytes are
   discarded inside `landing_stats()` and never reach the record, so there is no exact byte figure to
   print instead. A test pins the `/1000`, so a later "fix" to `/1024` is a visible change.
+- **The DAG is the real one, linked from the title.** `dag.html` is `dbt docs generate --static`
+  output — one self-contained file, manifest inlined, no sidecar JSON and no CDN, which is the only
+  form that fits a page with no third-party runtime. Regenerate it by hand when the models change:
+
+  ```
+  FILES_PATH=./landing ONELAKE_TABLES_PATH=./warehouse WAREHOUSE_PATH=./wh \
+  ONELAKE_ENDPOINT=http://localhost ONELAKE_TOKEN=x \
+  dbt docs generate --target iceberg --static --no-compile --empty-catalog
+  cp target/static_index.html dashboard/dag.html
+  ```
+
+  `--no-compile --empty-catalog` is what makes it free: no warehouse, no credentials, no capacity —
+  the lineage and the model descriptions all come from the parsed manifest. The placeholder env vars
+  are only there because parsing reads `profiles.yml`; nothing connects. The cost is that
+  column-level detail is empty. It lives under `dashboard/` so that regenerating it republishes the
+  page on its own, with no new trigger and no edit to a path filter this repo is careful about; the
+  workflow copies it into `site/` beside `index.html`.
+  The link is **relative** on the live page and rewritten by `build.mjs --snapshot` to the absolute
+  Pages URL, because the offline copy is one loose file with no sibling to point at — and a 404 off
+  a local disk looks like nothing happened at all. The build fails if that link ever stops matching.
 - **Numbers are visible, methodology is opt-in.** The long how-to-read notes are folded behind a
   one-line `<details>` each (`fold()` in `app.js`); every sentence stays in the DOM — the tests and
   ctrl-F still see it all — but the page reads numbers-first. Two things are deliberately NEVER

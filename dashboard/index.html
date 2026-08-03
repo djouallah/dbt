@@ -65,11 +65,11 @@ h2 { font-size:1.65rem; line-height:1.2; margin:0 0 1.5rem; letter-spacing:-0.01
 /* The dateline rides inside the h2 so the title stays one element, but it reads as a sub-line. */
 h2 .asof { display:block; font-size:.82rem; font-weight:400; color:var(--dim);
   letter-spacing:0; margin-top:.4rem; }
-/* The repo link rides inside the h1 the same way — same idiom, same metrics — but it KEEPS the link
-   colour rather than going dim like the dateline: it is the only way back to the source and it has
-   to look clickable, not like a caption. */
-h1 .repo { display:block; font-size:.82rem; font-weight:400; letter-spacing:0; margin-top:.4rem;
-  width:max-content; max-width:100%; }
+/* The links ride inside the h1 the same way — same idiom, same metrics — but they KEEP the link
+   colour rather than going dim like the dateline: they are the only way to the source and to the
+   DAG, and have to look clickable rather than like a caption. One block holding both, so they read
+   as one sub-line instead of stacking. */
+h1 .repo { display:block; font-size:.82rem; font-weight:400; letter-spacing:0; margin-top:.4rem; }
 /* The summary sentence: body prose, not a `.note`. It is the one line stating the SCALE of what
    every number below it describes, so it is the last thing that should read as an aside. */
 p.lede { font-size:1.02rem; margin:0 0 1.6rem; }
@@ -222,9 +222,16 @@ figure.chart svg { max-width:100%; height:auto; display:block; overflow:visible;
        The repo link is hardcoded exactly as the footer's is. `?repo=` redirects where the DATA is
        read from, not what this page is; the `[source]` line `app.js` renders is the one that
        follows it. -->
+  <!-- One sub-line, two links. The DAG is the real `dbt docs generate --static` output committed as
+       `dashboard/dag.html` and copied into `site/` by the workflow — not a drawing of one, so it
+       cannot drift from the models. The href is RELATIVE, which works on Pages and under a local
+       `http.server` alike; `build.mjs --snapshot` rewrites it to the absolute Pages URL, because
+       the offline copy has no sibling file to point at. -->
   <h1>Fabric dbt benchmark
-    <a class="repo"
-       href="https://github.com/djouallah/fabric-dbt-benchmark">djouallah/fabric-dbt-benchmark</a>
+    <span class="repo">
+      <a href="https://github.com/djouallah/fabric-dbt-benchmark">djouallah/fabric-dbt-benchmark</a>
+      · <a id="daglink" href="dag.html">the dbt DAG</a>
+    </span>
   </h1>
   <div class="status" id="status"></div>
   <div id="app"><p class="note">Loading…</p></div>
