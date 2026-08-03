@@ -182,6 +182,29 @@ without a build, a token or a dispatch.
 - **Bar charts first**, analytics then ETL, **cheapest first** because "lower is better" makes the
   ranking the finding. A **zero sorts to the bottom**, never the top: zero means the engine did no
   such work, and at the top under that caption it would read as the winner.
+- **A THIRD CHART — *Does paying more buy speed?* — answers what the first two raise and cannot
+  settle.** The analytics bars rank what each layout COST; the mart block lists what each one TOOK;
+  only putting one against the other says whether the cheap layouts are also the fast ones. They
+  are — for exactly **one of the three tiers**. Measured on the current records: **cold r +0.99,
+  warm r +0.01, hot r −0.18**. Cold is the first visit to a freshly deployed model, when Power BI
+  transcodes columns out of parquet, so its CU and its milliseconds are two measures of the same
+  work; warm and hot are answered from memory, where the layout has stopped mattering and the
+  cheapest layout to query is not the fastest at either tier. The r on cold is not an outlier
+  artefact — drop `duckdb iceberg`, the one extreme point, and it is still +0.97.
+  **The form is forced, not chosen.** It is a relationship between two measures, so a scatter; but
+  the tiers do not share a range (cold 27k–97k ms against hot 2.8k–5.4k), so on one shared y-axis
+  warm and hot collapse into a 3px band and overplot each other, and on **two** y-axes the alignment
+  would be arbitrary and the chart would invent a correlation. Small multiples are the way out —
+  one panel per tier, own y-scale, **each scale printed on its own axis**, which is the condition
+  that stops three scales being read as one. The **x-axis is shared** and that is the load-bearing
+  part: the same CU scale under all three is what makes the shapes comparable.
+  **One series per panel**, so there is no legend, no third hue and no categorical palette to
+  validate — the same reasoning the bar charts use. The dot is 8px with a surface ring; the hit
+  target is a separate transparent 26px circle, because a reader should not have to land dead-centre
+  on a mark to get its tooltip. Every value plotted is also in the `fct_summary` block below, which
+  is the table view — the tooltips enhance, they never gate.
+  `martPoints` is the single source for the bars, the dots and the mart rows, so all three quote the
+  same mean and cannot disagree.
 - **The two charts are keyed on DIFFERENT THINGS, and that is the design.** **Analytics is one bar
   per PARQUET LAYOUT**, because Power BI never sees the engine — it opens parquet through Direct Lake
   and transcodes row groups, so what a query costs belongs to what was written and the writer is

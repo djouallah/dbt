@@ -976,6 +976,130 @@ export function chartSvg(title, subtitle, rowsIn, kind = "") {
   return out.join("\n");
 }
 
+// ------------------------------------------------------------------ does paying more buy speed?
+//
+// SMALL MULTIPLES, ONE PANEL PER TIER, and the form is forced by the data rather than chosen.
+//
+// The question is whether query TIME tracks query COST across layouts, which is a relationship
+// between two measures — a scatter. The trap is that the three tiers do not share a range: cold runs
+// 27,000-97,000 ms and hot 2,800-5,400. On one shared y-axis warm and hot collapse into a 3px band at
+// the bottom and overplot each other into mush; on one plot with two y-axes the alignment would be
+// arbitrary and the chart would INVENT a correlation. Small multiples are the way out — one panel per
+// tier, each with its own y-scale, **each scale printed on its own axis** so the panels are never
+// read as if they shared one.
+//
+// The X AXIS IS SHARED and that is the load-bearing part: the same CU scale under all three panels is
+// what makes the shapes comparable. Cold climbs along it, warm and hot do not, and that IS the
+// finding.
+//
+// ONE SERIES PER PANEL, so there is no legend, no categorical palette to validate, and no hue
+// encoding anything the panel title does not already say — the same reasoning as the bar charts.
+//
+// Every value here is also in the `fct_summary` table further down the page, which is the table view:
+// the tooltips enhance, they do not gate.
+const SC_AX = 34, SC_GAP = 20, SC_TOP = 40, SC_H = 128, SC_BOT = 34;
+
+/**
+ * Pearson's r, or `null` when it cannot honestly be computed.
+ *
+ * Fewer than three points is not a relationship, and a series with no variance has no correlation
+ * defined at all — both return `null` so the caller prints nothing rather than a `0.00` that reads
+ * like a measured absence of relationship.
+ */
+export function pearson(xs, ys) {
+  const pts = xs.map((x, i) => [Number(x), Number(ys[i])])
+    .filter(([x, y]) => Number.isFinite(x) && Number.isFinite(y));
+  if (pts.length < 3) return null;
+  const n = pts.length;
+  const mx = pts.reduce((s, p) => s + p[0], 0) / n, my = pts.reduce((s, p) => s + p[1], 0) / n;
+  let num = 0, dx = 0, dy = 0;
+  for (const [x, y] of pts) {
+    num += (x - mx) * (y - my); dx += (x - mx) ** 2; dy += (y - my) ** 2;
+  }
+  if (dx <= 0 || dy <= 0) return null;
+  return num / Math.sqrt(dx * dy);
+}
+
+/** An axis top a human would pick: 1, 2 or 5 × a power of ten, at or above the largest value. */
+export function niceMax(v) {
+  const n = Number(v);
+  if (!Number.isFinite(n) || n <= 0) return 1;
+  const pow = 10 ** Math.floor(Math.log10(n));
+  for (const step of [1, 2, 2.5, 5, 10]) if (n <= step * pow) return step * pow;
+  return 10 * pow;
+}
+
+/** `12345` → `12.3k`. Axis ticks only, where four digits of precision buy nothing. */
+const tick = (v) => Math.abs(v) >= 1000 ? `${round1(v / 1000)}k` : String(Math.round(v));
+
+/**
+ * Query time against what the layout cost, one panel per tier.
+ *
+ * `points` is `[{name, cu, ms: {cold, warm, hot}}]` — the same objects the mart block's rows are
+ * built from, so the chart and the table under it cannot disagree.
+ */
+export function fitSvg(points, tiers) {
+  const pts = (points || []).filter((p) => p.cu > 0);
+  const panels = (tiers || []).map((t) => ({
+    tier: t,
+    pts: pts.filter((p) => Number.isFinite(Number((p.ms || {})[t])) && Number((p.ms || {})[t]) > 0)
+      .map((p) => ({ name: p.name, x: Number(p.cu), y: Number(p.ms[t]) })),
+  })).filter((p) => p.pts.length >= 2);
+  if (panels.length < 2) return "";
+
+  const xmax = niceMax(Math.max(...pts.map((p) => p.cu)));
+  const plotW = Math.round((WIDTH - SC_AX - SC_GAP * (panels.length - 1)) / panels.length);
+  const height = SC_TOP + SC_H + SC_BOT;
+  const title = "Does paying more buy speed?";
+  const out = [
+    `<figure class="chart" data-kind="fit"><figcaption>` +
+    `<span class="chart-title">${esc(title)}</span>` +
+    `<span class="chart-sub">each dot is one layout · x: capacity units it cost to query · ` +
+    `y: milliseconds it took · one y-scale per panel, printed</span></figcaption>`,
+    `<svg viewBox="0 0 ${WIDTH} ${height}" width="100%" height="${height}" role="img" ` +
+    `aria-label="${esc(title)}">`,
+  ];
+  panels.forEach((panel, i) => {
+    const x0 = SC_AX + i * (plotW + SC_GAP);
+    const ymax = niceMax(Math.max(...panel.pts.map((p) => p.y)));
+    const r = pearson(panel.pts.map((p) => p.x), panel.pts.map((p) => p.y));
+    // The verdict in words, because `r = +0.99` is the evidence and not everyone reads it as one.
+    const rr = r === null ? "" : `r ${r >= 0 ? "+" : ""}${fmt(r, 2)}`;
+    const verdict = r === null ? ""
+      : `${Math.abs(r) >= 0.8 ? "tracks CU" : "no relation"} · ${rr}`;
+    const px = (v) => x0 + (v / xmax) * plotW;
+    const py = (v) => SC_TOP + SC_H - (v / ymax) * SC_H;
+    out.push(`<text class="panel-title" x="${x0}" y="16">${esc(panel.tier)} ms</text>`);
+    if (verdict) out.push(`<text class="panel-sub" x="${x0}" y="29">${esc(verdict)}</text>`);
+    // Hairline, solid, one shade off the surface — a grid that competes with 7 dots is noise.
+    out.push(`<line class="grid" x1="${x0}" y1="${SC_TOP}" x2="${x0 + plotW}" y2="${SC_TOP}"/>`);
+    out.push(`<line class="axis" x1="${x0}" y1="${SC_TOP}" x2="${x0}" y2="${SC_TOP + SC_H}"/>`);
+    out.push(`<line class="axis" x1="${x0}" y1="${SC_TOP + SC_H}" x2="${x0 + plotW}" ` +
+      `y2="${SC_TOP + SC_H}"/>`);
+    // The y top is labelled per panel — the ONE thing that stops three different scales reading as one.
+    out.push(`<text class="tick tick-y" x="${x0 - 5}" y="${SC_TOP + 4}">${esc(tick(ymax))}</text>`);
+    out.push(`<text class="tick tick-y" x="${x0 - 5}" y="${SC_TOP + SC_H + 4}">0</text>`);
+    out.push(`<text class="tick" x="${x0}" y="${SC_TOP + SC_H + 15}">0</text>`);
+    out.push(`<text class="tick tick-end" x="${x0 + plotW}" y="${SC_TOP + SC_H + 15}">` +
+      `${esc(tick(xmax))}</text>`);
+    if (i === panels.length - 1) {
+      out.push(`<text class="tick tick-end" x="${x0 + plotW}" y="${SC_TOP + SC_H + 28}">CU →</text>`);
+    }
+    for (const p of panel.pts) {
+      const cx = px(p.x).toFixed(1), cy = py(p.y).toFixed(1);
+      // The visible dot is 8px per the mark spec, with a surface ring so two that overlap stay two.
+      // The HIT target is a separate transparent circle well above it — a reader should not have to
+      // land dead-centre on 8px to read a tooltip.
+      out.push(`<circle class="dot" cx="${cx}" cy="${cy}" r="4"/>` +
+        `<circle class="dot-hit" cx="${cx}" cy="${cy}" r="13">` +
+        `<title>${esc(p.name)}: ${fmt(p.y, 0)} ms ${esc(panel.tier)}, ` +
+        `${fmt(p.x, 0)} CU</title></circle>`);
+    }
+  });
+  out.push("</svg></figure>");
+  return out.join("\n");
+}
+
 // ------------------------------------------------------------------------------------- the page
 
 /**
@@ -1016,6 +1140,16 @@ export function spreadFor(runs, ledger, cls, keyOf, key = "items") {
 
 const meanOf = (vals) => vals.reduce((a, b) => a + b, 0) / vals.length;
 
+// A group's numbers are its RUNS' mean — the same runs the bar above averaged, so the two cannot
+// disagree. One dispatch is a sample of a shared capacity; a group with several runs has simply been
+// measured that many times, and a run that wrote a different shape is in a different group. A run
+// that measured NOTHING is dropped rather than averaged in as a zero, which would drag the mean
+// toward "free" for a run that was never read.
+const groupMean = (vals) => {
+  const v = (vals || []).filter((x) => x);
+  return v.length ? meanOf(v) : 0;
+};
+
 /**
  * `[label, mean, min, max, caption]` per LAYOUT — the analytics chart's rows.
  *
@@ -1036,6 +1170,29 @@ const meanOf = (vals) => vals.reduce((a, b) => a + b, 0) / vals.length;
  * same label possible (`duckrun sorted` twice, at `3 files · 26 RG` and `4 files · 25 RG`), and the
  * caption is what tells them apart: the label answers who wrote it, the caption answers what.
  */
+/**
+ * One entry per layout group: `{name, rec, cu, ms: {cold, warm, hot}}`.
+ *
+ * The single source for both things that describe the mart — the rows of its layout block and the
+ * dots of the fit chart. They are the same measurement shown twice, so deriving them separately is
+ * how a page ends up printing 1,916 in a table and plotting 1,960 above it.
+ *
+ * `rec` is the NEWEST member's record: entries arrive oldest-first, and within a group the physical
+ * stats agree to the band anyway — 78 files and 80 is one bar — so this only picks which of the two
+ * prints. The CU and the tier times are the group's MEAN across its runs, which is what the chart's
+ * bars already quote.
+ */
+export function martPoints(groups, times) {
+  return (groups || []).map(([, ms]) => {
+    const rec = ms[ms.length - 1].rec;
+    return {
+      name: producers(ms), rec, cu: groupMean(ms.map((m) => m.cu)),
+      ms: Object.fromEntries(TIERS.map(([lbl]) =>
+        [lbl, groupMean(ms.map((m) => ((times || {})[m.qid] || {})[lbl]))])),
+    };
+  });
+}
+
 export function groupRows(groups, table = DEFAULTS.table) {
   const out = [];
   for (const [, members] of groups) {
@@ -1422,13 +1579,6 @@ export function renderLayouts(cols, groups, times, counts, martTable = DEFAULTS.
     if (!members.has(name)) { members.set(name, []); order.push(name); }
     members.get(name).push({ col, rec });
   }
-  // A group's numbers are its RUNS' mean — the same runs the bar above averaged, so the two cannot
-  // disagree. One dispatch is a sample of a shared capacity; a group with several runs has simply been
-  // measured that many times, and a run that wrote a different shape is in a different group.
-  const mean = (vals) => {
-    const v = vals.filter((x) => x);
-    return v.length ? meanOf(v) : 0;
-  };
 
   const tables = [], schema = {};
   for (const { col, rec } of cols) {
@@ -1453,15 +1603,9 @@ export function renderLayouts(cols, groups, times, counts, martTable = DEFAULTS.
     // The mart's rows ARE the chart's bars — same grouping, same members, same mean. Every other block
     // is one row per producer, read off that producer's first column.
     let present = showCu
-      ? groups.map(([, ms]) => {
-        // The NEWEST member's stats: entries arrive oldest-first, and within a group they agree to the
-        // band anyway — 78 files and 80 is the same bar, so this only picks which of the two prints.
-        const rec = ms[ms.length - 1].rec;
-        const d = (((rec.layout || {}).stats || {})[rec.engine] || {})[t];
-        return { name: producers(ms), d, cu: mean(ms.map((m) => m.cu)),
-          ms: Object.fromEntries(TIERS.map(([lbl]) =>
-            [lbl, mean(ms.map((m) => (times[m.qid] || {})[lbl]))])) };
-      }).filter(({ d }) => d)
+      ? martPoints(groups, times)
+        .map((p) => ({ ...p, d: (((p.rec.layout || {}).stats || {})[p.rec.engine] || {})[t] }))
+        .filter(({ d }) => d)
       : order.map((n) => ({ name: n, d: (stats[members.get(n)[0].col] || {})[t], ms: {} }))
         .filter(({ d }) => d);
     if (!present.length) continue;
@@ -1808,16 +1952,34 @@ export function renderPage(cols, runs, ledger, opts = {}) {
     .map((e) => `[${STACK[e][0]}](${ADAPTER_URLS[e]}) — ${STACK[e][1]}`)
     .join(" · ")));
 
+  // The mart block and the fit chart quote the SAME numbers as the analytics bars above — the same
+  // groups, the same members, the same mean, all of it through `martPoints`. They are one measurement
+  // described three ways, and a page printing dwh at 1,916 in a bar and 1,960 in the row under it
+  // would be inviting the reader to work out which one it meant. The timings are keyed per RUN for the
+  // same reason the CU is: a group's tiers are its own runs' mean, not its column's newest record.
+  const { times, counts } = queryTime(anaEntries.map(({ qid, rec }) => ({ col: qid, rec })));
+
+  // THIRD CHART, and it answers the question the first two raise but cannot settle: the analytics bars
+  // rank what each layout COST, the mart table lists what each one TOOK, and only putting one against
+  // the other says whether the cheap layouts are also the fast ones. They are — for exactly one of the
+  // three tiers.
+  const fit = fitSvg(martPoints(groups, times), TIERS.map(([l]) => l).filter((l) => l in counts));
+  if (fit) {
+    out.push(fit);
+    out.push(note("**Cold is the tier the layout moves, and it is the only one.** Cold is the first " +
+      "visit to a freshly deployed model, when Power BI transcodes columns out of parquet — so it is " +
+      "the tier that reads the file layout, and its CU and its milliseconds are two measures of the " +
+      "same work. Warm and hot are answered from what the model already holds in memory, where the " +
+      "layout has stopped mattering: the spread across every layout is far smaller there, and the " +
+      "cheapest layout to query is not the fastest one at either tier. Read it as **cost buys you a " +
+      "faster FIRST visit**, not a faster model. Every value plotted is in the `fct_summary` block " +
+      "below."));
+  }
+
   out.push("<h3>Cost by engine</h3>");
   const secsCol = Object.fromEntries(cols.map(({ col, rec }) =>
     [col, runCu(rec, ledger, "seconds").cells]));
   out.push(engineTable(perCol, cols, secsCol));
-  // The mart block quotes the SAME number as the chart above it — the same groups, the same members,
-  // the same mean. They are one measurement described twice, and a page that printed dwh at 1,916 in a
-  // bar and 1,960 in the row under it would be inviting the reader to work out which one it meant. The
-  // timings are keyed per RUN for the same reason the CU is: a group's tiers are its own runs' mean,
-  // not its column's newest record.
-  const { times, counts } = queryTime(anaEntries.map(({ qid, rec }) => ({ col: qid, rec })));
   out.push(renderLayouts(cols, groups, times, counts, martTable));
 
   const n = new Set(cols.map(({ col }) => baseEngine(col))).size;

@@ -1744,6 +1744,124 @@ test("the two charts share one side-by-side row, analytics first", () => {
   assert.ok(!row[1].includes('data-kind="analytics"'), "analytics keeps the page's own series hue");
 });
 
+// ----------------------------------------------------------------------------------- the fit chart
+
+/**
+ * `n` layouts, each with its own CU and cold/warm/hot, so the fit chart has something to plot.
+ *
+ * File and row-group counts are a POWER OF TWO APART on purpose: `layoutKey` bands them, so
+ * `4, 5, 6` files would be one bar and one dot rather than three.
+ */
+const fitRuns = (spec) => spec.map(([engine, cold, warm, hot], i) =>
+  lay(engine, 4 << (i * 2), 20 << (i * 2), {
+    file: `f-${i}.json`, cfg: { vcores: String(10 + i) },
+    timings: timings({ q1: [cold, warm, hot] }),
+  }));
+
+test("pearson refuses to compute what it cannot", () => {
+  assert.equal(d.pearson([1, 2], [1, 2]), null, "two points are not a relationship");
+  assert.equal(d.pearson([1, 1, 1], [1, 2, 3]), null, "no variance, no correlation");
+  assert.ok(Math.abs(d.pearson([1, 2, 3], [2, 4, 6]) - 1) < 1e-9);
+  assert.ok(Math.abs(d.pearson([1, 2, 3], [6, 4, 2]) + 1) < 1e-9);
+});
+
+test("niceMax picks an axis top a human would", () => {
+  assert.equal(d.niceMax(96503), 100000);
+  assert.equal(d.niceMax(6078), 10000);
+  assert.equal(d.niceMax(0), 1, "a zero domain still needs a positive top");
+});
+
+test("the fit chart draws one panel per tier, each with its OWN y-scale printed", () => {
+  // Cold runs 27k–97k and hot 2.8k–5.4k. On one shared y-axis warm and hot collapse into a band at
+  // the bottom; on two y-axes the alignment would be arbitrary. Small multiples are the way out, and
+  // printing each panel's top is what stops three scales reading as one.
+  const svg = d.fitSvg([
+    { name: "a", cu: 1000, ms: { cold: 20000, warm: 4000, hot: 3000 } },
+    { name: "b", cu: 2000, ms: { cold: 40000, warm: 5000, hot: 4000 } },
+    { name: "c", cu: 4000, ms: { cold: 80000, warm: 3000, hot: 5000 } },
+  ], ["cold", "warm", "hot"]);
+  const titles = [...svg.matchAll(/<text class="panel-title"[^>]*>([^<]*)</g)].map((m) => m[1]);
+  assert.deepEqual(titles, ["cold ms", "warm ms", "hot ms"]);
+  // Three different y tops, each labelled — the honesty condition for per-panel scales.
+  const yticks = [...svg.matchAll(/<text class="tick tick-y"[^>]*>([^<]*)</g)].map((m) => m[1]);
+  assert.deepEqual(yticks, ["100k", "0", "5k", "0", "5k", "0"]);
+  assert.equal((svg.match(/class="dot"/g) || []).length, 9, "every layout in every panel");
+  // ONE series per panel, so no second hue and nothing to validate.
+  assert.ok(!svg.includes("series2"));
+});
+
+test("the fit chart states the verdict in words, not just r", () => {
+  const svg = d.fitSvg([
+    { name: "a", cu: 1000, ms: { cold: 20000, hot: 3000 } },
+    { name: "b", cu: 2000, ms: { cold: 40000, hot: 5000 } },
+    { name: "c", cu: 4000, ms: { cold: 80000, hot: 3100 } },
+  ], ["cold", "hot"]);
+  const subs = [...svg.matchAll(/<text class="panel-sub"[^>]*>([^<]*)</g)].map((m) => m[1]);
+  assert.ok(subs[0].startsWith("tracks CU · r +1.00"), `cold read ${subs[0]}`);
+  assert.ok(subs[1].startsWith("no relation · r "), `hot read ${subs[1]}`);
+});
+
+test("one tier alone is not a comparison, and draws nothing", () => {
+  // The chart's whole claim is that the tiers behave DIFFERENTLY against CU. With one panel there is
+  // nothing to contrast and a lone scatter would assert a relationship instead of comparing three.
+  const svg = d.fitSvg([
+    { name: "spark readHeavyForPBI", cu: 1000, ms: { cold: 20000 } },
+    { name: "b", cu: 2000, ms: { cold: 40000 } },
+    { name: "c", cu: 4000, ms: { cold: 80000 } },
+  ], ["cold"]);
+  assert.equal(svg, "");
+  assert.equal(d.fitSvg([], ["cold", "warm", "hot"]), "", "and nothing measured draws nothing");
+});
+
+test("the fit chart names the layout in every tooltip", () => {
+  const svg = d.fitSvg([
+    { name: "spark readHeavyForPBI", cu: 1000, ms: { cold: 20000, hot: 3000 } },
+    { name: "duckdb iceberg", cu: 8000, ms: { cold: 96000, hot: 3700 } },
+    { name: "dwh", cu: 1900, ms: { cold: 31000, hot: 3900 } },
+  ], ["cold", "hot"]);
+  assert.ok(svg.includes("<title>spark readHeavyForPBI: 20,000 ms cold, 1,000 CU</title>"));
+  assert.ok(svg.includes("<title>duckdb iceberg: 3,700 ms hot, 8,000 CU</title>"));
+  assert.equal((svg.match(/class="dot-hit" cx="[^"]*" cy="[^"]*" r="13"/g) || []).length, 6,
+    "a 13-unit hit circle over every 4-unit dot");
+});
+
+test("a layout with no timings is absent from the panel, not plotted at zero", () => {
+  const svg = d.fitSvg([
+    { name: "a", cu: 1000, ms: { cold: 20000, hot: 3000 } },
+    { name: "b", cu: 2000, ms: { cold: 40000, hot: 4000 } },
+    { name: "c", cu: 4000, ms: { cold: 80000 } },              // never benchmarked at hot
+    { name: "d", cu: 0, ms: { cold: 10000, hot: 2000 } },      // no CU read yet
+  ], ["cold", "hot"]);
+  assert.equal((svg.match(/class="dot"/g) || []).length, 5, "3 cold + 2 hot, no zeros invented");
+});
+
+test("the fit chart renders on the page, after both bar charts and before the cost table", () => {
+  const out = render(fitRuns([
+    ["spark", 20000, 4000, 3000], ["duckrun", 40000, 5000, 4000],
+    ["dwh", 80000, 3000, 5000],
+  ]), ledger({ OUT: 1.0, SEM: 2.0 }));
+  const at = out.indexOf('data-kind="fit"');
+  assert.ok(at > 0, "the fit chart is on the page");
+  assert.ok(out.indexOf('<div class="charts">') < at, "after the two bar charts");
+  assert.ok(at < out.indexOf("<h3>Cost by engine</h3>"), "before the cost table");
+  const said = plain(out);
+  assert.ok(said.includes("Does paying more buy speed?"));
+  assert.ok(said.includes("Cold is the tier the layout moves, and it is the only one"));
+  assert.ok(said.includes("cost buys you a faster FIRST visit"));
+});
+
+test("the fit chart and the mart block are one measurement, not two", () => {
+  // `martPoints` is the single source for both, so a dot and the row under it cannot disagree.
+  const runs = fitRuns([["spark", 20000, 4000, 3000], ["duckrun", 40000, 5000, 4000],
+    ["dwh", 80000, 3000, 5000]]);
+  const cols = d.columnsFor(runs);
+  const entries = runs.map((rec, i) => ({ col: cols[0].col, rec, qid: String(i), cu: 0 }));
+  const { times } = d.queryTime(entries.map(({ qid, rec }) => ({ col: qid, rec })));
+  const pts = d.martPoints(d.layoutGroups(entries), times);
+  assert.ok(pts.length >= 1);
+  for (const p of pts) assert.ok(p.name && p.rec, "every point carries its label and its record");
+});
+
 test("a single table renders without a tab strip", () => {
   const out = render([full("a-1.json", "spark")], ledger({ OUT: 1.0, SEM: 2.0 }));
   assert.ok(!out.includes('class="tabs"'));
