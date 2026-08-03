@@ -215,23 +215,6 @@ figure.chart svg { max-width:100%; height:auto; display:block; overflow:visible;
 .bar-caption { fill:var(--dim); font-size:10px; }
 .bar-value { fill:var(--dim); font-size:12px; font-variant-numeric:tabular-nums; }
 .axis { stroke:var(--line); stroke-width:1; }
-/* The fit chart: three scatter panels, one series each, so the dot wears the same slot-1 accent the
-   analytics bars do — it is the same measurement, seen against what it cost. */
-.dot { fill:var(--series); stroke:var(--bg); stroke-width:2; }
-/* Transparent, and much larger than the 8px mark: a reader should not have to land dead-centre on a
-   dot to get its tooltip. It carries the <title>, so the hit area IS the labelled area. */
-.dot-hit { fill:transparent; }
-/* Solid hairline, one shade off the surface. Dashed would read as a threshold when it is just a
-   bound, and anything heavier competes with seven dots. */
-.grid { stroke:var(--line); stroke-width:1; }
-.panel-title { fill:var(--fg); font-size:12px; font-weight:600; }
-.panel-sub { fill:var(--dim); font-size:10px; }
-.tick { fill:var(--dim); font-size:10px; font-variant-numeric:tabular-nums; }
-.tick-y { text-anchor:end; }
-.tick-end { text-anchor:end; }
-/* The pair sits side by side like the two bar charts, but this one is a full-width row of its own:
-   three panels inside 62rem is already tight, and halving it would collide the y ticks. */
-figure.chart[data-kind="fit"] { max-width:62rem; }
 </style>
 </head>
 <body>

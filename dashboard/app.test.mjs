@@ -1090,10 +1090,11 @@ test("two runs of ONE column that wrote different parquet are two bars", () => {
   // ...and the mart block says the same thing, because its rows ARE these groups.
   const body = rows(block(out, "the mart the queries land on")).slice(1);
   assert.equal(body.length, 2, "one mart row per bar, not one per writer");
-  assert.ok(body[0].startsWith("| duckrun sorted | 1,600 |"), body[0]);
-  assert.ok(body[0].includes("| 4 | 25 |"), `the shape the CU belongs to: ${body[0]}`);
-  assert.ok(body[1].startsWith("| duckrun sorted | 2,400 |"), body[1]);
-  assert.ok(body[1].includes("| 3 | 26 |"), body[1]);
+  // Fewest files first, and the block carries LAYOUT ONLY — the CU that used to sit here is in the
+  // charts and in `Cost by engine`, on the run that measured it.
+  assert.ok(body[0].startsWith("| duckrun sorted | 3 | 26 |"), body[0]);
+  assert.ok(body[1].startsWith("| duckrun sorted | 4 | 25 |"), body[1]);
+  assert.ok(!body[0].includes("1,600"), "no CU column on the layout block");
   // The ETL half is unmoved: there the writer and its compute are the subject, so both runs are
   // samples of ONE column and the bar is their mean with a range.
   const etl = charts(out)[1];
@@ -1187,8 +1188,9 @@ test("the layout table is one row per writer and agrees with the chart", () => {
   }));
   const body = rows(block(out, "the mart the queries land on"));
   assert.equal(body.length, 2, "a header and ONE row — duckrun, not duckrun twice");
-  assert.ok(body[1].startsWith("| duckrun | 1,500 |"), body[1]);
-  assert.equal(charts(out)[0].values[0].split(" ")[0], "1,500.0", "the same number as the bar");
+  assert.ok(body[1].startsWith("| duckrun | 4 | 27 |"), body[1]);
+  assert.equal(charts(out)[0].values[0].split(" ")[0], "1,500.0", "the chart still carries the CU");
+  assert.ok(!body[1].includes("1,500"), "but the layout block does not");
   assert.ok(!body[0].includes("| writer |"), "the row label IS the writer now");
 });
 
@@ -1220,7 +1222,7 @@ test("a tier is summed over the queries every column has", () => {
   assert.deepEqual(totals, { duckrun: 10.0, dwh: 20.0 });
 });
 
-test("the three tiers are columns of the mart block, not a section", () => {
+test("the three tiers are columns of the PER-RUN table, not of the layout block", () => {
   const t = timings({ a: [10, 5, 4], b: [20, 6, 5] });
   const runs = [
     full("a-1.json", "duckrun", {
@@ -1232,16 +1234,22 @@ test("the three tiers are columns of the mart block, not a section", () => {
   ];
   const out = render(runs, ledger({ OUT: 1.0, SEM: 2.0 }));
   assert.ok(!plain(out).includes("Query time"), "no section of its own");
+  // The LAYOUT block is physical layout only — no CU, no tiers.
   const rr = rows(block(out, "the mart the queries land on"));
-  assert.ok(rr[0].startsWith("| layout | CU | cold ms | warm ms | hot ms | files |"), rr[0]);
-  const row = rr.find((r) => r.startsWith("| duckrun |"));
-  assert.ok(row.includes("| 30 | 11 | 9 |"), `cold/warm/hot beside the layout: ${row}`);
-  assert.ok(row.trimEnd().endsWith("| 4 | — | — | — | · |"), row);
-  assert.ok(!rr[0].includes("| writer |"), "the row label IS the writer now");
+  assert.ok(rr[0].startsWith("| layout | files | row groups |"), rr[0]);
+  assert.ok(!rr[0].includes("cold ms") && !rr[0].includes("| CU |"), rr[0]);
+  // Exactly two tables carry them, and neither is a layout block: the cost-and-speed table, one row
+  // per layout, and the run table, one row per dispatch.
+  const heads = rows(out).filter((r) => r.includes("cold ms"));
+  assert.equal(heads.length, 2, `two headers carry the tiers: ${heads}`);
+  assert.ok(heads.some((h) => h.startsWith("| layout | CU | cold ms | warm ms | hot ms |")), heads[0]);
+  assert.ok(heads.some((h) =>
+    h.includes("| etl CU | analytics CU | cold ms | warm ms | hot ms | items |")), heads[1]);
+  assert.ok(rows(out).some((r) => r.includes("| 30 | 11 | 9 |")), "the run's own tiers");
 });
 
-test("the tiers appear on the mart block alone", () => {
-  // One number per ENGINE, not per table — on every block it would read as one measurement per table.
+test("no layout block carries the tiers, mart included", () => {
+  // They are a property of the RUN, not of any table's parquet.
   const runs = [full("a-1.json", "duckrun", {
     timings: timings({ a: [10, 5, 4] }),
     stats: {
@@ -1250,8 +1258,9 @@ test("the tiers appear on the mart block alone", () => {
     tables: ["fct_summary", "fct_scada"],
   })];
   const out = render(runs, ledger({ OUT: 1.0, SEM: 2.0 }));
-  assert.ok(block(out, "the mart the queries land on").includes("cold ms"));
+  assert.ok(!block(out, "the mart the queries land on").includes("cold ms"));
   assert.ok(!block(out, "landing.fct_scada").includes("cold ms"));
+  assert.ok(plain(out).includes("cold ms"), "but the run table still has them");
 });
 
 test("cold covers fewer queries than hot and the note says so", () => {
@@ -1266,7 +1275,7 @@ test("a record with no tier timings adds no columns", () => {
   // Absent columns say "not measured"; zeros would say "instant".
   const out = render([full("a-1.json", "spark")], ledger({ OUT: 1.0, SEM: 2.0 }));
   assert.ok(!plain(out).includes("cold ms"));
-  assert.ok(rows(out).some((r) => r.startsWith("| layout | CU | files |")),
+  assert.ok(rows(out).some((r) => r.startsWith("| layout | files |")),
     "the block itself still renders");
 });
 
@@ -1744,13 +1753,13 @@ test("the two charts share one side-by-side row, analytics first", () => {
   assert.ok(!row[1].includes('data-kind="analytics"'), "analytics keeps the page's own series hue");
 });
 
-// ----------------------------------------------------------------------------------- the fit chart
+// ------------------------------------------------------------------- cost and speed by layout
 
 /**
- * `n` layouts, each with its own CU and cold/warm/hot, so the fit chart has something to plot.
+ * `n` layouts, each with its own CU and cold/warm/hot.
  *
  * File and row-group counts are a POWER OF TWO APART on purpose: `layoutKey` bands them, so
- * `4, 5, 6` files would be one bar and one dot rather than three.
+ * `4, 5, 6` files would be one group and one row rather than three.
  */
 const fitRuns = (spec) => spec.map(([engine, cold, warm, hot], i) =>
   lay(engine, 4 << (i * 2), 20 << (i * 2), {
@@ -1758,100 +1767,55 @@ const fitRuns = (spec) => spec.map(([engine, cold, warm, hot], i) =>
     timings: timings({ q1: [cold, warm, hot] }),
   }));
 
-test("pearson refuses to compute what it cannot", () => {
-  assert.equal(d.pearson([1, 2], [1, 2]), null, "two points are not a relationship");
-  assert.equal(d.pearson([1, 1, 1], [1, 2, 3]), null, "no variance, no correlation");
-  assert.ok(Math.abs(d.pearson([1, 2, 3], [2, 4, 6]) - 1) < 1e-9);
-  assert.ok(Math.abs(d.pearson([1, 2, 3], [6, 4, 2]) + 1) < 1e-9);
-});
-
-test("niceMax picks an axis top a human would", () => {
-  assert.equal(d.niceMax(96503), 100000);
-  assert.equal(d.niceMax(6078), 10000);
-  assert.equal(d.niceMax(0), 1, "a zero domain still needs a positive top");
-});
-
-test("the fit chart draws one panel per tier, each with its OWN y-scale printed", () => {
-  // Cold runs 27k–97k and hot 2.8k–5.4k. On one shared y-axis warm and hot collapse into a band at
-  // the bottom; on two y-axes the alignment would be arbitrary. Small multiples are the way out, and
-  // printing each panel's top is what stops three scales reading as one.
-  const svg = d.fitSvg([
-    { name: "a", cu: 1000, ms: { cold: 20000, warm: 4000, hot: 3000 } },
-    { name: "b", cu: 2000, ms: { cold: 40000, warm: 5000, hot: 4000 } },
-    { name: "c", cu: 4000, ms: { cold: 80000, warm: 3000, hot: 5000 } },
-  ], ["cold", "warm", "hot"]);
-  const titles = [...svg.matchAll(/<text class="panel-title"[^>]*>([^<]*)</g)].map((m) => m[1]);
-  assert.deepEqual(titles, ["cold ms", "warm ms", "hot ms"]);
-  // Three different y tops, each labelled — the honesty condition for per-panel scales.
-  const yticks = [...svg.matchAll(/<text class="tick tick-y"[^>]*>([^<]*)</g)].map((m) => m[1]);
-  assert.deepEqual(yticks, ["100k", "0", "5k", "0", "5k", "0"]);
-  assert.equal((svg.match(/class="dot"/g) || []).length, 9, "every layout in every panel");
-  // ONE series per panel, so no second hue and nothing to validate.
-  assert.ok(!svg.includes("series2"));
-});
-
-test("the fit chart states the verdict in words, not just r", () => {
-  const svg = d.fitSvg([
-    { name: "a", cu: 1000, ms: { cold: 20000, hot: 3000 } },
-    { name: "b", cu: 2000, ms: { cold: 40000, hot: 5000 } },
-    { name: "c", cu: 4000, ms: { cold: 80000, hot: 3100 } },
-  ], ["cold", "hot"]);
-  const subs = [...svg.matchAll(/<text class="panel-sub"[^>]*>([^<]*)</g)].map((m) => m[1]);
-  assert.ok(subs[0].startsWith("tracks CU · r +1.00"), `cold read ${subs[0]}`);
-  assert.ok(subs[1].startsWith("no relation · r "), `hot read ${subs[1]}`);
-});
-
-test("one tier alone is not a comparison, and draws nothing", () => {
-  // The chart's whole claim is that the tiers behave DIFFERENTLY against CU. With one panel there is
-  // nothing to contrast and a lone scatter would assert a relationship instead of comparing three.
-  const svg = d.fitSvg([
-    { name: "spark readHeavyForPBI", cu: 1000, ms: { cold: 20000 } },
-    { name: "b", cu: 2000, ms: { cold: 40000 } },
-    { name: "c", cu: 4000, ms: { cold: 80000 } },
-  ], ["cold"]);
-  assert.equal(svg, "");
-  assert.equal(d.fitSvg([], ["cold", "warm", "hot"]), "", "and nothing measured draws nothing");
-});
-
-test("the fit chart names the layout in every tooltip", () => {
-  const svg = d.fitSvg([
-    { name: "spark readHeavyForPBI", cu: 1000, ms: { cold: 20000, hot: 3000 } },
-    { name: "duckdb iceberg", cu: 8000, ms: { cold: 96000, hot: 3700 } },
-    { name: "dwh", cu: 1900, ms: { cold: 31000, hot: 3900 } },
-  ], ["cold", "hot"]);
-  assert.ok(svg.includes("<title>spark readHeavyForPBI: 20,000 ms cold, 1,000 CU</title>"));
-  assert.ok(svg.includes("<title>duckdb iceberg: 3,700 ms hot, 8,000 CU</title>"));
-  assert.equal((svg.match(/class="dot-hit" cx="[^"]*" cy="[^"]*" r="13"/g) || []).length, 6,
-    "a 13-unit hit circle over every 4-unit dot");
-});
-
-test("a layout with no timings is absent from the panel, not plotted at zero", () => {
-  const svg = d.fitSvg([
-    { name: "a", cu: 1000, ms: { cold: 20000, hot: 3000 } },
-    { name: "b", cu: 2000, ms: { cold: 40000, hot: 4000 } },
-    { name: "c", cu: 4000, ms: { cold: 80000 } },              // never benchmarked at hot
-    { name: "d", cu: 0, ms: { cold: 10000, hot: 2000 } },      // no CU read yet
-  ], ["cold", "hot"]);
-  assert.equal((svg.match(/class="dot"/g) || []).length, 5, "3 cold + 2 hot, no zeros invented");
-});
-
-test("the fit chart renders on the page, after both bar charts and before the cost table", () => {
+test("cost and speed is one table, cheapest first, with a title and nothing else", () => {
   const out = render(fitRuns([
     ["spark", 20000, 4000, 3000], ["duckrun", 40000, 5000, 4000],
     ["dwh", 80000, 3000, 5000],
   ]), ledger({ OUT: 1.0, SEM: 2.0 }));
-  const at = out.indexOf('data-kind="fit"');
-  assert.ok(at > 0, "the fit chart is on the page");
+  const at = out.indexOf("<h3>Cost and speed by layout</h3>");
+  assert.ok(at > 0, "the table is on the page");
   assert.ok(out.indexOf('<div class="charts">') < at, "after the two bar charts");
   assert.ok(at < out.indexOf("<h3>Cost by engine</h3>"), "before the cost table");
+  const head = rows(out).find((r) => r.startsWith("| layout | CU |"));
+  assert.ok(head, "layout, CU, then the tiers");
+  assert.ok(head.includes("| cold ms | warm ms | hot ms |"), head);
+  // A TITLE AND NOTHING ELSE — no verdict, no correlation, no reading of the numbers.
   const said = plain(out);
-  assert.ok(said.includes("Does paying more buy speed?"));
-  assert.ok(said.includes("Cold is the tier the layout moves, and it is the only one"));
-  assert.ok(said.includes("cost buys you a faster FIRST visit"));
+  assert.ok(!said.includes("Does paying more buy speed"));
+  assert.ok(!said.includes("tracks CU") && !said.includes("no relation"));
+  assert.ok(!said.includes("Cold is the tier the layout moves"));
 });
 
-test("the fit chart and the mart block are one measurement, not two", () => {
-  // `martPoints` is the single source for both, so a dot and the row under it cannot disagree.
+test("the cost-and-speed rows are cheapest first", () => {
+  const out = render(fitRuns([
+    ["spark", 80000, 4000, 3000], ["duckrun", 40000, 5000, 4000],
+    ["dwh", 20000, 3000, 5000],
+  ]), ledger({ OUT: 1.0, SEM: 2.0 }));
+  const body = rows(out).filter((r) => /^\| (spark|duckrun|dwh)[^|]*\| [\d,]+ \| [\d,]+ \|/.test(r));
+  const cu = body.map((r) => Number(r.split("|")[2].trim().replace(/,/g, "")));
+  assert.deepEqual([...cu].sort((a, b) => a - b), cu, `cheapest first: ${cu}`);
+});
+
+test("a layout with no CU read yet is absent, not printed as free", () => {
+  assert.equal(d.renderFit([], {}, ["cold"]), "");
+  const groups = [["k", [{ qid: "0", cu: 0, rec: lay("spark", 4, 20) }]]];
+  assert.equal(d.renderFit(groups, {}, ["cold"]), "", "cu 0 means unmeasured, not free");
+});
+
+test("a tier nothing recorded is not a column", () => {
+  const groups = [
+    ["a", [{ qid: "0", cu: 100, rec: lay("spark", 4, 20) }]],
+    ["b", [{ qid: "1", cu: 200, rec: lay("dwh", 16, 80) }]],
+  ];
+  const times = { 0: { cold: 10, warm: 5 }, 1: { cold: 20, warm: 6 } };
+  const html = d.renderFit(groups, times, ["cold", "warm", "hot"]);
+  const head = rows(html)[0];
+  assert.ok(head.includes("| cold ms | warm ms |"), head);
+  assert.ok(!head.includes("hot ms"), "a tier with no samples adds no column");
+});
+
+test("the cost-and-speed table and the mart block are one measurement, not two", () => {
+  // `martPoints` is the single source for both, so a row here and a row there cannot disagree.
   const runs = fitRuns([["spark", 20000, 4000, 3000], ["duckrun", 40000, 5000, 4000],
     ["dwh", 80000, 3000, 5000]]);
   const cols = d.columnsFor(runs);

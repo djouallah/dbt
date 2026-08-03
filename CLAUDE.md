@@ -1339,25 +1339,27 @@ no data at all. `all.yml`, `dbt.yml` and `cu.yml` are gone.
   — in the row label, as `compute seconds` does — not in a bar, where length alone reads as a
   ranking and there is nowhere to put the qualification.
 - **THE PAGE CARRIES TWO NON-CU MEASURES NOW, and each states where its own number bends.**
-  *cold / warm / hot* are **THREE COLUMNS OF THE MART BLOCK, never a section of their own.** They
+  *cold / warm / hot* appear **TWICE, and the two placements answer different questions.** They
   come from the RUN RECORDS, not the ledger: every record already holds
   `benchmark.timings.<model>.<query>`, and `benchmark/render_report.py` renders it per dispatch — but
   a dispatch builds ONE engine, so that report always has a single column and its ranking is
   degenerate. The composed page is the only place the three tiers can be read ACROSS engines.
-  **The placement is the point and it was got wrong once.** A table of their own put the layout and
-  the speed it produced on two different tables, when whether one explains the other is the only
-  question worth asking of these numbers. On one row, `files`/`row groups`/`size MB`/`vorder` sit
-  beside the milliseconds they produced: iceberg's 357 files and 122k-row row groups next to 103,328
-  ms cold, against duckrun's 4 files and 23,491 ms. Do not move them back out.
-  Three more things easy to get wrong. **cold/warm/hot are PASS POSITIONS**, not the record's own
+  **Per LAYOUT** in the `Cost and speed by layout` table, beside the analytics CU — a group's mean
+  over its runs, cheapest first, with a title and no commentary. **Per RUN** in the sources table,
+  which is what actually measured them: one dispatch, against one semantic model it had just
+  deployed. They used to be columns of the mart's LAYOUT block and are not any more: that made one
+  table answer both what the parquet looks like and what querying it cost, and it forced a group mean
+  onto a row about parquet — a number no single run recorded. `Table layout` is now physical layout
+  alone, sorted fewest-files-first, because ordering by a CU column that is no longer printed is a
+  ranking a reader cannot check.
+  Three things easy to get wrong. **cold/warm/hot are PASS POSITIONS**, not the record's own
   `tier` field, which is the query CATEGORY (`probe`/`composite`/`raw`/`hot_only`) and names four
-  different things. **Each tier is summed over the queries every column carries AT THAT TIER**, and
+  different things. **Each tier is summed over the queries every run carries AT THAT TIER**, and
   the sets genuinely differ — the selectivity-ladder queries have no `cold_ms` at all, the top DUID
-  being resolved after pass 1 — so cold is two queries short and the closing note counts each tier
+  being resolved after pass 1 — so cold is two queries short and the note counts each tier
   rather than leaving a small total to be misread. And it is **reimplemented, never imported**:
   `render_report._totals`/`rank` take exactly this shape, and `cu/` importing `benchmark/` would end
   the isolation that makes this directory deletable by removing one folder and one workflow file.
-  Mart-block-only, for the same reason the CU column is: one number per ENGINE, not per table.
 - **`compute seconds` is ONE ROW, ON `etl` ONLY, and it is a reinstatement.** It was removed once, on
   the grounds that billed operation seconds SUM across concurrent operations and so needed more
   hedging than they were worth. That objection is true and unchanged; what was re-decided is that

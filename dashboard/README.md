@@ -182,29 +182,12 @@ without a build, a token or a dispatch.
 - **Bar charts first**, analytics then ETL, **cheapest first** because "lower is better" makes the
   ranking the finding. A **zero sorts to the bottom**, never the top: zero means the engine did no
   such work, and at the top under that caption it would read as the winner.
-- **A THIRD CHART — *Does paying more buy speed?* — answers what the first two raise and cannot
-  settle.** The analytics bars rank what each layout COST; the mart block lists what each one TOOK;
-  only putting one against the other says whether the cheap layouts are also the fast ones. They
-  are — for exactly **one of the three tiers**. Measured on the current records: **cold r +0.99,
-  warm r +0.01, hot r −0.18**. Cold is the first visit to a freshly deployed model, when Power BI
-  transcodes columns out of parquet, so its CU and its milliseconds are two measures of the same
-  work; warm and hot are answered from memory, where the layout has stopped mattering and the
-  cheapest layout to query is not the fastest at either tier. The r on cold is not an outlier
-  artefact — drop `duckdb iceberg`, the one extreme point, and it is still +0.97.
-  **The form is forced, not chosen.** It is a relationship between two measures, so a scatter; but
-  the tiers do not share a range (cold 27k–97k ms against hot 2.8k–5.4k), so on one shared y-axis
-  warm and hot collapse into a 3px band and overplot each other, and on **two** y-axes the alignment
-  would be arbitrary and the chart would invent a correlation. Small multiples are the way out —
-  one panel per tier, own y-scale, **each scale printed on its own axis**, which is the condition
-  that stops three scales being read as one. The **x-axis is shared** and that is the load-bearing
-  part: the same CU scale under all three is what makes the shapes comparable.
-  **One series per panel**, so there is no legend, no third hue and no categorical palette to
-  validate — the same reasoning the bar charts use. The dot is 8px with a surface ring; the hit
-  target is a separate transparent 26px circle, because a reader should not have to land dead-centre
-  on a mark to get its tooltip. Every value plotted is also in the `fct_summary` block below, which
-  is the table view — the tooltips enhance, they never gate.
-  `martPoints` is the single source for the bars, the dots and the mart rows, so all three quote the
-  same mean and cannot disagree.
+- **Cost and speed by layout is a TABLE, between the charts and *Cost by engine*.** One row per
+  layout, cheapest first: `CU`, `cold ms`, `warm ms`, `hot ms`. These four were columns of the mart's
+  layout block, which made one table answer two questions — what the parquet looks like, and what
+  querying it cost. *Table layout* is now physical layout alone and this is the other half. It has a
+  title and no commentary. Built from the same `martPoints` as the bars and the layout rows, so all
+  three quote the same mean.
 - **The two charts are keyed on DIFFERENT THINGS, and that is the design.** **Analytics is one bar
   per PARQUET LAYOUT**, because Power BI never sees the engine — it opens parquet through Direct Lake
   and transcodes row groups, so what a query costs belongs to what was written and the writer is
@@ -315,11 +298,13 @@ without a build, a token or a dispatch.
   settings therefore collapse to one row — they had written identical layouts, so the rows they
   replaced were the same row printed twice.
   **The MART block is the exception: its rows ARE the chart's bars**, same grouping and same members,
-  which is what makes the two agree when a writer produced more than one layout. It is the only block
-  carrying the analytics CU and the three query-time columns — one number per bar, not per table — so
-  it is the only one where a row averaging two shapes would print a number belonging to neither, which
-  is exactly what `duckrun sorted` did: the mean of a 3-file run and a 4-file one, on a row showing
-  4 files. That writer now has two mart rows and the `files`/`row groups` columns say which is which.
+  which is what keeps a writer that produced two different shapes on two rows — `duckrun sorted` wrote
+  3 files/26 RG and 4/25, which is two layouts and not one, and the `files`/`row groups` columns say
+  which is which. **The block is PHYSICAL LAYOUT ONLY**: the analytics CU and the three query tiers
+  that used to sit beside the mart are now the *Cost and speed by layout* table above, so one table
+  no longer answers both what the parquet looks like and what querying it cost. Rows are FEWEST FILES
+  FIRST — it sorted by the CU column, and ordering by a column that is no longer printed is a ranking
+  a reader cannot check.
   Every other block stays one row per writer: they are physical layout alone, describing a table the
   mart's shape says nothing about, so splitting them the same way would print one row twice for a
   difference that is not in it.
@@ -354,28 +339,23 @@ without a build, a token or a dispatch.
   newest run is broken", so a bad newest run excludes all the good history. Survivable because it is
   loud — the note says `N of M runs were excluded` and that the newest is then the likelier anomaly —
   and because the next good run reverses it.
-- **`cold` / `warm` / `hot` are THREE COLUMNS OF THE MART BLOCK, not a section.** The one thing on
-  the page that is not capacity units, and it comes from the run records rather than the ledger:
-  `benchmark.timings.<model>.<query>` is already on every record. `benchmark/render_report.py`
-  renders it per dispatch, but a dispatch builds ONE engine, so that report always has a single
-  column and a degenerate ranking — composed here from every engine's latest run, this is the only
-  place the three tiers can be read ACROSS engines at all.
-  They were briefly a table of their own. **That was wrong, and the placement is the whole point:** a
-  separate table put the layout and the speed it produced on two different tables, when the only
-  question worth asking of these numbers is whether one explains the other. On one row, `files`,
-  `row groups`, `size MB` and `V-Order` sit beside the milliseconds they produced, per engine, and a
-  reader can see for themselves whether a smaller file count bought a faster first visit — iceberg's
-  369 files and 122k-row row groups next to its 101,861 ms cold, against duckrun's 4 files and
-  27,675 ms. **cold** is the first visit to a freshly deployed semantic model, **warm** the second,
-  **hot** the median of the passes after that; the record's own `tier` field is something else
-  entirely (the query CATEGORY — `probe`/`composite`/`raw`/`hot_only`) and must not be confused with
-  them. Cold is the tier layout can actually MOVE — it is the one that transcodes columns out of
-  parquet, while warm and hot converge on what the model already holds in memory.
-  Mart block only, for the same reason the CU column is: one number per ENGINE, not per table, so on
-  every block it would read as one measurement per table. Each tier is summed over the queries
-  **every column carries at that tier**, and the closing note counts them, because it genuinely
-  differs — the selectivity-ladder queries have no `cold_ms` at all, the top DUID being resolved only
-  after pass 1, so cold is two queries short of warm and hot.
+- **`cold` / `warm` / `hot` appear TWICE, and the two answer different questions.** They are the one
+  thing on the page that is not capacity units, and they come from the run records rather than the
+  ledger: `benchmark.timings.<model>.<query>` is already on every record. `benchmark/render_report.py`
+  renders it per dispatch, but a dispatch builds ONE engine, so that report always has a single column
+  and a degenerate ranking — composed here, this is the only place the tiers can be read across
+  engines at all.
+  **Per LAYOUT** in *Cost and speed by layout*, beside the CU, which is a group's mean over its runs.
+  **Per RUN** in the sources table, which is what actually measured them: one dispatch, against one
+  semantic model it had just deployed. They were columns of the mart's layout block and are not any
+  more — there they had to be a group mean sitting on a row about parquet, and no single run recorded
+  that number.
+  **cold** is the first visit to a freshly deployed semantic model, **warm** the second, **hot** the
+  median of the passes after that; the record's own `tier` field is something else entirely (the
+  query CATEGORY — `probe`/`composite`/`raw`/`hot_only`) and must not be confused with them. Each is
+  summed over the queries every run carries at that tier, and the note counts them, because it
+  genuinely differs — the selectivity-ladder queries have no `cold_ms` at all, the top DUID being
+  resolved only after pass 1, so cold is two queries short of warm and hot.
   Deliberately **reimplemented rather than imported** — `render_report._totals`/`rank` take exactly
   this shape, and importing `benchmark/` would end the isolation that makes this directory deletable.
 - **`compute seconds` is ONE ROW, ON THE `etl` HALF ONLY** — how long the build billed for, read

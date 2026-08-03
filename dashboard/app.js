@@ -976,130 +976,6 @@ export function chartSvg(title, subtitle, rowsIn, kind = "") {
   return out.join("\n");
 }
 
-// ------------------------------------------------------------------ does paying more buy speed?
-//
-// SMALL MULTIPLES, ONE PANEL PER TIER, and the form is forced by the data rather than chosen.
-//
-// The question is whether query TIME tracks query COST across layouts, which is a relationship
-// between two measures — a scatter. The trap is that the three tiers do not share a range: cold runs
-// 27,000-97,000 ms and hot 2,800-5,400. On one shared y-axis warm and hot collapse into a 3px band at
-// the bottom and overplot each other into mush; on one plot with two y-axes the alignment would be
-// arbitrary and the chart would INVENT a correlation. Small multiples are the way out — one panel per
-// tier, each with its own y-scale, **each scale printed on its own axis** so the panels are never
-// read as if they shared one.
-//
-// The X AXIS IS SHARED and that is the load-bearing part: the same CU scale under all three panels is
-// what makes the shapes comparable. Cold climbs along it, warm and hot do not, and that IS the
-// finding.
-//
-// ONE SERIES PER PANEL, so there is no legend, no categorical palette to validate, and no hue
-// encoding anything the panel title does not already say — the same reasoning as the bar charts.
-//
-// Every value here is also in the `fct_summary` table further down the page, which is the table view:
-// the tooltips enhance, they do not gate.
-const SC_AX = 34, SC_GAP = 20, SC_TOP = 40, SC_H = 128, SC_BOT = 34;
-
-/**
- * Pearson's r, or `null` when it cannot honestly be computed.
- *
- * Fewer than three points is not a relationship, and a series with no variance has no correlation
- * defined at all — both return `null` so the caller prints nothing rather than a `0.00` that reads
- * like a measured absence of relationship.
- */
-export function pearson(xs, ys) {
-  const pts = xs.map((x, i) => [Number(x), Number(ys[i])])
-    .filter(([x, y]) => Number.isFinite(x) && Number.isFinite(y));
-  if (pts.length < 3) return null;
-  const n = pts.length;
-  const mx = pts.reduce((s, p) => s + p[0], 0) / n, my = pts.reduce((s, p) => s + p[1], 0) / n;
-  let num = 0, dx = 0, dy = 0;
-  for (const [x, y] of pts) {
-    num += (x - mx) * (y - my); dx += (x - mx) ** 2; dy += (y - my) ** 2;
-  }
-  if (dx <= 0 || dy <= 0) return null;
-  return num / Math.sqrt(dx * dy);
-}
-
-/** An axis top a human would pick: 1, 2 or 5 × a power of ten, at or above the largest value. */
-export function niceMax(v) {
-  const n = Number(v);
-  if (!Number.isFinite(n) || n <= 0) return 1;
-  const pow = 10 ** Math.floor(Math.log10(n));
-  for (const step of [1, 2, 2.5, 5, 10]) if (n <= step * pow) return step * pow;
-  return 10 * pow;
-}
-
-/** `12345` → `12.3k`. Axis ticks only, where four digits of precision buy nothing. */
-const tick = (v) => Math.abs(v) >= 1000 ? `${round1(v / 1000)}k` : String(Math.round(v));
-
-/**
- * Query time against what the layout cost, one panel per tier.
- *
- * `points` is `[{name, cu, ms: {cold, warm, hot}}]` — the same objects the mart block's rows are
- * built from, so the chart and the table under it cannot disagree.
- */
-export function fitSvg(points, tiers) {
-  const pts = (points || []).filter((p) => p.cu > 0);
-  const panels = (tiers || []).map((t) => ({
-    tier: t,
-    pts: pts.filter((p) => Number.isFinite(Number((p.ms || {})[t])) && Number((p.ms || {})[t]) > 0)
-      .map((p) => ({ name: p.name, x: Number(p.cu), y: Number(p.ms[t]) })),
-  })).filter((p) => p.pts.length >= 2);
-  if (panels.length < 2) return "";
-
-  const xmax = niceMax(Math.max(...pts.map((p) => p.cu)));
-  const plotW = Math.round((WIDTH - SC_AX - SC_GAP * (panels.length - 1)) / panels.length);
-  const height = SC_TOP + SC_H + SC_BOT;
-  const title = "Does paying more buy speed?";
-  const out = [
-    `<figure class="chart" data-kind="fit"><figcaption>` +
-    `<span class="chart-title">${esc(title)}</span>` +
-    `<span class="chart-sub">each dot is one layout · x: capacity units it cost to query · ` +
-    `y: milliseconds it took · one y-scale per panel, printed</span></figcaption>`,
-    `<svg viewBox="0 0 ${WIDTH} ${height}" width="100%" height="${height}" role="img" ` +
-    `aria-label="${esc(title)}">`,
-  ];
-  panels.forEach((panel, i) => {
-    const x0 = SC_AX + i * (plotW + SC_GAP);
-    const ymax = niceMax(Math.max(...panel.pts.map((p) => p.y)));
-    const r = pearson(panel.pts.map((p) => p.x), panel.pts.map((p) => p.y));
-    // The verdict in words, because `r = +0.99` is the evidence and not everyone reads it as one.
-    const rr = r === null ? "" : `r ${r >= 0 ? "+" : ""}${fmt(r, 2)}`;
-    const verdict = r === null ? ""
-      : `${Math.abs(r) >= 0.8 ? "tracks CU" : "no relation"} · ${rr}`;
-    const px = (v) => x0 + (v / xmax) * plotW;
-    const py = (v) => SC_TOP + SC_H - (v / ymax) * SC_H;
-    out.push(`<text class="panel-title" x="${x0}" y="16">${esc(panel.tier)} ms</text>`);
-    if (verdict) out.push(`<text class="panel-sub" x="${x0}" y="29">${esc(verdict)}</text>`);
-    // Hairline, solid, one shade off the surface — a grid that competes with 7 dots is noise.
-    out.push(`<line class="grid" x1="${x0}" y1="${SC_TOP}" x2="${x0 + plotW}" y2="${SC_TOP}"/>`);
-    out.push(`<line class="axis" x1="${x0}" y1="${SC_TOP}" x2="${x0}" y2="${SC_TOP + SC_H}"/>`);
-    out.push(`<line class="axis" x1="${x0}" y1="${SC_TOP + SC_H}" x2="${x0 + plotW}" ` +
-      `y2="${SC_TOP + SC_H}"/>`);
-    // The y top is labelled per panel — the ONE thing that stops three different scales reading as one.
-    out.push(`<text class="tick tick-y" x="${x0 - 5}" y="${SC_TOP + 4}">${esc(tick(ymax))}</text>`);
-    out.push(`<text class="tick tick-y" x="${x0 - 5}" y="${SC_TOP + SC_H + 4}">0</text>`);
-    out.push(`<text class="tick" x="${x0}" y="${SC_TOP + SC_H + 15}">0</text>`);
-    out.push(`<text class="tick tick-end" x="${x0 + plotW}" y="${SC_TOP + SC_H + 15}">` +
-      `${esc(tick(xmax))}</text>`);
-    if (i === panels.length - 1) {
-      out.push(`<text class="tick tick-end" x="${x0 + plotW}" y="${SC_TOP + SC_H + 28}">CU →</text>`);
-    }
-    for (const p of panel.pts) {
-      const cx = px(p.x).toFixed(1), cy = py(p.y).toFixed(1);
-      // The visible dot is 8px per the mark spec, with a surface ring so two that overlap stay two.
-      // The HIT target is a separate transparent circle well above it — a reader should not have to
-      // land dead-centre on 8px to read a tooltip.
-      out.push(`<circle class="dot" cx="${cx}" cy="${cy}" r="4"/>` +
-        `<circle class="dot-hit" cx="${cx}" cy="${cy}" r="13">` +
-        `<title>${esc(p.name)}: ${fmt(p.y, 0)} ms ${esc(panel.tier)}, ` +
-        `${fmt(p.x, 0)} CU</title></circle>`);
-    }
-  });
-  out.push("</svg></figure>");
-  return out.join("\n");
-}
-
 // ------------------------------------------------------------------------------------- the page
 
 /**
@@ -1191,6 +1067,28 @@ export function martPoints(groups, times) {
         [lbl, groupMean(ms.map((m) => ((times || {})[m.qid] || {})[lbl]))])),
     };
   });
+}
+
+/**
+ * What each layout cost to query and how long it took — one row per layout, cheapest first.
+ *
+ * These four numbers used to be columns of the mart's layout block, which made one table answer two
+ * questions: what the parquet looks like, and what querying it cost. *Table layout* is now physical
+ * layout alone and this is the cost-and-time half, standing on its own between the charts and the
+ * cost table.
+ *
+ * Same `martPoints` as the bars and the layout rows, so all three quote the same mean.
+ */
+export function renderFit(groups, times, tiers) {
+  const pts = martPoints(groups, times).filter((p) => p.cu > 0);
+  if (!pts.length) return "";
+  const cols = (tiers || []).filter((l) => pts.some((p) => p.ms[l]));
+  pts.sort((a, b) => a.cu - b.cu);
+  return ["<h3>Cost and speed by layout</h3>",
+    table(["layout", "CU", ...cols.map((l) => `${l} ms`)],
+      ["left", "right", ...cols.map(() => "right")],
+      pts.map((p) => [p.name, fmt(p.cu, 0), ...cols.map((l) => (p.ms[l] ? fmt(p.ms[l], 0) : DASH))])),
+  ].join("\n");
 }
 
 export function groupRows(groups, table = DEFAULTS.table) {
@@ -1366,6 +1264,11 @@ export function engineTable(perCol, cols, secsCol) {
 export function renderSources(cols, entries, ledger, repo, now = null, gen = {}) {
   const out = [note("**Every run on this page**, newest dispatch first. The RUN is the key — one row " +
     "per dispatch, with its own totals:")];
+  // The query tiers belong HERE rather than beside the layout: they were measured by one dispatch
+  // against one deployed semantic model, so the run is their natural key. On the layout block they
+  // had to be a group's MEAN, which is a number no single run recorded.
+  const times = (gen.times || {});
+  const tiers = TIERS.map(([l]) => l).filter((l) => l in (gen.counts || {}));
   // NEWEST DISPATCH FIRST. Everywhere else on the page the order is the engine order, which is what
   // makes columns comparable across two renders; here the point of the table is precisely that the
   // rows are NOT contemporaneous, so it sorts on the thing it is reporting.
@@ -1374,7 +1277,7 @@ export function renderSources(cols, entries, ledger, repo, now = null, gen = {})
     return sa < sb ? 1 : sa > sb ? -1 : 0;
   });
   const rows = [];
-  for (const { col, rec } of sorted) {
+  for (const { col, rec, qid } of sorted) {
     const rid = (rec.run || {}).id;
     // The run id is the label; the target is the committed record, which outlives the CI run.
     const link = rec._file ? `[${rid || rec._file}](${recordUrl(repo, rec._file, gen.ref)})`
@@ -1403,9 +1306,13 @@ export function renderSources(cols, entries, ledger, repo, now = null, gen = {})
       state = "settled";
     }
     const load = rec.full_load ? "full" : "incremental";
+    // This run's OWN tiers. A dash where it recorded none — a run that was built but not benchmarked
+    // is skipped entirely, but a run can still be missing one tier (`runs < 3` yields no hot at all).
+    const ms = (times[qid] || {});
     rows.push([col, link, `${started} (${load})`,
       cu.etl ? fmt(classTotal(cu, "etl"), 1) : DASH,
       cu.analytics ? fmt(classTotal(cu, "analytics"), 1) : DASH,
+      ...tiers.map((l) => (ms[l] ? fmt(ms[l], 0) : DASH)),
       String(items.length), state]);
   }
   // `state` was headed `CU` until this table grew CU numbers of its own — one column headed `CU`
@@ -1415,14 +1322,27 @@ export function renderSources(cols, entries, ledger, repo, now = null, gen = {})
   // and the only one a reader arrives at looking for a particular dispatch. Menus on `column` and
   // `state` — the two cells that repeat; `run`, `built` and the CU columns are unique per row, so a
   // dropdown of them would just be the table again.
-  out.push(table(["column", "run", "built", "etl CU", "analytics CU", "items", "state"],
-    ["left", "left", "left", "right", "right", "right", "left"], rows,
-    { find: "filter runs — engine, run id, date…", menus: [0, 6] }));
+  out.push(table(["column", "run", "built", "etl CU", "analytics CU",
+    ...tiers.map((l) => `${l} ms`), "items", "state"],
+  ["left", "left", "left", "right", "right", ...tiers.map(() => "right"), "right", "left"], rows,
+  { find: "filter runs — engine, run id, date…", menus: [0, 6 + tiers.length] }));
   out.push(note("**`etl CU` and `analytics CU` are that RUN's own totals** — the same GUID join as " +
     "*Cost by engine*, which quotes each column's newest run. The CHARTS quote neither: each bar is " +
     "the mean over the runs listed here that fed it. The two group differently, so one run can sit in " +
     "a bar with different company on each — ETL by column, analytics by the parquet the run " +
     "measured."));
+  if (tiers.length) {
+    const counted = Object.entries(gen.counts || {}).map(([l, n]) => `${l} over ${n}`).join(", ");
+    out.push(note("**`cold`, `warm` and `hot` are the DAX suite summed per PASS POSITION** — the " +
+      "first visit to a freshly deployed semantic model, the second, then the median of the rest. " +
+      "They are on the RUN because that is what measured them: one dispatch, against one model it " +
+      "had just deployed. Beside the layout they had to be a group's mean, which is a number no " +
+      `single run recorded. Each is summed over the queries EVERY run carries at that tier ` +
+      `(${counted}); cold covers fewer, because the selectivity-ladder queries have no first-pass ` +
+      "sample at all — the top DUID is resolved after pass 1. **Cold is the tier layout can move**: " +
+      "it is the one that transcodes columns out of parquet, while warm and hot converge on what " +
+      "the model already holds in memory — which is what the third chart above plots."));
+  }
   const drifters = cols.map(({ col, rec }) => [col, drifting(rec)]).filter(([, v]) => v.length);
   // The drifter warning stays a VISIBLE note — it is the one state that never resolves by waiting,
   // so it must not sit behind a click. Only the general how-numbers-settle prose is folded.
@@ -1599,24 +1519,27 @@ export function renderLayouts(cols, groups, times, counts, martTable = DEFAULTS.
   const out = ["<h3>Table layout</h3>"];
   const blocks = [];
   for (const t of ordered) {
-    const showCu = t === mart;
-    // The mart's rows ARE the chart's bars — same grouping, same members, same mean. Every other block
-    // is one row per producer, read off that producer's first column.
-    let present = showCu
+    const byLayout = t === mart;
+    // The mart's rows are still the CHART's groups, so a writer that produced two different shapes
+    // gets a row each — `duckrun sorted` wrote 3 files/26 RG and 4/25, which is two layouts and not
+    // one. Every other block is one row per producer, read off that producer's first column: those
+    // describe a table the mart's shape says nothing about, so splitting them the same way would
+    // print one row twice for a difference that is not in it.
+    let present = byLayout
       ? martPoints(groups, times)
         .map((p) => ({ ...p, d: (((p.rec.layout || {}).stats || {})[p.rec.engine] || {})[t] }))
         .filter(({ d }) => d)
       : order.map((n) => ({ name: n, d: (stats[members.get(n)[0].col] || {})[t], ms: {} }))
         .filter(({ d }) => d);
     if (!present.length) continue;
-    if (showCu) {
-      // CHEAPEST FIRST, like the chart — the CU column is the finding on this block, and "lower is
-      // better" only reads as a ranking if the rows are in that order. A 0 means nothing was measured,
-      // not that querying was free, so it sorts to the END.
+    if (byLayout) {
+      // FEWEST FILES FIRST. It sorted cheapest-CU-first while the CU column was here; ordering by a
+      // column that is no longer printed is a ranking a reader cannot check. Files is the layout
+      // fact this block leads with, so it is the one to sort on.
       present = present.sort((a, b) =>
-        ((a.cu || 0) === 0) - ((b.cu || 0) === 0) || (a.cu || 0) - (b.cu || 0));
+        (Number(a.d.num_files) || 0) - (Number(b.d.num_files) || 0) ||
+        (Number(a.d.num_row_groups) || 0) - (Number(b.d.num_row_groups) || 0));
     }
-    const tiers = showCu ? TIERS.map(([l]) => l).filter((l) => l in counts) : [];
     // The ROW COUNT goes in the heading, not in a column. It is identical on every row — that is the
     // parity statement the whole project rests on — and a 143,980,961 repeated down the table is a wide
     // column carrying one fact. When the engines DISAGREE it becomes a column again and the heading
@@ -1630,14 +1553,15 @@ export function renderLayouts(cols, groups, times, counts, martTable = DEFAULTS.
       ? `\`${t}\` — the mart the queries land on${rowsNote}`
       : `\`${schema[t] ? schema[t] + "." : ""}${t}\`${rowsNote}`;
     const colsHere = (agree ? [] : [["total_rows", "rows", 0]]).concat(metrics);
-    const header = ["layout", ...(showCu ? ["CU"] : []), ...tiers.map((l) => `${l} ms`),
-      ...colsHere.map(([, h]) => h), "V-Order"];
-    const align = ["left", ...(showCu ? ["right"] : []), ...tiers.map(() => "right"),
-      ...colsHere.map(() => "right"), "left"];
-    const body = present.map(({ name, d, cu, ms }) => [
+    // PHYSICAL LAYOUT AND NOTHING ELSE. The mart block carried the analytics CU and the three query
+    // tiers, so one table was answering two questions — what the parquet looks like, and what it cost
+    // and took to query it. Those belong to the run that measured them: the CU is in the charts and in
+    // *Cost by engine*, and the tiers moved to the per-run table, where each row is one dispatch
+    // rather than one layout. What is left here is what `stats.py` read off the Delta log.
+    const header = ["layout", ...colsHere.map(([, h]) => h), "V-Order"];
+    const align = ["left", ...colsHere.map(() => "right"), "left"];
+    const body = present.map(({ name, d }) => [
       name,
-      ...(showCu ? [fmt(cu || 0, 0)] : []),
-      ...tiers.map((l) => (ms[l] ? fmt(ms[l], 0) : DASH)),
       ...colsHere.map(([k, , dp]) => (d[k] === undefined || d[k] === null ? DASH
         : dp < 0 ? compact(d[k]) : fmt(d[k], dp))),
       d.vorder ? "**yes**" : "·",
@@ -1659,28 +1583,20 @@ export function renderLayouts(cols, groups, times, counts, martTable = DEFAULTS.
   } else {
     for (const b of blocks) out.push(b.html);
   }
-  const counted = Object.entries(counts).map(([lbl, n]) => `${lbl} over ${n}`).join(", ");
   out.push(fold("how these layouts were read",
     "Every shared table the project writes, in pipeline order, as `stats.py` read the " +
-    "Delta log in that run's **layout** job. Sizes are what the tables held at that moment; the CU " +
-    "beside the mart is the ANALYTICS total — what querying it cost, not what building it did " +
-    "— and the queries read all of these. Nothing here re-read a Delta log. **A row is a WRITER, " +
-    "not a dispatch:** the core count and the NEE flag are left off because two runs each showed they " +
-    "never reach the parquet — duckrun wrote 4 files and 27 row groups at 64 cores and at 32, and " +
-    "spark wrote the same layout with NEE on and off — so the resource profile is named by what " +
-    "it does (`V-Order`, `default`) and everything else is one row. Row counts sit in the heading " +
-    "because they are identical by design; if they ever stop being, the heading says so and they come " +
-    "back as a column." +
-    (Object.keys(counts).length
-      ? " **`cold`, `warm` and `hot` are the DAX suite summed per pass position** — the first " +
-        "visit to a freshly deployed semantic model, the second, then the median of the rest — so " +
-        "they sit beside the layout that produced them rather than in a table of their own. Each is " +
-        `summed over the queries EVERY engine carries at that tier (${counted}); cold covers fewer ` +
-        "because the selectivity-ladder queries have no first-pass sample at all, the top DUID being " +
-        "resolved after pass 1. Cold is the tier layout can actually move: it is the one that " +
-        "transcodes columns out of parquet, while warm and hot converge on what the model already " +
-        "holds in memory."
-      : "")));
+    "Delta log in that run's **layout** job. Sizes are what the tables held at that moment, and " +
+    "nothing here re-read a Delta log. **This block is PHYSICAL LAYOUT ONLY** — the analytics CU and " +
+    "the `cold`/`warm`/`hot` milliseconds used to sit beside the mart, which made one table answer " +
+    "both what the parquet looks like and what querying it cost. The cost is in the charts and in " +
+    "*Cost by engine*; the times are in the per-run table below, where a row is one dispatch rather " +
+    "than one layout. **A row is a WRITER, not a dispatch:** the core count and the NEE flag are left " +
+    "off because two runs each showed they never reach the parquet — duckrun wrote 4 files and 27 row " +
+    "groups at 64 cores and at 32, and spark wrote the same layout with NEE on and off — so " +
+    "everything but the resource profile and the sort collapses to one row. The mart is the " +
+    "exception: it splits by the shape a run actually WROTE, so a writer that produced two different " +
+    "layouts gets a row each. Row counts sit in the heading because they are identical by design; if " +
+    "they ever stop being, the heading says so and they come back as a column."));
   return out.join("\n");
 }
 
@@ -1959,22 +1875,9 @@ export function renderPage(cols, runs, ledger, opts = {}) {
   // same reason the CU is: a group's tiers are its own runs' mean, not its column's newest record.
   const { times, counts } = queryTime(anaEntries.map(({ qid, rec }) => ({ col: qid, rec })));
 
-  // THIRD CHART, and it answers the question the first two raise but cannot settle: the analytics bars
-  // rank what each layout COST, the mart table lists what each one TOOK, and only putting one against
-  // the other says whether the cheap layouts are also the fast ones. They are — for exactly one of the
-  // three tiers.
-  const fit = fitSvg(martPoints(groups, times), TIERS.map(([l]) => l).filter((l) => l in counts));
-  if (fit) {
-    out.push(fit);
-    out.push(note("**Cold is the tier the layout moves, and it is the only one.** Cold is the first " +
-      "visit to a freshly deployed model, when Power BI transcodes columns out of parquet — so it is " +
-      "the tier that reads the file layout, and its CU and its milliseconds are two measures of the " +
-      "same work. Warm and hot are answered from what the model already holds in memory, where the " +
-      "layout has stopped mattering: the spread across every layout is far smaller there, and the " +
-      "cheapest layout to query is not the fastest one at either tier. Read it as **cost buys you a " +
-      "faster FIRST visit**, not a faster model. Every value plotted is in the `fct_summary` block " +
-      "below."));
-  }
+  // What each layout cost to query and how long it took, together. `Table layout` is physical layout
+  // alone; these are the numbers that used to sit beside it.
+  out.push(renderFit(groups, times, TIERS.map(([l]) => l).filter((l) => l in counts)));
 
   out.push("<h3>Cost by engine</h3>");
   const secsCol = Object.fromEntries(cols.map(({ col, rec }) =>
@@ -2006,7 +1909,8 @@ export function renderPage(cols, runs, ledger, opts = {}) {
     "cheaply and queries expensively has optimised the half that does not hurt."));
 
   out.push(renderSources(cols, anaEntries, ledger, repo, now,
-    { dropped: opts.dropped, reference: opts.reference, table: martTable, ref: opts.ref }));
+    { dropped: opts.dropped, reference: opts.reference, table: martTable, ref: opts.ref,
+      times, counts }));
   // A record that is not a whole generation — a failed run that never benchmarked, a build half
   // that never reported — is skipped, and NAMED HERE with its reason. It used to be only a count in
   // the live status line, which the offline copy does not even have: a page that quietly ignores a
