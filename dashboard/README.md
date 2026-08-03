@@ -161,6 +161,14 @@ without a build, a token or a dispatch.
   The link is **relative** on the live page and rewritten by `build.mjs --snapshot` to the absolute
   Pages URL, because the offline copy is one loose file with no sibling to point at — and a 404 off
   a local disk looks like nothing happened at all. The build fails if that link ever stops matching.
+- **EVERY CHART AND TABLE COMES BEFORE EVERY PARAGRAPH, and the methodology is LAST.** The order is
+  the two CU charts, *Cost and speed by layout*, *Cost by engine*, *Table layout*, *Input archive*,
+  *Every run*, then *About these numbers* and the provenance line. `About these numbers` used to sit
+  between the layout tables and the run table, so the last table on the page was below a screen of
+  prose explaining the measure. A reader arrives for the numbers; the explanation is where they go
+  looking for it. Pinned by a test that asserts the section order outright.
+  *Every run* gained an `<h3>` of its own in the same move: it opened with a bare note, so it read as
+  a continuation of whatever sat above it.
 - **Numbers are visible, methodology is opt-in.** The long how-to-read notes are folded behind a
   one-line `<details>` each (`fold()` in `app.js`); every sentence stays in the DOM — the tests and
   ctrl-F still see it all — but the page reads numbers-first. Two things are deliberately NEVER
@@ -285,8 +293,7 @@ without a build, a token or a dispatch.
   its own; the same number repeated under every column read as "each of them spent this". The
   archive's SIZE is still reported, because input volume is a different question from what ingesting
   it cost.
-- **Input archive, LAST on the page**: files and bytes in the landing archive, from `stats.py`'s
-  listing. Every other number describes what came OUT, and this is the one copy of what went in —
+- **Input archive**: files and bytes in the landing archive, from `stats.py`'s listing. Every other number describes what came OUT, and this is the one copy of what went in —
   shared by every engine, so it belongs with the provenance rather than among the columns it is not
   one of. It used to sit between the engine table and the layout, where a table with no engine in it
   read as a column that had gone missing.

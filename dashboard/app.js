@@ -1262,8 +1262,12 @@ export function engineTable(perCol, cols, secsCol) {
  * facts that qualify a CU figure, in one place.
  */
 export function renderSources(cols, entries, ledger, repo, now = null, gen = {}) {
-  const out = [note("**Every run on this page**, newest dispatch first. The RUN is the key — one row " +
-    "per dispatch, with its own totals:")];
+  // A HEADING OF ITS OWN. Every other section on the page has one; this table opened with a bare
+  // note, so it read as a continuation of whatever sat above it — and with the methodology moved to
+  // the foot, what sits above it is now the input archive.
+  const out = ["<h3>Every run</h3>",
+    note("**Every run on this page**, newest dispatch first. The RUN is the key — one row " +
+      "per dispatch, with its own totals:")];
   // The query tiers belong HERE rather than beside the layout: they were measured by one dispatch
   // against one deployed semantic model, so the run is their natural key. On the layout block they
   // had to be a group's MEAN, which is a number no single run recorded.
@@ -1885,28 +1889,10 @@ export function renderPage(cols, runs, ledger, opts = {}) {
   out.push(engineTable(perCol, cols, secsCol));
   out.push(renderLayouts(cols, groups, times, counts, martTable));
 
-  const n = new Set(cols.map(({ col }) => baseEngine(col))).size;
-  out.push("<h3>About these numbers</h3>");
-  out.push(para("**Capacity units (CU-seconds) are what this page leads with** — Fabric's own " +
-    "billing measure, read from the Capacity Metrics model. Not milliseconds and not rows: what the " +
-    `work COST. One dbt project, ${n} engine${n !== 1 ? "s" : ""}, one landed copy of the data: this ` +
-    "is what each engine charged to build the same tables and to answer the same queries. Attribution " +
-    "is by Fabric ITEM GUID — each run records what it created and then deletes it — so no " +
-    "number here is a guess about which engine an item belonged to."));
-  out.push(fold("what's comparable, and why analytics leads",
-    "**The CU columns are directly comparable, and the two time measures need reading " +
-    "with more care.** The engines were handed different compute — a 64-vCore notebook, a Livy " +
-    "pool, a warehouse — and a capacity unit already prices that in, which is the whole reason " +
-    "to lead with cost. Duration does not: billed operation seconds SUM across concurrent operations, " +
-    "so spark's five Livy REPLs total more than the clock they ran on, and query milliseconds are one " +
-    "sample of a shared capacity rather than a bill. They are on the page because they answer a " +
-    "question CU cannot — how long a person waits, and how hard the engine drew while they did " +
-    "— and each says where its own number bends.",
-    "**Analytics is the half that matters**, and it leads for that reason. Fabric smooths " +
-    "BACKGROUND operations — everything the build does — over 24 hours, so a heavy ETL leg " +
-    "is absorbed and nobody waits for it. Query CU is INTERACTIVE, smoothed over minutes, and it is " +
-    "what THROTTLES: the CU a user sits behind and a capacity admin asks about. An engine that builds " +
-    "cheaply and queries expensively has optimised the half that does not hurt."));
+  // WHAT WENT IN, then the per-run table, then the prose. Every TABLE the page has comes before every
+  // paragraph about them: a reader arrives for the numbers, and `About these numbers` sat between the
+  // layout tables and the run table pushing the last one below a screen of methodology.
+  out.push(renderInput(cols));
 
   out.push(renderSources(cols, anaEntries, ledger, repo, now,
     { dropped: opts.dropped, reference: opts.reference, table: martTable, ref: opts.ref,
@@ -1930,11 +1916,31 @@ export function renderPage(cols, runs, ledger, opts = {}) {
         return `[\`${file}\`](${recordUrl(repo, file, opts.ref)}) — ${s.slice(at + 2)}`;
       }).join(" · ")));
   }
-  // LAST. Every other number on the page is about what came OUT; this is the one copy of what went in,
-  // shared by every engine, so it belongs with the provenance rather than among the columns it is not
-  // one of. It sat between the engine table and the layout, where a table with no engine in it read as
-  // a column that had gone missing.
-  out.push(renderInput(cols));
+  // FOOTNOTES, LAST — after every chart and every table. This block explains the measure rather than
+  // reporting one, so it belongs where a reader goes looking for it rather than in the middle of the
+  // page they came for.
+  const n = new Set(cols.map(({ col }) => baseEngine(col))).size;
+  out.push("<h3>About these numbers</h3>");
+  out.push(para("**Capacity units (CU-seconds) are what this page leads with** — Fabric's own " +
+    "billing measure, read from the Capacity Metrics model. Not milliseconds and not rows: what the " +
+    `work COST. One dbt project, ${n} engine${n !== 1 ? "s" : ""}, one landed copy of the data: this ` +
+    "is what each engine charged to build the same tables and to answer the same queries. Attribution " +
+    "is by Fabric ITEM GUID — each run records what it created and then deletes it — so no " +
+    "number here is a guess about which engine an item belonged to."));
+  out.push(fold("what's comparable, and why analytics leads",
+    "**The CU columns are directly comparable, and the two time measures need reading " +
+    "with more care.** The engines were handed different compute — a 64-vCore notebook, a Livy " +
+    "pool, a warehouse — and a capacity unit already prices that in, which is the whole reason " +
+    "to lead with cost. Duration does not: billed operation seconds SUM across concurrent operations, " +
+    "so spark's five Livy REPLs total more than the clock they ran on, and query milliseconds are one " +
+    "sample of a shared capacity rather than a bill. They are on the page because they answer a " +
+    "question CU cannot — how long a person waits, and how hard the engine drew while they did " +
+    "— and each says where its own number bends.",
+    "**Analytics is the half that matters**, and it leads for that reason. Fabric smooths " +
+    "BACKGROUND operations — everything the build does — over 24 hours, so a heavy ETL leg " +
+    "is absorbed and nobody waits for it. Query CU is INTERACTIVE, smoothed over minutes, and it is " +
+    "what THROTTLES: the CU a user sits behind and a capacity admin asks about. An engine that builds " +
+    "cheaply and queries expensively has optimised the half that does not hurt."));
 
   const reads = (ledger.reads || []).length;
   // `runs` here is already filtered to one source generation, so the count would UNDERSTATE what was

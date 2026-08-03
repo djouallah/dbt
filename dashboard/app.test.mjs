@@ -563,6 +563,22 @@ test("the numbers come before the methodology", () => {
   assert.ok(out.indexOf("<h2>Capacity units") < firstChart);
 });
 
+test("EVERY table comes before the methodology, and the methodology is last", () => {
+  // A reader arrives for the numbers. `About these numbers` used to sit between the layout tables and
+  // the run table, pushing the last table below a screen of prose.
+  const runs = [lay("spark", 11, 11, { file: "a-1.json", landing: { files: 8350, size_mb: 170491.5 } }),
+    lay("dwh", 78, 78, { file: "b-2.json", landing: { files: 8350, size_mb: 170491.5 } })];
+  const out = render(runs, ledger({ OUT: 34046.3, SEM: 1514.0 }));
+  const order = ["<h2>Capacity units", "<h3>Cost and speed by layout", "<h3>Cost by engine",
+    "<h3>Table layout", "<h3>Input archive", "<h3>Every run", "<h3>About these numbers"];
+  const at = order.map((h) => out.indexOf(h));
+  for (const [i, v] of at.entries()) assert.ok(v > 0, `${order[i]} is missing`);
+  assert.deepEqual([...at].sort((a, b) => a - b), at,
+    `sections are out of order: ${order.map((h, i) => `${h}@${at[i]}`)}`);
+  // The provenance line is the only thing after the methodology.
+  assert.ok(at[at.length - 1] < out.lastIndexOf("history/cu.json"));
+});
+
 // ---------------------------------------------------------------------------------------- the lede
 
 /** A record carrying a landing archive and the full eight-table inventory. */
