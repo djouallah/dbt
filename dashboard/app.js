@@ -1612,23 +1612,29 @@ const tableNames = (rec) => {
 };
 
 /**
- * `4 facts, 2 dimensions, a staging log and a mart` — the table count decomposed by name prefix.
+ * `1 fact, 2 dimensions, 4 staging and a log` — the table count decomposed.
+ *
+ * **THE `fct_` PREFIX IS NOT THE CLASSIFIER, and reading it as one got this wrong.** Four of the
+ * five `fct_*` tables — `fct_price`, `fct_scada` and their `_today` siblings — are raw AEMO CSV
+ * landed in the `landing` schema. Only `fct_summary` reaches `mart`, and it is the one actual fact
+ * table: the `(date, time, DUID)` grain Power BI queries. So the split is the MART TABLE against
+ * everything else, not the prefix, and the record's own `schema` field says so.
  *
  * Returns `""` when the parts do not add up to the whole list. A breakdown that is quietly short
  * sits beside the count it is supposed to explain and contradicts it, so an unrecognised name means
  * the count goes out alone.
  */
 const tableShape = (names, martTable) => {
+  const fact = names.includes(martTable) ? 1 : 0;
   const dims = names.filter((t) => t.startsWith("dim_")).length;
-  const stg = names.filter((t) => t.startsWith("stg_")).length;
-  const mart = names.includes(martTable) ? 1 : 0;
-  const facts = names.filter((t) => t.startsWith("fct_") && t !== martTable).length;
-  if (dims + stg + mart + facts !== names.length) return "";
+  const logs = names.filter((t) => t.startsWith("stg_")).length;
+  const stg = names.filter((t) => t.startsWith("fct_") && t !== martTable).length;
+  if (fact + dims + logs + stg !== names.length) return "";
   const parts = [];
-  if (facts) parts.push(`${facts} fact${facts !== 1 ? "s" : ""}`);
+  if (fact) parts.push("1 fact");
   if (dims) parts.push(`${dims} dimension${dims !== 1 ? "s" : ""}`);
-  if (stg) parts.push(stg === 1 ? "a staging log" : `${stg} staging logs`);
-  if (mart) parts.push("a mart");
+  if (stg) parts.push(`${stg} staging`);
+  if (logs) parts.push(logs === 1 ? "a log" : `${logs} logs`);
   if (parts.length < 2) return "";
   return `${parts.slice(0, -1).join(", ")} and ${parts[parts.length - 1]}`;
 };

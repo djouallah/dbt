@@ -116,9 +116,15 @@ without a build, a token or a dispatch.
   says `Loading…`, on the empty-records page and on the boot error page, with one copy to maintain
   instead of four. The sentence needs the records, so it cannot live there.
   **Every number in it is DERIVED** — engines from the columns, GB and files from `layout.landing`,
-  the table count and its `4 facts, 2 dimensions, a staging log and a mart` breakdown from
-  `layout.tables` by name prefix, the row total summed over that same list. A hardcoded `170 GB`
+  the table count and its `1 fact, 2 dimensions, 4 staging and a log` breakdown from
+  `layout.tables`, the row total summed over that same list. A hardcoded `170 GB`
   goes stale the first dispatch that runs with `skip_download` off, and goes stale **silently**.
+  **The `fct_` prefix is NOT the classifier**, and reading it as one printed `4 facts … and a mart`
+  — wrong twice over. Four of the five `fct_*` tables (`fct_price`, `fct_scada` and their `_today`
+  siblings) are raw AEMO CSV landed in the **`landing`** schema; only `fct_summary` reaches
+  **`mart`**, and it is the one actual fact table, the `(date, time, DUID)` grain Power BI queries.
+  The split is the mart table against everything else, and the record's own `schema` field is what
+  says so.
   It reads the archive through `landingBlocks`, the same call the *Input archive* table at the foot
   of the page makes, so the top and the bottom cannot quote different archives — a test asserts they
   agree rather than asserting which record wins, so it survives a change to that rule.

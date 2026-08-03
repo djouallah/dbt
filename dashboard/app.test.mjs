@@ -579,7 +579,9 @@ test("the lede states the scale of the thing, and leads the page", () => {
   assert.ok(said.includes("One dbt project on **1 engine**"));
   assert.ok(said.includes("**170 GB** of raw AEMO CSV (**8,350 files**)"));
   assert.ok(said.includes("built into the same **8 tables**"));
-  assert.ok(said.includes("4 facts, 2 dimensions, a staging log and a mart"));
+  // ONE fact. `fct_price`/`fct_scada` and their `_today` siblings are raw CSV in the `landing`
+  // schema; only `fct_summary` reaches `mart`. The prefix is not the classifier.
+  assert.ok(said.includes("1 fact, 2 dimensions, 4 staging and a log"));
   assert.ok(said.includes("totalling **519,377,319 rows**"));
   // FIRST — above the section heading that used to lead, which is above the first chart.
   assert.ok(out.indexOf('<p class="lede">') >= 0);
@@ -664,13 +666,24 @@ test("the total sums the run's table LIST, not every key of its stats block", ()
   assert.ok(plain(render([r], ledger({ OUT: 1.0 }))).includes("totalling **519,377,319 rows**"));
 });
 
+test("the fct_ prefix is not the classifier — there is exactly ONE fact", () => {
+  // `fct_price`, `fct_scada` and their `_today` siblings are raw AEMO CSV landed in the `landing`
+  // schema; only `fct_summary` reaches `mart` and is the (date, time, DUID) grain Power BI queries.
+  // Counting the prefix called four landed sources "facts" and the real one "a mart".
+  const said = plain(render([scaled("a-1.json", "spark")], ledger({ OUT: 1.0, SEM: 2.0 })));
+  assert.ok(said.includes("1 fact,"), "the mart is the fact");
+  assert.ok(!said.includes("4 facts"), "the landed fct_ tables are staging, not facts");
+  assert.ok(said.includes("4 staging"));
+  assert.ok(said.includes("and a log"), "stg_csv_archive_log is the log");
+});
+
 test("a breakdown that would not add up is dropped, and the count goes out alone", () => {
   // A decomposition quietly short of the count beside it contradicts it.
   const said = plain(render([scaled("a-1.json", "spark",
     { names: ["fct_summary", "dim_duid", "mystery_table"], rows: [1, 2, 3] })],
     ledger({ OUT: 1.0, SEM: 2.0 })));
   assert.ok(said.includes("built into the same **3 tables**"));
-  assert.ok(!said.includes("and a mart —"), "no breakdown when it does not account for every table");
+  assert.ok(!said.includes("1 fact"), "no breakdown when it does not account for every table");
   assert.ok(said.includes("totalling **6 rows**"));
 });
 
