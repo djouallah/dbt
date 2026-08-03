@@ -6,7 +6,7 @@ them on the Fabric item GUID, and writes the whole page — tables, both bar cha
 an empty shell.
 
 **So publishing is what you do when the VISUALISATION changes, not when a number does.** A
-`Benchmark` run that commits a record, or a `Dashboard` measure job that commits the ledger, appears
+`Benchmark` run that commits a record, or a `Capacity units` run that commits the ledger, appears
 on the published page with no deploy at all. That is the point of the arrangement, and it replaced a
 Python renderer whose output had to be republished for every measurement — which meant a page nobody
 had looked at could be published by a workflow nobody had watched.
@@ -15,11 +15,36 @@ had looked at could be published by a workflow nobody had watched.
 index.html   the shell: one stylesheet, three empty elements
 app.js       the whole page — loader, join, layout grouping, render, charts
 build.mjs    index.html + app.js -> one file, twice (live, and offline with data inlined)
-app.test.mjs 69 offline tests, no browser, no network
+app.test.mjs 74 offline tests, no browser, no network
 ```
 
 Where the data comes from is [`cu/`](../cu/README.md) (the CU ledger) and the `Benchmark` workflow
 (the run records). **Neither directory imports the other**; what passes between them is `history/`.
+
+## When it publishes
+
+**On a push to `dashboard/**` on `main`, and on dispatch. Nothing else.** Push a change to the page
+and it deploys itself; that is the only automation, and you start nothing by hand in the normal case.
+
+This is a reversal of the repo's "nothing runs on push" rule, and it is safe for a reason that does
+**not** generalise — do not copy the trigger to another workflow. That rule exists because the
+workflows that COMMIT would otherwise pay for their own commits. `Dashboard` commits nothing (it
+deploys to Pages), and `dashboard/**` never matches the `history/` paths that `Benchmark` and
+`Capacity units` write. So no commit can trigger a publish and no publish can make a commit: the loop
+is not reachable. Two things must stay true —
+
+- **`history/` must never appear in the path filter.** That single edit builds the loop.
+- **`Benchmark` and `Capacity units` must never gain a `push:` trigger.** They commit, and one of
+  them spends capacity.
+
+The filter is the whole directory even though only `app.js`, `index.html` and `build.mjs` reach the
+published bytes. A narrower one is tempting, but if someone later adds `dashboard/theme.css` and
+forgets to extend it, the page **silently** stops updating; the broad filter's worst case is a free
+no-op deploy for a README edit. `paths:` is also evaluated per PUSH, not per file, so a mixed commit
+fires it anyway — which is the same reason and the same cost.
+
+One wrinkle when this trigger is first added, or if it is ever changed: **a commit that edits
+`dashboard.yml` but nothing under `dashboard/` does not fire it.** Dispatch once by hand to bootstrap.
 
 ## Why raw.githubusercontent, and why the contents API
 
@@ -204,14 +229,25 @@ without a build, a token or a dispatch.
   after pass 1, so cold is two queries short of warm and hot.
   Deliberately **reimplemented rather than imported** — `render_report._totals`/`rank` take exactly
   this shape, and importing `benchmark/` would end the isolation that makes this directory deletable.
-- **`compute CU per second` is a ROW OF THE ENGINE TABLE, not a section, and the raw seconds are
-  not shown at all.** It comes off the SAME Capacity Metrics row as the CU above it — same GUIDs,
-  same roles, same compute/storage split — so a table of its own restated the whole join to add two
-  numbers per class. The seconds themselves are gone because they are BILLED OPERATION seconds that
-  sum across concurrent operations — spark's five Livy REPLs total more than the clock they ran on —
-  so the number needed four sentences of hedging to be read at all, while the rate needs none: the
-  concurrency is in the numerator and the denominator alike, so it cancels. The rate was the only
-  thing the seconds were there to support. A high rate is a WIDE engine, not a slow one.
+- **`compute seconds` is ONE ROW, ON THE `etl` HALF ONLY** — how long the build billed for, read
+  from `Duration (s)` in the same Capacity Metrics row as the CU, so it costs no extra query. It was
+  removed once and is back: billed operation seconds SUM across concurrent operations, which is a
+  real objection and unchanged, but "how long did the build take" deserves an answer and the hedge
+  now rides in the row's own label (`compute seconds` — *billed, not wall clock*) instead of in a
+  note four rows below where it is attached to nothing. A duckrun leg is one long notebook run so its
+  seconds land close to the clock; spark's five Livy REPLs under one session sum to more than the
+  wall time anyone waited. Compare it freely between two runs of the same engine, across engines only
+  knowing that.
+  **`analytics` gets no such row on purpose:** the query half already reports latency as the
+  `cold`/`warm`/`hot` milliseconds beside the layout that produced them, and those are time a user
+  actually waited. A second, differently-defined duration next to them would invite a comparison.
+  **COMPUTE seconds, never total**, which also makes the column reconcile against itself: `compute`
+  CU ÷ `compute seconds` is exactly the rate underneath (duckrun·64c: 20,665.6 ÷ 646 = 32.0).
+- **`compute CU per second` is a ROW OF THE ENGINE TABLE, not a section.** It comes off the SAME
+  Capacity Metrics row as the CU above it — same GUIDs, same roles, same compute/storage split — so a
+  table of its own restated the whole join to add two numbers per class. It is the sturdiest number
+  here: the concurrency that makes the seconds awkward is in the numerator and the denominator alike,
+  so it cancels. A high rate is a WIDE engine, not a slow one.
   **It is COMPUTE ÷ COMPUTE, and that is not a refinement — a total-over-total rate is wrong.** A
   storage operation bills real CU over a duration of essentially nothing (one `OneLake Write via
   Redirect`: 383.25 CU in **0.049 s**), so including storage does not dilute the rate, it detonates
@@ -225,9 +261,11 @@ without a build, a token or a dispatch.
   not expose the column — because absent says "not measured" and a zero would say "instant". Same
   rule on a class subtotal: a column the ledger has not read yet is a **dash**, never `0.0`, which
   would say the engine did that work for free.
-- **There is no chart of the seconds and no third bar.** The page carries two, and both are capacity
-  units — the measure it leads with and can defend. A third in the same visual language, drawn from
-  numbers that need a caveat, invites exactly the reading the note beneath it withdraws.
+- **There is no chart of the seconds and no third bar — which is exactly why they are a table row.**
+  The page carries two bars and both are capacity units, the measure it leads with and can defend. A
+  third in the same visual language, drawn from numbers that need a caveat, invites precisely the
+  cross-engine ranking the caveat withdraws. A number that needs a caveat belongs where the caveat
+  can sit beside it — in the row label — not in a bar, where length alone reads as a ranking.
 - **A record has to be built and benchmarked to reach the page.** `incomplete()` skips anything else
   and names why — a run with no benchmark shows an empty analytics column, which reads as "querying
   this engine was free" rather than "nobody measured it".

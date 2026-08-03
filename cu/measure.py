@@ -522,7 +522,7 @@ def main():
             + (f" — MISSING {', '.join(missing)}" if missing else ""))
     if unfound:
         log(f"  {unfound} recorded item(s) returned no rows. Expected for a run that finished in "
-            f"the last ~10 minutes (ingestion lag) — dispatch Dashboard again. If they are still "
+            f"the last ~10 minutes (ingestion lag) — the daily Capacity units run will pick them up. If "
             f"missing hours later, the metrics model needs a refresh to surface a new item GUID "
             f"and this file's central assumption is wrong.")
 

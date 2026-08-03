@@ -684,20 +684,43 @@ to `provision.py teardown`, which polls for a 404 and goes red if it is still li
   i.e. no V-Order). `readHeavyForPBI` is the only value that enables V-Order, and it also flips
   `optimizeWrite` to a 1 GB bin size, so ticking it rewrites file layout broadly — judge it in the
   `layout` job's table at the end of the run.
-- **Nothing runs on push, and that rule now carries a second load.** Pushing to `main` used to
-  trigger the four Fabric legs, which meant any code change — a script, a workflow file, a comment —
-  spent paid capacity nobody asked for, and a batch of edits queued several such runs on the
-  concurrency group. `paths-ignore` did not fix that: it is per-PUSH, not per-file, so a commit
-  touching a doc *and* anything else still ran. Commit and push freely; start a build with
-  `gh workflow run Benchmark` when you actually want one.
-  The second load: **both workflows commit back to the repo** — `Benchmark` a run record, `Dashboard`
-  the CU ledger — and that is only safe because no workflow answers a push. Give any workflow a
-  `push:` trigger and CI starts paying for its own commits — revisit those steps in the same change,
-  not afterwards.
-- **THERE ARE TWO WORKFLOWS: `Benchmark` and `Dashboard`.** `all.yml`, `dbt.yml` and `cu.yml` are
-  deleted. `benchmark.yml` is the whole build-and-measure chain — open the record, offline checks,
-  plan, land, build, layout, resolve, bench, report, teardown, record — and `dashboard.yml` reads
-  capacity and publishes. **They share nothing but the JSON in `history/`.**
+- **NOTHING THAT COMMITS OR SPENDS RUNS ON PUSH.** This replaces the older, blunter "nothing runs on
+  push", and the narrowing is deliberate — read the reason before touching a trigger.
+  The original: pushing to `main` used to trigger the four Fabric legs, so any code change — a
+  script, a workflow file, a comment — spent paid capacity nobody asked for, and a batch of edits
+  queued several such runs on the concurrency group. `paths-ignore` did not fix that: it is per-PUSH,
+  not per-file, so a commit touching a doc *and* anything else still ran. It then carried a second
+  load: **the workflows that commit back to the repo** — `Benchmark` a run record, `Capacity units`
+  the CU ledger — are only safe while no workflow answers a push, or CI starts paying for its own
+  commits.
+  **`Dashboard` now answers a push, and it is safe for a reason that does not generalise.** It
+  commits NOTHING — it deploys to Pages — and its filter is `paths: ['dashboard/**']`, which never
+  matches the `history/` paths the other two write. So no commit can trigger a publish and no publish
+  can make a commit: the loop is not reachable, and a publish costs a free runner minute rather than
+  capacity. Two things must stay true, and they are the actual rule now:
+  **`Benchmark` and `Capacity units` must never gain a `push:` trigger**, and **`history/` must never
+  appear in that path filter** — that single edit builds the loop.
+  The per-push mechanic still applies (a commit touching `dashboard/app.js` and something else fires
+  it), and it is accepted here because the cost is one no-op deploy of an identical shell. The filter
+  is the whole directory rather than the three files that reach the published bytes on purpose: a
+  narrow filter that someone forgets to extend makes the page **silently** stop updating, while the
+  broad one's worst case is a free deploy for a README edit.
+  Start a build with `gh workflow run Benchmark` when you actually want one; that one is still
+  dispatch-only and always will be.
+- **THERE ARE THREE WORKFLOWS: `Benchmark`, `Capacity units` and `Dashboard`.** `all.yml`, `dbt.yml`
+  and `cu.yml` are deleted. **They share nothing but the JSON in `history/`.**
+
+  | workflow | file | does | triggered by |
+  |---|---|---|---|
+  | `Benchmark` | `benchmark.yml` | open the record, offline checks, plan, land, build, layout, resolve, bench, report, teardown, record | dispatch only — it is the only one that spends capacity |
+  | `Capacity units` | `capacity.yml` | `cu/measure.py` → commits `history/cu.json` | daily `schedule` · dispatch · `workflow_run` after Benchmark |
+  | `Dashboard` | `dashboard.yml` | `dashboard/build.mjs` → deploys the page | `push` to `dashboard/**` · dispatch |
+
+  In the normal case a human starts nothing but a `Benchmark`: the ledger tops itself up daily and
+  after every build, and the page publishes itself when its code changes.
+  **The measurement was a job inside `Dashboard` and splitting it out is what bought all of this** —
+  while one dispatch both measured and deployed, refreshing a number dragged a Pages deploy behind
+  it, so "publish only when the page changes" was not expressible.
   The composition they replaced charged three taxes, and the third is what finally killed a run.
   Every input was declared twice, once as a `type: choice` on the dispatch form and once as a plain
   string across the call boundary (a `workflow_call` input cannot be a choice). The workspace secret
@@ -968,18 +991,56 @@ takes to **query** them. Ported from `djouallah/duckrun`'s `parquet_layout.yml`.
   its log — the deploy printed a **different item id** than last time (`replaced <guid>`, so pass 1
   really was cold) and pass 1 > pass 2 > pass 3.
 
-## `cu/` and `dashboard/` are the SECOND workflow, and they join the run records on the item GUID
+## `cu/` and `dashboard/` are the OTHER TWO workflows, and they join the run records on the item GUID
 
-`cu/` + `dashboard/` + `.github/workflows/dashboard.yml` ("Dashboard") answer what the workspace
-*cost*: CU per Fabric item, read from the Capacity Metrics app's own semantic model by DAX over the
-Power BI `executeQueries` endpoint. Fabric exposes **no per-operation CU REST API** — that model is
-the only authoritative source, which is why this exists. [cu/README.md](cu/README.md) and
-[dashboard/README.md](dashboard/README.md) have the detail.
+`cu/` + `capacity.yml` ("Capacity units") and `dashboard/` + `dashboard.yml` ("Dashboard") answer
+what the workspace *cost*: CU per Fabric item, read from the Capacity Metrics app's own semantic
+model by DAX over the Power BI `executeQueries` endpoint. Fabric exposes **no per-operation CU REST
+API** — that model is the only authoritative source, which is why this exists.
+[cu/README.md](cu/README.md) and [dashboard/README.md](dashboard/README.md) have the detail.
 
-**There are two workflows in this repo now, and this is one of them.** `Benchmark` builds, measures
-query time, deletes what it created and commits `history/runs/<ts>-<run id>.json`; `Dashboard` reads
-capacity for the GUIDs in those records, tops up `history/cu.json`, and publishes the page. `all.yml`,
-`dbt.yml` and `cu.yml` are gone.
+**Three workflows, one job each in spirit.** `Benchmark` builds, measures query time, deletes what it
+created and commits `history/runs/<ts>-<run id>.json`; `Capacity units` reads capacity for the GUIDs
+in those records and commits `history/cu.json`; `Dashboard` builds and deploys the page and touches
+no data at all. `all.yml`, `dbt.yml` and `cu.yml` are gone.
+
+- **MEASURING AND PUBLISHING ARE SEPARATE WORKFLOWS, AND THAT IS WHAT MAKES THE PAGE'S DYNAMISM
+  REAL.** They used to be two jobs of `Dashboard`, so one dispatch did both and refreshing a number
+  dragged a Pages deploy behind it — the page could be dynamic while the *wiring* stayed coupled.
+  Now: `Capacity units` commits the ledger and publishes nothing; `Dashboard` publishes and measures
+  nothing. Three consequences worth holding:
+  - **`Capacity units` fires on a daily `schedule`, on dispatch, and on `workflow_run` after
+    `Benchmark`.** That is a scoped reversal of the "dispatch only" rule, and it is earned: the rule's
+    stated reason was that *publishing is a decision*, and a scheduled measurement now publishes
+    nothing. `Benchmark` stays dispatch-only because it spends capacity.
+  - **`workflow_run`, never `workflow_call`** — see the three taxes below. It also means
+    `benchmark.yml` needs **no edit**: the CU read is a separate run that starts after Benchmark
+    completes, so Benchmark's duration, status and job graph are untouched. No conclusion filter: a
+    failed Benchmark still spent capacity and still commits a record (`record` is `if: always()`).
+  - **⚠️ `workflow_run` REQUIRES AN EXPLICIT CHECKOUT `ref:`.** A default checkout takes the
+    TRIGGERING run's head SHA, which is from *before* Benchmark's `record` job pushed the run record
+    — so the measurement would read `history/runs/` without the very run that triggered it and
+    `floor_for()` would compute a floor excluding it. Silently incomplete, nothing says so.
+    `capacity.yml` uses `${{ github.event.workflow_run.head_branch || github.ref_name }}` for the
+    checkout **and** for the `pull --rebase` / `push` targets; `github.ref_name` alone is the default
+    branch on that event regardless of where the build ran.
+  - **`Capacity units` is NOT `continue-on-error`.** It was, while it gated a page deploy in the same
+    run: a throttled metrics model had to cost a stale number rather than a stale page. Unattended on
+    a schedule that inverts — a failed read would report green and the ledger would quietly stop being
+    topped up. Red, so the scheduled-failure mail arrives; nothing downstream breaks, because the page
+    keeps serving the last good ledger.
+- **TWO TRIGGERS ON THE MEASUREMENT, AND NEITHER IS REDUNDANT.** A CU hour keeps growing for up to
+  ~70 minutes (~6 min ingestion lag, 5–64 min smoothing), and `measure.py` has **no settle logic** —
+  every read re-reads the whole window from the floor and merges with `max(old, new)`, so a re-read
+  is idempotent and monotonic and two reads of one window can only RAISE a number. The read after a
+  `Benchmark` is therefore a deliberate LOWER BOUND, there so a fresh run's column is populated in
+  minutes rather than blank for a day; the daily read is what makes it final with nobody watching.
+  One run is about **two DAX queries** (`discover_columns()` plus one `read_cu()` per capacity, and
+  `CU_CAPACITY_ID` is pinned to one), so the cadence is nearly free.
+  **Do NOT add a high-water mark to narrow the floor.** It is one query either way — the aggregation
+  is server-side, so a 14-day window costs no more requests than a one-day one — `max(old, new)`
+  *depends* on re-reading the window, and narrowing the floor is exactly what produced the recorded
+  "duckrun read 14.8 CU" moment.
 
 - **TWO DIRECTORIES, AND THE SPLIT IS THE JOB EACH DOES.** `cu/` **EXPORTS** — `measure.py` reads the
   metrics model and writes `history/cu.json`, and that is all it does: Python, `requests`, no
@@ -1196,12 +1257,13 @@ capacity for the GUIDs in those records, tops up `history/cu.json`, and publishe
   parity statement the project rests on — so repeating 143,980,961 down a table is a wide column
   carrying one fact. When the engines disagree the heading says so and the column returns, because
   that is the loudest signal this page has.
-- **THE SECONDS GET NO CHART. Do not add one back.** The page carries two bars
-  and both are capacity units — the measure it leads with and can defend. A third in the same visual
-  language, drawn from billed operation seconds that SUM across concurrent operations and are not
-  wall clock, invites exactly the reading the note beneath it spends four sentences withdrawing. A
-  number that needs a caveat belongs in a table where the caveat sits beside it, not in a bar where
-  it reads as a ranking.
+- **THE SECONDS GET NO CHART. Do not add one back** — and this is exactly why they are a table ROW
+  and nothing more. The page carries two bars and both are capacity units, the measure it leads with
+  and can defend. A third in the same visual language, drawn from billed operation seconds that SUM
+  across concurrent operations and are not wall clock, invites precisely the cross-engine ranking
+  that the caveat withdraws. A number that needs a caveat belongs where the caveat can sit beside it
+  — in the row label, as `compute seconds` does — not in a bar, where length alone reads as a
+  ranking and there is nowhere to put the qualification.
 - **THE PAGE CARRIES TWO NON-CU MEASURES NOW, and each states where its own number bends.**
   *cold / warm / hot* are **THREE COLUMNS OF THE MART BLOCK, never a section of their own.** They
   come from the RUN RECORDS, not the ledger: every record already holds
@@ -1222,17 +1284,30 @@ capacity for the GUIDs in those records, tops up `history/cu.json`, and publishe
   `render_report._totals`/`rank` take exactly this shape, and `cu/` importing `benchmark/` would end
   the isolation that makes this directory deletable by removing one folder and one workflow file.
   Mart-block-only, for the same reason the CU column is: one number per ENGINE, not per table.
-*`compute CU per second`* is a **ROW OF THE ENGINE TABLE, not a section, and the RAW SECONDS are
-  not shown at all** — it comes off the SAME Capacity Metrics row as the CU above it, so a table of
-  its own restated the whole GUID→role→bucket join. The seconds themselves were dropped because they
-  are BILLED OPERATION seconds that sum across concurrent operations (spark's five Livy REPLs total
-  more than the clock they ran on), so the number needed four sentences of hedging while the rate
-  needs none — the concurrency is in the numerator and the denominator alike, so it cancels, and the
-  rate was the only thing the seconds were there to support. A class the ledger has not read yet is a
-  DASH, never `0.0`: a zero there says the engine did that work for free. **Those seconds are BILLED
-  OPERATION seconds, not wall clock**: a duckrun leg is one long notebook run so the two nearly
-  agree, while spark's five concurrent Livy REPLs sum to more than the clock ever showed. **The RATE
-  is the sturdiest number in the section** — the concurrency is in the numerator and the denominator
+- **`compute seconds` is ONE ROW, ON `etl` ONLY, and it is a reinstatement.** It was removed once, on
+  the grounds that billed operation seconds SUM across concurrent operations and so needed more
+  hedging than they were worth. That objection is true and unchanged; what was re-decided is that
+  "how long did the build take" deserves an answer, with the hedge carried IN THE ROW LABEL
+  (`compute seconds` <sub>billed, not wall clock</sub>) rather than in a note four rows below where
+  it is attached to nothing. Read it as billed time: a duckrun leg is one long notebook run so its
+  seconds land close to the clock, while spark's five Livy REPLs under one session sum to more than
+  the wall time anyone waited. Comparable freely between two runs of the SAME engine; across engines
+  only knowing that.
+  **`analytics` gets no such row, deliberately** — the query half already reports latency properly as
+  the `cold`/`warm`/`hot` milliseconds beside the layout that produced them, and those are time a
+  user actually waited. A second, differently-defined duration beside them would invite the two to be
+  compared.
+  **COMPUTE seconds, never total**, for the same reason the rate is: storage bills real CU over
+  essentially no time, so storage durations are noise tracking OneLake traffic. It also makes the
+  column RECONCILE — `compute` CU ÷ `compute seconds` is exactly the rate printed underneath, so a
+  reader can check it against itself (duckrun·64c: 20,665.6 ÷ 646 = 32.0). Absent when the ledger has
+  no `seconds`, and a DASH per column the ledger has not read; never `0`, which would say the build
+  was instant.
+- *`compute CU per second`* is a **ROW OF THE ENGINE TABLE, not a section** — it comes off the SAME
+  Capacity Metrics row as the CU above it, so a table of its own restated the whole GUID→role→bucket
+  join. A class the ledger has not read yet is a
+  DASH, never `0.0`: a zero there says the engine did that work for free. **The RATE
+  is the sturdiest number here** — the concurrency is in the numerator and the denominator
   alike, so it cancels; a high rate is a WIDE engine, not a slow one. **It is COMPUTE ÷ COMPUTE, and
   that is not a refinement — a total-over-total rate is simply wrong.** A storage operation bills real
   CU over a duration of essentially nothing (one `OneLake Write via Redirect`: 383.25 CU in
@@ -1257,20 +1332,26 @@ capacity for the GUIDs in those records, tops up `history/cu.json`, and publishe
   `NON_ENGINE_ROLES` skips it and the `folder` outright. The archive's SIZE is still reported from
   `stats.py`'s listing — input volume is a different question from what ingesting it cost. With this
   gone there is no inexact attribution left anywhere on the page.
-- **The measurement can fail; the page cannot.** `measure` is `continue-on-error` and `page` is
-  `always()`, so a throttled metrics model costs a stale number and never a stale page. The `page` job
-  installs **no Python at all** — not even `requests` — which is what proves by running that the
-  render path reaches no network of its own beyond the two documents the browser fetches.
+- **The measurement can fail; the page cannot — and they can no longer fail together, because they
+  are separate workflows.** A throttled metrics model turns `Capacity units` red and leaves the page
+  serving the last good ledger; it cannot make a publish stale, because publishing does not wait on
+  it. `Dashboard`'s `page` job installs **no Python at all** — not even `requests` — which is what
+  proves by running that the render path reaches no network of its own beyond the two documents the
+  browser fetches.
 - **The `page` job checks out `ref: ${{ github.ref_name }}`, not the default SHA — and the reason
-  narrowed.** `measure` commits the ledger; a default checkout takes the triggering commit and would
-  read the version from *before* that. The LIVE page is now immune to this, because it reads the
-  branch head at view time — which is exactly the class of one-dispatch-stale bug the whole dynamic
-  arrangement removes. The OFFLINE snapshot is not immune, and that is what the `ref:` still protects.
-- **`workflow_dispatch` only, same standing rule as the build.** No `schedule`, no `push`, no
-  `workflow_run`. For the measurement the reason is capacity; for the page it is that publishing is a
-  decision, and a page that republishes itself whenever a measurement lands will eventually publish
-  one nobody looked at, on a repo whose page is public. Committing the ledger from CI is only safe
-  because nothing answers a push.
+  narrowed twice.** A default checkout takes the triggering commit, so the OFFLINE snapshot would be
+  frozen from the branch as it stood there rather than from its head, missing any ledger commit in
+  between. The LIVE page was already immune (it reads the branch head at view time — the whole point
+  of the arrangement), and now the measurement does not even run in this workflow. The snapshot is
+  still not immune, and that is all the `ref:` protects.
+- **`Dashboard` is `push` to `dashboard/**` plus dispatch; `Capacity units` is schedule plus
+  dispatch plus `workflow_run`; `Benchmark` is dispatch only.** This replaced a blanket
+  "`workflow_dispatch` only" that applied when one workflow both measured and published. What each
+  reason protects now: for `Benchmark`, capacity — unchanged and absolute. For the page, that
+  publishing is a decision — still true, and satisfied because pushing to `dashboard/` IS that
+  decision; it still never republishes because a number moved. For the ledger commit, that no
+  workflow which commits answers a push — still true, and the `dashboard/**` filter is what keeps it
+  true. See the push bullet in *CI etiquette* for the full reasoning; do not weaken it from here.
 - **Every real GUID is a SECRET.** `FABRIC_WORKSPACE_ID`, `CU_CAPACITY_ID`, `CU_METRICS_WORKSPACE_ID`,
   `CU_METRICS_MODEL_ID`. No tracked file outside `history/` holds one — the `model.bim`'s Direct Lake
   URL carries a zeros placeholder, and `deploy()` rewrites both ids anyway. Keep that placeholder's

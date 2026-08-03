@@ -10,7 +10,9 @@ running in the reader's browser. **The two share no file and neither imports the
 passes between them is `history/cu.json`, on disk and in git. Either can be deleted without touching
 the other, which is the same property this directory has always had against `benchmark/`.
 
-Both halves are driven by the `Dashboard` workflow, one of only two workflows in this repo.
+This half is the `Capacity units` workflow (`.github/workflows/capacity.yml`); the page is the
+`Dashboard` workflow. They were one workflow with two jobs, and separating them is what lets the
+page be published when the PAGE changes rather than when a number does.
 
 Fabric exposes **no per-operation CU REST API**. The metrics app's semantic model is the only
 authoritative source, which is why this exists at all.
@@ -122,21 +124,44 @@ bookkeeping. There used to be all four.
 - **The floor is bounded by retention**: the earliest recorded run start, clamped to `now − 14 days`,
   in the model's clock. One query covers everything that can still be learned and never more.
 
-**A run measured just now is a LOWER BOUND, and the page says so per column.** Dispatch `Dashboard`
-again an hour or two later and the numbers rise to their final value. Nothing has to be reconciled.
+**A run measured just now is a LOWER BOUND, and the page says so per column.** It settles itself:
+the daily `Capacity units` run re-reads the whole window and keeps the larger figure. Nothing has to
+be reconciled, and nobody has to remember.
 
 **Committing the ledger is how the numbers reach the page.** Nothing has to be rendered or deployed
-afterwards: the published page fetches `history/cu.json` on every load. A pure top-up is therefore
-`gh workflow run Dashboard -f publish=false`, and the page shows the new numbers to the next reader.
+afterwards: the published page fetches `history/cu.json` on every load.
 
-## Running it
+## Running it — and mostly you do not
+
+This is the `Capacity units` workflow (`.github/workflows/capacity.yml`), and it fires itself:
+
+| trigger | why |
+|---|---|
+| `workflow_run` after `Benchmark` | so a fresh run's column is populated in minutes rather than blank for a day. Deliberately a **lower bound** — the settle has not happened yet. |
+| daily `schedule`, 21:17 UTC (07:17 in the model's +10 clock) | what makes that lower bound final, unattended. One read covers the whole previous day. |
+| `workflow_dispatch` | by hand, when you want a number now or need `since` |
+
+**Neither automatic trigger is redundant**, and the reason is the `max(old, new)` rule above: a
+re-read of the same window can only raise a number, so an early read costs nothing and a later one
+completes it. It is also cheap — about **two DAX queries** per run (`discover_columns()` plus one
+`read_cu()` per capacity, and `CU_CAPACITY_ID` is pinned to one), whatever the window width.
+
+It **publishes nothing**. `Dashboard` is a separate workflow that only builds and deploys the page,
+on a push to `dashboard/**`. That split is what lets the page be published when the page changes
+rather than when a number does; while the two were jobs of one workflow, it was not expressible.
 
 ```
-gh workflow run Dashboard                        # measure, then deploy the page
-gh workflow run Dashboard -f publish=false       # measure only — the live page picks it up anyway
-gh workflow run Dashboard -f measure=false       # deploy only, when dashboard/ changed
-gh workflow run Dashboard -f since='2026-08-01 00:00:00'   # re-read a window by hand
+gh workflow run "Capacity units"                                   # a read, now
+gh workflow run "Capacity units" -f since='2026-08-01 00:00:00'    # re-read a window by hand
 ```
+
+Locally, with a token in `PBI_TOKEN` and the four GUIDs in the environment: `python cu/measure.py`.
+
+Two things that will surprise you eventually. **A failed read is RED**, not a warning — it was
+`continue-on-error` while it gated a page deploy, and unattended on a schedule that would mean the
+ledger quietly stops being topped up while the run reports green. And **GitHub disables a scheduled
+workflow after 60 days of repository inactivity**, so a quiet stretch stops the daily top-up
+silently; re-enabling is manual.
 
 Locally, with a token in `PBI_TOKEN` and the four GUIDs in the environment:
 
@@ -175,7 +200,7 @@ pointed at a copy rather than at the committed file.
 - **Moving a record in or out of `history/runs/legacy/` MOVES THE FLOOR.** It is derived from the
   earliest remaining run start, so parking a record narrows the window and the items of any run
   outside it stop being read. That is what made duckrun read 14.8 CU for a moment. Re-dispatch
-  `Dashboard` after moving one.
+  `Capacity units` after moving one.
 - **`measure.py` deliberately does NOT skip incomplete records.** Those items really did cost
   capacity and the ledger is the ledger; it is the PAGE that must only compare like with like.
 

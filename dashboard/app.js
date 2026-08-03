@@ -2,10 +2,11 @@
  * The page. Reads the run records and the CU ledger, joins them on the ITEM GUID, renders HTML.
  *
  * **This runs in the browser, against `history/` on `main`, at VIEW time.** That is the whole point
- * of it: `Benchmark` commits a run record, `Dashboard`'s measure job commits the ledger, and the
- * published page picks both up on the next load. Publishing is now what happens when the VISUALISATION
- * changes, not when data arrives — which is what it used to mean, and what made every new measurement
- * cost a Pages deploy.
+ * of it: `Benchmark` commits a run record, `Capacity units` commits the ledger, and the published
+ * page picks both up on the next load. Publishing is what happens when the VISUALISATION changes —
+ * `Dashboard` fires on a push to `dashboard/**` and does nothing else. It used to mean "when a number
+ * changed", because measuring and deploying were two jobs of one workflow, which made every new
+ * measurement cost a Pages deploy.
  *
  * **It must fetch from `raw.githubusercontent.com`, not from the Pages origin.** Serving `history/`
  * out of `site/` would put the data back inside the published artifact and make every commit a
@@ -606,8 +607,16 @@ export function esc(s) {
 }
 
 /**
- * `**bold**`, `` `code` ``, `[text](url)`, `<br>`, and nothing else. Escaped first, so a stray `<` in
- * an item name cannot inject markup.
+ * `**bold**`, `` `code` ``, `[text](url)`, `<br>`, `<sub>`, and nothing else. Escaped first, so a
+ * stray `<` in an item name cannot inject markup.
+ *
+ * The two tags that survive are matched as EXACT tokens with no attribute position, so a display
+ * name containing a literal `<sub>` becomes a harmless empty tag rather than an injection point.
+ *
+ * `<sub>` is repurposed: it marks a dim annotation, not a subscript, and the stylesheet aligns it to
+ * the baseline for that reason. It is how a caveat rides ALONGSIDE the number it qualifies —
+ * `compute seconds` needs "billed, not wall clock" attached to it, and a note four rows below is not
+ * attached to anything.
  *
  * Links are restricted to `http(s)://` — the page only ever emits GitHub URLs, and a scheme allowlist
  * is what keeps that true even if an item NAME ever reaches this function looking like markdown. A
@@ -616,6 +625,7 @@ export function esc(s) {
 export function inline(text) {
   let out = esc(text);
   out = out.replace(/&lt;br&gt;/g, "<br>");
+  out = out.replace(/&lt;(\/?)sub&gt;/g, "<$1sub>");
   out = out.replace(/\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)/g,
     (_m, label, url) => `<a href="${url.replace(/"/g, "&quot;")}">${label}</a>`);
   out = out.replace(/\*\*([\s\S]+?)\*\*/g, "<strong>$1</strong>");
@@ -902,11 +912,35 @@ export function engineTable(perCol, cols, secsCol) {
       })]);
     }
     if (!(secsCol && names.some((c) => (secsCol[c] || {})[cls]))) continue;
-    // The RATE only. The raw seconds were a row here and are gone: they are billed OPERATION seconds,
-    // which sum across concurrent operations, so spark's five Livy REPLs total more than the clock they
-    // ran on and the number needed four sentences of hedging to be read at all. The rate does not — the
-    // concurrency is in the numerator and the denominator alike, so it cancels — and it is the only
-    // thing the seconds were there to support.
+    // HOW LONG THE BUILD TOOK — **`etl` only, and one row.** The seconds were dropped from this table
+    // once, on the grounds that they are billed OPERATION seconds which SUM across concurrent
+    // operations (spark's five Livy REPLs total more than the clock they ran on) and so needed more
+    // hedging than they were worth. That objection is real and has not gone away; what changed is the
+    // judgement that "how long did the build take" is a question worth answering anyway, with the
+    // caveat carried in the row's own label rather than in a note four rows below it.
+    //
+    // `analytics` deliberately does NOT get one: the query half already reports latency properly, as
+    // cold/warm/hot milliseconds per pass position in the mart block, and those are wall clock a user
+    // actually waited. A second, differently-defined duration beside them would invite the two to be
+    // compared.
+    //
+    // COMPUTE seconds, not total, for the same reason the rate below is compute over compute: a
+    // storage operation bills real CU against a duration of essentially nothing — 383.25 CU in
+    // 0.049 s, measured — so storage durations are noise that tracks OneLake traffic rather than
+    // anything about how long the engine ran. It also makes the three rows RECONCILE: `compute` CU
+    // divided by `compute seconds` is exactly the rate printed underneath, so a reader can check the
+    // column against itself.
+    if (cls === "etl") {
+      rows.push(["`compute seconds` <sub>billed, not wall clock</sub>", ...names.map((c) => {
+        const secs = ((secsCol[c] || {})[cls] || {}).compute;
+        // A dash, never 0 — the ledger not having read this column yet is not a build that took no
+        // time. Same rule as every other cell here.
+        return secs ? fmt(secs, 0) : DASH;
+      })]);
+    }
+    // THE RATE. Unaffected by the concurrency that makes the row above hard to read across engines —
+    // it is in the numerator and the denominator alike, so it cancels. A high rate is a WIDE engine,
+    // not a slow one.
     // COMPUTE over COMPUTE. A storage operation bills real CU against a duration of essentially
     // nothing — 383.25 CU in 0.049 s, measured — so including it does not dilute the rate, it detonates
     // it, by an amount that tracks how much OneLake traffic the engine made rather than anything about
@@ -926,17 +960,25 @@ export function engineTable(perCol, cols, secsCol) {
     "operation is storage; everything else — Livy runs, warehouse queries, notebook runs, " +
     "SQL-endpoint queries — is compute. A dash means no operation of that kind was billed there " +
     "at all — or, on a class subtotal, that the ledger has not read that column yet; never that " +
-    "the work was free.<br>**`compute CU per second`** divides that class's compute CU by its " +
-    "`Duration (s)`, read from the same Capacity Metrics row, so it costs no extra query. It is the " +
-    "average capacity the node drew while it ran — the raw seconds are deliberately not shown, " +
-    "because they are BILLED OPERATION seconds that sum across concurrent operations (spark's five " +
-    "Livy REPLs total more than the clock they ran on) while the rate is unaffected, the concurrency " +
-    "being in the numerator and the denominator alike. It is COMPUTE against COMPUTE, and that is not " +
-    "a refinement: a storage operation bills real CU over a duration of essentially nothing (383.25 " +
-    "CU in 0.049 s), so a total-over-total rate drifts upward with however much OneLake traffic an " +
-    "engine happened to make. It SCALES with the compute the column was given — a single-node " +
-    "Python notebook draws `vCores ÷ 2`, 32 at 64 vCores and 16 at 32 — so compare it " +
-    "across columns only at equal size.");
+    "the work was free.<br>**`compute seconds`** is how long the build BILLED for, on the `etl` half " +
+    "only, read from `Duration (s)` in the same Capacity Metrics row as the CU above it — so it " +
+    "costs no extra query. **Read it as billed time, not as a stopwatch.** It is the sum of every " +
+    "compute operation's duration, and those run CONCURRENTLY: a duckrun leg is one long notebook " +
+    "run so its seconds land close to the clock, while spark opens five Livy REPLs under one session " +
+    "whose durations sum to more than the wall time anyone waited. Compare it freely between two runs " +
+    "of the SAME engine; compare it across engines only knowing that. Storage is left out because a " +
+    "storage operation bills real CU over a duration of essentially nothing (383.25 CU in 0.049 s), " +
+    "so its seconds are noise that tracks OneLake traffic rather than how long anything ran. " +
+    "`analytics` gets no such row on purpose: the query half reports latency properly, as the " +
+    "`cold`/`warm`/`hot` milliseconds beside the layout that produced them, and those are time a user " +
+    "actually waited.<br>**`compute CU per second`** divides the two rows above it, so the column " +
+    "reconciles against itself. It is the average capacity the node drew while it ran, and it is the " +
+    "sturdiest number here — the concurrency that makes the seconds awkward is in the numerator and " +
+    "the denominator alike, so it cancels. A high rate is a WIDE engine, not a slow one. It is " +
+    "COMPUTE against COMPUTE, and that is not a refinement: a total-over-total rate drifts upward " +
+    "with however much OneLake traffic an engine happened to make. It SCALES with the compute the " +
+    "column was given — a single-node Python notebook draws `vCores ÷ 2`, 32 at 64 vCores and 16 " +
+    "at 32 — so compare it across columns only at equal size.");
 }
 
 /**
@@ -986,9 +1028,11 @@ export function renderSources(cols, ledger, unmeasured, repo, now = null) {
     ["left", "left", "left", "right", "left"], rows));
   const drifters = cols.map(({ col, rec }) => [col, drifting(rec)]).filter(([, v]) => v.length);
   out.push(note("An hour's CU keeps growing for up to ~70 minutes after the work happened, so a run " +
-    "measured just now is a lower bound — dispatch **Dashboard** again and the numbers rise to " +
-    "their final value. Every item a run creates is deleted when it finishes, which is what makes a " +
-    "Fabric item GUID belong to exactly one run and the attribution exact." +
+    "measured just now is a lower bound. It settles itself: the **Capacity units** workflow re-reads " +
+    "the whole window daily and keeps the larger of the two figures, so reloading this page tomorrow " +
+    "shows the final number and nothing has to be reconciled. Every item a run creates is deleted " +
+    "when it finishes, which is what makes a Fabric item GUID belong to exactly one run and the " +
+    "attribution exact." +
     drifters.map(([c, v]) => ` **${c}** predates that teardown and still owns ` +
       v.map((x) => `\`${x}\``).join(", ") +
       " — Fabric keeps billing them, so its total creeps upward and is an upper bound on that " +
@@ -1360,8 +1404,9 @@ export function renderEmpty(repo = DEFAULTS.repo) {
       "capacity, so an empty directory means nothing has been recorded yet — not that the " +
       "capacity was idle."),
     para(`Dispatch **Benchmark** ([${repo}](${SERVER}/${repo}/actions)). It builds one engine, ` +
-      "benchmarks it, deletes what it created and commits one record; the **Dashboard** workflow then " +
-      "reads the capacity for those item GUIDs and commits the ledger this page joins against."),
+      "benchmarks it, deletes what it created and commits one record; the **Capacity units** " +
+      "workflow then reads the capacity for those item GUIDs and commits the ledger this page joins " +
+      "against — it runs straight after that build, and daily thereafter."),
   ].join("\n");
 }
 

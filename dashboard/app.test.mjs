@@ -890,8 +890,70 @@ test("the rate is a row of the engine table, not a section", () => {
   const rr = rows(out);
   assert.ok(rr.some((r) => r === "| **etl** | **900.0** |"));
   assert.ok(rr.some((r) => r === "| `compute CU per second` | 30.0 |"), "under its class");
-  assert.ok(!rr.some((r) => r.startsWith("| `seconds` |")), "the raw seconds are not shown");
   assert.equal(charts(out).length, 2, "and it brought no bar with it");
+});
+
+test("etl carries a duration row and analytics deliberately does not", () => {
+  // "How long did the build take" is worth answering, and it rides the same Capacity Metrics row as
+  // the CU so it costs no extra query. `analytics` gets none: the query half already reports latency
+  // as cold/warm/hot milliseconds beside the layout, and those are time a user actually waited — a
+  // second, differently-defined duration next to them would invite the two to be compared.
+  const runs = [full("a-1.json", "spark")];
+  const led = ledger({
+    OUT: { "High Concurrency Session Livy Run": 900.0 }, SEM: { "XMLA Read Operation": 40.0 },
+  });
+  led.seconds = secs({
+    OUT: { "High Concurrency Session Livy Run": 645.79 }, SEM: { "XMLA Read Operation": 25.93 },
+  });
+  const rr = rows(render(runs, led));
+  const secondsRows = rr.filter((r) => r.includes("compute seconds"));
+  assert.equal(secondsRows.length, 1, "exactly one, and it is etl's");
+  assert.ok(secondsRows[0].includes("| 646 |"), secondsRows[0]);
+  // The caveat rides ON the label. A note four rows below is not attached to anything.
+  assert.ok(secondsRows[0].includes("billed, not wall clock"), secondsRows[0]);
+  // ...and it reconciles: compute CU / compute seconds is the rate printed underneath.
+  const rate = rr.filter((r) => r.startsWith("| `compute CU per second`"));
+  assert.equal(rate.length, 2, "one per class — the rate is not etl-only");
+  assert.ok(rate[0].includes(`| ${(900.0 / 645.79).toFixed(1)} |`), rate[0]);
+});
+
+test("the duration row uses compute seconds, never total", () => {
+  // A storage operation bills real CU over a duration of essentially nothing — 383.25 CU in 0.049 s,
+  // measured — so its seconds track OneLake traffic rather than how long anything ran. Including them
+  // would also break the reconciliation with the rate underneath.
+  const runs = [full("a-1.json", "duckrun")];
+  runs[0].items = {
+    NB: gone("compute", "dbt-duckrun-ab12"), OUT: gone("output", "dbt_delta"),
+    SEM: gone("semantic_model", "aemo_duckrun"),
+  };
+  const led = ledger({
+    NB: { "Jupyter Notebook Scheduled Run": 20665.6 },
+    OUT: { "OneLake Write via Redirect": 384.1 },
+    SEM: { "XMLA Read Operation": 1287.2 },
+  });
+  led.seconds = secs({
+    NB: { "Jupyter Notebook Scheduled Run": 645.79 },
+    OUT: { "OneLake Write via Redirect": 0.031 },
+    SEM: { "XMLA Read Operation": 25.93 },
+  });
+  const row = rows(render(runs, led)).find((r) => r.includes("compute seconds"));
+  assert.ok(row.includes("| 646 |"), `645.79 compute, not 645.82 with storage: ${row}`);
+});
+
+test("a ledger with no seconds renders no duration row either", () => {
+  // Absent says "not measured"; a 0 would say the build was instant.
+  const out = render([full("a-1.json", "spark")], ledger({ OUT: 1.0, SEM: 2.0 }));
+  assert.ok(!rows(out).some((r) => r.includes("compute seconds")));
+});
+
+test("a column the ledger has not read is a dash in the duration row, not a zero", () => {
+  const runs = [lay("duckrun", 4, 27, { file: "a-1.json" }), lay("dwh", 78, 78, { file: "b-2.json" })];
+  runs[0].items = { O0: gone("output", "dbt_delta"), S0: gone("semantic_model", "aemo") };
+  runs[1].items = { O1: gone("output", "dbt_dwh"), S1: gone("semantic_model", "aemo_dwh") };
+  const led = ledger({ O0: { "Jupyter Notebook Scheduled Run": 900.0 } });   // nothing for dwh
+  led.seconds = secs({ O0: { "Jupyter Notebook Scheduled Run": 30.0 } });
+  const row = rows(render(runs, led)).find((r) => r.includes("compute seconds"));
+  assert.ok(row.endsWith("| 30 | — |"), row);
 });
 
 test("a class the ledger has not read yet is a dash, not a zero", () => {
@@ -1100,6 +1162,17 @@ test("a page that cannot read its data says so instead of reading as empty", asy
   assert.ok(text.includes("Could not read the data"));
   assert.ok(text.includes("403"), "the reason has to be on the page, not only in the console");
   assert.ok(!text.includes("No run records"), "never the empty-repo message");
+});
+
+test("the two surviving tags are exact tokens, so they cannot carry an attribute", () => {
+  // `<br>` and `<sub>` are un-escaped after the fact, which is a deliberate hole and has to stay a
+  // token-shaped one: no attribute position, so nothing can ride in on it.
+  assert.equal(d.inline("a<br>b"), "a<br>b");
+  assert.equal(d.inline("x <sub>note</sub>"), "x <sub>note</sub>");
+  assert.equal(d.inline('<sub onload="x()">'), '&lt;sub onload="x()"&gt;', "no attributes");
+  assert.equal(d.inline("<subtle>"), "&lt;subtle&gt;", "prefix match must not open a tag");
+  assert.equal(d.inline("<script>alert(1)</script>"),
+    "&lt;script&gt;alert(1)&lt;/script&gt;");
 });
 
 test("an item name cannot inject markup", () => {

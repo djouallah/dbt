@@ -54,6 +54,11 @@ thead th { background:var(--head); font-weight:600; font-size:.82rem; letter-spa
 tbody tr.sub td { background:var(--sub); font-weight:600; }
 tbody tr:last-child td { border-bottom:none; }
 .left { text-align:left; } .right { text-align:right; }
+/* A dim annotation, NOT a subscript — `baseline` is what makes it read as a caveat attached to the
+   label rather than as notation. It is how "billed, not wall clock" sits on the row it qualifies
+   instead of in a note the reader meets four rows later. */
+sub { font-size:.78em; color:var(--dim); vertical-align:baseline; margin-left:.45em;
+  font-weight:400; }
 /* Where the data came from and when — the one thing a live page owes a reader that a rendered
    document did not, since the numbers can now change without the page changing. */
 .status { color:var(--dim); font-size:.78rem; margin:0 0 1.5rem; min-height:1.2em; }

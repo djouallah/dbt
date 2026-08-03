@@ -1,11 +1,21 @@
 name: Dashboard
 
-# THE PAGE, and one of only two workflows in this repo. It reads capacity units for the item GUIDs
-# the `Benchmark` workflow recorded, tops up the ledger, and publishes
-# https://djouallah.github.io/fabric-dbt-benchmark/.
+# THE PAGE — https://djouallah.github.io/fabric-dbt-benchmark/ — and nothing else. It BUILDS AND
+# DEPLOYS; it measures nothing, reads no Fabric endpoint, spends no capacity and commits nothing.
 #
-#   measure (cu/measure.py        -> history/cu.json)   commits the ledger
-#   page    (dashboard/build.mjs  -> site/index.html)   deploys the SHELL, which carries no data
+#   dashboard/build.mjs -> site/index.html   the SHELL, which carries no data
+#                       -> dashboard.html    the artifact copy, with history/ inlined
+#
+# **PUBLISHING HAPPENS WHEN THE PAGE CHANGES, AND ONLY THEN.** `site/index.html` holds the stylesheet
+# and `dashboard/app.js` and NOTHING ELSE: it reads `history/runs/*.json` and `history/cu.json` from
+# `raw.githubusercontent.com` in the reader's browser on every load. So a `Benchmark` committing a
+# record, or `Capacity units` committing the ledger, reaches readers with **no deploy at all** — and
+# there is nothing left for this workflow to do about data. It used to hold the measurement too,
+# which meant refreshing a number dragged a Pages deploy behind it.
+#
+#   Benchmark        builds, benchmarks, tears down, commits the run record   dispatch only
+#   Capacity units   reads the metrics model, commits history/cu.json         schedule · dispatch · after Benchmark
+#   Dashboard        this — builds and deploys the page                       push to dashboard/ · dispatch
 #
 # **TWO DIRECTORIES, AND THE SPLIT IS THE JOB EACH DOES.** `cu/` EXPORTS: it reads the Capacity
 # Metrics model over DAX and writes `history/cu.json`, and that is all it does — Python, `requests`,
@@ -14,66 +24,42 @@ name: Dashboard
 # imports the other and they share no file; what passes between them is `history/`, on disk and in
 # git. Either can be deleted without touching the other.
 #
-# **THE PAGE IS DYNAMIC, AND THAT IS THE POINT OF THIS SHAPE.** `site/index.html` holds the stylesheet
-# and `dashboard/app.js` and NOTHING ELSE. It reads `history/runs/*.json` and `history/cu.json` from
-# `raw.githubusercontent.com` in the reader's browser, on every load — so a `Benchmark` run that
-# commits a record, or a `measure` job that commits the ledger, shows up on the published page with no
-# deploy at all. Publishing is what you do when the VISUALISATION changes. It used to be what you did
-# when a number changed, which meant every measurement dragged a Pages deploy behind it and a page
-# nobody had looked at could be published by a workflow nobody had watched.
-#
-# That is why `render` is gone and there is no `dashboard.md`: `cu/dashboard.py` and
+# That is also why `render` is gone and there is no `dashboard.md`: `cu/dashboard.py` and
 # `cu/report_html.py` were DELETED rather than kept beside `app.js`. Two implementations of the GUID
 # join is exactly the drift the rest of this repo is built to avoid, so the browser's is the only one.
 #
-# **Two JSON documents, joined on the item GUID.** `Benchmark` commits `history/runs/<ts>-<run id>.json`
-# naming every Fabric item it created, with its role; `measure` builds `history/cu.json`, a cumulative
-# `{item GUID: {operation: CU}}` ledger. The page is the join. Nothing else passes between the two
-# workflows — no artifact, no shared env, no `needs:`.
+# **`push` HERE IS A REVERSAL OF "NOTHING RUNS ON PUSH", AND IT IS SAFE FOR A NARROW REASON.** That
+# rule exists because the workflows that COMMIT would otherwise pay for their own commits. Check it
+# against this file: `Dashboard` commits nothing — it deploys to Pages — and the path filter is
+# `dashboard/**`, which never matches the `history/` paths that `Benchmark` and `Capacity units`
+# write. So no commit can trigger a publish and no publish can make a commit: **the loop is not
+# reachable.** The decision-making half of the old rule survives intact, just relocated — pushing a
+# change to `dashboard/` IS the decision to publish it, and the page still never republishes because
+# a number moved. Two things must stay true:
 #
-# **The measurement does not refresh the metrics model and resolves no names.** That refresh is what
-# Power BI throttled per-identity — every attempt 429 on two consecutive runs, and 41,887 CU of
-# notebook compute landing under `shared` because the items resolved to no name. The fact table
-# carries the item GUID and the workspace id as columns of its own, so neither is needed.
+#   - `Benchmark` and `Capacity units` must NEVER gain a `push:` trigger. They commit, and one of
+#     them spends capacity. The rule is now "nothing that commits or spends runs on push".
+#   - `history/` must NEVER appear in the path filter below. That single edit builds the loop.
 #
-# **Re-dispatching is the top-up.** An hour's CU keeps growing for ~70 minutes after the fact, so a run
-# measured minutes ago is a LOWER BOUND — the page says so per column. Dispatching this twice is how a
-# number becomes final, and dispatching it ten times costs almost nothing. With the page live, a
-# top-up needs no publish: untick `publish` and the deploy is skipped while the numbers still land.
-#
-# **`workflow_dispatch` only, and that is the standing rule.** No `schedule`, no `push`, no
-# `workflow_run`, no `workflow_call` — deliberately NOT chained off `Benchmark`. Committing the
-# ledger from CI is only safe because nothing here answers a push.
+# `paths:` is evaluated PER PUSH, not per file — the same mechanic that made `paths-ignore` useless
+# on Benchmark — so a commit touching `dashboard/app.js` and something else still fires this. On
+# Benchmark that cost paid capacity; here it costs one no-op deploy of an identical shell.
+# And the filter is deliberately the whole directory rather than the three files that actually reach
+# the published bytes: if someone later adds `dashboard/theme.css` and forgets a narrow filter, the
+# page SILENTLY stops updating, whereas the broad filter's worst case is a free deploy for a README
+# edit.
 on:
+  push:
+    branches: [main]
+    paths: ['dashboard/**']   # NEVER add history/ — see above
+  # The escape hatch: redeploy with no code change (a Pages settings change, a failed deploy, or the
+  # one-time bootstrap after this trigger is first added — the commit that adds it touches no file
+  # under `dashboard/`, so it does not fire itself).
   workflow_dispatch:
-    inputs:
-      # Off re-publishes from the committed ledger: free, offline, and the way to fix the page
-      # without spending a metrics query.
-      measure:
-        description: "measure CU before publishing"
-        type: boolean
-        default: true
-      # The page reads its data live, so a deploy only carries `dashboard/app.js` and the stylesheet.
-      # Untick it when this dispatch is a pure top-up of the numbers — the published page will
-      # show them anyway, on the next load, because it fetches them itself.
-      publish:
-        description: "deploy the page (only needed when dashboard/ changed)"
-        type: boolean
-        default: true
-      # In the MODEL'S clock (the app's own +10 offset, not UTC) — a wrong value reads as "no
-      # activity" rather than as an error. Blank is computed from the earliest unsettled run, which is
-      # what you want; set it to re-read a window by hand.
-      since:
-        description: "CU floor override, in the model's clock (+10)"
-        type: string
-        default: ""
-      workspace:
-        description: "workspace GUID; blank = the repo secret"
-        type: string
-        default: ""
 
-# Its own group. It measures nothing timing-sensitive, so it has no reason to queue behind a build —
-# and cancel-in-progress because a superseded publish has nothing worth finishing.
+# cancel-in-progress earns its keep now that pushes drive this: a burst of commits to `dashboard/`
+# cancels superseded deploys instead of queueing them, and a superseded publish has nothing worth
+# finishing.
 concurrency:
   group: dashboard-${{ github.ref_name }}
   cancel-in-progress: true
@@ -82,109 +68,23 @@ permissions:
   contents: read
 
 jobs:
-  # The only job here that touches Fabric, spends anything, or can fail for a Fabric reason. It is
-  # `continue-on-error` for exactly that reason: a throttled or unavailable metrics model must cost a
-  # stale number, never a stale page.
-  measure:
-    name: read capacity units
-    if: inputs.measure
-    runs-on: ubuntu-latest
-    continue-on-error: true
-    timeout-minutes: 20
-    permissions:
-      id-token: write     # OIDC -> the Power BI token
-      contents: write     # commits history/cu.json
-    env:
-      # Every one of these is a real GUID and therefore a SECRET: no tracked file holds one. An
-      # input's `default:` cannot take a context, so the fallback lives here, where `secrets` IS
-      # available. measure.py keeps no default either — a hardcoded fallback would put the value back
-      # in the repo and outvote the secret whenever the env var arrived empty.
-      CU_METRICS_WORKSPACE_ID: ${{ secrets.CU_METRICS_WORKSPACE_ID }}
-      CU_METRICS_MODEL_ID: ${{ secrets.CU_METRICS_MODEL_ID }}
-      CU_CAPACITY_ID: ${{ secrets.CU_CAPACITY_ID }}
-      CU_WORKSPACE_FILTER: ${{ inputs.workspace || secrets.FABRIC_WORKSPACE_ID }}
-      CU_SINCE: ${{ inputs.since }}
-      PYTHONIOENCODING: utf-8
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with: {python-version: "3.11"}
-      # `requests` is the entire runtime dependency of the measurement. No duckrun, no ADOMD, no
-      # .NET — this talks to the Power BI executeQueries REST endpoint, which takes DAX as a JSON
-      # string.
-      - run: pip install requests pytest
-
-      # Free, offline, ~1s, before the login. Everything it covers fails as a plausible number rather
-      # than as an error: summing instead of overwriting multiplies an hour by how often it was read,
-      # removing on absence erases everything past the app's 14-day retention, settling too early
-      # freezes a partial total forever.
-      - name: Test the ledger offline
-        run: python -m pytest cu/ -q
-
-      # Same OIDC federated identity as the Benchmark workflow. allow-no-subscriptions because the
-      # deploy app is a workspace principal, not an Azure RBAC one.
-      - uses: azure/login@v2
-        with:
-          client-id: ${{ secrets.AZURE_CLIENT_ID }}
-          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
-          allow-no-subscriptions: true
-
-      # Minted here, not a repo secret. The community consensus is that a service principal cannot
-      # read the Capacity Metrics model; it can, measured on run 30536137179. If it is ever refused,
-      # the manual hatch is the same command against a user account, exported as PBI_TOKEN.
-      - name: Acquire a Power BI token
-        run: |
-          set -euo pipefail
-          TOKEN=$(az account get-access-token \
-            --resource https://analysis.windows.net/powerbi/api \
-            --query accessToken -o tsv)
-          echo "::add-mask::$TOKEN"
-          echo "PBI_TOKEN=$TOKEN" >> "$GITHUB_ENV"
-
-      - name: Top up the CU ledger
-        run: python cu/measure.py
-
-      # The ledger is the only storage that outlives the app's ~14-day retention, so committing it IS
-      # the measurement's output — and, now that the page reads `history/` directly, it is also how
-      # the numbers REACH the page. Nothing downstream has to run for a reader to see them.
-      # `pull --rebase` because a queued dispatch can have moved main since checkout; the diff check
-      # exits 0 so a re-read that changed nothing does not fail the job, which is the expected outcome
-      # once everything has settled.
-      - name: Commit the ledger
-        run: |
-          set -euo pipefail
-          git config user.name  "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add history/cu.json
-          git diff --cached --quiet && { echo "ledger unchanged — everything settled" >&2; exit 0; }
-          git commit -m "cu: capacity units as of run ${{ github.run_id }}"
-          git pull --rebase --autostash origin "${{ github.ref_name }}"
-          git push origin "HEAD:${{ github.ref_name }}"
-
-  # Free, offline, and it CANNOT fail for a Fabric reason — no token, no Azure login, no Python. It
-  # builds two HTML files out of the same `dashboard/app.js`:
+  # Free, offline, and it CANNOT fail for a Fabric reason — no token, no Azure login, no Python, no
+  # network beyond the checkout. It builds two HTML files out of the same `dashboard/app.js`:
   #
   #   site/index.html   the LIVE page. No data in it; it fetches `history/` on load.
   #   dashboard.html    the artifact copy, with `history/` inlined, for opening off a disk with no
   #                     network years later. Same module, same render path — which is the only reason
   #                     a frozen copy and the live page cannot disagree about a number.
-  #
-  # `always()` so a throttled measurement still publishes.
   page:
     name: build the page
-    needs: measure
-    # `!cancelled()`, not `always()`: a skipped or failed `measure` must still publish (that is the
-    # `-f measure=false` path, and the whole point of `continue-on-error` on the job above), but a
-    # cancelled run has nothing worth finishing. A status function is required either way — GitHub
-    # skips a job when ANY ancestor was skipped.
-    if: ${{ !cancelled() && inputs.publish }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      # `ref:` MATTERS. The default checkout takes `github.sha` — the commit that triggered the
-      # dispatch — so the ARTIFACT copy would be frozen from the ledger as it stood BEFORE the measure
-      # job committed to it. The live page is immune (it reads the branch head at view time), which is
-      # precisely the class of one-dispatch-stale bug this whole change removes; the snapshot is not.
+      # `ref:` still MATTERS, though the reason narrowed once the measurement moved out. A default
+      # checkout takes `github.sha` — the triggering commit — and the OFFLINE SNAPSHOT would then be
+      # frozen from the branch as it stood at that commit rather than from its head, so a ledger
+      # commit landing in between would be missing from the artifact copy. The live page is immune:
+      # it reads the branch head at view time, which is the whole point of the arrangement.
       - uses: actions/checkout@v4
         with:
           ref: ${{ github.ref_name }}
@@ -223,9 +123,10 @@ jobs:
   deploy:
     name: publish
     needs: page
-    # A status function, for the same reason `layout` carries one in benchmark.yml: GitHub skips a job
-    # when ANY ancestor was skipped, and it propagates straight through `page`'s `always()`.
-    if: ${{ !cancelled() && needs.page.result == 'success' }}
+    # NO `if:`. It used to carry a status function because a SKIPPED ancestor propagates past
+    # `always()` — GitHub skips a job when any ancestor was skipped — and `measure` was skippable via
+    # an input. With that job gone there is no skippable ancestor left, so the default `success()`
+    # says exactly what is meant: a build that failed must not overwrite a good page.
     runs-on: ubuntu-latest
     permissions:
       pages: write

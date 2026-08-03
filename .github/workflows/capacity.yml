@@ -1,0 +1,184 @@
+name: Capacity units
+
+# WHAT THE WORK COST. Reads CU — and duration — per Fabric item GUID from the Capacity Metrics app's
+# own semantic model, by DAX over the Power BI `executeQueries` endpoint, and commits
+# `history/cu.json`. Fabric exposes no per-operation CU REST API; that model is the only
+# authoritative source. `cu/README.md` has the detail.
+#
+# **THIS IS THE ONLY WORKFLOW THAT WRITES THE LEDGER, AND IT PUBLISHES NOTHING.** It used to be a job
+# inside `Dashboard`, which meant one dispatch both measured and deployed — so refreshing a number
+# dragged a Pages deploy behind it. Splitting them is what lets the page be published only when the
+# page CHANGES, and the numbers be topped up on their own cadence. Nothing downstream waits on this:
+# the published page fetches `history/cu.json` at view time, so committing it IS how the numbers
+# reach a reader.
+#
+#   Benchmark        builds, benchmarks, tears down, commits the run record   dispatch only
+#   Capacity units   this — reads the model, commits the ledger               schedule · dispatch · after Benchmark
+#   Dashboard        builds and deploys the page                              push to dashboard/ · dispatch
+#
+# **THE SCHEDULE IS A REVERSAL OF A STANDING RULE, AND IT IS SCOPED.** The rule was
+# `workflow_dispatch` only — no schedule, no push, no workflow_run — and its stated reason was that
+# *publishing is a decision*: a page that republishes itself whenever a measurement lands will
+# eventually publish one nobody looked at, on a public repo. The dynamic page severed that link and
+# this split completes it. **A scheduled measurement now publishes nothing.** What is untouched:
+# `Benchmark` stays dispatch-only, because it spends paid capacity.
+#
+# **Why `workflow_run` and not `workflow_call`.** A called workflow can never hold MORE permission
+# than its caller grants — run 30735526504 died as a `startup_failure` with no jobs and no log for
+# exactly that — every input has to be declared twice, and `secrets` is unavailable in
+# `jobs.<id>.with`. `workflow_run` lets this file own its own permissions and secrets block, and it
+# is what "async, and Benchmark does not wait for it" means: a separate run that starts after
+# Benchmark COMPLETES, leaving Benchmark's duration, status and job graph untouched. **benchmark.yml
+# needs no edit at all**, which is the point.
+#
+# **No conclusion filter on the trigger, deliberately.** A failed or cancelled Benchmark still spent
+# capacity, may have left items standing, and still commits a record (its `record` job is
+# `if: always()`). The read is idempotent and costs about two DAX queries, so gating on success would
+# only lose data.
+#
+# **Two triggers, and neither is redundant.** A CU hour keeps growing for up to ~70 minutes after the
+# work (~6 min ingestion lag, 5–64 min smoothing), and `measure.py` has no settle logic: every read
+# re-reads the whole window from the floor and merges with `max(old, new)`, so re-reading is
+# idempotent and monotonic — two reads of the same window can only RAISE a number. The read after a
+# Benchmark is therefore deliberately a LOWER BOUND, and it is there so a fresh run's column is
+# populated in minutes rather than blank for a day; the daily read is what makes it final, with
+# nobody watching.
+on:
+  workflow_dispatch:
+    inputs:
+      # In the MODEL'S clock (the app's own +10 offset, not UTC) — a wrong value reads as "no
+      # activity" rather than as an error. Blank is computed from the earliest unsettled run, which
+      # is what you want; set it to re-read a window by hand.
+      since:
+        description: "CU floor override, in the model's clock (+10)"
+        type: string
+        default: ""
+      workspace:
+        description: "workspace GUID; blank = the repo secret"
+        type: string
+        default: ""
+  schedule:
+    # 21:17 UTC is 07:17 in the model's own +10 clock, so one read covers the whole previous day.
+    # OFF the hour on purpose: GitHub delays scheduled runs under load and the top of the hour is the
+    # worst of it. Note GitHub DISABLES a schedule after 60 days of repository inactivity — a quiet
+    # stretch stops the daily top-up silently, and re-enabling is manual.
+    - cron: "17 21 * * *"
+  workflow_run:
+    workflows: [Benchmark]
+    types: [completed]
+
+# Not per-ref only for tidiness: this job PUSHES, so two runs must queue rather than race on the
+# ledger. `cancel-in-progress: false` for the same reason — cancelling mid-push is the one outcome
+# worth avoiding. GitHub keeps a single pending run per group and drops the rest, which is harmless
+# here: every read is idempotent.
+concurrency:
+  group: capacity-${{ github.event.workflow_run.head_branch || github.ref_name }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  # NOT `continue-on-error`. It was, while this measured and deployed the page in one run: a
+  # throttled metrics model had to cost a stale number rather than a stale page. Standalone and
+  # unattended that inverts — a failed read would report GREEN and the ledger would quietly stop
+  # being topped up. Red instead, so GitHub's scheduled-workflow failure mail arrives, and nothing
+  # downstream breaks: the page simply keeps serving the last good ledger.
+  measure:
+    name: read capacity units
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      id-token: write     # OIDC -> the Power BI token
+      contents: write     # commits history/cu.json
+    env:
+      # Every one of these is a real GUID and therefore a SECRET: no tracked file holds one. An
+      # input's `default:` cannot take a context, so the fallback lives here, where `secrets` IS
+      # available. measure.py keeps no default either — a hardcoded fallback would put the value back
+      # in the repo and outvote the secret whenever the env var arrived empty.
+      # On a `schedule` or `workflow_run` event the `inputs` context is empty, so both of the
+      # input-fed values below fall through to the secret / to blank, which is what is wanted.
+      CU_METRICS_WORKSPACE_ID: ${{ secrets.CU_METRICS_WORKSPACE_ID }}
+      CU_METRICS_MODEL_ID: ${{ secrets.CU_METRICS_MODEL_ID }}
+      CU_CAPACITY_ID: ${{ secrets.CU_CAPACITY_ID }}
+      CU_WORKSPACE_FILTER: ${{ inputs.workspace || secrets.FABRIC_WORKSPACE_ID }}
+      CU_SINCE: ${{ inputs.since }}
+      PYTHONIOENCODING: utf-8
+      # The branch to read and write. On a `workflow_run` event `github.ref_name` is the DEFAULT
+      # branch regardless of where the triggering run happened, so `head_branch` is what keeps a
+      # topic-branch Benchmark writing its ledger back to its own branch.
+      BRANCH: ${{ github.event.workflow_run.head_branch || github.ref_name }}
+    steps:
+      # `ref:` IS LOAD-BEARING, and this is the trap this workflow exists to walk into. On a
+      # `workflow_run` event a default checkout takes the TRIGGERING run's head SHA — which is from
+      # BEFORE Benchmark's `record` job pushed the run record. The measurement would then read
+      # `history/runs/` without the very run that triggered it, and `floor_for()` would compute a
+      # floor that excludes it: a silently incomplete ledger, and nothing would say so. Same class of
+      # bug as the `ref:` on the page job in dashboard.yml.
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.workflow_run.head_branch || github.ref_name }}
+
+      - uses: actions/setup-python@v5
+        with: {python-version: "3.11"}
+      # `requests` is the entire runtime dependency of the measurement. No duckrun, no ADOMD, no
+      # .NET — this talks to the Power BI executeQueries REST endpoint, which takes DAX as a JSON
+      # string.
+      - run: pip install requests pytest
+
+      # Free, offline, ~1s, before the login. Everything it covers fails as a plausible number rather
+      # than as an error: summing instead of overwriting multiplies an hour by how often it was read,
+      # removing on absence erases everything past the app's 14-day retention, settling too early
+      # freezes a partial total forever.
+      - name: Test the ledger offline
+        run: python -m pytest cu/ -q
+
+      # Same OIDC federated identity as the Benchmark workflow. allow-no-subscriptions because the
+      # deploy app is a workspace principal, not an Azure RBAC one.
+      - uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          allow-no-subscriptions: true
+
+      # Minted here, not a repo secret. The community consensus is that a service principal cannot
+      # read the Capacity Metrics model; it can, measured on run 30536137179. If it is ever refused,
+      # the manual hatch is the same command against a user account, exported as PBI_TOKEN.
+      - name: Acquire a Power BI token
+        run: |
+          set -euo pipefail
+          TOKEN=$(az account get-access-token \
+            --resource https://analysis.windows.net/powerbi/api \
+            --query accessToken -o tsv)
+          echo "::add-mask::$TOKEN"
+          echo "PBI_TOKEN=$TOKEN" >> "$GITHUB_ENV"
+
+      # About two DAX queries: one `discover_columns()` and one `read_cu()` per capacity, and
+      # `CU_CAPACITY_ID` is pinned to one. The floor covers the whole 14-day retention window every
+      # time and that is not a cost — the aggregation is server-side, so a wider window is the same
+      # single request. Do NOT add a high-water mark to narrow it: `max(old, new)` DEPENDS on
+      # re-reading the window, and narrowing the floor is exactly what produced the recorded
+      # "duckrun read 14.8 CU" incident.
+      - name: Top up the CU ledger
+        run: python cu/measure.py
+
+      # The ledger is the only storage that outlives the app's ~14-day retention, so committing it IS
+      # the measurement's output — and, since the page reads `history/` at view time, it is also how
+      # the numbers REACH the page. Nothing downstream has to run for a reader to see them.
+      # `pull --rebase` because a queued run can have moved the branch since checkout; the diff check
+      # exits 0 so a re-read that changed nothing does not fail the job, which is the expected outcome
+      # once everything has settled.
+      #
+      # This commit CANNOT trigger anything, and that is a property to preserve: nothing in this repo
+      # answers `push` except `Dashboard`, whose path filter is `dashboard/**` and therefore never
+      # matches `history/`. Putting `history/` in that filter is the one edit that would build a loop.
+      - name: Commit the ledger
+        run: |
+          set -euo pipefail
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add history/cu.json
+          git diff --cached --quiet && { echo "ledger unchanged — everything settled" >&2; exit 0; }
+          git commit -m "cu: capacity units as of run ${{ github.run_id }}"
+          git pull --rebase --autostash origin "$BRANCH"
+          git push origin "HEAD:$BRANCH"
