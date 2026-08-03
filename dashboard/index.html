@@ -36,7 +36,18 @@
 * { box-sizing: border-box; }
 body { margin:0; padding:2rem 1.25rem 4rem; background:var(--bg); color:var(--fg);
   font:15px/1.55 ui-sans-serif, -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; }
-main { max-width: 62rem; margin: 0 auto; }
+/* PROSE AND DATA GET DIFFERENT WIDTHS, and that split is the whole layout.
+   A readable line of text is ~62rem; a table here carries ONE COLUMN PER ENGINE-AND-CONFIG and grows
+   every time a config is added — eleven of them now. Holding both to the prose measure put the
+   numbers, which are the entire point of the page, behind a horizontal scrollbar while the notes
+   ABOUT them sat in full view. So `main` is wide, and only the things that are read as sentences are
+   capped. No `vw` anywhere: on Windows `100vw` includes the classic scrollbar and a full-bleed trick
+   built on it makes the whole page scroll sideways — which is the bug being fixed, one level up. */
+main { max-width: 110rem; margin: 0 auto; }
+h2, h3, h4, p, footer { max-width: 62rem; }
+/* The charts are DRAWN at a 660-unit viewBox and scale to their box, so letting them fill a wide
+   `main` would inflate every label and value ~2.7x. They keep the prose measure. */
+figure.chart { max-width: 62rem; }
 h2 { font-size:1.5rem; line-height:1.25; margin:0 0 1.25rem; letter-spacing:-0.01em; }
 h3 { font-size:1.1rem; margin:2.5rem 0 .85rem; }
 h4 { font-size:.95rem; margin:2rem 0 .6rem; color:var(--dim); }
@@ -47,8 +58,12 @@ p.note { color:var(--dim); font-size:.82rem; line-height:1.5; margin:.7rem 0 0; 
 code { background:var(--code); border-radius:4px; padding:.08em .32em; font-size:.88em;
   font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
 .scroll { overflow-x:auto; -webkit-overflow-scrolling:touch; margin:.5rem 0 .25rem; }
-table { border-collapse:collapse; width:100%; font-variant-numeric: tabular-nums; font-size:.92rem; }
-th, td { padding:.42rem .7rem; border-bottom:1px solid var(--line); white-space:nowrap; }
+table { border-collapse:collapse; width:100%; font-variant-numeric: tabular-nums; font-size:.9rem; }
+th, td { padding:.4rem .6rem; border-bottom:1px solid var(--line); white-space:nowrap; }
+/* The label column is the only one holding a sentence, and `nowrap` on it made the widest row —
+   `compute seconds  billed, not wall clock` — set the width of the whole first column. Numbers must
+   never wrap; a label happily can. */
+th:first-child, td:first-child { white-space:normal; min-width:9rem; }
 thead th { background:var(--head); font-weight:600; font-size:.82rem; letter-spacing:.02em;
   text-transform:lowercase; color:var(--dim); position:sticky; top:0; }
 tbody tr.sub td { background:var(--sub); font-weight:600; }
