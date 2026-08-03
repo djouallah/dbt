@@ -49,23 +49,38 @@
 --
 -- THREE MEASURED POINTS, all 64 vCores, all full loads, all 143,980,961 rows. They are the
 -- yardstick for whatever the picker does next:
---   none                 985.5 MB  4 files/27 RG  cold 23,491  warm 6,300  hot 5,420  etl 22,624
---   auto (chose `date`)  777.2 MB  4 files/25 RG  cold 27,740  warm 3,498  hot 3,056  etl 26,991
---   ['date','time','DUID'] 652.6 MB 3 files/26 RG cold 24,523  warm 3,141  hot 3,572  etl 23,465
--- (runs 30752070535, 30796667149, 30805417412.) So the picker left ~16% of size and some warm on
--- the table against a key chosen from the query suite, and charged more to do it. That gap IS the
--- measurement now; if it matters, the lever is `sort_by=['date','time','DUID']` here.
+--   none                    985.5 MB  4f/27RG  cold 23,491  warm 6,300  hot 5,420  etl 22,624
+--   auto -> `date, time`    777.2 MB  4f/25RG  cold 27,740  warm 3,498  hot 3,056  etl 26,991
+--   ['date','time','DUID']  652.6 MB  3f/26RG  cold 24,523  warm 3,141  hot 3,572  etl 23,465
+-- (runs 30752070535, 30796667149, 30805417412. What auto chose is in the CI log, not the record:
+-- `duckrun: sort_by=auto for … -> date, time`. Nothing writes the key anywhere durable, so read the
+-- leg's log if a future run's numbers need explaining.)
 --
--- WHY THAT KEY IS THE YARDSTICK, read off benchmark/xmla_compare.py rather than guessed:
--- dim_calendar[year]/[month] filters or groups 9 of the 25 queries while fct_summary[DUID] is a
--- filter in 2, and both relationships are relyOnReferentialIntegrity so a year filter propagates
--- onto date -- so date-first. A DUID-first key would give DUID runs of ~209k rows and destroy date
--- monotonicity: 9 queries hurt to help 2. `time` second earns its place through `price`, which is
--- RRP per (SETTLEMENTDATE, REGIONID) -- 5 regions -- so one (date, time) holds ~156 rows carrying
--- at most 5 distinct prices, collapsed into a 156-row window and smeared over ~45,036 rows under a
--- bare ['date']. Read the mechanism as Direct Lake, not file skipping: VertiPaq inherits the
--- parquet row order when it transcodes, so a sorted table gives longer RLE runs in the resident
--- columns -- which is why warm and hot move and not only cold.
+-- READ THAT TABLE CAREFULLY, because the obvious reading is wrong. auto did NOT pick `date` alone —
+-- it picked `date, time`, the same first two columns the query suite argues for. So the picker got
+-- the direction right on its own, and the entire 652.6-vs-777.2 gap (~16% of size) is attributable
+-- to the THIRD key, `DUID`. That contradicts the reasoning this file used to carry, which said DUID
+-- adds no run-length because it appears once per (date, time) — true, and beside the point: a
+-- sorted string column with ascending dictionary ids compresses far better than the same values in
+-- arbitrary order, and DUID is the widest low-cardinality column here. The run-length argument
+-- under-weighted it.
+--
+-- WHY DATE, TIME IS THE RIGHT DIRECTION, read off benchmark/xmla_compare.py rather than guessed —
+-- and now independently agreed with by the picker: dim_calendar[year]/[month] filters or groups 9
+-- of the 25 queries while fct_summary[DUID] is a filter in 2, and both relationships are
+-- relyOnReferentialIntegrity so a year filter propagates onto date. Hence date-first: a DUID-first
+-- key would give DUID runs of ~209k rows and destroy date monotonicity, hurting 9 queries to help
+-- 2. `time` second earns its place through `price`, which is RRP per (SETTLEMENTDATE, REGIONID) --
+-- 5 regions -- so one (date, time) holds ~156 rows carrying at most 5 distinct prices, collapsed
+-- into a 156-row window and smeared over ~45,036 rows under a bare ['date']. Read the mechanism as
+-- Direct Lake, not file skipping: VertiPaq inherits the parquet row order when it transcodes, so a
+-- sorted table gives longer RLE runs in the resident columns -- which is why warm and hot move and
+-- not only cold.
+--
+-- So the open question the `sorted` input now measures is narrow: does the picker ever add DUID?
+-- If it keeps stopping at `date, time`, the ~16% is bought by one word — `sort_by=['date','time',
+-- 'DUID']` here — and the picker is costing more (+19% ETL against a named key's +3.7%) to reach a
+-- worse layout.
 --
 -- Not the trailing ORDER BY below doing any of this: that reaches no stored table on any engine
 -- (CLAUDE.md, "fairness invariant"), and at 143M rows with spilling it demonstrably did not reach
