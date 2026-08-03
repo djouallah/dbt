@@ -775,6 +775,58 @@ test("the same parquet is one bar however many engines wrote it", () => {
   assert.deepEqual(c[1].labels.sort(), ["duckrun·32c", "duckrun·64c"]);
 });
 
+test("two runs of ONE column that wrote different parquet are two bars", () => {
+  // The bug this pins, on the real records: `duckrun·64c+sorted` wrote 3 files / 26 RG under an
+  // explicit sort key and 4 files / 25 under the one `sort_by='auto'` resolved to. Grouping the
+  // COLUMNS and pouring every run of each into its bar put them together at their mean — 2,041.8, a
+  // number neither run measured — captioned with only the newer one's shape. The layout is measured
+  // per RUN, so it has to be grouped per run.
+  const cfg = { vcores: "64", sorted: "true" };
+  const runs = [
+    lay("duckrun", 3, 26, { cfg, file: "a-1.json", finishedHoursAgo: 72 }),
+    lay("duckrun", 4, 25, { cfg, file: "b-2.json", finishedHoursAgo: 48 }),
+  ];
+  runs[0].items = { S0: gone("semantic_model", "aemo_duckrun"), O0: gone("output", "dbt_delta") };
+  runs[1].items = { S1: gone("semantic_model", "aemo_duckrun"), O1: gone("output", "dbt_delta") };
+  const out = render(runs, ledger({
+    S0: { "XMLA Read Operation": 2400.0 }, O0: 1.0,
+    S1: { "XMLA Read Operation": 1600.0 }, O1: 1.0,
+  }));
+  const c = charts(out)[0];
+  assert.deepEqual(c.labels, ["duckrun sorted", "duckrun sorted"], "one label, two layouts");
+  assert.deepEqual(c.values, ["1,600.0", "2,400.0"], "each run's OWN CU, never their mean");
+  // The caption is the whole reason two bars with one label read: the label answers who wrote it.
+  assert.deepEqual(c.captions, ["4 files · 25 RG", "3 files · 26 RG"]);
+  // ...and the mart block says the same thing, because its rows ARE these groups.
+  const body = rows(block(out, "the mart the queries land on")).slice(1);
+  assert.equal(body.length, 2, "one mart row per bar, not one per writer");
+  assert.ok(body[0].startsWith("| duckrun sorted | 1,600 |"), body[0]);
+  assert.ok(body[0].includes("| 4 | 25 |"), `the shape the CU belongs to: ${body[0]}`);
+  assert.ok(body[1].startsWith("| duckrun sorted | 2,400 |"), body[1]);
+  assert.ok(body[1].includes("| 3 | 26 |"), body[1]);
+  // The ETL half is unmoved: there the writer and its compute are the subject, so both runs are
+  // samples of ONE column and the bar is their mean with a range.
+  const etl = charts(out)[1];
+  assert.deepEqual(etl.labels, ["duckrun"], "one column — the tag is only added to tell two apart");
+  assert.equal(etl.values[0], "1.0");
+});
+
+test("a column whose runs recorded no layout stays ONE bar", () => {
+  // The "two unmeasured layouts are not one layout" rule is about two different COLUMNS. Splitting one
+  // column's own runs would print the same label three times with no caption able to say why.
+  const runs = ["a-1.json", "b-2.json", "c-3.json"].map((f, i) =>
+    full(f, "spark", { finishedHoursAgo: 72 - i * 24 }));
+  runs.forEach((r, i) => {
+    r.items = { [`S${i}`]: gone("semantic_model", "aemo_spark"), [`O${i}`]: gone("output", "dbt_spark") };
+  });
+  const c = charts(render(runs, ledger({
+    S0: { "XMLA Read Operation": 1000.0 }, S1: { "XMLA Read Operation": 2000.0 },
+    S2: { "XMLA Read Operation": 1500.0 },
+  })))[0];
+  assert.deepEqual(c.labels, ["spark"]);
+  assert.equal(c.values[0], "1,500.0", "the mean of all three, as before");
+});
+
 test("an engine is named for who writes when the target name misleads", () => {
   assert.equal(d.producer(lay("iceberg", 357, 1172)), "duckdb iceberg");
   assert.equal(d.producer(lay("duckrun", 4, 27)), "duckrun", "only where the name misleads");

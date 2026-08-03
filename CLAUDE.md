@@ -1223,12 +1223,26 @@ no data at all. `all.yml`, `dbt.yml` and `cu.yml` are gone.
   `(V-Order, band(files), band(row groups), sorted)`, the first three from the parquet as `stats.py`
   read it, so two unrelated engines that wrote the same shape *do* share a bar; the caption comes
   from `LAYOUT_CONFIG` so it does not re-word itself whenever a record lands.
+  **IT GROUPS RUNS, NOT COLUMNS, and that was got wrong for one release.** A column is
+  `(engine, config)` and the layout is measured per RUN, so two runs of one column can write different
+  parquet — which is not hypothetical: `duckrun·64c+sorted` wrote **3 files / 26 RG** under an explicit
+  `sort_by=['date','time','DUID']` (run 30805417412) and **4 files / 25 RG** under the `sort_by='auto'`
+  the picker resolved to `['date','time']` (run 30809945203). `layoutGroups` keyed the COLUMNS and
+  `spreadFor` then poured every run of each into its bar, so those two landed in one bar valued at
+  their mean — **2,041.8, a number neither run measured** — captioned `4 files · 25 RG` from the newer
+  record alone, because `layoutLabel` ranged over columns too. Per run they are two bars sharing the
+  label `duckrun sorted`, at 2,454.1 and 1,629.5, and the caption is what tells them apart. Two bars
+  with one label is the correct output, not a defect to tidy: the label answers who wrote it and the
+  caption answers what. A run whose record carries no file count falls back to its COLUMN rather than
+  to a bar of its own — the "two unmeasured layouts are not one layout" rule below is about two
+  different columns and still holds, but one column's own runs must not split into a bar each with no
+  caption able to say why.
   **`sorted` is the exception and it is DECLARED**, because nothing in `stats.py` measures sort
   ORDER — there is no column for it, so the config the run recorded is the only witness that the
   parquet differs. It earns its place the same way V-Order does (a write-time reordering of what
-  Power BI transcodes; V-Order is already element `[0]`), and leaving it out is not neutral: the one
-  sorted duckrun run wrote **4 files either way** and moved 27 → 25 row groups, i.e. the same bands,
-  so it would have shared a bar with the unsorted run and had its cold/warm/hot means averaged in —
+  Power BI transcodes; V-Order is already element `[0]`), and leaving it out is not neutral: the
+  `sort_by='auto'` duckrun run wrote **4 files either way** and moved 27 → 25 row groups, i.e. the same
+  bands, so it would have shared a bar with the unsorted run and had its cold/warm/hot means averaged in —
   destroying the comparison the flag exists to make. A record with no `sorted` key groups WITH an
   unsorted run rather than opening its own bar: all 13 pre-input records demonstrably wrote unsorted
   parquet, so absence here is not the "unmeasured" case below. If this ever needs to become
@@ -1276,10 +1290,15 @@ no data at all. `all.yml`, `dbt.yml` and `cu.yml` are gone.
   a record predating the dispatch input has no key at all and would collide with an explicit `false` —
   so `columnsFor` checks for a collision and falls the whole engine back to the explicit spelling.
   Two identical column headers is the failure it prevents, and it is silent about why.
-  The layout table groups by the DECLARED writer while the chart groups by the MEASURED parquet — two
-  directions onto the same rows, and a disagreement between them is worth knowing rather than
-  smoothing. Both quote the same CU (the mean over every run), because a page printing 1,916 in a bar
-  and 1,960 in the row under it is asking the reader which one it meant.
+  **The MART block's rows ARE the chart's bars** — same grouping, same members, same mean — and every
+  other block stays one row per DECLARED writer. That split replaced "two directions onto the same
+  rows", which held only while no writer produced two layouts: the mart block is the only one carrying
+  CU and the query tiers, so it is the only one where a row spanning two shapes prints a number
+  belonging to neither, and `duckrun sorted` did exactly that. Its other blocks are physical layout
+  alone, describing tables the mart's shape says nothing about, so splitting them the same way would
+  print one row twice for a difference that is not in it. The mart's CU and its cold/warm/hot are both
+  the group's own runs' mean — a page printing 1,916 in a bar and 1,960 in the row under it is asking
+  the reader which one it meant.
   There is **no `writer` column**: the row label is the writer, so it printed `duckdb (iceberg)`
   beside `duckdb iceberg` and `spark` beside `spark V-Order`. `STACK`'s third entry is now unread.
   **Row counts live in the block HEADING**, not a column: identical on every row by design — the

@@ -562,23 +562,41 @@ export function layoutKey(rec, table = DEFAULTS.table) {
 }
 
 /**
- * `[[key, [{col, rec}]]]` — the columns that wrote parquet Power BI cannot distinguish.
+ * `[[key, [entry]]]` — the entries that wrote parquet Power BI cannot distinguish.
  *
- * Insertion-ordered, so the engine order the caller sorted `cols` into survives into the grouping; the
- * chart re-sorts by value anyway. A column with no `layoutKey` gets a singleton group keyed on itself
- * — never merged with another unmeasured one.
+ * **ONE ENTRY PER RUN, not per column, and that is the whole point.** A column is `(engine, config)`
+ * and a run is one dispatch, so two runs of ONE column can write different parquet — which is not
+ * hypothetical: `duckrun·64c+sorted` wrote 3 files / 26 row groups under an explicit
+ * `sort_by=['date','time','DUID']` and 4 files / 25 under the `sort_by='auto'` the picker resolved to
+ * `['date','time']`. Grouping the COLUMNS and then averaging every run of each is what put those two
+ * in one bar, valued at their mean (2,041.8) and captioned with only the newer one's shape. The layout
+ * is measured PER RUN, so it has to be grouped per run; two runs that wrote different shapes are two
+ * bars sharing a label, which the caption then explains.
+ *
+ * Entries are passed through untouched, so a caller can hang the run's CU and its query timings on
+ * them and read them back off the members.
+ *
+ * Insertion-ordered, so the caller's order survives into the grouping; the chart re-sorts by value
+ * anyway.
+ *
+ * An entry with no `layoutKey` falls back to its COLUMN, which is as much as is known about it, and to
+ * a singleton when it has no column either. Two unmeasured records are still never merged with each
+ * other — that rule is about two different columns, and it holds — but a column's own runs are not
+ * split into a bar each just because none of them recorded a file count, which would print the same
+ * label several times with no caption able to say why.
  */
-export function layoutGroups(cols, table = DEFAULTS.table) {
+export function layoutGroups(entries, table = DEFAULTS.table) {
   const out = [], seen = new Map();
-  for (const { col, rec } of cols) {
-    const key = layoutKey(rec, table);
-    const id = key === null ? null : JSON.stringify(key);
+  for (const entry of entries) {
+    const key = layoutKey(entry.rec, table);
+    const id = key !== null ? JSON.stringify(key)
+      : entry.col === undefined || entry.col === null ? null : `col:${entry.col}`;
     const at = id === null ? undefined : seen.get(id);
     if (at === undefined) {
       if (id !== null) seen.set(id, out.length);
-      out.push([key, [{ col, rec }]]);
+      out.push([key, [entry]]);
     } else {
-      out[at][1].push({ col, rec });
+      out[at][1].push(entry);
     }
   }
   return out;
@@ -952,14 +970,16 @@ const meanOf = (vals) => vals.reduce((a, b) => a + b, 0) / vals.length;
  * reader scanning bars wants to know which thing they are looking at, and a file count is a poor name
  * even when it is the real subject. The shape sits underneath, where it explains why two writers would
  * ever share a bar.
+ *
+ * The mean is over the group's OWN runs — `layoutGroups` keys per run, so a run that wrote a different
+ * shape is a sample of a different bar rather than of this one. That is what makes two bars with the
+ * same label possible (`duckrun sorted` twice, at `3 files · 26 RG` and `4 files · 25 RG`), and the
+ * caption is what tells them apart: the label answers who wrote it, the caption answers what.
  */
-export function groupRows(cols, spread, latest, table = DEFAULTS.table) {
+export function groupRows(groups, table = DEFAULTS.table) {
   const out = [];
-  for (const [, members] of layoutGroups(cols, table)) {
-    let vals = [];
-    for (const { col } of members) {
-      vals = vals.concat(spread[col] || (latest[col] ? [latest[col]] : []));
-    }
+  for (const [, members] of groups) {
+    const vals = members.map((m) => m.cu).filter((v) => v);
     const label = producers(members);
     let caption = layoutLabel(members, table);
     if (caption === label) caption = "";       // nothing was measured, so it would read twice
@@ -1287,8 +1307,16 @@ export function renderInput(cols) {
  * `spark·readHeavyForPBI+NEE` — the profile named by what it does to the parquet, and the core count
  * and NEE flag dropped because neither reaches it. duckrun's two core counts and spark's two NEE
  * settings each collapse to one row, and they had written identical layouts, so the rows they replaced
- * were the same row printed twice. This is also what makes the table agree with the chart above it,
- * which groups on the MEASURED parquet: the two arrive at the same rows from opposite directions.
+ * were the same row printed twice.
+ *
+ * **The MART block takes its rows from the chart's own groups, and the other blocks stay per
+ * producer.** That is what keeps the two agreeing when a producer wrote more than one layout: the mart
+ * block is the only one carrying CU and query time, so it is the only one where a row that averaged two
+ * different shapes would print a number belonging to neither — which is exactly what `duckrun sorted`
+ * did, quoting the mean of a 3-file run and a 4-file one on a row showing 4 files. Per group, that
+ * producer has two mart rows and the `files`/`row groups` columns say which is which. The other blocks
+ * are physical layout alone and describe a table the mart's shape says nothing about, so splitting them
+ * the same way would print the same row twice for a difference that is not in it.
  *
  * **`cold`/`warm`/`hot` are here rather than in a section of their own, and that placement is the
  * point.** They were briefly a table further down the page, which put the layout and the speed it
@@ -1298,36 +1326,28 @@ export function renderInput(cols) {
  * a faster first visit. Cold especially: it is the tier that transcodes columns out of parquet, so it
  * is the one layout can move at all.
  */
-export function renderLayouts(cols, analytics, times, counts, martTable = DEFAULTS.table) {
+export function renderLayouts(cols, groups, times, counts, martTable = DEFAULTS.table) {
   const stats = {};
   for (const { col, rec } of cols) {
     stats[col] = ((rec.layout || {}).stats || {})[rec.engine] || {};
   }
-  // ONE ROW PER PRODUCER, not per column. `producer()` has already dropped the config that never
-  // reached the parquet, so duckrun's two core counts and spark's two NEE settings each collapse to one
-  // name — and they wrote identical layouts, so the rows they replaced were the same row twice.
+  // ONE ROW PER PRODUCER, not per column, for every block but the mart. `producer()` has already
+  // dropped the config that never reached the parquet, so duckrun's core counts and spark's two NEE
+  // settings each collapse to one name — and they wrote identical layouts, so the rows they replaced
+  // were the same row twice.
   const order = [], members = new Map();
   for (const { col, rec } of cols) {
     const name = producer(rec);
     if (!members.has(name)) { members.set(name, []); order.push(name); }
     members.get(name).push({ col, rec });
   }
-  // A producer's numbers are its columns' MEAN — one dispatch is a sample of a shared capacity, and a
-  // producer with two columns has simply been measured twice.
-  const mean = (name, source) => {
-    const vals = members.get(name).map(({ col }) => source[col]).filter((v) => v);
-    return vals.length ? meanOf(vals) : 0;
+  // A group's numbers are its RUNS' mean — the same runs the bar above averaged, so the two cannot
+  // disagree. One dispatch is a sample of a shared capacity; a group with several runs has simply been
+  // measured that many times, and a run that wrote a different shape is in a different group.
+  const mean = (vals) => {
+    const v = vals.filter((x) => x);
+    return v.length ? meanOf(v) : 0;
   };
-  const cuOf = {}, msOf = {};
-  for (const name of members.keys()) {
-    cuOf[name] = mean(name, analytics);
-    msOf[name] = {};
-    for (const [lbl] of TIERS) {
-      const src = {};
-      for (const { col } of members.get(name)) src[col] = (times[col] || {})[lbl];
-      msOf[name][lbl] = mean(name, src);
-    }
-  }
 
   const tables = [], schema = {};
   for (const { col, rec } of cols) {
@@ -1348,25 +1368,36 @@ export function renderLayouts(cols, analytics, times, counts, martTable = DEFAUL
   const out = ["<h3>Table layout</h3>"];
   const blocks = [];
   for (const t of ordered) {
-    let present = order
-      .map((n) => [n, (stats[members.get(n)[0].col] || {})[t]])
-      .filter(([, d]) => d);
-    if (!present.length) continue;
     const showCu = t === mart;
+    // The mart's rows ARE the chart's bars — same grouping, same members, same mean. Every other block
+    // is one row per producer, read off that producer's first column.
+    let present = showCu
+      ? groups.map(([, ms]) => {
+        // The NEWEST member's stats: entries arrive oldest-first, and within a group they agree to the
+        // band anyway — 78 files and 80 is the same bar, so this only picks which of the two prints.
+        const rec = ms[ms.length - 1].rec;
+        const d = (((rec.layout || {}).stats || {})[rec.engine] || {})[t];
+        return { name: producers(ms), d, cu: mean(ms.map((m) => m.cu)),
+          ms: Object.fromEntries(TIERS.map(([lbl]) =>
+            [lbl, mean(ms.map((m) => (times[m.qid] || {})[lbl]))])) };
+      }).filter(({ d }) => d)
+      : order.map((n) => ({ name: n, d: (stats[members.get(n)[0].col] || {})[t], ms: {} }))
+        .filter(({ d }) => d);
+    if (!present.length) continue;
     if (showCu) {
       // CHEAPEST FIRST, like the chart — the CU column is the finding on this block, and "lower is
       // better" only reads as a ranking if the rows are in that order. A 0 means nothing was measured,
       // not that querying was free, so it sorts to the END.
       present = present.sort((a, b) =>
-        ((cuOf[a[0]] || 0) === 0) - ((cuOf[b[0]] || 0) === 0) || (cuOf[a[0]] || 0) - (cuOf[b[0]] || 0));
+        ((a.cu || 0) === 0) - ((b.cu || 0) === 0) || (a.cu || 0) - (b.cu || 0));
     }
     const tiers = showCu ? TIERS.map(([l]) => l).filter((l) => l in counts) : [];
     // The ROW COUNT goes in the heading, not in a column. It is identical on every row — that is the
     // parity statement the whole project rests on — and a 143,980,961 repeated down the table is a wide
     // column carrying one fact. When the engines DISAGREE it becomes a column again and the heading
     // says so, because that disagreement is the loudest signal this page has.
-    const seenCounts = [...new Set(present.filter(([, d]) => d.total_rows)
-      .map(([, d]) => Math.trunc(Number(d.total_rows))))].sort((a, b) => a - b);
+    const seenCounts = [...new Set(present.filter(({ d }) => d.total_rows)
+      .map(({ d }) => Math.trunc(Number(d.total_rows))))].sort((a, b) => a - b);
     const agree = seenCounts.length === 1;
     const rowsNote = agree ? ` — ${fmt(seenCounts[0], 0)} rows on every engine`
       : seenCounts.length ? " — **row counts DISAGREE**" : "";
@@ -1378,10 +1409,10 @@ export function renderLayouts(cols, analytics, times, counts, martTable = DEFAUL
       ...colsHere.map(([, h]) => h), "V-Order"];
     const align = ["left", ...(showCu ? ["right"] : []), ...tiers.map(() => "right"),
       ...colsHere.map(() => "right"), "left"];
-    const body = present.map(([name, d]) => [
+    const body = present.map(({ name, d, cu, ms }) => [
       name,
-      ...(showCu ? [fmt(cuOf[name] || 0, 0)] : []),
-      ...tiers.map((l) => ((msOf[name] || {})[l] ? fmt(msOf[name][l], 0) : DASH)),
+      ...(showCu ? [fmt(cu || 0, 0)] : []),
+      ...tiers.map((l) => (ms[l] ? fmt(ms[l], 0) : DASH)),
       ...colsHere.map(([k, , dp]) => (d[k] === undefined || d[k] === null ? DASH
         : dp < 0 ? compact(d[k]) : fmt(d[k], dp))),
       d.vorder ? "**yes**" : "·",
@@ -1515,12 +1546,11 @@ export function renderPage(cols, runs, ledger, opts = {}) {
   const repo = opts.repo || DEFAULTS.repo;
   const martTable = opts.table || DEFAULTS.table;
   const now = opts.now === undefined ? null : opts.now;
-  const perCol = {}, analytics = {}, unmeasured = {};
+  const perCol = {}, unmeasured = {};
   for (const { col, rec } of cols) {
     const { cells, unmeasured: missing } = runCu(rec, ledger);
     perCol[col] = cells;
     unmeasured[col] = missing;
-    analytics[col] = classTotal(cells, "analytics");
   }
 
   const newest = cols.map(({ rec }) => (rec.run || {}).started || "").sort().pop() || "";
@@ -1535,8 +1565,21 @@ export function renderPage(cols, runs, ledger, opts = {}) {
     [JSON.stringify([baseEngine(col), variant(rec)]), col]));
   const keyOf = (rec) => byVariant.get(JSON.stringify([rec.engine, variant(rec)]));
   const captions = Object.fromEntries(cols.map(({ col, rec }) => [col, engineCaption(rec, col)]));
-  const anaSpread = spreadFor(runs, ledger, "analytics", keyOf);
-  const nRuns = Math.max(1, ...cols.map(({ col }) => (anaSpread[col] || []).length));
+
+  // ONE ENTRY PER RUN, carrying that run's own analytics CU and a key into its own query timings. The
+  // analytics half groups on the parquet a run MEASURED, and two runs of one column can write different
+  // parquet — grouping the columns and averaging their runs is what put a 3-file and a 4-file
+  // `duckrun sorted` in one bar, at a mean belonging to neither. `qid` is the entry's index because a
+  // record has no id of its own that is guaranteed present.
+  const anaEntries = [];
+  for (const rec of runs) {
+    const col = keyOf(rec);
+    if (col === undefined || col === null) continue;
+    anaEntries.push({ col, rec, qid: String(anaEntries.length),
+      cu: classTotal(runCu(rec, ledger).cells, "analytics") });
+  }
+  const groups = layoutGroups(anaEntries, martTable);
+  const nRuns = Math.max(1, ...groups.map(([, ms]) => ms.filter((m) => m.cu).length));
   const over = nRuns > 1 ? `, mean of ${nRuns} runs with the range` : "";
 
   // ONE BAR PER LAYOUT, not per engine — Power BI never sees the engine. It opens parquet through
@@ -1549,7 +1592,7 @@ export function renderPage(cols, runs, ledger, opts = {}) {
   // each figure shrinks below the prose measure and the SVG scales with it.
   const chartA = chartSvg("Analytics — what querying each LAYOUT cost",
     `capacity units, lower is better — INTERACTIVE CU, and Power BI sees only the parquet${over}`,
-    groupRows(cols, anaSpread, analytics, martTable));
+    groupRows(groups, martTable));
   // `data-kind="etl"` gives the ETL bars their own hue (categorical slot 2, validated with slot 1
   // on both surfaces) — beside each other the two charts measure different things, and one blue
   // for both read as one dataset split in half.
@@ -1566,21 +1609,17 @@ export function renderPage(cols, runs, ledger, opts = {}) {
     .map((e) => `[${STACK[e][0]}](${ADAPTER_URLS[e]}) — ${STACK[e][1]}`)
     .join(" · ")));
 
-  // The layout table quotes the SAME number as the chart above it: the mean over every run of a
-  // column, not that column's latest. They are one measurement described twice, and a page that
-  // printed dwh at 1,916 in a bar and 1,960 in the row under it would be inviting the reader to work
-  // out which one it meant.
-  const anaMean = Object.fromEntries(cols.map(({ col }) => {
-    const v = anaSpread[col] || [];
-    return [col, v.length ? meanOf(v) : (analytics[col] || 0)];
-  }));
-
   out.push("<h3>Cost by engine</h3>");
   const secsCol = Object.fromEntries(cols.map(({ col, rec }) =>
     [col, runCu(rec, ledger, "seconds").cells]));
   out.push(engineTable(perCol, cols, secsCol));
-  const { times, counts } = queryTime(cols);
-  out.push(renderLayouts(cols, anaMean, times, counts, martTable));
+  // The mart block quotes the SAME number as the chart above it — the same groups, the same members,
+  // the same mean. They are one measurement described twice, and a page that printed dwh at 1,916 in a
+  // bar and 1,960 in the row under it would be inviting the reader to work out which one it meant. The
+  // timings are keyed per RUN for the same reason the CU is: a group's tiers are its own runs' mean,
+  // not its column's newest record.
+  const { times, counts } = queryTime(anaEntries.map(({ qid, rec }) => ({ col: qid, rec })));
+  out.push(renderLayouts(cols, groups, times, counts, martTable));
 
   const n = new Set(cols.map(({ col }) => baseEngine(col))).size;
   out.push("<h3>About these numbers</h3>");

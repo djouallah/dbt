@@ -140,10 +140,20 @@ without a build, a token or a dispatch.
   bars 50% apart was not a comparison — it was one layout measured twice, presented as two results.
   Grouping merges them and the range says what the gap really was.
   **Grouping is MEASURED, labelling is DECLARED.** The key is
-  `(V-Order, power-of-two band of files, power-of-two band of row groups)` read off the parquet as
-  `stats.py` saw it, so two unrelated engines that wrote the same shape *do* share a bar. The caption
-  comes from `LAYOUT_CONFIG`, so it does not re-word itself every time a record lands. On the current
-  records that yields five groups from nine columns, and it surfaces two things the old chart hid:
+  `(V-Order, power-of-two band of files, power-of-two band of row groups, sorted)` read off the parquet
+  as `stats.py` saw it, so two unrelated engines that wrote the same shape *do* share a bar. The caption
+  comes from `LAYOUT_CONFIG`, so it does not re-word itself every time a record lands.
+  **It groups RUNS, not columns, and that distinction is load-bearing.** A column is
+  `(engine, config)`, so two of its runs can write different parquet — `duckrun·64c+sorted` wrote
+  3 files / 26 row groups under an explicit `sort_by=['date','time','DUID']` and 4 files / 25 under the
+  `sort_by='auto'` the picker resolved to `['date','time']`. Grouping the columns and then averaging
+  every run of each put those two in one bar at their mean (2,041.8 — a number neither run measured)
+  captioned with only the newer one's shape. Per run they are **two bars sharing a label**, and the
+  caption is what tells them apart: the label answers who wrote it, the caption answers what. A run with
+  no file count at all falls back to its column rather than to a bar of its own — two *unmeasured*
+  layouts are still never merged, but one column's own runs are not split into a bar each with nothing
+  able to say why.
+  It surfaces two things the old chart hid:
   V-Order on and off sit in the same file band and differ 2.8× (1,332 against 3,769), which is the
   sharpest experiment on the page; and NEE on and off produce the same layout, so the gap between
   them was never an NEE effect.
@@ -212,12 +222,16 @@ without a build, a token or a dispatch.
   Microsoft's name for the workload it was designed for, and the core count and NEE flag are dropped
   because two runs each showed they never reach it. duckrun's two core counts and spark's two NEE
   settings therefore collapse to one row — they had written identical layouts, so the rows they
-  replaced were the same row printed twice. This is also what makes the table agree with the chart
-  above it: the table groups by the DECLARED writer and the chart by the MEASURED parquet, two
-  directions onto the same rows, and a disagreement between them would be worth knowing.
-  The mart block alone carries the analytics CU and the three query-time columns — both are one
-  number per writer, not per table — and it quotes the **same** CU as the chart above it, the mean
-  over every run, not that column's latest.
+  replaced were the same row printed twice.
+  **The MART block is the exception: its rows ARE the chart's bars**, same grouping and same members,
+  which is what makes the two agree when a writer produced more than one layout. It is the only block
+  carrying the analytics CU and the three query-time columns — one number per bar, not per table — so
+  it is the only one where a row averaging two shapes would print a number belonging to neither, which
+  is exactly what `duckrun sorted` did: the mean of a 3-file run and a 4-file one, on a row showing
+  4 files. That writer now has two mart rows and the `files`/`row groups` columns say which is which.
+  Every other block stays one row per writer: they are physical layout alone, describing a table the
+  mart's shape says nothing about, so splitting them the same way would print one row twice for a
+  difference that is not in it.
   **The row count is in the heading, not a column**: it is identical on every row by design, which is
   the parity statement the whole project rests on, and 143,980,961 repeated down a table is a wide
   column carrying one fact. When the engines DISAGREE the heading says so and the column comes back —
