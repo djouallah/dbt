@@ -15,7 +15,7 @@ had looked at could be published by a workflow nobody had watched.
 index.html   the shell: one stylesheet, three empty elements
 app.js       the whole page — loader, join, layout grouping, render, charts
 build.mjs    index.html + app.js -> one file, twice (live, and offline with data inlined)
-app.test.mjs 84 offline tests, no browser, no network
+app.test.mjs 88 offline tests, no browser, no network
 ```
 
 Where the data comes from is [`cu/`](../cu/README.md) (the CU ledger) and the `Benchmark` workflow
@@ -106,6 +106,18 @@ without a build, a token or a dispatch.
 
 ## The page
 
+- **Numbers are visible, methodology is opt-in.** The long how-to-read notes are folded behind a
+  one-line `<details>` each (`fold()` in `app.js`); every sentence stays in the DOM — the tests and
+  ctrl-F still see it all — but the page reads numbers-first. Two things are deliberately NEVER
+  folded, because they are the page's alarms: the excluded-runs block (a different source generation)
+  and a **still billing** drifter note. Both are pinned by tests.
+- **The layout tables are a tab strip, one table visible at a time.** Eight stacked tables buried
+  the mart under seven blocks that explain it. The tabs are CSS-only — radio inputs paired to panels
+  by enumerated `nth-of-type` rules, no JS — so the offline snapshot and a script-blocked browser
+  behave identically, every panel stays in the DOM, and print shows all of them. The pairing is
+  enumerated to 12 panels in the stylesheet; past that `renderLayouts` falls back to stacked blocks
+  rather than render tabs whose panels could never show. The `?table=` param still picks which table
+  leads, i.e. which tab is first and checked.
 - **Bar charts first**, analytics then ETL, **cheapest first** because "lower is better" makes the
   ranking the finding. A **zero sorts to the bottom**, never the top: zero means the engine did no
   such work, and at the top under that caption it would read as the winner.

@@ -34,8 +34,8 @@
 :root[data-theme="light"] { --bg:#fff; --fg:#1a1a1a; --dim:#5b6472; --line:#e3e6ea; --head:#f6f7f9;
   --sub:#eef1f5; --code:#f2f3f5; --series:#2a78d6; }
 * { box-sizing: border-box; }
-body { margin:0; padding:2rem 1.25rem 4rem; background:var(--bg); color:var(--fg);
-  font:15px/1.55 ui-sans-serif, -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; }
+body { margin:0; padding:2.25rem 1.25rem 4rem; background:var(--bg); color:var(--fg);
+  font:15px/1.6 ui-sans-serif, -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; }
 /* PROSE AND DATA GET DIFFERENT WIDTHS, and that split is the whole layout.
    A readable line of text is ~62rem; a table here carries ONE COLUMN PER ENGINE-AND-CONFIG and grows
    every time a config is added — eleven of them now. Holding both to the prose measure put the
@@ -48,18 +48,25 @@ h2, h3, h4, p, footer { max-width: 62rem; }
 /* The charts are DRAWN at a 660-unit viewBox and scale to their box, so letting them fill a wide
    `main` would inflate every label and value ~2.7x. They keep the prose measure. */
 figure.chart { max-width: 62rem; }
-h2 { font-size:1.5rem; line-height:1.25; margin:0 0 1.25rem; letter-spacing:-0.01em; }
-h3 { font-size:1.1rem; margin:2.5rem 0 .85rem; }
-h4 { font-size:.95rem; margin:2rem 0 .6rem; color:var(--dim); }
+h2 { font-size:1.65rem; line-height:1.2; margin:0 0 1.5rem; letter-spacing:-0.015em; }
+/* The dateline rides inside the h2 so the title stays one element, but it reads as a sub-line. */
+h2 .asof { display:block; font-size:.82rem; font-weight:400; color:var(--dim);
+  letter-spacing:0; margin-top:.4rem; }
+/* A ruled heading per section is what gives the page its rhythm — the sections used to run into
+   each other and the only cue was font size. */
+h3 { font-size:1.12rem; margin:3rem 0 .9rem; padding-top:1.4rem; border-top:1px solid var(--line);
+  letter-spacing:-0.01em; }
+h4 { font-size:.95rem; margin:1.9rem 0 .55rem; color:var(--dim); }
 p { margin:.75rem 0; }
 a { color:var(--series); text-decoration:none; border-bottom:1px solid var(--line); }
 a:hover { border-bottom-color:var(--series); }
 p.note { color:var(--dim); font-size:.82rem; line-height:1.5; margin:.7rem 0 0; }
 code { background:var(--code); border-radius:4px; padding:.08em .32em; font-size:.88em;
   font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
-.scroll { overflow-x:auto; -webkit-overflow-scrolling:touch; margin:.5rem 0 .25rem; }
+.scroll { overflow-x:auto; -webkit-overflow-scrolling:touch; margin:.6rem 0 .35rem;
+  border:1px solid var(--line); border-radius:10px; }
 table { border-collapse:collapse; width:100%; font-variant-numeric: tabular-nums; font-size:.9rem; }
-th, td { padding:.4rem .6rem; border-bottom:1px solid var(--line); white-space:nowrap; }
+th, td { padding:.45rem .7rem; border-bottom:1px solid var(--line); white-space:nowrap; }
 /* The label column is the only one holding a sentence, and `nowrap` on it made the widest row —
    `compute seconds  billed, not wall clock` — set the width of the whole first column. Numbers must
    never wrap; a label happily can. */
@@ -67,8 +74,77 @@ th:first-child, td:first-child { white-space:normal; min-width:9rem; }
 thead th { background:var(--head); font-weight:600; font-size:.82rem; letter-spacing:.02em;
   text-transform:lowercase; color:var(--dim); position:sticky; top:0; }
 tbody tr.sub td { background:var(--sub); font-weight:600; }
+/* Hover follows the row a reader is tracing across eleven columns; subtotal rows keep their own
+   shade so the class structure never flickers. */
+tbody tr:not(.sub):hover td { background:var(--head); }
 tbody tr:last-child td { border-bottom:none; }
 .left { text-align:left; } .right { text-align:right; }
+/* METHODOLOGY IS OPT-IN. The long notes are all still on the page — every sentence a test pins is
+   in the DOM — but folded behind one line each, so the numbers read first and the reasoning is
+   there when a number looks wrong. The exclusion notice is deliberately NOT one of these. */
+details.note { max-width:62rem; margin:.7rem 0 0; font-size:.82rem; line-height:1.5;
+  color:var(--dim); }
+details.note summary { cursor:pointer; user-select:none; width:fit-content; color:var(--dim); }
+details.note summary:hover { color:var(--fg); }
+details.note[open] { padding:.65rem .9rem .75rem; background:var(--head);
+  border:1px solid var(--line); border-radius:8px; }
+details.note p, details.note p.note { margin:.5rem 0 0; max-width:none; }
+/* THE LAYOUT TABLES ARE TABS — CSS only, radio inputs, no JS, so the offline snapshot and a
+   browser with scripts disabled behave identically. Every panel stays in the DOM (tests and
+   ctrl-F see everything); only display toggles. The nth-of-type rules below pair input k with
+   panel k and label k, enumerated to 12 — `renderLayouts` falls back to stacked blocks past that. */
+.tabs { margin:.9rem 0 .5rem; }
+.tabs > input { position:absolute; opacity:0; pointer-events:none; }
+.tab-nav { display:flex; flex-wrap:wrap; gap:.4rem; margin:0 0 .4rem; max-width:62rem; }
+.tab-nav label { cursor:pointer; padding:.26rem .8rem; border:1px solid var(--line);
+  border-radius:999px; font-size:.8rem; color:var(--dim);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+.tab-nav label:hover { color:var(--fg); border-color:var(--dim); }
+.tabs > section { display:none; }
+.tabs > section > h4 { margin-top:.9rem; }
+.tabs > input:nth-of-type(1):checked ~ section:nth-of-type(1),
+.tabs > input:nth-of-type(2):checked ~ section:nth-of-type(2),
+.tabs > input:nth-of-type(3):checked ~ section:nth-of-type(3),
+.tabs > input:nth-of-type(4):checked ~ section:nth-of-type(4),
+.tabs > input:nth-of-type(5):checked ~ section:nth-of-type(5),
+.tabs > input:nth-of-type(6):checked ~ section:nth-of-type(6),
+.tabs > input:nth-of-type(7):checked ~ section:nth-of-type(7),
+.tabs > input:nth-of-type(8):checked ~ section:nth-of-type(8),
+.tabs > input:nth-of-type(9):checked ~ section:nth-of-type(9),
+.tabs > input:nth-of-type(10):checked ~ section:nth-of-type(10),
+.tabs > input:nth-of-type(11):checked ~ section:nth-of-type(11),
+.tabs > input:nth-of-type(12):checked ~ section:nth-of-type(12) { display:block; }
+.tabs > input:nth-of-type(1):checked ~ .tab-nav label:nth-of-type(1),
+.tabs > input:nth-of-type(2):checked ~ .tab-nav label:nth-of-type(2),
+.tabs > input:nth-of-type(3):checked ~ .tab-nav label:nth-of-type(3),
+.tabs > input:nth-of-type(4):checked ~ .tab-nav label:nth-of-type(4),
+.tabs > input:nth-of-type(5):checked ~ .tab-nav label:nth-of-type(5),
+.tabs > input:nth-of-type(6):checked ~ .tab-nav label:nth-of-type(6),
+.tabs > input:nth-of-type(7):checked ~ .tab-nav label:nth-of-type(7),
+.tabs > input:nth-of-type(8):checked ~ .tab-nav label:nth-of-type(8),
+.tabs > input:nth-of-type(9):checked ~ .tab-nav label:nth-of-type(9),
+.tabs > input:nth-of-type(10):checked ~ .tab-nav label:nth-of-type(10),
+.tabs > input:nth-of-type(11):checked ~ .tab-nav label:nth-of-type(11),
+.tabs > input:nth-of-type(12):checked ~ .tab-nav label:nth-of-type(12) {
+  background:var(--head); color:var(--fg); border-color:var(--series);
+  box-shadow: inset 0 0 0 1px var(--series); }
+.tabs > input:nth-of-type(1):focus-visible ~ .tab-nav label:nth-of-type(1),
+.tabs > input:nth-of-type(2):focus-visible ~ .tab-nav label:nth-of-type(2),
+.tabs > input:nth-of-type(3):focus-visible ~ .tab-nav label:nth-of-type(3),
+.tabs > input:nth-of-type(4):focus-visible ~ .tab-nav label:nth-of-type(4),
+.tabs > input:nth-of-type(5):focus-visible ~ .tab-nav label:nth-of-type(5),
+.tabs > input:nth-of-type(6):focus-visible ~ .tab-nav label:nth-of-type(6),
+.tabs > input:nth-of-type(7):focus-visible ~ .tab-nav label:nth-of-type(7),
+.tabs > input:nth-of-type(8):focus-visible ~ .tab-nav label:nth-of-type(8),
+.tabs > input:nth-of-type(9):focus-visible ~ .tab-nav label:nth-of-type(9),
+.tabs > input:nth-of-type(10):focus-visible ~ .tab-nav label:nth-of-type(10),
+.tabs > input:nth-of-type(11):focus-visible ~ .tab-nav label:nth-of-type(11),
+.tabs > input:nth-of-type(12):focus-visible ~ .tab-nav label:nth-of-type(12) {
+  outline:2px solid var(--series); outline-offset:2px; }
+@media print {
+  .tabs > section { display:block !important; }
+  .tabs > input, .tab-nav { display:none; }
+}
 /* A dim annotation, NOT a subscript — `baseline` is what makes it read as a caveat attached to the
    label rather than as notation. It is how "billed, not wall clock" sits on the row it qualifies
    instead of in a note the reader meets four rows later. */

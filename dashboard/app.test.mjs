@@ -1315,6 +1315,59 @@ test("the two surviving tags are exact tokens, so they cannot carry an attribute
     "&lt;script&gt;alert(1)&lt;/script&gt;");
 });
 
+// ------------------------------------------------------------------------------- presentation
+
+test("the layout blocks sit behind a tab strip when more than one table renders", () => {
+  const runs = [full("a-1.json", "duckrun", {
+    stats: {
+      duckrun: { fct_summary: { total_rows: 1 }, fct_scada: { total_rows: 9, schema: "landing" } },
+    },
+    tables: ["fct_summary", "fct_scada"],
+  })];
+  const out = render(runs, ledger({ OUT: 1.0, SEM: 2.0 }));
+  assert.ok(out.includes('class="tabs"'));
+  assert.equal((out.match(/name="layout-tab"/g) || []).length, 2, "one radio per table");
+  assert.ok(out.includes('id="lt-0" checked'), "the mart tab starts selected");
+  // Every panel stays in the DOM — hidden by CSS, never dropped — so ctrl-F, print, the offline
+  // snapshot and every other test here still see every table.
+  assert.ok(plain(out).includes("landing.fct_scada"));
+  assert.ok(plain(out).includes("9 rows on every engine"));
+});
+
+test("a single table renders without a tab strip", () => {
+  const out = render([full("a-1.json", "spark")], ledger({ OUT: 1.0, SEM: 2.0 }));
+  assert.ok(!out.includes('class="tabs"'));
+  assert.ok(plain(out).includes("the mart the queries land on"), "the block itself still renders");
+});
+
+test("methodology folds, but the exclusion notice never does", () => {
+  const runs = [
+    gen("a-1.json", "duckrun", 143980960, { finishedHoursAgo: 72 }),
+    gen("b-2.json", "spark", 143980961, { finishedHoursAgo: 24 }),
+  ];
+  const { html } = d.compose(runs, ledger({ OUT: 1.0, SEM: 2.0 }), {});
+  // The long notes fold behind <details>, with their full text still in the DOM.
+  assert.ok(html.includes("<details"));
+  assert.ok(plain(html).includes("Every `OneLake …` operation is storage"));
+  // The excluded-runs block is the loud one and stays fully visible.
+  const excl = block(html, "run(s) excluded");
+  assert.ok(excl.includes("143,980,960"), "the dropped run's count is in the open");
+  assert.ok(!excl.includes("<details"), "loud by design — never folded");
+});
+
+test("a still-billing drifter is a visible note, not a folded one", () => {
+  // The one state that never resolves by waiting must not sit behind a click.
+  const good = full("a-1.json", "spark");
+  const bad = full("b-2.json", "duckrun");
+  delete bad.items.OUT.deleted;
+  const out = render([good, bad], ledger({ OUT: 1.0, SEM: 2.0 }));
+  const at = out.indexOf("predates that teardown");
+  assert.ok(at > 0);
+  const before = out.slice(0, at);
+  assert.ok(before.lastIndexOf("<details") <= before.lastIndexOf("</details>"),
+    "the drifter warning is not inside a <details>");
+});
+
 test("an item name cannot inject markup", () => {
   // The page escapes before it interprets markdown, so a `<` in a Fabric display name is text.
   const r = rec("a-1.json", "spark", {

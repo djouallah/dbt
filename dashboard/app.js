@@ -711,6 +711,16 @@ export function table(head, align, rows) {
 export const note = (text) => `<p class="note">${inline(text)}</p>`;
 export const para = (text) => `<p>${inline(text)}</p>`;
 
+/**
+ * A methodology note folded behind one line. The full text stays in the DOM — every sentence the
+ * tests pin still renders, and ctrl-F still finds it — but the page reads numbers-first and the
+ * reasoning opens on demand. Anything that must stay LOUD (the excluded-runs table, a still-billing
+ * drifter) is never folded; those go through `note`/`table` as before.
+ */
+export const fold = (summary, ...texts) =>
+  `<details class="note"><summary>${inline(summary)}</summary>` +
+  texts.map((t) => `<p class="note">${inline(t)}</p>`).join("") + "</details>";
+
 // ------------------------------------------------------------------------------------------ charts
 //
 // Horizontal bars, one series, drawn as inline SVG.
@@ -998,7 +1008,8 @@ export function engineTable(perCol, cols, secsCol) {
       return !secs || !cu ? DASH : fmt(cu / secs, 1);
     })]);
   }
-  return table(["CU (s)", ...names], ["left", ...names.map(() => "right")], rows) + "\n" + note(
+  return table(["CU (s)", ...names], ["left", ...names.map(() => "right")], rows) + "\n" + fold(
+    "how to read this table",
     "`etl` against `analytics` comes from each item's recorded ROLE — a semantic model is only " +
     "ever queried, everything else is work done to build the tables. `compute` against `storage` " +
     "comes from the OPERATION, which is the only thing that can separate them: they share an ITEM. " +
@@ -1074,16 +1085,21 @@ export function renderSources(cols, ledger, unmeasured, repo, now = null, gen = 
   out.push(table(["column", "run", "built", "items", "CU"],
     ["left", "left", "left", "right", "left"], rows));
   const drifters = cols.map(({ col, rec }) => [col, drifting(rec)]).filter(([, v]) => v.length);
-  out.push(note("An hour's CU keeps growing for up to ~70 minutes after the work happened, so a run " +
+  // The drifter warning stays a VISIBLE note — it is the one state that never resolves by waiting,
+  // so it must not sit behind a click. Only the general how-numbers-settle prose is folded.
+  if (drifters.length) {
+    out.push(note(drifters.map(([c, v]) => `**${c}** predates that teardown and still owns ` +
+      v.map((x) => `\`${x}\``).join(", ") +
+      " — Fabric keeps billing them, so its total creeps upward and is an upper bound on that " +
+      "run rather than a measurement of it. Delete them and it settles.").join(" ")));
+  }
+  out.push(fold("how a number settles",
+    "An hour's CU keeps growing for up to ~70 minutes after the work happened, so a run " +
     "measured just now is a lower bound. It settles itself: the **Capacity units** workflow re-reads " +
     "the whole window daily and keeps the larger of the two figures, so reloading this page tomorrow " +
     "shows the final number and nothing has to be reconciled. Every item a run creates is deleted " +
     "when it finishes, which is what makes a Fabric item GUID belong to exactly one run and the " +
-    "attribution exact." +
-    drifters.map(([c, v]) => ` **${c}** predates that teardown and still owns ` +
-      v.map((x) => `\`${x}\``).join(", ") +
-      " — Fabric keeps billing them, so its total creeps upward and is an upper bound on that " +
-      "run rather than a measurement of it. Delete them and it settles.").join("")));
+    "attribution exact."));
 
   // THE EXCLUSION HAS TO BE LOUD. Filtering to one source generation replaced a shout with a
   // silence: the mart's `row counts DISAGREE` heading — the loudest signal this page had — can no
@@ -1151,16 +1167,19 @@ export function renderInput(cols) {
   return [
     "<h3>Input archive</h3>",
     table(["folder", "files", "size MB"], ["left", "right", "right"], rows),
-    note("The landed AEMO archive `stats.py` listed in `dbt_landing/Files` — **one copy, read by " +
+    // The changed-archive warning stays VISIBLE — it qualifies every comparison above it — while
+    // the description of what the table is folds away.
+    differ.length > 1
+      ? note(`The runs on this page did not all read the same archive: sizes ranged ` +
+          `${fmt(differ[0], 1)}–${fmt(differ[differ.length - 1], 1)} MB, so they did different ` +
+          `amounts of work.`)
+      : "",
+    fold("what this table is",
+      "The landed AEMO archive `stats.py` listed in `dbt_landing/Files` — **one copy, read by " +
       "every engine**, so this is not per column. Every other number on this page is about what came " +
       "OUT; this is what went in, and it is what makes a duration or a CU total mean anything. It " +
-      "moves only when a dispatch runs with `skip_download` off." +
-      (differ.length > 1
-        ? ` The runs on this page did not all read the same archive: sizes ranged ` +
-          `${fmt(differ[0], 1)}–${fmt(differ[differ.length - 1], 1)} MB, so they did different ` +
-          `amounts of work.`
-        : "")),
-  ].join("\n");
+      "moves only when a dispatch runs with `skip_download` off."),
+  ].filter(Boolean).join("\n");
 }
 
 /**
@@ -1234,6 +1253,7 @@ export function renderLayouts(cols, analytics, times, counts, martTable = DEFAUL
     ["avg_row_group", "rows per RG", -1], ["size_mb", "size MB", 1]];
 
   const out = ["<h3>Table layout</h3>"];
+  const blocks = [];
   for (const t of ordered) {
     let present = order
       .map((n) => [n, (stats[members.get(n)[0].col] || {})[t]])
@@ -1261,7 +1281,6 @@ export function renderLayouts(cols, analytics, times, counts, martTable = DEFAUL
       ? `\`${t}\` — the mart the queries land on${rowsNote}`
       : `\`${schema[t] ? schema[t] + "." : ""}${t}\`${rowsNote}`;
     const colsHere = (agree ? [] : [["total_rows", "rows", 0]]).concat(metrics);
-    out.push(`<h4>${inline(head)}</h4>`);
     const header = ["layout", ...(showCu ? ["CU"] : []), ...tiers.map((l) => `${l} ms`),
       ...colsHere.map(([, h]) => h), "V-Order"];
     const align = ["left", ...(showCu ? ["right"] : []), ...tiers.map(() => "right"),
@@ -1274,10 +1293,26 @@ export function renderLayouts(cols, analytics, times, counts, martTable = DEFAUL
         : dp < 0 ? compact(d[k]) : fmt(d[k], dp))),
       d.vorder ? "**yes**" : "·",
     ]);
-    out.push(table(header, align, body));
+    blocks.push({ name: t, html: `<h4>${inline(head)}</h4>\n` + table(header, align, body) });
+  }
+  // ONE BLOCK VISIBLE AT A TIME. Eight stacked tables buried the mart under seven it explains; a
+  // tab per table keeps them all one click away without the scroll. CSS-only — radio inputs, no
+  // JS — so the offline snapshot and a script-blocked browser behave identically, and every panel
+  // stays in the DOM (the tests and ctrl-F read all of them; print shows all). The stylesheet's
+  // nth-of-type pairing is enumerated to 12 panels, so past that this falls back to stacking
+  // rather than rendering tabs whose panels could never show.
+  if (blocks.length > 1 && blocks.length <= 12) {
+    const inputs = blocks.map((_, i) =>
+      `<input type="radio" name="layout-tab" id="lt-${i}"${i === 0 ? " checked" : ""}>`).join("");
+    const labels = blocks.map((b, i) => `<label for="lt-${i}">${esc(b.name)}</label>`).join("");
+    out.push(`<div class="tabs">${inputs}<nav class="tab-nav">${labels}</nav>\n` +
+      blocks.map((b) => `<section>\n${b.html}\n</section>`).join("\n") + "</div>");
+  } else {
+    for (const b of blocks) out.push(b.html);
   }
   const counted = Object.entries(counts).map(([lbl, n]) => `${lbl} over ${n}`).join(", ");
-  out.push(note("Every shared table the project writes, in pipeline order, as `stats.py` read the " +
+  out.push(fold("how these layouts were read",
+    "Every shared table the project writes, in pipeline order, as `stats.py` read the " +
     "Delta log in that run's **layout** job. Sizes are what the tables held at that moment; the CU " +
     "beside the mart is the ANALYTICS total — what querying it cost, not what building it did " +
     "— and the queries read all of these. Nothing here re-read a Delta log. **A row is a WRITER, " +
@@ -1397,7 +1432,8 @@ export function renderPage(cols, runs, ledger, opts = {}) {
 
   const newest = cols.map(({ rec }) => (rec.run || {}).started || "").sort().pop() || "";
   const asOf = String(ledger.updated || newest || "?").slice(0, 16).replace("T", " ");
-  const out = [`<h2>Capacity units — the latest run per engine, as of ${esc(asOf)}</h2>`];
+  const out = [`<h2>Capacity units <span class="asof">the latest run per engine, as of ` +
+    `${esc(asOf)}</span></h2>`];
 
   // EVERY run maps to its column, not just the one the column was named after: the chart's mean is
   // over an engine's whole history at that configuration, and matching on the chosen record's filename
@@ -1431,7 +1467,7 @@ export function renderPage(cols, runs, ledger, opts = {}) {
     return [col, v.length ? meanOf(v) : (analytics[col] || 0)];
   }));
 
-  out.push(para("Every engine's latest run, summed:"));
+  out.push("<h3>Cost by engine</h3>");
   const secsCol = Object.fromEntries(cols.map(({ col, rec }) =>
     [col, runCu(rec, ledger, "seconds").cells]));
   out.push(engineTable(perCol, cols, secsCol));
@@ -1446,15 +1482,16 @@ export function renderPage(cols, runs, ledger, opts = {}) {
     "is what each engine charged to build the same tables and to answer the same queries. Attribution " +
     "is by Fabric ITEM GUID — each run records what it created and then deletes it — so no " +
     "number here is a guess about which engine an item belonged to."));
-  out.push(para("**The CU columns are directly comparable, and the two time measures need reading " +
+  out.push(fold("what's comparable, and why analytics leads",
+    "**The CU columns are directly comparable, and the two time measures need reading " +
     "with more care.** The engines were handed different compute — a 64-vCore notebook, a Livy " +
     "pool, a warehouse — and a capacity unit already prices that in, which is the whole reason " +
     "to lead with cost. Duration does not: billed operation seconds SUM across concurrent operations, " +
     "so spark's five Livy REPLs total more than the clock they ran on, and query milliseconds are one " +
     "sample of a shared capacity rather than a bill. They are on the page because they answer a " +
     "question CU cannot — how long a person waits, and how hard the engine drew while they did " +
-    "— and each says where its own number bends."));
-  out.push(para("**Analytics is the half that matters**, and it leads for that reason. Fabric smooths " +
+    "— and each says where its own number bends.",
+    "**Analytics is the half that matters**, and it leads for that reason. Fabric smooths " +
     "BACKGROUND operations — everything the build does — over 24 hours, so a heavy ETL leg " +
     "is absorbed and nobody waits for it. Query CU is INTERACTIVE, smoothed over minutes, and it is " +
     "what THROTTLES: the CU a user sits behind and a capacity admin asks about. An engine that builds " +
