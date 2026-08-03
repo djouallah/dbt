@@ -24,6 +24,7 @@ self-acquires the Fabric control-plane + OneLake tokens on the runner via GitHub
 (AZURE_CLIENT_ID / AZURE_TENANT_ID + id-token: write), so no token is minted here.
 """
 import os
+import re
 import sys
 import uuid
 
@@ -61,6 +62,53 @@ def _record_notebook(item_id, engine, name):
               flush=True)
 
 
+# What duckrun prints when it resolves `sort_by='auto'` (delta_plugin._resolve_sort_by):
+#   duckrun: sort_by=auto for "memory"."mart"."fct_summary__duckrun_tmp" -> date, time
+# or the same with `-> no sort (nothing pays off)`. The line is the ONLY place the chosen key
+# appears — the adapter does not return it and nothing writes it to disk — so it is scraped from
+# the log rather than reported. `\S+` for the relation because it is dot-quoted and never spaced.
+_SORT_KEY_LINE = re.compile(r"sort_by=auto for (\S+) -> (.*)")
+_ANSI = re.compile(r"\x1b\[[0-9;]*m")
+
+
+def _sort_keys(log):
+    """`{model: [cols]}` for every `sort_by='auto'` the run resolved, LAST occurrence winning.
+
+    Last wins because the retry ladder can rebuild a model, and the key that describes the parquet
+    on disk is the one the final write used. An empty list is a real answer — duckrun writes
+    unsorted when nothing pays off — and is not the same as the model being absent here.
+    """
+    out = {}
+    for name, chosen in _SORT_KEY_LINE.findall(_ANSI.sub("", log or "")):
+        # `"memory"."mart"."fct_summary__duckrun_tmp"` -> `fct_summary`. dbt stages the model in a
+        # tmp relation, so the suffix is an artefact of the write and not part of the model name.
+        model = re.sub(r"__\w+_tmp$", "", name.split(".")[-1].strip('"'))
+        chosen = chosen.strip()
+        out[model] = [] if chosen.startswith("no sort") else [c.strip() for c in chosen.split(",")]
+    return out
+
+
+def _record_sort_keys(log, engine):
+    """Write the resolved keys into the run record, under a key NOTHING READS.
+
+    `dbt.<engine>.sort_by_auto`, deliberately outside `layout.config`: the dashboard's `variant()`
+    walks every entry of that dict, so putting it there would split an engine's column and its
+    layout bar on a key that changes run to run — the picker re-profiles every batch. Here it is
+    inert, and `record.py`'s merge is a recursive dict union so a new branch costs nothing.
+
+    Best-effort, like `_record_notebook`: this also runs on the failure path, where raising would
+    REPLACE the build's own exception and lose the real cause.
+    """
+    try:
+        keys = _sort_keys(log)
+        if not keys:
+            return
+        record.merge({"dbt": {engine: {"sort_by_auto": keys}}})
+        print(f"[fabric_run] sort_by=auto resolved to {keys}", flush=True)
+    except Exception as ex:                             # noqa: BLE001 — never fail a green build
+        print(f"[fabric_run] could not record the sort key ({type(ex).__name__}: {ex})", flush=True)
+
+
 def main() -> int:
     engine = sys.argv[1] if len(sys.argv) > 1 else "duckrun"
     ws = os.environ["WS_ID"]
@@ -92,8 +140,13 @@ def main() -> int:
         )
     except BaseException as ex:
         _record_notebook(getattr(ex, "item_id", None), engine, name)
+        # `RemoteRunError` carries `item_id` but no `log`, so this is usually a no-op on this path.
+        # It stays because a run that got far enough to write the table before dying still chose a
+        # key, and `getattr` costs nothing to find out.
+        _record_sort_keys(getattr(ex, "log", ""), engine)
         raise
     _record_notebook(res.item_id, engine, name)
+    _record_sort_keys(res.log, engine)
 
     print(f"[fabric_run] {engine} success={res.success} returncode={res.returncode}", flush=True)
     return 0 if res.success else 1

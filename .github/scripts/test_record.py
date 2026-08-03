@@ -145,3 +145,64 @@ def test_init_reads_the_dispatch_inputs_and_skips_blanks(tmp_path, monkeypatch):
     assert doc["run"]["id"] == "42" and doc["run"]["started"]
     # full_load is settled at finish() from what was actually created, so it is absent here.
     assert "full_load" not in doc
+
+
+# ------------------------------------------------------------------ the resolved auto sort key
+
+def _fabric_run():
+    """Import fabric_run without duckrun installed — the module imports it at top level and these
+    tests must stay offline. Only the log-scraping half is under test."""
+    import types
+    sys.modules.setdefault("duckrun", types.ModuleType("duckrun"))
+    import fabric_run  # noqa: PLC0415
+    return fabric_run
+
+
+# The real line from run 30796667149, with the streamer prefix and ANSI codes it arrives with.
+_REAL_LOG = (
+    'duckdb delta_rs\tUNKNOWN STEP\t2026-08-03T08:32:57.6695754Z [remote] \x1b[0m08:31:58  '
+    'Duckrun adapter: duckrun: sort_by=auto for "memory"."mart"."fct_summary__duckrun_tmp" '
+    '-> date, time\n'
+)
+
+
+def test_the_auto_sort_key_is_scraped_from_the_leg_log():
+    # The adapter does not return the key and nothing writes it to disk, so the log is the only
+    # source. A run whose numbers need explaining later has nowhere else to look.
+    assert _fabric_run()._sort_keys(_REAL_LOG) == {"fct_summary": ["date", "time"]}
+
+
+def test_no_sort_is_recorded_as_an_empty_list_not_as_absence():
+    # duckrun writes unsorted when nothing pays off. "it chose nothing" and "it was never asked"
+    # are different facts and must not collapse.
+    log = "duckrun: sort_by=auto for \"m\".\"mart\".\"fct_summary__x_tmp\" -> no sort (nothing pays off)"
+    assert _fabric_run()._sort_keys(log) == {"fct_summary": []}
+
+
+def test_the_last_resolution_wins_over_an_earlier_one():
+    # The retry ladder can rebuild a model; the key that describes the parquet on disk is the one
+    # the final write used.
+    log = ('duckrun: sort_by=auto for "m"."mart"."fct_summary__a_tmp" -> date\n'
+           'duckrun: sort_by=auto for "m"."mart"."fct_summary__a_tmp" -> date, time, DUID\n')
+    assert _fabric_run()._sort_keys(log) == {"fct_summary": ["date", "time", "DUID"]}
+
+
+def test_a_log_with_no_auto_resolution_records_nothing(tmp_path, monkeypatch):
+    # An unsorted run must not gain an empty `dbt` branch — a key that is present-but-empty reads
+    # as "measured, nothing found" rather than "not applicable".
+    p = tmp_path / "f.json"
+    monkeypatch.setenv("RUN_RECORD", str(p))
+    _fabric_run()._record_sort_keys("nothing interesting here", "duckrun")
+    assert not p.exists()
+
+
+def test_the_sort_key_lands_outside_layout_config(tmp_path, monkeypatch):
+    # THE point of the placement. dashboard/app.js `variant()` walks every entry of
+    # layout.config[engine], so a key that changes run to run would split that engine's column and
+    # its layout bar. Under `dbt` nothing reads it.
+    p = tmp_path / "f.json"
+    monkeypatch.setenv("RUN_RECORD", str(p))
+    _fabric_run()._record_sort_keys(_REAL_LOG, "duckrun")
+    doc = json.loads(p.read_text(encoding="utf-8"))
+    assert doc == {"dbt": {"duckrun": {"sort_by_auto": {"fct_summary": ["date", "time"]}}}}
+    assert "layout" not in doc
