@@ -1534,6 +1534,18 @@ export function renderPage(cols, runs, ledger, opts = {}) {
 
   out.push(renderSources(cols, ledger, unmeasured, repo, now,
     { dropped: opts.dropped, reference: opts.reference, table: martTable }));
+  // A record that is not a whole generation — a failed run that never benchmarked, a build half
+  // that never reported — is skipped, and NAMED HERE with its reason. It used to be only a count in
+  // the live status line, which the offline copy does not even have: a page that quietly ignores a
+  // record is indistinguishable from a page that never had it. Visible, not folded — same rule as
+  // the generation exclusions above.
+  const skipped = opts.skipped || [];
+  if (skipped.length) {
+    out.push(note(`**${skipped.length} record(s) skipped as incomplete** — a run has to be built ` +
+      "and benchmarked to be comparable, and a partial one would render an empty column that reads " +
+      "as “this engine was free”: " +
+      skipped.map((s) => `\`${s}\``).join(" · ")));
+  }
   // LAST. Every other number on the page is about what came OUT; this is the one copy of what went in,
   // shared by every engine, so it belongs with the provenance rather than among the columns it is not
   // one of. It sat between the engine table and the layout, where a table with no engine in it read as
@@ -1547,7 +1559,8 @@ export function renderPage(cols, runs, ledger, opts = {}) {
   const excluded = (opts.dropped || []).length;
   out.push(para([`[source](${SERVER}/${repo})`,
     `\`history/runs/\` — ${runs.length} run(s)` +
-    (excluded ? ` (+${excluded} excluded)` : "") + `, ${cols.length} on this page`,
+    (excluded ? ` (+${excluded} excluded)` : "") +
+    (skipped.length ? ` (+${skipped.length} skipped)` : "") + `, ${cols.length} on this page`,
     `\`history/cu.json\` — ${Object.keys(ledger.items).length} item GUID(s) over ${reads} read(s)`,
   ].join(" · ")));
   return out.filter(Boolean).join("\n");
@@ -1588,7 +1601,7 @@ export function compose(records, ledgerDoc, opts = {}) {
     if (!hits.length) hits = whole.slice(-1);
     const rec = hits[hits.length - 1];
     const cols = [{ col: ENGINE_LABEL[rec.engine] || rec.engine || "?", engine: rec.engine, rec }];
-    return { html: renderPage(cols, whole, ledger, opts), skipped, cols, dropped: [] };
+    return { html: renderPage(cols, whole, ledger, { ...opts, skipped }), skipped, cols, dropped: [] };
   }
   // BEFORE `columnsFor`, and the order is load-bearing twice over. `columnsFor` takes the latest run
   // per (engine, config), so filtering afterwards would let a stale-generation run hold a column; and
@@ -1597,7 +1610,7 @@ export function compose(records, ledgerDoc, opts = {}) {
   const { runs, dropped, reference } = sameGeneration(whole, opts.table || DEFAULTS.table);
   const cols = columnsFor(runs);
   return {
-    html: renderPage(cols, runs, ledger, { ...opts, dropped, reference }),
+    html: renderPage(cols, runs, ledger, { ...opts, dropped, reference, skipped }),
     skipped, cols, dropped,
   };
 }

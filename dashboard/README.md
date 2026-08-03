@@ -312,7 +312,9 @@ without a build, a token or a dispatch.
   can sit beside it — in the row label — not in a bar, where length alone reads as a ranking.
 - **A record has to be built and benchmarked to reach the page.** `incomplete()` skips anything else
   and names why — a run with no benchmark shows an empty analytics column, which reads as "querying
-  this engine was free" rather than "nobody measured it".
+  this engine was free" rather than "nobody measured it". The skipped records are **listed by file
+  and reason in the sources section**, visible and never folded — they used to be only a count in
+  the live status line, which the offline copy does not even have.
 - **A run that was never TORN DOWN still renders, with a caveat.** Its items are alive and Fabric
   keeps billing them, so its total creeps upward and is an upper bound on that run rather than a
   measurement of it. It was briefly rejected outright; the creep is small and a column that

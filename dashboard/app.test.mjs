@@ -1388,6 +1388,24 @@ test("methodology folds, but the exclusion notice never does", () => {
   assert.ok(!excl.includes("<details"), "loud by design — never folded");
 });
 
+test("a skipped record is named on the page, with its reason", () => {
+  // It used to be only a count in the live status line — which the offline copy does not even have.
+  // A page that quietly ignores a record is indistinguishable from a page that never had it.
+  const good = full("a-1.json", "spark");
+  const bad = full("b-2.json", "dwh");
+  bad.benchmark = {};
+  const { html } = d.compose([good, bad], ledger({ OUT: 1.0, SEM: 2.0 }), {});
+  const text = plain(html);
+  assert.ok(text.includes("1 record(s) skipped as incomplete"));
+  assert.ok(text.includes("b-2.json: no benchmark timings — the query half did not run"),
+    "the file and the reason, not only a count");
+  assert.ok(text.includes("(+1 skipped)"), "and the footer counts it");
+  const at = html.indexOf("skipped as incomplete");
+  const before = html.slice(0, at);
+  assert.ok(before.lastIndexOf("<details") <= before.lastIndexOf("</details>"),
+    "visible, never folded — same rule as the generation exclusions");
+});
+
 test("a still-billing drifter is a visible note, not a folded one", () => {
   // The one state that never resolves by waiting must not sit behind a click.
   const good = full("a-1.json", "spark");
