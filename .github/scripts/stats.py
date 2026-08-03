@@ -310,8 +310,17 @@ def build_doc(per_engine, engines, guids=None, landing=None):
         # never set `FABRIC_CORES` for a notebook it did not run, so recording a vCore count under
         # `duckrun` there states a hardware choice that no leg made. The reader prints this as the
         # hardware the run RAN ON, and an engine the run did not build has none.
+        # `sorted` is on DUCKRUN ONLY and is recorded ONLY when it is on. Both halves of that are
+        # deliberate and neither is symmetry worth restoring. iceberg parses the same model and has
+        # no `sort_by` config at all, so recording the flag there would split iceberg's dashboard
+        # column between two runs whose parquet is byte-identical — the page would claim two
+        # layouts where there is one; what the DISPATCH asked for is still in the record's `inputs`
+        # block, which is what that block is for. And off is the same parquet as never-offered, so
+        # an explicit "false" would fragment 13 runs of history for a difference that does not
+        # exist — the same reason `variantTag` can read absence as off here but not for NEE.
         "config": {e: cfg for e, cfg in (
-            ("duckrun", {"vcores": os.environ.get("FABRIC_CORES") or None}),
+            ("duckrun", {"vcores": os.environ.get("FABRIC_CORES") or None,
+                         "sorted": "true" if os.environ.get("DUCKDB_SORTED") == "true" else None}),
             ("iceberg", {"vcores": os.environ.get("FABRIC_CORES") or None}),
             ("spark", {"resource_profile": os.environ.get("SPARK_RESOURCE_PROFILE") or None,
                        "native_execution_engine": os.environ.get("SPARK_NATIVE_ENABLED") or None}),

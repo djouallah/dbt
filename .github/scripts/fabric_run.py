@@ -36,7 +36,7 @@ import record
 # REBUILD_SUMMARY was forwarded here; the input that set it is gone. SPARK_NATIVE_ENABLED does
 # not belong here either — it is a Livy conf, and there is no Livy session on this path.
 _FORWARD = ("FILES_PATH", "ONELAKE_TABLES_PATH", "WAREHOUSE_PATH", "ONELAKE_ENDPOINT",
-            "DBT_SCHEMA", "download_limit", "daily_download_limit")
+            "DBT_SCHEMA", "DUCKDB_SORTED", "download_limit", "daily_download_limit")
 
 
 def _record_notebook(item_id, engine, name):

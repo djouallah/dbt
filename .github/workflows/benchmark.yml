@@ -78,6 +78,10 @@ on:
         description: "spark NEE"
         type: boolean
         default: false
+      sorted:
+        description: "duckrun writes fct_summary sorted by date, time, DUID (duckrun only)"
+        type: boolean
+        default: false
 
       # ---- rarely touched ----------------------------------------------------------------------
       build:
@@ -150,6 +154,13 @@ env:
   # Spark leg only. writeHeavy is the workspace default, so the default dispatch writes what a plain
   # Fabric session writes — and therefore NO V-Order, which readHeavyForPBI alone enables.
   SPARK_RESOURCE_PROFILE: ${{ inputs.spark_resource_profile }}
+  # DuckDB legs only, off by default: fct_summary's `sort_by` renders to ['date','time','DUID'].
+  # Reaches the notebook through fabric_run.py's _FORWARD — a var missing from that tuple is
+  # silently inert, which is how a 4GB DUCKDB_MEMORY_LIMIT nobody could dispatch around stood for
+  # months — and reaches the `layout` job through this env, which is what puts it in the record and
+  # therefore in the dashboard's column and bar keys. iceberg parses the same model and has no such
+  # config, so only duckrun's parquet moves; see the model header for what that costs.
+  DUCKDB_SORTED: ${{ inputs.sorted && 'true' || 'false' }}
   BENCH_ENGINES: ${{ inputs.engines }}
   BENCH_RUNS: ${{ inputs.runs }}
   BENCH_THINK_SECONDS: ${{ inputs.think_seconds }}
@@ -180,6 +191,7 @@ jobs:
           RUNIN_CORES: ${{ inputs.cores }}
           RUNIN_SPARK_RESOURCE_PROFILE: ${{ inputs.spark_resource_profile }}
           RUNIN_NATIVE_EXECUTION_ENGINE: ${{ inputs.native_execution_engine }}
+          RUNIN_SORTED: ${{ inputs.sorted }}
           RUNIN_SKIP_DOWNLOAD: ${{ inputs.skip_download }}
           RUNIN_DOWNLOAD_LIMIT: ${{ inputs.download_limit }}
           RUNIN_RUNS: ${{ inputs.runs }}

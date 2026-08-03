@@ -596,6 +596,16 @@ to `provision.py teardown`, which polls for a 404 and goes red if it is still li
   The line is gone. Note the knock-on: duckrun's merge budget is a **0.3 share of the global
   limit** (`set_merge_memory_limit`), so the routed anti-join now gets 0.3 × default instead of
   0.3 × 4GB. Spill is unaffected — `temp_directory` is still set for both.
+  **The `sorted` dispatch input is a KNOWING exception, and the only one.** With it on, duckrun
+  writes `fct_summary` in `date, time, DUID` order and iceberg writes it unsorted — so the pair
+  differs by more than the writer for that run. This is not a settings drift to be corrected: it
+  cannot be corrected. `sort_by` occurs **zero times** in dbt-duckdb's adapter and its macro package,
+  so iceberg has no way to express a sort at all, and the trailing `ORDER BY date` in the model does
+  not reach any engine's stored table (see the fairness invariant under `fct_summary`). Off — the
+  default — the two are identical exactly as before, which is why the flag is a dispatch input rather
+  than a config in the tree. `stats.py` records it under **duckrun only**: recording it under iceberg
+  would split that engine's column between two runs whose parquet is byte-identical, and what the
+  dispatch asked for is already in the record's `inputs` block.
 - **Every engine takes 4 threads — duckrun, iceberg, dwh and spark alike.** It was
   8/8/4, so DAG-level concurrency was a hidden variable between the legs: a benchmark comparing
   engines should not also be comparing how many models each was allowed to build at once. duckrun
@@ -1209,10 +1219,22 @@ no data at all. `all.yml`, `dbt.yml` and `cu.yml` are gone.
   there the writer and the compute it was given are the entire subject.
   What forced it: duckrun at 64 cores and at 32 wrote 4 files and 27 row groups either way, so two
   bars 50% apart was not a comparison — it was one layout measured twice, presented as two results.
-  **Grouping is MEASURED, labelling is DECLARED**, and the split matters. The key is
-  `(V-Order, band(files), band(row groups))` from the parquet as `stats.py` read it, so two unrelated
-  engines that wrote the same shape *do* share a bar; the caption comes from `LAYOUT_CONFIG` so it
-  does not re-word itself whenever a record lands. **Banded to powers of two, never exact** — exact
+  **Grouping is MEASURED, labelling is DECLARED — with ONE stated exception.** The key is
+  `(V-Order, band(files), band(row groups), sorted)`, the first three from the parquet as `stats.py`
+  read it, so two unrelated engines that wrote the same shape *do* share a bar; the caption comes
+  from `LAYOUT_CONFIG` so it does not re-word itself whenever a record lands.
+  **`sorted` is the exception and it is DECLARED**, because nothing in `stats.py` measures sort
+  ORDER — there is no column for it, so the config the run recorded is the only witness that the
+  parquet differs. It earns its place the same way V-Order does (a write-time reordering of what
+  Power BI transcodes; V-Order is already element `[0]`), and leaving it out is not neutral: the one
+  sorted duckrun run wrote **4 files either way** and moved 27 → 25 row groups, i.e. the same bands,
+  so it would have shared a bar with the unsorted run and had its cold/warm/hot means averaged in —
+  destroying the comparison the flag exists to make. A record with no `sorted` key groups WITH an
+  unsorted run rather than opening its own bar: all 13 pre-input records demonstrably wrote unsorted
+  parquet, so absence here is not the "unmeasured" case below. If this ever needs to become
+  measured, per-file `date` min/max from the Delta log says whether files cover disjoint date ranges,
+  which is what a date sort actually produces.
+  **Banded to powers of two, never exact** — exact
   equality splits dwh's own two runs from each other (78 files and 80, same writer, incremental
   drift) and splits duckrun on 1.1 MB of size. Accepted cost: 15 row groups and 17 land in different
   bands. A record with no file count keys to `None` and keeps its own bar — two UNMEASURED layouts
@@ -1223,9 +1245,14 @@ no data at all. `all.yml`, `dbt.yml` and `cu.yml` are gone.
   produce the same layout, so the gap between them was never an NEE effect.
 - **A LAYOUT ROW IS A WRITER, and `producer()` decides what that means.** `spark V-Order`,
   `spark default`, `duckrun` — not `spark·V-Order+NEE`, not `duckrun·64c`. `LAYOUT_CONFIG` is
-  `("resource_profile",)` and the exclusions are **measured, not tidiness**: duckrun wrote 4 files and
-  27 row groups at 64 cores and at 32, spark wrote the same layout with NEE on and off, so neither
-  reaches the parquet and neither belongs on a chart about parquet. `PROFILE_LABEL` names a profile
+  `("resource_profile", "sorted")` and the exclusions are **measured, not tidiness**: duckrun wrote 4
+  files and 27 row groups at 64 cores and at 32, spark wrote the same layout with NEE on and off, so
+  neither reaches the parquet and neither belongs on a chart about parquet. `sorted` is the reverse
+  case and needed no measuring to admit — it is *nothing but* a physical ordering of the rows, so it
+  reaches the parquet by definition. Its caption comes from `CONFIG_LABEL`, keyed `<key>=<value>`
+  rather than by value: `PROFILE_LABEL` can be value-keyed because a profile NAME says which knob it
+  is, and a bare `true` does not. The label spells the key out (`sorted by date, time, DUID`) —
+  "sorted" alone leaves a reader asking by what. `PROFILE_LABEL` names a profile
   by its EFFECT (`readHeavyForPBI` → `V-Order`, `writeHeavy` → `default`) because that is the only
   thing a reader of this page wants from it; an unmapped profile keeps its own name rather than being
   guessed at — `readHeavyForSpark` reads like it enables V-Order and sets no vorder at all.

@@ -333,6 +333,55 @@ test("a variant tag never contains the column separator", () => {
     ["resource_profile", "readHeavyForPBI"], ["vcores", "64"]]);
   assert.ok(!tag.includes(d.COL_SEP));
   assert.equal(d.baseEngine(`spark${d.COL_SEP}${tag}`), "spark");
+  const sorted = d.variantTag([["sorted", "true"], ["vcores", "64"]]);
+  assert.ok(!sorted.includes(d.COL_SEP), sorted);
+  assert.equal(d.baseEngine(`duckrun${d.COL_SEP}${sorted}`), "duckrun");
+});
+
+test("a sorted write gets its own column, and absence reads as unsorted", () => {
+  // stats.py records this ONLY when on, so absence is one state — a run predating the input and an
+  // unsorted run both wrote unsorted parquet. That is why there is no `unsorted` spelling and no
+  // terse fallback, unlike NEE.
+  assert.equal(d.variantTag([["sorted", "true"], ["vcores", "64"]]), "64c+sorted");
+  assert.equal(d.variantTag([["vcores", "64"]]), "64c");
+  // Two duckrun runs at one core count, one sorted: two columns, distinct headers.
+  const cols = d.columnsFor([
+    lay("duckrun", 4, 27, { cfg: { vcores: "64" }, file: "a-1.json" }),
+    lay("duckrun", 4, 25, { cfg: { vcores: "64", sorted: "true" }, file: "b-2.json" }),
+  ]).map((c) => c.col);
+  assert.equal(new Set(cols).size, 2, cols);
+  assert.ok(cols.some((c) => c.endsWith("sorted")), cols);
+});
+
+test("the layout caption spells the sort key out", () => {
+  // "sorted" alone leaves the reader asking "by what?", and the caption's whole job is to say what
+  // was written.
+  assert.equal(d.producer(lay("duckrun", 4, 25, { cfg: { sorted: "true" } })),
+    "duckrun sorted by date, time, DUID");
+  assert.equal(d.producer(lay("duckrun", 4, 27, { cfg: { vcores: "64" } })), "duckrun",
+    "vcores still never reaches a caption about parquet");
+});
+
+test("a sort splits the layout bar even though the bands do not move", () => {
+  // THE reason `sorted` is in layoutKey. The one measured sorted run wrote 4 files either way and
+  // 27 -> 25 row groups, which fall in the SAME bands — so without the config in the key these two
+  // share a bar and their cold/warm/hot means are averaged, which is the comparison the flag exists
+  // to make.
+  const plain = lay("duckrun", 4, 27, { cfg: { vcores: "64" } });
+  const sorted = lay("duckrun", 4, 25, { cfg: { vcores: "64", sorted: "true" } });
+  assert.deepEqual(d.layoutKey(plain).slice(0, 3), d.layoutKey(sorted).slice(0, 3),
+    "same V-Order and same bands — the measured half cannot tell them apart");
+  assert.notDeepEqual(d.layoutKey(plain), d.layoutKey(sorted));
+});
+
+test("a record with no sorted key groups with an unsorted run, not alone", () => {
+  // All 13 existing records predate the input. They demonstrably wrote unsorted parquet, so absence
+  // here is NOT the "unmeasured" case that earns a bar of its own — that case is a missing file
+  // count, which is a different thing entirely.
+  const old = lay("duckrun", 4, 27, { cfg: { vcores: "64" } });          // no `sorted` key at all
+  const off = lay("iceberg", 4, 27, { cfg: { vcores: "64" } });
+  assert.deepEqual(d.layoutKey(old), d.layoutKey(off));
+  assert.equal(d.layoutKey(old)[3], false);
 });
 
 test("a column header names a profile by its effect", () => {

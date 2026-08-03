@@ -138,14 +138,27 @@ export const DELETABLE_ROLES = new Set(["output", "dwh_src", "compute", "semanti
 // called the same thing wherever it appears on the page.
 export const PROFILE_LABEL = { readHeavyForPBI: "V-Order", writeHeavy: "default" };
 
+// How a LAYOUT_CONFIG entry is NAMED on a layout caption, keyed `<key>=<value>` rather than by the
+// value alone. `PROFILE_LABEL` gets away with a value-keyed map because a profile name says which
+// knob it is; a bare `true` does not, and would label every boolean config in LAYOUT_CONFIG the
+// same way the moment a second one joins. Consulted before `PROFILE_LABEL`, which still serves the
+// profile. The label spells the KEY out — the caption's job is to say what was written, and
+// "sorted" alone leaves a reader asking "by what?".
+export const CONFIG_LABEL = { "sorted=true": "sorted by date, time, DUID" };
+
 // The dispatch config that is SHOWN to change what gets written. `vcores` and
 // `native_execution_engine` are excluded, and that is measured rather than assumed: duckrun at 64 and
 // at 32 cores wrote 4 files and 27 row groups either way, and spark under `readHeavyForPBI` wrote the
 // same layout with NEE on and off. Neither reaches the parquet, so neither belongs on a caption about
 // parquet — `duckrun·64c, duckrun·32c` names one layout twice and puts a knob in front of the reader
 // that demonstrably had nothing to do with it. `resource_profile` stays because it plainly does:
-// `readHeavyForPBI` writes V-Order at ~10 files, `writeHeavy` writes neither.
-export const LAYOUT_CONFIG = ["resource_profile"];
+// `readHeavyForPBI` writes V-Order at ~10 files, `writeHeavy` writes neither. `sorted` stays for
+// the same reason and is the more direct case — it is nothing BUT a physical ordering of the rows,
+// so it reaches the parquet by definition. Note it does so without moving the numbers this page
+// measures: the one sorted run wrote 4 files either way, changing size (985 -> 777 MB) and row
+// groups (27 -> 25) but not the BANDS those fall in. That is exactly why it has to be carried as
+// config — see `layoutKey`.
+export const LAYOUT_CONFIG = ["resource_profile", "sorted"];
 
 // Pass POSITION, which is what cold/warm/hot mean here — the first visit to a freshly deployed
 // semantic model, the second, then the median of the rest. NOT the record's own `tier` field, which is
@@ -415,6 +428,11 @@ export function variantTag(sig, terse = true) {
     if (String(nee).toLowerCase() === "true") bits.push("NEE");
     else if (!terse) bits.push("noNEE");
   }
+  // No `terse` branch and no `unsorted` spelling, unlike NEE above: `stats.py` records this ONLY
+  // when it is on, because off and never-offered produce the same parquet. So absence here is one
+  // state rather than two that merely look alike, and there is nothing for the terse fallback to
+  // disambiguate.
+  if (d.sorted) bits.push("sorted");
   // `+`, never COL_SEP — baseEngine splits on that, and a tag containing one would make
   // `spark·V-Order+NEE` unparseable back to `spark`.
   return bits.join("+") || "unrecorded";
@@ -506,7 +524,8 @@ export function sameGeneration(runs, table = DEFAULTS.table) {
 }
 
 /**
- * What Power BI can actually tell apart: `[V-Order, files band, row-groups band]` for the mart.
+ * What Power BI can actually tell apart: `[V-Order, files band, row-groups band, sorted]` for the
+ * mart.
  *
  * `avg RG rows` is `total_rows ÷ row groups` and every engine writes the same 143,980,961 rows, so it
  * carries nothing the row-group count does not. `size MB` is excluded deliberately — see `layoutBand`.
@@ -515,12 +534,29 @@ export function sameGeneration(runs, table = DEFAULTS.table) {
  * it into a group it was never measured into. That distinction is the whole point: two records
  * carrying no file count are not two identical layouts, they are two unmeasured ones, and merging them
  * would claim Power BI cannot tell apart two things nobody looked at.
+ *
+ * THE LAST ELEMENT IS DECLARED, NOT MEASURED, and it is the one exception to that rule on this page.
+ * A sort is the same class of thing as V-Order — a write-time reordering that changes what Power BI
+ * transcodes — and V-Order is already element `[0]`, so it belongs in the same key. The difference is
+ * where each comes from: `vorder` is read off the Delta table property by `stats.py`, while nothing in
+ * `stats.py` measures sort ORDER, so the config the run recorded is the only witness that the parquet
+ * differs. Leaving it out is not neutral — a sorted and an unsorted duckrun run wrote 4 files and the
+ * same bands either way, so they would share one bar and have their cold/warm/hot means averaged
+ * together, which is precisely the comparison the flag exists to make.
+ *
+ * A measured version is possible later and would be better: per-file `date` min/max from the Delta log
+ * says whether files cover disjoint date ranges, which is what a date sort actually produces.
  */
 export function layoutKey(rec, table = DEFAULTS.table) {
   const d = martStats(rec, table);
   if (d.num_files === undefined && d.num_row_groups === undefined) return null;
   if (d.num_files === null && d.num_row_groups === null) return null;
-  return [Boolean(d.vorder), layoutBand(d.num_files), layoutBand(d.num_row_groups)];
+  // `Boolean` so a record with no `sorted` key — every run before the input existed — keys
+  // identically to an unsorted one rather than opening a bar of its own. Unlike the file counts
+  // above, absence here is not "unmeasured": those runs demonstrably wrote unsorted parquet.
+  const cfg = ((rec || {}).layout || {}).config || {};
+  const sorted = Boolean((cfg[(rec || {}).engine] || {}).sorted);
+  return [Boolean(d.vorder), layoutBand(d.num_files), layoutBand(d.num_row_groups), sorted];
 }
 
 /**
@@ -591,7 +627,9 @@ export function producer(rec) {
   const c = (((rec || {}).layout || {}).config || {})[engine] || {};
   const bits = [ENGINE_LABEL[engine] || engine];
   for (const k of LAYOUT_CONFIG) {
-    if (c[k]) bits.push(PROFILE_LABEL[String(c[k])] || String(c[k]));
+    if (!c[k]) continue;
+    const v = String(c[k]);
+    bits.push(CONFIG_LABEL[`${k}=${v}`] || PROFILE_LABEL[v] || v);
   }
   return bits.join(" ");
 }
