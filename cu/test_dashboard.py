@@ -164,7 +164,7 @@ def test_the_page_renders_end_to_end_with_charts_and_a_layout():
     # cost actually goes.
     assert "`compute`" in out and "29,571.0" in out
     assert "`storage`" in out and "1,509.0" in out
-    assert "fct_summary" in out and "delta-rs" in out
+    assert "fct_summary" in out and "1.8M" in out, "the layout block, with row-group size abbreviated"
     assert "8,167" in out and "12,345.60" in out, "the input archive should be on the page"
     # ANALYTICS leads: it is the interactive CU that throttles, which is the point of the project.
     first, second = [json.loads(b.split("-->")[0]) for b in out.split("<!--chart:")[1:3]]
@@ -572,7 +572,7 @@ def test_the_layout_table_is_one_row_per_writer_and_agrees_with_the_chart():
     block = out.split("#### `fct_summary`")[1].split("\n###")[0]
     body = [ln for ln in block.splitlines() if ln.startswith("| ") and not ln.startswith("|:")]
     assert len(body) == 2, "a header and ONE row — duckrun, not duckrun twice"
-    assert body[1].startswith("| duckrun | `delta-rs` | 1,500 |")
+    assert body[1].startswith("| duckrun | 1,500 |")
     assert _analytics_chart(out)["rows"][0][1] == 1500.0, "the same number as the bar"
 
 
@@ -616,10 +616,11 @@ def test_the_three_tiers_are_columns_of_the_mart_block_not_a_section():
     out = _render(runs, ledger({"OUT": 1.0, "SEM": 2.0}))
     assert "### Query time" not in out, "no section of its own"
     block = out.split("#### `fct_summary`")[1].split("####")[0]
-    assert "| layout | writer | CU | cold ms | warm ms | hot ms | files |" in block
+    assert "| layout | CU | cold ms | warm ms | hot ms | files |" in block
     row = next(ln for ln in block.splitlines() if ln.startswith("| duckrun |"))
     assert "| 30 | 11 | 9 |" in row, "cold/warm/hot beside the layout that produced them"
     assert row.rstrip().endswith("| 4 | — | — | — | · |"), "and the file count on the same row"
+    assert "| writer |" not in block, "the row label IS the writer now"
 
 
 def test_the_tiers_appear_on_the_mart_block_alone():
@@ -650,7 +651,7 @@ def test_a_record_with_no_tier_timings_adds_no_columns():
     tier can read. Absent columns say "not measured"; zeros would say "instant"."""
     out = _render([_full("a-1.json", "spark")], ledger({"OUT": 1.0, "SEM": 2.0}))
     assert "cold ms" not in out and "### Query time" not in out
-    assert "| layout | writer | CU | files |" in out, "the block itself still renders"
+    assert "| layout | CU | files |" in out, "the block itself still renders"
 
 
 # ------------------------------------------------------------------------------------- build time

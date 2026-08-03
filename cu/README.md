@@ -194,7 +194,9 @@ because that artifact has to open off a local disk years later.
   it cost.
 - **Input archive**: files and bytes in the landing archive, from `stats.py`'s listing. Every other
   number on the page describes what came OUT.
-- **Table layout**, every shared table, mart first, **one row per WRITER** — `spark V-Order`,
+- **Table layout**, every shared table, mart first, **one row per WRITER, and no `writer` column** —
+  the row label IS the writer, so a `duckdb (iceberg)` cell beside a `duckdb iceberg` label was one
+  fact printed twice. `spark V-Order`,
   `spark default`, `duckrun`, not `spark·readHeavyForPBI+NEE` and `duckrun·64c`. The resource profile
   is named by what it does to the parquet rather than by Microsoft's name for the workload it was
   designed for, and the core count and NEE flag are dropped because two runs each showed they never

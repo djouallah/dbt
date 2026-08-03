@@ -44,10 +44,11 @@ SERVER = os.environ.get("GITHUB_SERVER_URL", "https://github.com")
 # just sorts to the end.
 ENGINES = ["duckrun", "iceberg", "spark", "dwh"]
 
-# What each engine IS, for the chart captions and the layout table. `iceberg` beside `duckrun` reads
-# as an engine difference and it is a WRITER difference — the same DuckDB, in the same notebook, at
-# the same vCores. The third entry matches stats.py's WRITER map exactly, so the layout table reads
-# identically whether it came from that artifact or from a record.
+# What each engine IS. Only the ADAPTER is read now, by `engine_caption` for the ETL chart — the
+# layout table used to carry the third entry as a `writer` column and no longer does, because its row
+# label became the writer itself (`duckdb iceberg` beside `duckdb (iceberg)` was one fact printed
+# twice). The other two are kept as the description of the stack this page compares; they match
+# stats.py's WRITER map exactly, which is what `ENGINE_LABEL` is derived from.
 STACK = {
     "landing": ("download_aemo.py", "the shared AEMO archive every leg reads", "—"),
     "duckrun": ("dbt-duckrun", "DuckDB → delta-rs", "delta-rs"),
@@ -818,7 +819,6 @@ def render_layouts(cols, analytics, qtime=({}, {})):
             members[name] = []
             order_by_producer.append(name)
         members[name].append((col, rec))
-    writers = {n: (STACK.get(m[0][1].get("engine")) or ("", "", "—"))[2] for n, m in members.items()}
     # A producer's numbers are its columns' MEAN — one dispatch is a sample of a shared capacity, and
     # a producer with two columns has simply been measured twice.
     def mean_of(name, source):
@@ -871,10 +871,10 @@ def render_layouts(cols, analytics, qtime=({}, {})):
                 else f"`{(schema.get(t) + '.') if schema.get(t) else ''}{t}`{rows_note}")
         cols_here = ([] if agree else [("total_rows", "rows", 0)]) + metrics
         print(f"\n#### {head}\n")
-        print("| layout | writer | " + ("CU | " if show_cu else "")
+        print("| layout | " + ("CU | " if show_cu else "")
               + "".join(f"{lbl} ms | " for lbl in tiers)
               + " | ".join(h for _k, h, _d in cols_here) + " | V-Order |")
-        print("|:--|:--|" + ("--:|" if show_cu else "") + "--:|" * len(tiers)
+        print("|:--|" + ("--:|" if show_cu else "") + "--:|" * len(tiers)
               + "--:|" * len(cols_here) + ":--|")
         for name, d in present:
             cells = ["—" if d.get(k) is None else
@@ -883,7 +883,7 @@ def render_layouts(cols, analytics, qtime=({}, {})):
             cu_cell = (f"{cu_of.get(name, 0.0):,.0f} | " if show_cu else "")
             ms = "".join("— | " if not (ms_of.get(name) or {}).get(lbl)
                          else f"{ms_of[name][lbl]:,.0f} | " for lbl in tiers)
-            print(f"| {name} | `{writers.get(name, '—')}` | {cu_cell}{ms}" + " | ".join(cells)
+            print(f"| {name} | {cu_cell}{ms}" + " | ".join(cells)
                   + f" | {'**yes**' if d.get('vorder') else '·'} |")
     counted = ", ".join(f"{lbl} over {n}" for lbl, n in counts.items())
     print("\n<sub>Every shared table the project writes, in pipeline order, as `stats.py` read the "

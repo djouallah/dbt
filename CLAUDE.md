@@ -1129,6 +1129,8 @@ capacity for the GUIDs in those records, tops up `history/cu.json`, and publishe
   directions onto the same rows, and a disagreement between them is worth knowing rather than
   smoothing. Both quote the same CU (the mean over every run), because a page printing 1,916 in a bar
   and 1,960 in the row under it is asking the reader which one it meant.
+  There is **no `writer` column**: the row label is the writer, so it printed `duckdb (iceberg)`
+  beside `duckdb iceberg` and `spark` beside `spark V-Order`. `STACK`'s third entry is now unread.
   **Row counts live in the block HEADING**, not a column: identical on every row by design — the
   parity statement the project rests on — so repeating 143,980,961 down a table is a wide column
   carrying one fact. When the engines disagree the heading says so and the column returns, because
