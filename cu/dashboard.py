@@ -362,6 +362,12 @@ LAYOUT_TABLE = os.environ.get("CU_LAYOUT_TABLE", "fct_summary").strip()
 # like it would.
 PROFILE_LABEL = {"readHeavyForPBI": "V-Order", "writeHeavy": "default"}
 
+# An engine named by WHO WRITES, where the target name misleads. `iceberg` reads as a format beside
+# three engines, when the writer is the same DuckDB that duckrun uses — pointed at an Iceberg REST
+# catalog instead of delta-rs. On a page whose subject is what got written, that distinction is the
+# entire reason the pair exists, and calling it `iceberg` hides it. Matches `STACK`'s writer column.
+ENGINE_LABEL = {"iceberg": "duckdb iceberg"}
+
 
 def compact(n):
     """`13,089,178` → `13.1M`. Row-group sizes span four orders of magnitude across these engines —
@@ -471,8 +477,9 @@ def producer(rec):
     `variant_tag()` is untouched and keeps naming columns everywhere the ENGINE is the subject — the
     ETL chart, the CU table, the Time section, the sources table.
     """
-    c = ((rec.get("layout") or {}).get("config") or {}).get(rec.get("engine")) or {}
-    bits = [rec.get("engine") or "?"]
+    engine = rec.get("engine") or "?"
+    c = ((rec.get("layout") or {}).get("config") or {}).get(engine) or {}
+    bits = [ENGINE_LABEL.get(engine, engine)]
     for k in LAYOUT_CONFIG:
         if c.get(k):
             bits.append(PROFILE_LABEL.get(str(c[k]), str(c[k])))
@@ -590,19 +597,25 @@ def group_rows(cols, spread, latest):
     turns a 50% gap between duckrun at two core counts from a comparison into what it actually is,
     one layout measured twice.
 
-    The label is the layout; the caption is the writer. That is the whole inversion.
+    **The bar is NAMED for its writer and captioned with the shape** — `spark V-Order` over
+    `V-Order · 10–11 files · 10–11 RG`. The grouping is still the layout, which is the whole point;
+    but a reader scanning bars wants to know which thing they are looking at, and a file count is a
+    poor name even when it is the real subject. The shape sits underneath, where it explains why two
+    writers would ever share a bar.
     """
     out = []
     for _key, members in layout_groups(cols):
         vals = []
         for col, _rec in members:
             vals += spread.get(col) or ([latest[col]] if latest.get(col) else [])
-        label = layout_label(members)
+        label, caption = producers(members), layout_label(members)
+        if caption == label:                    # nothing was measured, so it would read twice
+            caption = ""
         if not vals:
-            out.append([label, 0, 0, 0, producers(members)])
+            out.append([label, 0, 0, 0, caption])
             continue
         out.append([label, round(sum(vals) / len(vals), 1), round(min(vals), 1),
-                    round(max(vals), 1), producers(members)])
+                    round(max(vals), 1), caption])
     return out
 
 
@@ -1002,17 +1015,13 @@ def render_time(cols, runs, ledger):
     names = [c for c, _e, _r in cols if c in per_col]
     cu_col = {col: run_cu(rec, ledger)[0] for col, _e, rec in cols}
 
+    # NO CHART HERE, deliberately. This section is a table and stays one. The page has two bars
+    # already and both are capacity units — the measure it leads with and can defend. A third bar in
+    # the same visual language, drawn from billed operation seconds that sum across concurrent
+    # operations and are not wall clock, invites exactly the reading the paragraph under it spends
+    # four sentences withdrawing. Numbers that need a caveat belong in a table where the caveat sits
+    # beside them.
     print("\n### Time — how long the work took, and how hard it drew\n")
-    key_by_variant = {(base_engine(c), variant(r)): c for c, _e, r in cols}
-    key_of = lambda rec: key_by_variant.get((rec.get("engine"), variant(rec)))
-    etl_spread = spread_for(runs, ledger, "etl", key_of, "seconds")
-    n = max((len(v) for v in etl_spread.values()), default=1)
-    chart("ETL — how long building the tables took",
-          "billed operation seconds, lower is better — not wall clock, see below"
-          + (f", mean of {n} runs with the range" if n > 1 else ""),
-          chart_rows([c for c in cols if c[0] in per_col], etl_spread,
-                     {c: class_total(per_col[c], "etl") for c in per_col},
-                     {col: engine_caption(rec, col) for col, _e, rec in cols}))
     print("| seconds | " + " | ".join(names) + " |")
     print("|:--|" + "---:|" * len(names))
     for cls in ("etl", "analytics"):

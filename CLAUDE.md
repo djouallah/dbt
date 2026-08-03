@@ -1092,9 +1092,11 @@ capacity for the GUIDs in those records, tops up `history/cu.json`, and publishe
 - **THE TWO CHARTS ARE KEYED ON DIFFERENT THINGS, AND THAT IS THE DESIGN — do not "unify" them.**
   **Analytics is one bar per PARQUET LAYOUT.** Power BI never sees the engine: it opens parquet
   through Direct Lake and transcodes row groups, so what a query costs belongs to what was WRITTEN
-  and the writer is metadata — the bar is labelled by the layout (`4 files · 27 RG`) and captioned by
-  the writer. **ETL is one bar per column**, unchanged, because there the writer and the compute it
-  was given are the entire subject.
+  and the writer is metadata. The bar is **named for its writer and captioned with the shape** —
+  `spark V-Order` over `V-Order · 10–11 files · 10–11 RG`: the grouping is the layout, but a file
+  count is a poor NAME even when it is the real subject, so the shape sits underneath where it
+  explains why two writers would ever share a bar. **ETL is one bar per column**, unchanged, because
+  there the writer and the compute it was given are the entire subject.
   What forced it: duckrun at 64 cores and at 32 wrote 4 files and 27 row groups either way, so two
   bars 50% apart was not a comparison — it was one layout measured twice, presented as two results.
   **Grouping is MEASURED, labelling is DECLARED**, and the split matters. The key is
@@ -1117,6 +1119,10 @@ capacity for the GUIDs in those records, tops up `history/cu.json`, and publishe
   by its EFFECT (`readHeavyForPBI` → `V-Order`, `writeHeavy` → `default`) because that is the only
   thing a reader of this page wants from it; an unmapped profile keeps its own name rather than being
   guessed at — `readHeavyForSpark` reads like it enables V-Order and sets no vorder at all.
+  `ENGINE_LABEL` does the same job for an engine whose TARGET name misleads: `iceberg` is written
+  **`duckdb iceberg`**, because it reads as a format beside three engines when the writer is the same
+  DuckDB duckrun uses, pointed at an Iceberg REST catalog instead of delta-rs — and on a page about
+  what got written, that is the entire reason the pair exists.
   `variant_tag()` is untouched and still names columns everywhere the ENGINE is the subject: the ETL
   chart, the CU table, the Time section, the sources table.
   The layout table groups by the DECLARED writer while the chart groups by the MEASURED parquet — two
@@ -1127,6 +1133,12 @@ capacity for the GUIDs in those records, tops up `history/cu.json`, and publishe
   parity statement the project rests on — so repeating 143,980,961 down a table is a wide column
   carrying one fact. When the engines disagree the heading says so and the column returns, because
   that is the loudest signal this page has.
+- **THE TIME SECTION IS A TABLE AND GETS NO CHART. Do not add one back.** The page carries two bars
+  and both are capacity units — the measure it leads with and can defend. A third in the same visual
+  language, drawn from billed operation seconds that SUM across concurrent operations and are not
+  wall clock, invites exactly the reading the note beneath it spends four sentences withdrawing. A
+  number that needs a caveat belongs in a table where the caveat sits beside it, not in a bar where
+  it reads as a ranking.
 - **THE PAGE CARRIES TWO NON-CU MEASURES NOW, and each states where its own number bends.**
   *cold / warm / hot* are **THREE COLUMNS OF THE MART BLOCK, never a section of their own.** They
   come from the RUN RECORDS, not the ledger: every record already holds

@@ -173,8 +173,8 @@ def test_the_page_renders_end_to_end_with_charts_and_a_layout():
     # [label, mean, min, max, caption] — one run, so the range collapses onto the mean.
     # ANALYTICS is labelled by the LAYOUT and captioned by the writer; ETL is labelled by the column
     # and captioned by the adapter and its compute. That asymmetry is the point of both charts.
-    assert first["rows"][0][:4] == ["4 files · 79 RG", 2041.0, 2041.0, 2041.0]
-    assert first["rows"][0][4] == "duckrun"
+    assert first["rows"][0][:4] == ["duckrun", 2041.0, 2041.0, 2041.0]
+    assert first["rows"][0][4] == "4 files · 79 RG", "the shape is the sub-label"
     assert second["rows"][0][:4] == ["duckrun", 31080.0, 31080.0, 31080.0]
     assert second["rows"][0][4] == "dbt-duckrun · 64 vCores"
 
@@ -427,7 +427,7 @@ def test_the_chart_shows_the_mean_and_the_range_across_runs():
     out = _render(runs, led)
     spec = json.loads(out.split("<!--chart:")[1].split("-->")[0])
     assert spec["rows"][0][1:4] == [1500.0, 1000.0, 2000.0]
-    assert spec["rows"][0][4] == "spark", "the writer is the caption on the analytics chart"
+    assert spec["rows"][0][0] == "spark", "the analytics bar is NAMED for its writer"
     assert "mean of 3 runs" in spec["subtitle"]
 
 
@@ -440,7 +440,7 @@ def test_the_chart_sorts_by_the_mean():
     out = _render(runs, ledger({"S0": {"XMLA Read Operation": 9.0}, "O0": {"Warehouse Query": 1.0},
                                 "S1": {"XMLA Read Operation": 3.0}, "O1": {"Warehouse Query": 1.0}}))
     spec = json.loads(out.split("<!--chart:")[1].split("-->")[0])
-    assert [r[4] for r in spec["rows"]] == ["dwh", "spark"], "cheapest mean first"
+    assert [r[0] for r in spec["rows"]] == ["dwh", "spark"], "cheapest mean first"
 
 
 # ------------------------------------------------------------- one bar per LAYOUT, not per engine
@@ -472,12 +472,35 @@ def test_the_same_parquet_is_one_bar_however_many_engines_wrote_it():
                                 "S1": {"XMLA Read Operation": 2000.0}, "O1": 1.0}))
     rows = _analytics_chart(out)["rows"]
     assert len(rows) == 1, "one layout, one bar"
-    assert rows[0][:4] == ["4 files · 27 RG", 1500.0, 1000.0, 2000.0]
-    assert rows[0][4] == "duckrun", "not `duckrun·64c, duckrun·32c` — the cores never reached it"
+    assert rows[0][:4] == ["duckrun", 1500.0, 1000.0, 2000.0],         "not `duckrun·64c` and `duckrun·32c` — the cores never reached the parquet"
+    assert rows[0][4] == "4 files · 27 RG", "the shape it grouped on sits underneath"
     # ...while the ETL chart keeps BOTH columns, because there the writer and the compute it was
     # given are the entire subject. That asymmetry is the change, and it must not be tidied away.
     etl = json.loads(out.split("<!--chart:")[2].split("-->")[0])
     assert [r[0] for r in etl["rows"]] == ["duckrun·32c", "duckrun·64c"]
+
+
+def test_an_engine_is_named_for_who_writes_when_the_target_name_misleads():
+    """`iceberg` reads as a format beside three engines, when the writer is the same DuckDB that
+    duckrun uses — pointed at an Iceberg REST catalog instead of delta-rs. On a page whose subject is
+    what got written, that is the entire reason the pair exists."""
+    assert d.producer(_lay("iceberg", 357, 1172)) == "duckdb iceberg"
+    assert d.producer(_lay("duckrun", 4, 27)) == "duckrun", "only where the name misleads"
+
+
+def test_the_time_section_is_a_table_and_gets_no_chart():
+    """Two bars on this page and both are capacity units — the measure it leads with and can defend.
+    A third in the same visual language, drawn from billed operation seconds that sum across
+    concurrent operations and are not wall clock, invites exactly the reading the paragraph under it
+    spends four sentences withdrawing."""
+    runs = [_lay("spark", 11, 11, file="a-1.json")]
+    led = ledger({"OUT": {"High Concurrency Session Livy Run": 900.0},
+                  "SEM": {"XMLA Read Operation": 40.0}})
+    led["seconds"] = _secs({"OUT": {"High Concurrency Session Livy Run": 30.0},
+                            "SEM": {"XMLA Read Operation": 4.0}})
+    out = _render(runs, led)
+    assert "### Time —" in out and "| **etl** | **30.0** |" in out, "the table is still there"
+    assert out.count("<!--chart:") == 2, "and it brought no bar with it"
 
 
 def test_v_order_never_merges_with_anything():
@@ -739,7 +762,7 @@ def test_the_rate_is_computed_per_class():
     assert "| `compute CU per second` | 30.0 |" in body, "900 CU over 30 s"
     assert "| **analytics** | **4.0** |" in body
     assert "| `compute CU per second` | 10.0 |" in body, "40 CU over 4 s"
-    assert out.count("<!--chart:") == 3, "the ETL-time chart joins the two CU ones"
+    assert out.count("<!--chart:") == 2, "the two CU charts and no third — seconds stay a table"
 
 
 def test_the_svg_draws_a_whisker_only_when_there_is_a_range():

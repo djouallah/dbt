@@ -144,9 +144,11 @@ because that artifact has to open off a local disk years later.
 - **The two charts are keyed on DIFFERENT THINGS, and that is the design.** **Analytics is one bar
   per PARQUET LAYOUT**, because Power BI never sees the engine — it opens parquet through Direct Lake
   and transcodes row groups, so what a query costs belongs to what was written and the writer is
-  metadata. The bar is labelled by the layout (`V-Order · 10–11 files · 10–11 RG`, `4 files · 27 RG`)
-  and captioned by the writer. **ETL is one bar per column**, because there the writer and the
-  compute it was given are the entire subject, and it keeps the adapter-and-vCores caption.
+  metadata. The bar is **named for its writer and captioned with the shape** — `spark V-Order` over
+  `V-Order · 10–11 files · 10–11 RG`: the grouping is the layout, but a file count is a poor name
+  even when it is the real subject, so the shape sits underneath where it explains why two writers
+  would ever share a bar. **ETL is one bar per column**, because there the writer and the compute it
+  was given are the entire subject, and it keeps the adapter-and-vCores caption.
   What forced this: duckrun at 64 cores and at 32 wrote 4 files and 27 row groups either way, so two
   bars 50% apart was not a comparison — it was one layout measured twice, presented as two results.
   Grouping merges them and the range says what the gap really was.
@@ -210,6 +212,15 @@ because that artifact has to open off a local disk years later.
   because that disagreement is the loudest signal this page has. `rows per RG` is abbreviated
   (`13.1M`, `122.9K`) — that number spans four orders of magnitude across these engines and the ratio
   is the finding, not the twelve digits.
+  `iceberg` is written **`duckdb iceberg`** (`ENGINE_LABEL`): it reads as a format beside three
+  engines, when the writer is the same DuckDB that duckrun uses pointed at an Iceberg REST catalog
+  instead of delta-rs — and on a page about what got written, that is the entire reason the pair
+  exists.
+- **The Time section is a TABLE and gets no chart, deliberately.** The page has two bars and both are
+  capacity units, the measure it leads with and can defend. A third in the same visual language,
+  drawn from billed operation seconds that sum across concurrent operations and are not wall clock,
+  invites exactly the reading the note under it spends four sentences withdrawing. Numbers that need
+  a caveat belong in a table where the caveat sits beside them.
 - **`cold` / `warm` / `hot` are THREE COLUMNS OF THE MART BLOCK, not a section.** The one thing on
   the page that is not capacity units, and it comes from the run records rather than the ledger:
   `benchmark.timings.<model>.<query>` is already on every record. `benchmark/render_report.py`
