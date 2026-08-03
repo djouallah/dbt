@@ -207,6 +207,11 @@ jobs:
   publish:
     name: publish
     needs: render
+    # A status function, for the same reason `layout` carries one in benchmark.yml: GitHub skips a
+    # job when ANY ancestor was skipped, and it propagates straight through `render`'s `always()`.
+    # So `measure=false` — the documented free, offline re-render — rendered a page and silently
+    # published nothing, which looks exactly like a page that did not change.
+    if: ${{ !cancelled() && needs.render.result == 'success' }}
     runs-on: ubuntu-latest
     permissions:
       pages: write
