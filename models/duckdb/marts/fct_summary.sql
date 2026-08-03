@@ -23,42 +23,24 @@
 -- mistake in it. Full story: LEARNINGS.md, "Two branches of one model, two different unit
 -- universes"; CLAUDE.md, "fct_summary must be a pure function of its inputs".
 --
--- sort_by='auto' is DUCKRUN-ONLY and does NOT break the one-config-for-both rule, for the same
--- reason partition_by did not: `sort_by` occurs ZERO times in dbt-duckdb's adapter and in its macro
--- package, so on iceberg it is parsed into the manifest and read by nobody. Both targets still run
--- byte-identical model code and there is still no `target.name` in this tree. On duckrun it profiles
--- the staged model result and picks the physical ORDER BY itself, writing unsorted when nothing pays
--- off. It IS honored here despite the adapter docs calling sort_by inert on the delta_rs merge path:
--- the merge on this model is insert-only, so the engine seam routes it to a DuckDB anti-join
--- committed as a plain append, and that path forwards sort_by (delta_plugin.py resolves 'auto' in
--- store() and rewrites cfg before dispatch) -- as does the first-build overwrite. Experimental, and
--- it re-profiles EVERY batch, so the chosen key can differ between the create and a later
--- incremental write. Requires duckrun >= 0.4.39; an older adapter reads 'auto' as a COLUMN NAME and
--- fails the binder, which is at least loud. The notebook pip-installs duckrun unpinned, so it takes
--- the latest and clears that floor.
---
--- Only this model carries it: fct_summary is what the query benchmark reads through Direct Lake, so
--- it is the one table where a sort key can show up as a cold/warm/hot number.
---
--- IT IS NOT FREE, and the cost lands on the metric this repo measures. The picker profiles the
--- STAGED RELATION, which duckrun materializes as a VIEW -- so its reservoir sample (plan_sample:
--- ~4.79M rows for this 6-column schema, never `exact` on a derived relation) re-executes this
--- model's whole query once BEFORE the write executes it again. Two consequences to read for, not
--- to be surprised by. duckrun's ETL CU on this model should rise sharply against iceberg, which
--- runs the identical SQL and ignores the config -- so the pair the dashboard calls its sharpest
--- comparison now differs by more than the writer, and that gap is sort cost, not drift. And nothing
--- RECORDS the setting -- it is not a dispatch input and stats.py does not write it into
--- `layout.config` -- so a duckrun run from before this commit and one from after share a dashboard
--- column, and share a layout bar whenever the file and row-group bands agree. Expect them to: a
--- sort changes what is INSIDE a row group, not how many there are. Judge the effect from the
--- per-dispatch benchmark report (`benchmark.timings` in the run record), where one dispatch is one
--- config, and from the run's sha -- not from the page, which will average the two generations.
+-- sort_by='auto' was HERE and was REMOVED. It worked, and it is still not coming back: duckrun's
+-- picker is a greedy single pass over statistical sketches -- its own limitations.md calls it "a
+-- naive, lightly-tested heuristic ... not guaranteed to shrink anything" and warns it "can
+-- occasionally pick a worse key than the default" -- so it is a coin-flip re-thrown on EVERY batch,
+-- in a benchmark whose whole value is that two dispatches of one commit differ by nothing but what
+-- was changed. What it picked was `date`. Measured, run 30796667149 (auto) against 30752070535
+-- (none), both 64 vCores, both full loads, both 143,980,961 rows, one config line apart:
+-- fct_summary 985.5 -> 777.2 MB, 27 -> 25 row groups, warm 6,300 -> 3,498 ms, hot 5,420 -> 3,056 ms,
+-- and etl CU 22,624 -> 26,980 -- that +19% is the profiling pass, which re-executes this model's
+-- whole query to sample it before the write executes it again.
+-- So the layout win is real and the way it was obtained is not worth keeping: `sort_by=['date']`
+-- states the same key outright, costs no profiling pass and cannot change its mind between runs.
+-- That is the change to make if the win is wanted -- not this one.
 {{ config(
     materialized='incremental',
     incremental_strategy='merge',
     unique_key=['date', 'time', 'DUID'],
     merge_clauses={'when_matched': [{'action': 'do_nothing'}]},
-    sort_by='auto',
     schema='mart'
 ) }}
 
