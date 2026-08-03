@@ -1360,6 +1360,19 @@ test("a single table renders without a tab strip", () => {
   assert.ok(plain(out).includes("the mart the queries land on"), "the block itself still renders");
 });
 
+test("the adapters are named and linked once, under the charts", () => {
+  // The bars stopped captioning the adapter; this note is where a reader finds out what
+  // dbt-duckrun, dbt-duckdb, dbt-fabricspark and the samdebruyn fork actually are.
+  const out = render([full("a-1.json", "spark")], ledger({ OUT: 1.0, SEM: 2.0 }));
+  for (const [engine, url] of Object.entries(d.ADAPTER_URLS)) {
+    assert.equal(out.split(`href="${url}"`).length - 1, 1, `${engine} linked exactly once`);
+  }
+  const text = plain(out);
+  assert.ok(text.includes("dbt-fabric-samdebruyn") && text.includes("dbt-fabricspark"));
+  assert.ok(out.indexOf('<div class="charts">') < out.indexOf("The adapters:"), "under the charts");
+  assert.ok(out.indexOf("The adapters:") < out.indexOf("Cost by engine"), "not buried below");
+});
+
 test("methodology folds, but the exclusion notice never does", () => {
   const runs = [
     gen("a-1.json", "duckrun", 143980960, { finishedHoursAgo: 72 }),

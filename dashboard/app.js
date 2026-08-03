@@ -63,10 +63,10 @@ export const SERVER = "https://github.com";
 // just sorts to the end.
 export const ENGINES = ["duckrun", "iceberg", "spark", "dwh"];
 
-// What each engine IS. NOTHING renders from this any more — the layout table's `writer` column
-// became the row label, and the ETL captions stopped restating the adapter because the column name
-// already implies it (`spark·default` under `dbt-fabricspark` was one fact twice). Kept as the
-// description of the stack this page compares; the entries match stats.py's WRITER map exactly,
+// What each engine IS. One thing renders from this now: the adapters note under the charts, which
+// is the page's only pointer to what actually did the writing since the ETL captions stopped
+// restating the adapter (`spark·default` under `dbt-fabricspark` was one fact twice) and the layout
+// table's `writer` column became the row label. The entries match stats.py's WRITER map exactly,
 // which is what `ENGINE_LABEL` is derived from.
 export const STACK = {
   landing: ["download_aemo.py", "the shared AEMO archive every leg reads", "—"],
@@ -74,6 +74,16 @@ export const STACK = {
   iceberg: ["dbt-duckdb", "DuckDB → Iceberg REST catalog", "duckdb (iceberg)"],
   spark: ["dbt-fabricspark", "Fabric Spark (Livy) → Delta", "spark"],
   dwh: ["dbt-fabric-samdebruyn", "Fabric Warehouse (T-SQL)", "warehouse"],
+};
+
+// Where each adapter lives, keyed like STACK. duckrun's adapter ships inside the duckrun package;
+// dwh is Sam Debruyn's fork of dbt-fabric (the PyPI package the build installs), not Microsoft's —
+// the URL is the fork's, verified against the package's own PyPI metadata.
+export const ADAPTER_URLS = {
+  duckrun: "https://github.com/djouallah/duckrun",
+  iceberg: "https://github.com/duckdb/dbt-duckdb",
+  spark: "https://github.com/microsoft/dbt-fabricspark",
+  dwh: "https://github.com/sdebruyn/dbt-fabric",
 };
 
 // A column is an engine (`spark`) or an engine under one CONFIG (`spark·V-Order+NEE`), which is what
@@ -1476,6 +1486,12 @@ export function renderPage(cols, runs, ledger, opts = {}) {
       Object.fromEntries(cols.map(({ col }) => [col, classTotal(perCol[col], "etl")])), captions),
     "etl");
   out.push(chartA || chartB ? `<div class="charts">\n${chartA}\n${chartB}\n</div>` : "");
+  // The one place the ADAPTERS are named and linked. The bars stopped captioning them because the
+  // column name already implies the adapter — this line is where that implication resolves.
+  out.push(note("The adapters: " + ENGINES
+    .filter((e) => ADAPTER_URLS[e])
+    .map((e) => `[${STACK[e][0]}](${ADAPTER_URLS[e]}) — ${STACK[e][1]}`)
+    .join(" · ")));
 
   // The layout table quotes the SAME number as the chart above it: the mean over every run of a
   // column, not that column's latest. They are one measurement described twice, and a page that
