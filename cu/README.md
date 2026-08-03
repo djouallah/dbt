@@ -251,11 +251,14 @@ because that artifact has to open off a local disk years later.
   Deliberately **reimplemented rather than imported** — `render_report._totals`/`rank` take exactly
   this shape, and `cu/` importing `benchmark/` would end the isolation that makes this directory
   deletable by removing one folder and one workflow file.
-- **Seconds and the rate are ROWS OF THE ENGINE TABLE, not a section.** They come off the SAME
-  Capacity Metrics row as the CU above them — same GUIDs, same roles, same compute/storage split — so
-  a table of their own restated the whole join to add two numbers per class, and split "what it cost"
-  from "how long it took" across two tables the reader had to hold at once. Under each class subtotal
-  instead.
+- **`compute CU per second` is a ROW OF THE ENGINE TABLE, not a section, and the raw seconds are
+  not shown at all.** It comes off the SAME Capacity Metrics row as the CU above it — same GUIDs,
+  same roles, same compute/storage split — so a table of its own restated the whole join to add two
+  numbers per class. The seconds themselves are gone because they are BILLED OPERATION seconds that
+  sum across concurrent operations — spark's five Livy REPLs total more than the clock they ran on —
+  so the number needed four sentences of hedging to be read at all, while the rate needs none: the
+  concurrency is in the numerator and the denominator alike, so it cancels. The rate was the only
+  thing the seconds were there to support.
   **Seconds here are BILLED OPERATION seconds, not wall clock**, and the difference is not small on
   every engine: a duckrun leg is one long notebook run so the two nearly agree, while spark opens
   five concurrent Livy REPLs under one session whose durations sum to more than the clock ever

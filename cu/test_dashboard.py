@@ -501,7 +501,9 @@ def test_seconds_are_rows_of_the_engine_table_not_a_section():
     out = _render(runs, led)
     assert "### Time" not in out, "no section of its own"
     body = out.split("Every engine's latest run")[1].split("###")[0]
-    assert "| **etl** | **900.0** |" in body and "| `seconds` | 30.0 |" in body
+    assert "| **etl** | **900.0** |" in body
+    assert "| `compute CU per second` | 30.0 |" in body, "the rate, under the class it belongs to"
+    assert "| `seconds` |" not in body, "the raw seconds are not shown — see the rate's docstring"
     assert out.count("<!--chart:") == 2, "and it brought no bar with it"
 
 
@@ -691,16 +693,15 @@ def test_a_class_the_ledger_has_not_read_yet_is_a_dash_not_a_zero():
                             "S0": {"XMLA Read Operation": 4.0}})
     body = _render(runs, led).split("Every engine's latest run")[1].split("###")[0]
     assert "| **etl** | **900.0** | — |" in body, "measured, then not-yet-measured"
-    assert "| `seconds` | 30.0 | — |" in body
+    assert "| `compute CU per second` | 30.0 | — |" in body
     assert "| 0.0 |" not in body and "**0.0**" not in body, "no cell reads as free"
 
 
-def test_a_ledger_with_no_seconds_renders_no_seconds_rows():
+def test_a_ledger_with_no_seconds_renders_no_rate_row():
     """Every ledger written before the duration read, and any read where the model had no duration
     column. Absent is the correct output for both — zeros would say the work was instant."""
     out = _render([_full("a-1.json", "spark")], ledger({"OUT": 1.0, "SEM": 2.0}))
-    assert "| `seconds` |" not in out
-    assert "| `compute CU per second` |" not in out, "no ROW; the note may still explain the column"
+    assert "| `compute CU per second` |" not in out, "no ROW; the note may still explain it"
     assert out.count("<!--chart:") == 2, "no seconds, no ETL-time chart"
 
 
@@ -744,7 +745,7 @@ def test_the_rate_is_compute_over_compute_never_total_over_total():
     rate = [ln for ln in body.splitlines() if ln.startswith("| `compute CU per second`")]
     assert rate[0] == "| `compute CU per second` | 32.0 |", "the node's own draw, not a blend"
     # And the SECONDS row still counts storage — it is the rate alone that must not.
-    assert "| `seconds` | 645.8 |" in body
+    assert "| `compute` | 20,665.6 |" in body, "the compute CU the rate divides"
 
 
 def test_the_rate_scales_with_the_cores_the_column_was_given():
@@ -780,9 +781,9 @@ def test_the_rate_is_computed_per_class():
                             "SEM": {"XMLA Read Operation": 4.0}})
     out = _render(runs, led)
     body = out.split("Every engine's latest run")[1].split("###")[0]
-    assert "| **etl** | **900.0** |" in body and "| `seconds` | 30.0 |" in body
+    assert "| **etl** | **900.0** |" in body
     assert "| `compute CU per second` | 30.0 |" in body, "900 CU over 30 s"
-    assert "| **analytics** | **40.0** |" in body and "| `seconds` | 4.0 |" in body
+    assert "| **analytics** | **40.0** |" in body
     assert "| `compute CU per second` | 10.0 |" in body, "40 CU over 4 s"
     assert out.count("<!--chart:") == 2, "the two CU charts and no third — seconds stay a table"
 

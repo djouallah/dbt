@@ -1161,9 +1161,13 @@ capacity for the GUIDs in those records, tops up `history/cu.json`, and publishe
   `render_report._totals`/`rank` take exactly this shape, and `cu/` importing `benchmark/` would end
   the isolation that makes this directory deletable by removing one folder and one workflow file.
   Mart-block-only, for the same reason the CU column is: one number per ENGINE, not per table.
-  *Seconds* and *`compute CU per second`* are **ROWS OF THE ENGINE TABLE, not a section** — they
-  come off the SAME Capacity Metrics row as the CU above them, so a table of their own restated the
-  whole GUID→role→bucket join to add two numbers per class. A class the ledger has not read yet is a
+*`compute CU per second`* is a **ROW OF THE ENGINE TABLE, not a section, and the RAW SECONDS are
+  not shown at all** — it comes off the SAME Capacity Metrics row as the CU above it, so a table of
+  its own restated the whole GUID→role→bucket join. The seconds themselves were dropped because they
+  are BILLED OPERATION seconds that sum across concurrent operations (spark's five Livy REPLs total
+  more than the clock they ran on), so the number needed four sentences of hedging while the rate
+  needs none — the concurrency is in the numerator and the denominator alike, so it cancels, and the
+  rate was the only thing the seconds were there to support. A class the ledger has not read yet is a
   DASH, never `0.0`: a zero there says the engine did that work for free. **Those seconds are BILLED
   OPERATION seconds, not wall clock**: a duckrun leg is one long notebook run so the two nearly
   agree, while spark's five concurrent Livy REPLs sum to more than the clock ever showed. **The RATE

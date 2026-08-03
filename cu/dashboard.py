@@ -698,9 +698,11 @@ def engine_table(per_col, cols, secs_col=None):
             print(f"| `{label}` | " + " | ".join(row) + " |")
         if not (secs_col and any((secs_col.get(c) or {}).get(cls) for c in names)):
             continue
-        print("| `seconds` | "
-              + " | ".join("—" if not (secs_col.get(c) or {}).get(cls)
-                           else f"{class_total(secs_col[c], cls):,.1f}" for c in names) + " |")
+        # The RATE only. The raw seconds were a row here and are gone: they are billed OPERATION
+        # seconds, which sum across concurrent operations, so spark's five Livy REPLs total more than
+        # the clock they ran on and the number needed four sentences of hedging to be read at all.
+        # The rate does not — the concurrency is in the numerator and the denominator alike, so it
+        # cancels — and it is the only thing the seconds were there to support.
         # COMPUTE over COMPUTE. A storage operation bills real CU against a duration of essentially
         # nothing — 383.25 CU in 0.049 s, measured — so including it does not dilute the rate, it
         # detonates it, by an amount that tracks how much OneLake traffic the engine made rather than
@@ -721,18 +723,17 @@ def engine_table(per_col, cols, secs_col=None):
           "queries, notebook runs, SQL-endpoint queries — is compute. A dash means no operation of "
           "that kind was billed there at all — or, on a class subtotal, that the ledger has not read "
           "that column yet; never that the work was free.\n"
-          "`seconds` comes from `Duration (s)` in the same Capacity Metrics row as the CU above it, "
-          "so it costs no extra query — but it is **billed operation seconds, not wall clock**: a "
-          "duckrun leg is one long notebook run so the two nearly agree, while spark's five "
-          "concurrent Livy REPLs bill against one session and sum to more than the clock ever "
-          "showed. **`compute CU per second` is the sturdiest number here** — the average capacity "
-          "the node drew while it ran, with that concurrency in the numerator and the denominator "
-          "alike, so it cancels. It is COMPUTE against COMPUTE, and that is not a refinement: a "
-          "storage operation bills real CU over a duration of essentially nothing (383.25 CU in "
-          "0.049 s), so a total-over-total rate drifts upward with however much OneLake traffic an "
-          "engine happened to make. It also SCALES with the compute the column was given — a "
-          "single-node Python notebook draws `vCores ÷ 2`, 32 at 64 vCores and 16 at 32 — so compare "
-          "it across columns only at equal size.</sub>")
+          "**`compute CU per second`** divides that class's compute CU by its `Duration (s)`, read "
+          "from the same Capacity Metrics row, so it costs no extra query. It is the average "
+          "capacity the node drew while it ran — the raw seconds are deliberately not shown, because "
+          "they are BILLED OPERATION seconds that sum across concurrent operations (spark's five "
+          "Livy REPLs total more than the clock they ran on) while the rate is unaffected, the "
+          "concurrency being in the numerator and the denominator alike. It is COMPUTE against "
+          "COMPUTE, and that is not a refinement: a storage operation bills real CU over a duration "
+          "of essentially nothing (383.25 CU in 0.049 s), so a total-over-total rate drifts upward "
+          "with however much OneLake traffic an engine happened to make. It SCALES with the compute "
+          "the column was given — a single-node Python notebook draws `vCores ÷ 2`, 32 at 64 vCores "
+          "and 16 at 32 — so compare it across columns only at equal size.</sub>")
 
 
 def render_sources(cols, ledger, unmeasured):
