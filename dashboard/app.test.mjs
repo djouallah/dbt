@@ -1388,6 +1388,23 @@ test("methodology folds, but the exclusion notice never does", () => {
   assert.ok(!excl.includes("<details"), "loud by design — never folded");
 });
 
+test("a run links to its committed record, never to CI", () => {
+  // Actions runs expire — logs at 90 days, the run page eventually with them — while the record in
+  // history/runs/ is the permanent copy of everything this page renders. Sources table, excluded
+  // table and the skipped note all point there.
+  const runs = [
+    gen("a-1.json", "duckrun", 143980960, { finishedHoursAgo: 72 }),   // dropped: old generation
+    gen("b-2.json", "spark", 143980961, { finishedHoursAgo: 24 }),
+  ];
+  const bad = full("c-3.json", "dwh");
+  bad.benchmark = {};                                                  // skipped: incomplete
+  const { html } = d.compose([...runs, bad], ledger({ OUT: 1.0, SEM: 2.0 }), {});
+  for (const f of ["a-1.json", "b-2.json", "c-3.json"]) {
+    assert.ok(html.includes(`href="${d.recordUrl(d.DEFAULTS.repo, f)}"`), `${f} links to history/`);
+  }
+  assert.ok(!html.includes("/actions/runs/"), "no CI link anywhere on the page");
+});
+
 test("a skipped record is named on the page, with its reason", () => {
   // It used to be only a count in the live status line — which the offline copy does not even have.
   // A page that quietly ignores a record is indistinguishable from a page that never had it.
@@ -1397,7 +1414,7 @@ test("a skipped record is named on the page, with its reason", () => {
   const { html } = d.compose([good, bad], ledger({ OUT: 1.0, SEM: 2.0 }), {});
   const text = plain(html);
   assert.ok(text.includes("1 record(s) skipped as incomplete"));
-  assert.ok(text.includes("b-2.json: no benchmark timings — the query half did not run"),
+  assert.ok(text.includes("`b-2.json` — no benchmark timings — the query half did not run"),
     "the file and the reason, not only a count");
   assert.ok(text.includes("(+1 skipped)"), "and the footer counts it");
   const at = html.indexOf("skipped as incomplete");

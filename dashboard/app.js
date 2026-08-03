@@ -197,8 +197,15 @@ export function baseEngine(col) {
   return ENGINE_OF_LABEL[head] || head;
 }
 
-export function runUrl(repo, runId) {
-  return `${SERVER}/${repo}/actions/runs/${runId}`;
+/**
+ * Where a run's identifier links to: its COMMITTED record in `history/runs/`, never the Actions
+ * run. CI runs expire — logs at 90 days, the run page eventually with them — while the record is
+ * the permanent copy of everything this page renders from it, so a link that outlives the page's
+ * own data source is the only honest one. `runUrl` (the `/actions/runs/` form) was deleted for
+ * exactly that reason; do not bring it back.
+ */
+export function recordUrl(repo, file, ref = DEFAULTS.ref) {
+  return `${SERVER}/${repo}/blob/${encodeURIComponent(ref)}/history/runs/${file}`;
 }
 
 /** `owner/name` → the project-pages URL the live copy is published at. Derived rather than
@@ -1080,7 +1087,9 @@ export function renderSources(cols, ledger, unmeasured, repo, now = null, gen = 
   const rows = [];
   for (const { col, rec } of sorted) {
     const rid = (rec.run || {}).id;
-    const link = rid ? `[${rid}](${runUrl(repo, rid)})` : DASH;
+    // The run id is the label; the target is the committed record, which outlives the CI run.
+    const link = rec._file ? `[${rid || rec._file}](${recordUrl(repo, rec._file, gen.ref)})`
+      : rid ? String(rid) : DASH;
     const skip = landingGuids(rec);
     const items = Object.entries(items_(rec))
       .filter(([g, it]) => !NON_ENGINE_ROLES.has(role_(it)) && !skip.has(g));
@@ -1134,7 +1143,8 @@ export function renderSources(cols, ledger, unmeasured, repo, now = null, gen = 
     out.push(table(["run", "engine", `${gen.table || DEFAULTS.table} rows`, "against current"],
       ["left", "left", "right", "right"],
       dropped.map((d) => [
-        d.run ? `[${d.run}](${runUrl(repo, d.run)})` : `\`${d.file}\``,
+        d.file && d.file !== "?" ? `[${d.run || d.file}](${recordUrl(repo, d.file, gen.ref)})`
+          : d.run ? String(d.run) : `\`${d.file}\``,
         d.engine,
         d.rows === null ? DASH : fmt(d.rows, 0),
         d.rows === null || gen.reference == null ? DASH
@@ -1533,7 +1543,7 @@ export function renderPage(cols, runs, ledger, opts = {}) {
     "cheaply and queries expensively has optimised the half that does not hurt."));
 
   out.push(renderSources(cols, ledger, unmeasured, repo, now,
-    { dropped: opts.dropped, reference: opts.reference, table: martTable }));
+    { dropped: opts.dropped, reference: opts.reference, table: martTable, ref: opts.ref }));
   // A record that is not a whole generation — a failed run that never benchmarked, a build half
   // that never reported — is skipped, and NAMED HERE with its reason. It used to be only a count in
   // the live status line, which the offline copy does not even have: a page that quietly ignores a
@@ -1544,7 +1554,14 @@ export function renderPage(cols, runs, ledger, opts = {}) {
     out.push(note(`**${skipped.length} record(s) skipped as incomplete** — a run has to be built ` +
       "and benchmarked to be comparable, and a partial one would render an empty column that reads " +
       "as “this engine was free”: " +
-      skipped.map((s) => `\`${s}\``).join(" · ")));
+      skipped.map((s) => {
+        // `file: reason` — the file half links to the committed record so the reason can be
+        // checked against what the run actually filed.
+        const at = s.indexOf(": ");
+        if (at < 0) return `\`${s}\``;
+        const file = s.slice(0, at);
+        return `[\`${file}\`](${recordUrl(repo, file, opts.ref)}) — ${s.slice(at + 2)}`;
+      }).join(" · ")));
   }
   // LAST. Every other number on the page is about what came OUT; this is the one copy of what went in,
   // shared by every engine, so it belongs with the provenance rather than among the columns it is not
