@@ -27,6 +27,7 @@
     incremental_strategy='merge',
     unique_key=['date', 'time', 'DUID'],
     merge_clauses={'when_matched': [{'action': 'do_nothing'}]},
+    sort_by='auto',
     schema='mart'
 ) }}
 
