@@ -317,9 +317,12 @@ test("columns are the latest run per engine and config", () => {
     rec("d-4.json", "dwh", {}, { finishedHoursAgo: 12 }),
   ];
   const cols = d.columnsFor(runs);
-  assert.deepEqual(cols.map((c) => c.col), ["spark·V-Order", "spark·default", "dwh"]);
+  // Alphabetical within an engine: `readHeavyForPBI` before `writeHeavy`. It sorted the other way
+  // when the two were labelled `V-Order` and `default`, which is the order changing with the label
+  // and not with anything measured — one more reason the profiles are printed verbatim.
+  assert.deepEqual(cols.map((c) => c.col), ["spark·readHeavyForPBI", "spark·writeHeavy", "dwh"]);
   const byCol = Object.fromEntries(cols.map((c) => [c.col, c.rec._file]));
-  assert.equal(byCol["spark·default"], "b-2.json", "the LATER run of a config wins its column");
+  assert.equal(byCol["spark·writeHeavy"], "b-2.json", "the LATER run of a config wins its column");
 });
 
 test("one config per engine gets a bare column name", () => {
@@ -383,20 +386,22 @@ test("a record with no sorted key groups with an unsorted run, not alone", () =>
   assert.equal(d.layoutKey(old)[3], false);
 });
 
-test("a column header names a profile by its effect", () => {
-  // `spark·readHeavyForPBI+noNEE` is Microsoft's name for an intended workload plus a double negative,
-  // in a header repeated across every table and both charts.
-  assert.equal(d.variantTag([["resource_profile", "readHeavyForPBI"]]), "V-Order");
-  assert.equal(d.variantTag([["resource_profile", "writeHeavy"]]), "default");
-  // An unmapped profile keeps its own name — guessing at readHeavyForSpark would be wrong.
+test("a column header calls a profile by its own name", () => {
+  // The dispatch is given `readHeavyForPBI` and every doc and log line says `readHeavyForPBI`, so the
+  // page does too — a reader matching this against a run's inputs should not have to translate. The
+  // EFFECT is said where it is measured instead: `layoutCaption` reads `vorder` off the parquet.
+  assert.equal(d.variantTag([["resource_profile", "readHeavyForPBI"]]), "readHeavyForPBI");
+  // `default` survives because it is a fact about the WORKSPACE — the profile in force when a
+  // dispatch asks for nothing — not a rewording of `writeHeavy`.
+  assert.equal(d.variantTag([["resource_profile", "writeHeavy"]]), "writeHeavy");
   assert.equal(d.variantTag([["resource_profile", "readHeavyForSpark"]]), "readHeavyForSpark");
 });
 
 test("a flag that is off is absent from the header rather than negated", () => {
   const on = [["native_execution_engine", "true"], ["resource_profile", "writeHeavy"]];
   const off = [["native_execution_engine", "false"], ["resource_profile", "writeHeavy"]];
-  assert.equal(d.variantTag(on), "default+NEE");
-  assert.equal(d.variantTag(off), "default");
+  assert.equal(d.variantTag(on), "writeHeavy+NEE");
+  assert.equal(d.variantTag(off), "writeHeavy");
 });
 
 test("a column is named for its writer and still resolves to its engine", () => {
@@ -432,7 +437,7 @@ test("two configs that would share a header are spelled out instead", () => {
   ];
   const names = d.columnsFor(runs).map((c) => c.col);
   assert.equal(new Set(names).size, 2, names.join(","));
-  assert.deepEqual(names, ["spark·default", "spark·default+noNEE"]);
+  assert.deepEqual(names, ["spark·writeHeavy", "spark·writeHeavy+noNEE"]);
 });
 
 // ------------------------------------------------------------------------------- whole-page shape
@@ -1147,10 +1152,10 @@ test("an unmeasured layout is never grouped with another one", () => {
 test("the producer name drops what never reached the parquet", () => {
   assert.equal(d.producer(lay("spark", 11, 11, {
     cfg: { resource_profile: "readHeavyForPBI", native_execution_engine: "true" },
-  })), "spark V-Order");
+  })), "spark readHeavyForPBI");
   assert.equal(d.producer(lay("spark", 14, 14, {
     cfg: { resource_profile: "writeHeavy", native_execution_engine: "false" },
-  })), "spark default");
+  })), "spark writeHeavy");
   assert.equal(d.producer(lay("duckrun", 4, 27, { cfg: { vcores: "64" } })), "duckrun");
   // An unmapped profile keeps its own name — `readHeavyForSpark` reads like it enables V-Order and
   // sets no vorder at all.
@@ -1164,7 +1169,7 @@ test("a group of genuinely different writers names both", () => {
     { col: "duckrun·32c", rec: lay("duckrun", 4, 27, { cfg: { vcores: "32" } }) },
     { col: "spark·writeHeavy", rec: lay("spark", 4, 27, { cfg: { resource_profile: "writeHeavy" } }) },
   ];
-  assert.equal(d.producers(members), "duckrun, spark default", "deduplicated, and both kept");
+  assert.equal(d.producers(members), "duckrun, spark writeHeavy", "deduplicated, and both kept");
 });
 
 test("the layout table is one row per writer and agrees with the chart", () => {

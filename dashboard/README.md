@@ -185,8 +185,8 @@ without a build, a token or a dispatch.
 - **The two charts are keyed on DIFFERENT THINGS, and that is the design.** **Analytics is one bar
   per PARQUET LAYOUT**, because Power BI never sees the engine — it opens parquet through Direct Lake
   and transcodes row groups, so what a query costs belongs to what was written and the writer is
-  metadata. The bar is **named for its writer and captioned with the shape** — `spark V-Order` over
-  `V-Order · 10–11 files · 10–11 RG`: the grouping is the layout, but a file count is a poor name
+  metadata. The bar is **named for its writer and captioned with the shape** — `spark readHeavyForPBI`
+  over `V-Order · 10–11 files · 10–11 RG`: the grouping is the layout, but a file count is a poor name
   even when it is the real subject, so the shape sits underneath where it explains why two writers
   would ever share a bar. **ETL is one bar per column**, because there the writer and the compute it
   was given are the entire subject; its caption states only what the column name does not already
@@ -217,13 +217,27 @@ without a build, a token or a dispatch.
   different bands. A record with **no** file count keys to `null` and keeps a bar of its own; two
   unmeasured layouts are not one identical layout.
 - **A column header is an engine plus the SHORTEST config that still tells it apart** (`variantTag`).
-  It appears in every table and both charts, so width is a real cost, and it used to read
-  `spark·readHeavyForPBI+NEE` — Microsoft's name for an intended workload plus a double negative on
-  its sibling. Two rules cut it to `spark·V-Order+NEE` / `spark·V-Order` / `spark·default+NEE` /
-  `spark·default`. The profile is named by its **effect**, through the same `PROFILE_LABEL` the layout
-  captions use, so a profile is called the same thing wherever it appears on the page. And a flag that
-  is **off is absent** rather than negated — `+noNEE` spends header width saying nothing happened, and
-  the contrast with the run that did enable it is what a reader is looking for.
+  It appears in every table and both charts, so width is a real cost. One rule keeps it short: a flag
+  that is **off is absent** rather than negated — `spark·readHeavyForPBI+NEE` against
+  `spark·readHeavyForPBI`, never `+noNEE`, which spends header width saying nothing happened when the
+  contrast with the run that did enable it is what a reader is looking for.
+  **The RESOURCE PROFILE is printed verbatim, and a second rule that shortened it is gone.** A
+  `PROFILE_LABEL` map renamed the two in use by their effect — `readHeavyForPBI` → `V-Order`,
+  `writeHeavy` → `default` — and it has been removed in both directions. Those strings are what the
+  dispatch input takes, what `profiles.yml` sets and what Microsoft's own profile reference publishes,
+  so the rename made a reader translate to match this page against a run's inputs, and the page and
+  the record called one setting two things. `default` was the worse half: it named the workspace's
+  *choice* rather than the profile, so it would silently become a lie the day that default changed,
+  and it hid which profile a bare dispatch actually got. The effect is still said — **where it is
+  measured rather than declared**: `layoutCaption` reads `vorder` off the parquet, so a bar reads
+  `spark readHeavyForPBI` over `V-Order · 10–11 files · 10–11 RG`. The label names the knob that was
+  turned, the caption states what came out — a split that also survives a profile whose name misleads,
+  which is not hypothetical, since `readHeavyForSpark` reads like it enables V-Order and sets no
+  vorder at all. One cost, worth knowing: column order is alphabetical, so renaming moved
+  `readHeavyForPBI` ahead of `writeHeavy` where `V-Order` had followed `default` — an order that
+  changed with a label rather than with anything measured, which is one more argument for the
+  verbatim spelling. `CONFIG_LABEL` is now the only relabelling left, and it exists because
+  `sorted=true` has no name of its own to print.
   Absence-means-off is only unambiguous while every config of that engine RECORDS the flag, so
   `columnsFor` checks it: where two configs would collapse to one header — a record predating the
   dispatch input has no key at all and would collide with an explicit `false` — the whole engine falls
@@ -272,10 +286,9 @@ without a build, a token or a dispatch.
   read as a column that had gone missing.
 - **Table layout**, every shared table, mart first, **one row per WRITER, and no `writer` column** —
   the row label IS the writer, so a `duckdb (iceberg)` cell beside a `duckdb iceberg` label was one
-  fact printed twice. `spark V-Order`, `spark default`, `duckrun`, not `spark·V-Order+NEE` and
-  `duckrun·64c`. The resource profile is named by what it does to the parquet rather than by
-  Microsoft's name for the workload it was designed for, and the core count and NEE flag are dropped
-  because two runs each showed they never reach it. duckrun's two core counts and spark's two NEE
+  fact printed twice. `spark readHeavyForPBI`, `spark writeHeavy`, `duckrun`, not
+  `spark·readHeavyForPBI+NEE` and `duckrun·64c`. The resource profile is printed verbatim; the core
+  count and NEE flag are dropped because two runs each showed they never reach the parquet. duckrun's two core counts and spark's two NEE
   settings therefore collapse to one row — they had written identical layouts, so the rows they
   replaced were the same row printed twice.
   **The MART block is the exception: its rows ARE the chart's bars**, same grouping and same members,
@@ -413,7 +426,7 @@ The core count still reaches the chart because a run at a different size is a di
 but through the column tag (`duckrun·64c`), not a caption. An ETL caption states only what the
 column name does not already say, which in practice is the vCores of a single-config engine whose
 bare column carries no tag: `dbt-fabricspark · writeHeavy · NEE off` under a bar already labelled
-`spark·default` was three facts the label carries (the profile named by its effect, an off flag
+`spark·writeHeavy` was three facts the label carries (the profile named by its effect, an off flag
 absent, the adapter implied by the engine name).
 
 ## Things that will bite

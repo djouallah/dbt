@@ -65,7 +65,7 @@ export const ENGINES = ["duckrun", "iceberg", "spark", "dwh"];
 
 // What each engine IS. One thing renders from this now: the adapters note under the charts, which
 // is the page's only pointer to what actually did the writing since the ETL captions stopped
-// restating the adapter (`spark·default` under `dbt-fabricspark` was one fact twice) and the layout
+// restating the adapter (`spark·writeHeavy` under `dbt-fabricspark` was one fact twice) and the layout
 // table's `writer` column became the row label. The entries match stats.py's WRITER map exactly,
 // which is what `ENGINE_LABEL` is derived from.
 export const STACK = {
@@ -86,7 +86,7 @@ export const ADAPTER_URLS = {
   dwh: "https://github.com/sdebruyn/dbt-fabric",
 };
 
-// A column is an engine (`spark`) or an engine under one CONFIG (`spark·V-Order+NEE`), which is what
+// A column is an engine (`spark`) or an engine under one CONFIG (`spark·readHeavyForPBI+NEE`), which is what
 // puts the same engine's two resource profiles side by side. A tag joins its own parts with `+`, never
 // with this, so the split back to the engine is unambiguous.
 export const COL_SEP = "·";
@@ -129,23 +129,28 @@ export const NON_ENGINE_ROLES = new Set(["landing", "folder"]);
 // its numbers are not a measurement of that run — they are a measurement of everything since.
 export const DELETABLE_ROLES = new Set(["output", "dwh_src", "compute", "semantic_model"]);
 
-// A resource profile named by WHAT IT DOES to the parquet, because that is the only thing a reader of
-// this page needs from it. `readHeavyForPBI` is the one profile that turns V-Order on; `writeHeavy` is
-// the workspace default and turns it off. Microsoft's names describe an intended workload, which is a
-// different question from what came out. An unmapped profile keeps its own name rather than being
-// guessed at — `readHeavyForSpark`, for one, sets no vorder at all despite reading like it would.
-// Shared by the column headers (`variantTag`) and the layout captions (`producer`), so a profile is
-// called the same thing wherever it appears on the page.
-export const PROFILE_LABEL = { readHeavyForPBI: "V-Order", writeHeavy: "default" };
+// THE RESOURCE PROFILE IS PRINTED BY ITS OWN NAME. There was a `PROFILE_LABEL` map that renamed the
+// two in use by their EFFECT on the parquet — `readHeavyForPBI` → `V-Order`, `writeHeavy` → `default`
+// — and it is gone, in both directions. `readHeavyForPBI` and `writeHeavy` are the strings the
+// dispatch input takes, the strings `profiles.yml` sets and the strings Microsoft's own reference
+// publishes, so a reader matching this page against a run's inputs had to translate, and the page and
+// the record disagreed about the name of the same setting. `default` was the worse half: it named the
+// workspace's CHOICE rather than the profile, so it would silently become a lie the day the workspace
+// default changed, and it hid which profile a bare dispatch actually got.
+// The effect is still said — where it is MEASURED rather than declared. `layoutCaption` reads
+// `vorder` off the parquet, so a bar reads `spark readHeavyForPBI` over `V-Order · 10–11 files ·
+// 10–11 RG`: the label names the knob that was turned, the caption states what came out. That split
+// also survives a profile whose name misleads, which is not hypothetical — `readHeavyForSpark` reads
+// like it enables V-Order and sets no vorder at all.
 
 // How a LAYOUT_CONFIG entry is NAMED on a layout caption, keyed `<key>=<value>` rather than by the
-// value alone. `PROFILE_LABEL` gets away with a value-keyed map because a profile name says which
-// knob it is; a bare `true` does not, and would label every boolean config in LAYOUT_CONFIG the
-// same way the moment a second one joins. Consulted before `PROFILE_LABEL`, which still serves the
-// profile. Deliberately does NOT spell the sort key out — which is now also the only honest label:
-// the key comes from duckrun's `sort_by='auto'` picker, which re-profiles every batch, so no fixed
-// column list would be true across runs. `duckrun sorted` sits beside `spark V-Order`, which does
-// not list what V-Order does either.
+// value alone — a bare `true` does not say which knob it is, and would label every boolean config in
+// LAYOUT_CONFIG the same way the moment a second one joins. It is the ONLY relabelling left: the
+// resource profile is now printed verbatim (see above), and this exists because `sorted=true` has no
+// name of its own to print.
+// Deliberately does NOT spell the sort key out — which is also the only honest label: the key comes
+// from duckrun's `sort_by='auto'` picker, which re-profiles every batch, so no fixed column list
+// would be true across runs.
 export const CONFIG_LABEL = { "sorted=true": "sorted" };
 
 // The dispatch config that is SHOWN to change what gets written. `vcores` and
@@ -202,7 +207,7 @@ export function landingGuids(rec) {
 }
 
 /**
- * `spark·V-Order+NEE` → `spark`; `spark` → `spark`; `duckdb iceberg·64c` → `iceberg`.
+ * `spark·readHeavyForPBI+NEE` → `spark`; `spark` → `spark`; `duckdb iceberg·64c` → `iceberg`.
  *
  * The label reversal is what lets a column be NAMED for its writer while every lookup keyed on the
  * engine — `STACK`, the (engine, variant) join to a record — still finds it.
@@ -411,20 +416,21 @@ export const variantKey = (sig) => JSON.stringify(sig);
  * in a table head — the column is repeated across every table and both charts — and the full reading
  * is in the layout section and the chart captions.
  *
- * Two things keep it short. The profile is named by its EFFECT via `PROFILE_LABEL`, so
- * `readHeavyForPBI` reads `V-Order`; and a flag that is OFF is simply absent, so `spark·V-Order+NEE`
- * contrasts with `spark·V-Order` rather than with `spark·readHeavyForPBI+noNEE`. Absence-means-off is
- * only unambiguous while every column of that engine RECORDS the flag — `columnsFor` checks that and
- * falls back to `terse=false` for the whole engine if two configs would collide.
+ * What keeps it short is that a flag which is OFF is simply absent, so `spark·readHeavyForPBI+NEE`
+ * contrasts with `spark·readHeavyForPBI` rather than with `spark·readHeavyForPBI+noNEE`.
+ * Absence-means-off is only unambiguous while every column of that engine RECORDS the flag —
+ * `columnsFor` checks that and falls back to `terse=false` for the whole engine if two configs would
+ * collide.
+ *
+ * The RESOURCE PROFILE is printed verbatim. It was shortened to its effect — `V-Order` / `default` —
+ * and that is reverted: it is the string the dispatch takes and `profiles.yml` sets, so the header
+ * now matches the record it came from.
  */
 export function variantTag(sig, terse = true) {
   const d = Object.fromEntries(sig);
   const bits = [];
   if (d.vcores) bits.push(`${d.vcores}c`);
-  if (d.resource_profile) {
-    const p = String(d.resource_profile);
-    bits.push(PROFILE_LABEL[p] || p);
-  }
+  if (d.resource_profile) bits.push(String(d.resource_profile));
   const nee = d.native_execution_engine;
   if (nee !== undefined) {
     if (String(nee).toLowerCase() === "true") bits.push("NEE");
@@ -436,7 +442,7 @@ export function variantTag(sig, terse = true) {
   // disambiguate.
   if (d.sorted) bits.push("sorted");
   // `+`, never COL_SEP — baseEngine splits on that, and a tag containing one would make
-  // `spark·V-Order+NEE` unparseable back to `spark`.
+  // `spark·readHeavyForPBI+NEE` unparseable back to `spark`.
   return bits.join("+") || "unrecorded";
 }
 
@@ -633,10 +639,10 @@ export function layoutLabel(members, table = DEFAULTS.table) {
 /**
  * Who wrote it, named by the config that reached the parquet and nothing else.
  *
- * `duckrun`, `spark V-Order`, `spark default`. No core count, no NEE flag — see `LAYOUT_CONFIG` — and
- * the profile is named by its EFFECT (`PROFILE_LABEL`) rather than by Microsoft's name for the
- * workload it was designed for. `spark·readHeavyForPBI+NEE` is three facts, two of which never reached
- * the parquet; `spark V-Order` is the one that did.
+ * `duckrun`, `spark readHeavyForPBI`, `spark writeHeavy`. No core count and no NEE flag — see
+ * `LAYOUT_CONFIG` — because neither reaches the parquet: `spark·readHeavyForPBI+NEE` is three facts
+ * and only the profile is one of them. The profile itself is printed VERBATIM; what it did to the
+ * parquet is the caption's job, and `layoutCaption` measures that rather than inferring it.
  *
  * This is what the analytics chart and the layout blocks carry instead of the column id. `variantTag`
  * is untouched and keeps naming columns everywhere the ENGINE is the subject — the ETL chart, the CU
@@ -649,7 +655,7 @@ export function producer(rec) {
   for (const k of LAYOUT_CONFIG) {
     if (!c[k]) continue;
     const v = String(c[k]);
-    bits.push(CONFIG_LABEL[`${k}=${v}`] || PROFILE_LABEL[v] || v);
+    bits.push(CONFIG_LABEL[`${k}=${v}`] || v);
   }
   return bits.join(" ");
 }
@@ -658,7 +664,7 @@ export function producer(rec) {
  * The group's writers, DEDUPLICATED — two members reducing to the same name appear once.
  *
  * So duckrun at two core counts reads `duckrun`, and a group holding genuinely different writers keeps
- * both (`duckrun, spark default`), which is the case worth reading: two engines that produced parquet
+ * both (`duckrun, spark writeHeavy`), which is the case worth reading: two engines that produced parquet
  * Power BI cannot tell apart.
  */
 export function producers(members) {
@@ -976,7 +982,7 @@ export function chartSvg(title, subtitle, rowsIn, kind = "") {
  * The ETL bar's caption: ONLY what the column name does not already say.
  *
  * It used to restate the whole configuration — `dbt-fabricspark · writeHeavy · NEE off` under a bar
- * already labelled `spark·default` was three facts the label carries (the profile named by its
+ * already labelled `spark·writeHeavy` was three facts the label carries (the profile named by its
  * effect, an off flag absent, the adapter implied by the engine name). The one thing that can
  * genuinely be missing is the compute size: a single-config engine gets a BARE column name with no
  * `64c` tag, so the vCores are stated iff the label does not carry them. Never a default — an
@@ -1019,7 +1025,7 @@ const meanOf = (vals) => vals.reduce((a, b) => a + b, 0) / vals.length;
  * between duckrun at two core counts from a comparison into what it actually is, one layout measured
  * twice.
  *
- * **The bar is NAMED for its writer and captioned with the shape** — `spark V-Order` over
+ * **The bar is NAMED for its writer and captioned with the shape** — `spark readHeavyForPBI` over
  * `V-Order · 10–11 files · 10–11 RG`. The grouping is still the layout, which is the whole point; but a
  * reader scanning bars wants to know which thing they are looking at, and a file count is a poor name
  * even when it is the real subject. The shape sits underneath, where it explains why two writers would
@@ -1378,7 +1384,7 @@ export function renderInput(cols) {
  * table, so printing them in every block would read as one measurement per table. That block's rows
  * are ordered by that CU, cheapest first; the rest keep the engine order.
  *
- * **A row is a `producer()`, not a column.** `spark V-Order` and `spark default`, not
+ * **A row is a `producer()`, not a column.** `spark readHeavyForPBI` and `spark writeHeavy`, not
  * `spark·readHeavyForPBI+NEE` — the profile named by what it does to the parquet, and the core count
  * and NEE flag dropped because neither reaches it. duckrun's two core counts and spark's two NEE
  * settings each collapse to one row, and they had written identical layouts, so the rows they replaced
