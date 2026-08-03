@@ -22,6 +22,37 @@
 -- back to a grain check. Treat any edit to dispatch_duids as load-bearing -- nothing will catch a
 -- mistake in it. Full story: LEARNINGS.md, "Two branches of one model, two different unit
 -- universes"; CLAUDE.md, "fct_summary must be a pure function of its inputs".
+--
+-- sort_by='auto' is DUCKRUN-ONLY and does NOT break the one-config-for-both rule, for the same
+-- reason partition_by did not: `sort_by` occurs ZERO times in dbt-duckdb's adapter and in its macro
+-- package, so on iceberg it is parsed into the manifest and read by nobody. Both targets still run
+-- byte-identical model code and there is still no `target.name` in this tree. On duckrun it profiles
+-- the staged model result and picks the physical ORDER BY itself, writing unsorted when nothing pays
+-- off. It IS honored here despite the adapter docs calling sort_by inert on the delta_rs merge path:
+-- the merge on this model is insert-only, so the engine seam routes it to a DuckDB anti-join
+-- committed as a plain append, and that path forwards sort_by (delta_plugin.py resolves 'auto' in
+-- store() and rewrites cfg before dispatch) -- as does the first-build overwrite. Experimental, and
+-- it re-profiles EVERY batch, so the chosen key can differ between the create and a later
+-- incremental write. Requires duckrun >= 0.4.39; an older adapter reads 'auto' as a COLUMN NAME and
+-- fails the binder, which is at least loud. The notebook pip-installs duckrun unpinned, so it takes
+-- the latest and clears that floor.
+--
+-- Only this model carries it: fct_summary is what the query benchmark reads through Direct Lake, so
+-- it is the one table where a sort key can show up as a cold/warm/hot number.
+--
+-- IT IS NOT FREE, and the cost lands on the metric this repo measures. The picker profiles the
+-- STAGED RELATION, which duckrun materializes as a VIEW -- so its reservoir sample (plan_sample:
+-- ~4.79M rows for this 6-column schema, never `exact` on a derived relation) re-executes this
+-- model's whole query once BEFORE the write executes it again. Two consequences to read for, not
+-- to be surprised by. duckrun's ETL CU on this model should rise sharply against iceberg, which
+-- runs the identical SQL and ignores the config -- so the pair the dashboard calls its sharpest
+-- comparison now differs by more than the writer, and that gap is sort cost, not drift. And nothing
+-- RECORDS the setting -- it is not a dispatch input and stats.py does not write it into
+-- `layout.config` -- so a duckrun run from before this commit and one from after share a dashboard
+-- column, and share a layout bar whenever the file and row-group bands agree. Expect them to: a
+-- sort changes what is INSIDE a row group, not how many there are. Judge the effect from the
+-- per-dispatch benchmark report (`benchmark.timings` in the run record), where one dispatch is one
+-- config, and from the run's sha -- not from the page, which will average the two generations.
 {{ config(
     materialized='incremental',
     incremental_strategy='merge',
