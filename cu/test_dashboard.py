@@ -488,18 +488,20 @@ def test_an_engine_is_named_for_who_writes_when_the_target_name_misleads():
     assert d.producer(_lay("duckrun", 4, 27)) == "duckrun", "only where the name misleads"
 
 
-def test_the_time_section_is_a_table_and_gets_no_chart():
-    """Two bars on this page and both are capacity units — the measure it leads with and can defend.
-    A third in the same visual language, drawn from billed operation seconds that sum across
-    concurrent operations and are not wall clock, invites exactly the reading the paragraph under it
-    spends four sentences withdrawing."""
+def test_seconds_are_rows_of_the_engine_table_not_a_section():
+    """They come off the SAME Capacity Metrics row as the CU above them — same GUIDs, same roles,
+    same compute/storage split — so a table of their own restated the whole join to add two numbers
+    per class, and split "what it cost" from "how long it took" across two tables. And no third
+    chart: the page carries two bars and both are capacity units, the measure it can defend."""
     runs = [_lay("spark", 11, 11, file="a-1.json")]
     led = ledger({"OUT": {"High Concurrency Session Livy Run": 900.0},
                   "SEM": {"XMLA Read Operation": 40.0}})
     led["seconds"] = _secs({"OUT": {"High Concurrency Session Livy Run": 30.0},
                             "SEM": {"XMLA Read Operation": 4.0}})
     out = _render(runs, led)
-    assert "### Time —" in out and "| **etl** | **30.0** |" in out, "the table is still there"
+    assert "### Time" not in out, "no section of its own"
+    body = out.split("Every engine's latest run")[1].split("###")[0]
+    assert "| **etl** | **900.0** |" in body and "| `seconds` | 30.0 |" in body
     assert out.count("<!--chart:") == 2, "and it brought no bar with it"
 
 
@@ -675,11 +677,30 @@ def test_seconds_split_by_role_exactly_like_cu():
     assert d.class_total(cells, "analytics") == 4.0, "landing is skipped here as it is for CU"
 
 
-def test_a_ledger_with_no_seconds_renders_no_time_section():
+def test_a_class_the_ledger_has_not_read_yet_is_a_dash_not_a_zero():
+    """A run committed minutes ago whose CU has not been read. `**0.0**` on its subtotal says the
+    engine did that work for FREE, which is the one reading this whole page is built to prevent —
+    and it is the same distinction the item rows already make. Live case: a record landed from CI
+    mid-render and printed 0.0 down an entire column."""
+    runs = [_lay("duckrun", 4, 27, file="a-1.json"), _lay("dwh", 78, 78, file="b-2.json")]
+    runs[0]["items"] = {"O0": gone("output", "dbt_delta"), "S0": gone("semantic_model", "aemo")}
+    runs[1]["items"] = {"O1": gone("output", "dbt_dwh"), "S1": gone("semantic_model", "aemo_dwh")}
+    led = ledger({"O0": {"Jupyter Notebook Scheduled Run": 900.0},
+                  "S0": {"XMLA Read Operation": 40.0}})       # nothing for dwh at all
+    led["seconds"] = _secs({"O0": {"Jupyter Notebook Scheduled Run": 30.0},
+                            "S0": {"XMLA Read Operation": 4.0}})
+    body = _render(runs, led).split("Every engine's latest run")[1].split("###")[0]
+    assert "| **etl** | **900.0** | — |" in body, "measured, then not-yet-measured"
+    assert "| `seconds` | 30.0 | — |" in body
+    assert "| 0.0 |" not in body and "**0.0**" not in body, "no cell reads as free"
+
+
+def test_a_ledger_with_no_seconds_renders_no_seconds_rows():
     """Every ledger written before the duration read, and any read where the model had no duration
-    column. Absent is the correct output for both."""
+    column. Absent is the correct output for both — zeros would say the work was instant."""
     out = _render([_full("a-1.json", "spark")], ledger({"OUT": 1.0, "SEM": 2.0}))
-    assert "### Time —" not in out
+    assert "| `seconds` |" not in out
+    assert "| `compute CU per second` |" not in out, "no ROW; the note may still explain the column"
     assert out.count("<!--chart:") == 2, "no seconds, no ETL-time chart"
 
 
@@ -719,11 +740,11 @@ def test_the_rate_is_compute_over_compute_never_total_over_total():
     led["seconds"] = _secs({"NB": {"Jupyter Notebook Scheduled Run": 645.79},
                             "OUT": {"OneLake Write via Redirect": 0.031},
                             "SEM": {"XMLA Read Operation": 25.93}})
-    body = _render(runs, led).split("### Time —")[1].split("###")[0]
+    body = _render(runs, led).split("Every engine's latest run")[1].split("###")[0]
     rate = [ln for ln in body.splitlines() if ln.startswith("| `compute CU per second`")]
     assert rate[0] == "| `compute CU per second` | 32.0 |", "the node's own draw, not a blend"
     # And the SECONDS row still counts storage — it is the rate alone that must not.
-    assert "| **etl** | **645.8** |" in body
+    assert "| `seconds` | 645.8 |" in body
 
 
 def test_the_rate_scales_with_the_cores_the_column_was_given():
@@ -758,10 +779,10 @@ def test_the_rate_is_computed_per_class():
     led["seconds"] = _secs({"OUT": {"High Concurrency Session Livy Run": 30.0},
                             "SEM": {"XMLA Read Operation": 4.0}})
     out = _render(runs, led)
-    body = out.split("### Time —")[1].split("###")[0]
-    assert "| **etl** | **30.0** |" in body
+    body = out.split("Every engine's latest run")[1].split("###")[0]
+    assert "| **etl** | **900.0** |" in body and "| `seconds` | 30.0 |" in body
     assert "| `compute CU per second` | 30.0 |" in body, "900 CU over 30 s"
-    assert "| **analytics** | **4.0** |" in body
+    assert "| **analytics** | **40.0** |" in body and "| `seconds` | 4.0 |" in body
     assert "| `compute CU per second` | 10.0 |" in body, "40 CU over 4 s"
     assert out.count("<!--chart:") == 2, "the two CU charts and no third — seconds stay a table"
 

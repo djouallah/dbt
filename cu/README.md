@@ -192,8 +192,11 @@ because that artifact has to open off a local disk years later.
   its own; the same number repeated under every column read as "each of them spent this". The
   archive's SIZE is still reported, because input volume is a different question from what ingesting
   it cost.
-- **Input archive**: files and bytes in the landing archive, from `stats.py`'s listing. Every other
-  number on the page describes what came OUT.
+- **Input archive, LAST on the page**: files and bytes in the landing archive, from `stats.py`'s
+  listing. Every other number describes what came OUT, and this is the one copy of what went in —
+  shared by every engine, so it belongs with the provenance rather than among the columns it is not
+  one of. It used to sit between the engine table and the layout, where a table with no engine in it
+  read as a column that had gone missing.
 - **Table layout**, every shared table, mart first, **one row per WRITER, and no `writer` column** —
   the row label IS the writer, so a `duckdb (iceberg)` cell beside a `duckdb iceberg` label was one
   fact printed twice. `spark V-Order`,
@@ -248,8 +251,11 @@ because that artifact has to open off a local disk years later.
   Deliberately **reimplemented rather than imported** — `render_report._totals`/`rank` take exactly
   this shape, and `cu/` importing `benchmark/` would end the isolation that makes this directory
   deletable by removing one folder and one workflow file.
-- **Time — how long the work took, and how hard it drew.** The same GUID→role→bucket join as the CU
-  table, read off the ledger's `seconds` dict, with a `compute CU per second` row under each class.
+- **Seconds and the rate are ROWS OF THE ENGINE TABLE, not a section.** They come off the SAME
+  Capacity Metrics row as the CU above them — same GUIDs, same roles, same compute/storage split — so
+  a table of their own restated the whole join to add two numbers per class, and split "what it cost"
+  from "how long it took" across two tables the reader had to hold at once. Under each class subtotal
+  instead.
   **Seconds here are BILLED OPERATION seconds, not wall clock**, and the difference is not small on
   every engine: a duckrun leg is one long notebook run so the two nearly agree, while spark opens
   five concurrent Livy REPLs under one session whose durations sum to more than the clock ever
@@ -264,10 +270,11 @@ because that artifact has to open off a local disk years later.
   notebook that is **`cores` ÷ 2**, fixed for a given core count and not a constant: 32.0 at the 64
   vCores dispatched by default, 16.0 at 32. The check when this reads oddly is two DuckDB legs at the
   **same** `cores` reading the **same** number, never that they read 32; `vcores` is part of
-  `variant()`, so two core counts are two columns and the caption names each. The section renders
-  **nothing** when the ledger has no seconds, which is the correct output both for a ledger written
-  before the duration read and for a model that does not expose the column: an absent section says
-  "not measured", a table of zeros would say "instant".
+  `variant()`, so two core counts are two columns and the caption names each. The rows are **absent**
+  when the ledger has no seconds — a ledger written before the duration read, or a model that does
+  not expose the column — because absent says "not measured" and a zero would say "instant". Same
+  rule on a class subtotal: a column the ledger has not read yet is a **dash**, never `0.0`, which
+  would say the engine did that work for free.
 - **A record has to be built and benchmarked to reach the page.** `dashboard.py`'s `incomplete()`
   skips anything else and names why — a run with no benchmark shows an empty analytics column, which
   reads as "querying this engine was free" rather than "nobody measured it".

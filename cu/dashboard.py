@@ -641,7 +641,7 @@ def chart_rows(cols, spread, latest, captions):
     return out
 
 
-def engine_table(per_col, cols):
+def engine_table(per_col, cols, secs_col=None):
     """Engines across, ITEMS down, grouped by class — the shape the whole repo reads in.
 
     ENGINE-MAJOR, and that orientation is what makes the width work: item-major (one column per
@@ -651,6 +651,13 @@ def engine_table(per_col, cols):
     **No total column and no grand-total row.** Both would sum ACROSS engines, which is the one sum
     on this page that answers nothing — the engines are alternatives to each other. The class
     subtotals stay: they sum DOWN a column, which is "what this engine spent building".
+
+    **Seconds and the rate are ROWS HERE, not a section of their own.** They come from the same
+    Capacity Metrics row as the CU above them — same GUIDs, same roles, same compute/storage split,
+    read from the ledger's `seconds` dict — so a separate table restated the whole join to add two
+    numbers per class, and put "what it cost" and "how long it took" on two tables the reader had to
+    hold in their head at once. Under each class subtotal instead, where the seconds sit against the
+    CU they produced.
     """
     names = [c for c, _e, _r in cols]
     labels = {}
@@ -673,8 +680,13 @@ def engine_table(per_col, cols):
     for cls in ("etl", "analytics"):
         if not any((per_col.get(c) or {}).get(cls) for c in names):
             continue
+        # An em dash when the ledger has nothing for this column yet — a run committed minutes ago
+        # whose CU has not been read. `**0.0**` there says the engine did this work for free, which
+        # is the one reading the whole page is built to prevent, and it is the same distinction the
+        # item rows below already make.
         print(f"| **{cls}** | "
-              + " | ".join(f"**{class_total(per_col.get(c) or {}, cls):,.1f}**" for c in names)
+              + " | ".join("—" if not (per_col.get(c) or {}).get(cls)
+                           else f"**{class_total(per_col[c], cls):,.1f}**" for c in names)
               + " |")
         for label in labels[cls]:
             row = []
@@ -684,6 +696,22 @@ def engine_table(per_col, cols):
                 # different statement from one that cost nothing.
                 row.append("—" if v is None else f"{v:,.1f}")
             print(f"| `{label}` | " + " | ".join(row) + " |")
+        if not (secs_col and any((secs_col.get(c) or {}).get(cls) for c in names)):
+            continue
+        print("| `seconds` | "
+              + " | ".join("—" if not (secs_col.get(c) or {}).get(cls)
+                           else f"{class_total(secs_col[c], cls):,.1f}" for c in names) + " |")
+        # COMPUTE over COMPUTE. A storage operation bills real CU against a duration of essentially
+        # nothing — 383.25 CU in 0.049 s, measured — so including it does not dilute the rate, it
+        # detonates it, by an amount that tracks how much OneLake traffic the engine made rather than
+        # anything about the engine. That is what made two runs of the same DuckDB on the same
+        # notebook read 31.2 and 36.1.
+        rates = []
+        for c in names:
+            secs = ((secs_col.get(c) or {}).get(cls) or {}).get("compute")
+            cu = ((per_col.get(c) or {}).get(cls) or {}).get("compute")
+            rates.append("—" if not secs or not cu else f"{cu / secs:,.1f}")
+        print("| `compute CU per second` | " + " | ".join(rates) + " |")
     print("\n<sub>`etl` against `analytics` comes from each item's recorded ROLE — a semantic model "
           "is only ever queried, everything else is work done to build the tables. `compute` against "
           "`storage` comes from the OPERATION, which is the only thing that can separate them: they "
@@ -691,7 +719,20 @@ def engine_table(per_col, cols):
           "lakehouse; a warehouse bills `Warehouse Query` and its OneLake writes against the same "
           "warehouse. Every `OneLake …` operation is storage; everything else — Livy runs, warehouse "
           "queries, notebook runs, SQL-endpoint queries — is compute. A dash means no operation of "
-          "that kind was billed there at all.</sub>")
+          "that kind was billed there at all — or, on a class subtotal, that the ledger has not read "
+          "that column yet; never that the work was free.\n"
+          "`seconds` comes from `Duration (s)` in the same Capacity Metrics row as the CU above it, "
+          "so it costs no extra query — but it is **billed operation seconds, not wall clock**: a "
+          "duckrun leg is one long notebook run so the two nearly agree, while spark's five "
+          "concurrent Livy REPLs bill against one session and sum to more than the clock ever "
+          "showed. **`compute CU per second` is the sturdiest number here** — the average capacity "
+          "the node drew while it ran, with that concurrency in the numerator and the denominator "
+          "alike, so it cancels. It is COMPUTE against COMPUTE, and that is not a refinement: a "
+          "storage operation bills real CU over a duration of essentially nothing (383.25 CU in "
+          "0.049 s), so a total-over-total rate drifts upward with however much OneLake traffic an "
+          "engine happened to make. It also SCALES with the compute the column was given — a "
+          "single-node Python notebook draws `vCores ÷ 2`, 32 at 64 vCores and 16 at 32 — so compare "
+          "it across columns only at equal size.</sub>")
 
 
 def render_sources(cols, ledger, unmeasured):
@@ -969,95 +1010,6 @@ def query_time(cols):
     return out, counts
 
 
-# ------------------------------------------------------------------------------------- build time
-
-def render_time(cols, runs, ledger):
-    """What the work TOOK, beside what it cost — and how hard it drew while it ran.
-
-    Free: `measure.py` reads `Duration (s)` from the same Capacity Metrics row as `CU (s)`, in the
-    same query. So this is the same join as the CU table — item GUID, role, compute/storage — read
-    off the ledger's `seconds` dict instead of `items`.
-
-    **Seconds here are BILLED OPERATION seconds, not wall clock**, and the difference is not small on
-    every engine. A duckrun leg is one long notebook run, so the two nearly agree; spark opens five
-    concurrent Livy REPLs under one session and their durations sum to more than the clock ever
-    showed. That is why CU stays the page's lead measure and this is second.
-
-    **The rate is COMPUTE ONLY, and that is not a refinement — a total-over-total rate is wrong.**
-    A storage operation bills real CU against a duration that is essentially zero: measured on the
-    live model, one `OneLake Write via Redirect` is 383.25 CU over **0.049 s**, a rate of ~7,800.
-    Fold a handful of those into the numerator and the denominator of a whole class and the result is
-    neither the node's draw nor anything else — it just drifts upward with however much OneLake
-    traffic the engine happened to make. It read 36.1 for iceberg against 31.2 for duckrun, which are
-    the SAME DuckDB in the SAME notebook at the SAME vCores and cannot differ: the gap was entirely
-    iceberg's heavier OneLake share. Compute-only, both land where a single node has to land — which
-    is `cores` ÷ 2, NOT a constant. `cores` is a dispatch input; 64 gives 32.0 and 32 gives 16.0. So
-    the invariant is that two DuckDB legs at the same `cores` agree, never that they read 32.
-
-    So `compute CU ÷ compute seconds` is the average capacity the node drew while it ran, and it is
-    the sturdiest number in this section: the concurrency that makes spark's billed seconds exceed
-    its wall clock is in the numerator and the denominator alike, so it cancels. A high rate is a
-    WIDE engine, not a slow one; read it beside the seconds, not instead of them.
-
-    Renders NOTHING when the ledger has no seconds. That is the correct output for a ledger written
-    before the duration read, or one whose model does not expose the column: an absent section says
-    "not measured", a table of zeros would say "instant".
-    """
-    if not (ledger.get("seconds") or {}):
-        return
-    per_col = {}
-    for col, _e, rec in cols:
-        cells, _missing = run_cu(rec, ledger, "seconds")
-        if any(cells.values()):
-            per_col[col] = cells
-    if not per_col:
-        return
-    names = [c for c, _e, _r in cols if c in per_col]
-    cu_col = {col: run_cu(rec, ledger)[0] for col, _e, rec in cols}
-
-    # NO CHART HERE, deliberately. This section is a table and stays one. The page has two bars
-    # already and both are capacity units — the measure it leads with and can defend. A third bar in
-    # the same visual language, drawn from billed operation seconds that sum across concurrent
-    # operations and are not wall clock, invites exactly the reading the paragraph under it spends
-    # four sentences withdrawing. Numbers that need a caveat belong in a table where the caveat sits
-    # beside them.
-    print("\n### Time — how long the work took, and how hard it drew\n")
-    print("| seconds | " + " | ".join(names) + " |")
-    print("|:--|" + "---:|" * len(names))
-    for cls in ("etl", "analytics"):
-        if not any(per_col[c].get(cls) for c in names):
-            continue
-        print(f"| **{cls}** | "
-              + " | ".join(f"**{class_total(per_col[c], cls):,.1f}**" for c in names) + " |")
-        # COMPUTE against COMPUTE. A storage operation bills real CU over a near-zero duration —
-        # 383.25 CU in 0.049 s, measured — so including it does not dilute the rate, it detonates it,
-        # and by an amount that tracks how much OneLake traffic the engine made rather than anything
-        # about the engine. See the docstring: this is what made two runs of the same DuckDB on the
-        # same notebook read 31.2 and 36.1.
-        rates = []
-        for c in names:
-            secs = (per_col[c].get(cls) or {}).get("compute")
-            cu = ((cu_col.get(c) or {}).get(cls) or {}).get("compute")
-            rates.append("—" if not secs or not cu else f"{cu / secs:,.1f}")
-        print("| `compute CU per second` | " + " | ".join(rates) + " |")
-    print("\n<sub>Read from `Duration (s)` in the same Capacity Metrics row as the CU above, in the "
-          "same query — it costs no extra request and no capacity. These are **billed operation "
-          "seconds, not wall clock**: a duckrun leg is one long notebook run so the two nearly "
-          "agree, while spark's five concurrent Livy REPLs bill against one session and sum to more "
-          "than the clock ever showed. **`compute CU per second` is the sturdiest number here** — the "
-          "average capacity the node drew while it ran, with the concurrency that inflates spark's "
-          "seconds appearing in the numerator and the denominator alike, so it cancels. It is "
-          "**compute against compute**, and that is not a refinement: a storage operation bills real "
-          "CU over a duration of essentially nothing — one `OneLake Write via Redirect` is 383.25 CU "
-          "in 0.049 s — so a total-over-total rate drifts upward with however much OneLake traffic "
-          "an engine happened to make. It read 36.1 for iceberg against 31.2 for duckrun, which are "
-          "the same DuckDB in the same notebook at the same vCores and cannot differ. **It SCALES "
-          "with the compute the column was given**, so compare it across columns only at equal size: "
-          "a single-node Python notebook draws `vCores ÷ 2`, which is 32 at 64 vCores and 16 at 32, "
-          "and each chart caption names the size it ran at. A high rate is a WIDE engine, not a slow "
-          "one; the seconds beside it say whether that width finished sooner.</sub>")
-
-
 def render(cols, runs, ledger):
     """The whole page, on stdout, as the markdown subset `report_html.py` renders."""
     per_col, analytics, unmeasured = {}, {}, {}
@@ -1111,14 +1063,17 @@ def render(cols, runs, ledger):
                 for c, v in ((c, ana_spread.get(c) or []) for c, _e, _r in cols)}
 
     print("\nEvery engine's latest run, summed:\n")
-    engine_table(per_col, cols)
-    render_input(cols)
+    # Seconds and the rate are ROWS of this table, not a section further down. They come off the same
+    # Capacity Metrics row as the CU — same GUIDs, same roles, same compute/storage split — so a
+    # table of their own restated the entire join to add two numbers per class, and split "what it
+    # cost" from "how long it took" across two tables the reader had to hold at once.
+    secs_col = {col: run_cu(rec, ledger, "seconds")[0] for col, _e, rec in cols}
+    engine_table(per_col, cols, secs_col)
     # The query times go INTO the mart block rather than into a section of their own. A separate
     # table put the layout and the speed it produced on two different tables, and the whole question
     # is whether one explains the other — files, row groups, size and V-Order beside cold, warm and
     # hot, on one row per engine, is the comparison. Nothing else on the page can be read that way.
     render_layouts(cols, ana_mean, query_time(cols))
-    render_time(cols, runs, ledger)
 
     n = len({base_engine(c) for c, _e, _r in cols})
     print("\n### About these numbers\n")
@@ -1143,6 +1098,11 @@ def render(cols, runs, ledger):
           "that builds cheaply and queries expensively has optimised the half that does not hurt.\n")
 
     render_sources(cols, ledger, unmeasured)
+    # LAST. Every other number on the page is about what came OUT; this is the one copy of what went
+    # in, shared by every engine, so it belongs with the provenance rather than among the columns it
+    # is not one of. It sat between the engine table and the layout, where a table with no engine in
+    # it read as a column that had gone missing.
+    render_input(cols)
 
     reads = len(ledger.get("reads") or [])
     print("\n" + " · ".join([f"[source]({SERVER}/{REPO})",

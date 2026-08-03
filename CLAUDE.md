@@ -1135,7 +1135,7 @@ capacity for the GUIDs in those records, tops up `history/cu.json`, and publishe
   parity statement the project rests on — so repeating 143,980,961 down a table is a wide column
   carrying one fact. When the engines disagree the heading says so and the column returns, because
   that is the loudest signal this page has.
-- **THE TIME SECTION IS A TABLE AND GETS NO CHART. Do not add one back.** The page carries two bars
+- **THE SECONDS GET NO CHART. Do not add one back.** The page carries two bars
   and both are capacity units — the measure it leads with and can defend. A third in the same visual
   language, drawn from billed operation seconds that SUM across concurrent operations and are not
   wall clock, invites exactly the reading the note beneath it spends four sentences withdrawing. A
@@ -1161,8 +1161,10 @@ capacity for the GUIDs in those records, tops up `history/cu.json`, and publishe
   `render_report._totals`/`rank` take exactly this shape, and `cu/` importing `benchmark/` would end
   the isolation that makes this directory deletable by removing one folder and one workflow file.
   Mart-block-only, for the same reason the CU column is: one number per ENGINE, not per table.
-  *Time — how long the work took* is the same GUID→role→bucket join as the CU table read off the
-  ledger's `seconds`, with a `compute CU per second` row under each class. **Those seconds are BILLED
+  *Seconds* and *`compute CU per second`* are **ROWS OF THE ENGINE TABLE, not a section** — they
+  come off the SAME Capacity Metrics row as the CU above them, so a table of their own restated the
+  whole GUID→role→bucket join to add two numbers per class. A class the ledger has not read yet is a
+  DASH, never `0.0`: a zero there says the engine did that work for free. **Those seconds are BILLED
   OPERATION seconds, not wall clock**: a duckrun leg is one long notebook run so the two nearly
   agree, while spark's five concurrent Livy REPLs sum to more than the clock ever showed. **The RATE
   is the sturdiest number in the section** — the concurrency is in the numerator and the denominator
