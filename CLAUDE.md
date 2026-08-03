@@ -1251,8 +1251,10 @@ no data at all. `all.yml`, `dbt.yml` and `cu.yml` are gone.
   case and needed no measuring to admit — it is *nothing but* a physical ordering of the rows, so it
   reaches the parquet by definition. Its caption comes from `CONFIG_LABEL`, keyed `<key>=<value>`
   rather than by value: `PROFILE_LABEL` can be value-keyed because a profile NAME says which knob it
-  is, and a bare `true` does not. The label spells the key out (`sorted by date, time, DUID`) —
-  "sorted" alone leaves a reader asking by what. `PROFILE_LABEL` names a profile
+  is, and a bare `true` does not. The label is just **`sorted`**, not the column list — there is one
+  sort in this project and its columns are in the model, so `duckrun sorted by date, time, DUID`
+  spent a wide caption on a detail beside `spark V-Order`, which does not spell out what V-Order does
+  either. `PROFILE_LABEL` names a profile
   by its EFFECT (`readHeavyForPBI` → `V-Order`, `writeHeavy` → `default`) because that is the only
   thing a reader of this page wants from it; an unmapped profile keeps its own name rather than being
   guessed at — `readHeavyForSpark` reads like it enables V-Order and sets no vorder at all.

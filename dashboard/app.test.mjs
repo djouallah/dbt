@@ -353,11 +353,10 @@ test("a sorted write gets its own column, and absence reads as unsorted", () => 
   assert.ok(cols.some((c) => c.endsWith("sorted")), cols);
 });
 
-test("the layout caption spells the sort key out", () => {
-  // "sorted" alone leaves the reader asking "by what?", and the caption's whole job is to say what
-  // was written.
-  assert.equal(d.producer(lay("duckrun", 4, 25, { cfg: { sorted: "true" } })),
-    "duckrun sorted by date, time, DUID");
+test("the layout caption names the sort without listing its columns", () => {
+  // `duckrun sorted`, beside `spark V-Order` — which does not spell out what V-Order does either.
+  // There is one sort in this project and its columns are in the model.
+  assert.equal(d.producer(lay("duckrun", 4, 25, { cfg: { sorted: "true" } })), "duckrun sorted");
   assert.equal(d.producer(lay("duckrun", 4, 27, { cfg: { vcores: "64" } })), "duckrun",
     "vcores still never reaches a caption about parquet");
 });
