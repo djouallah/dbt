@@ -783,11 +783,20 @@ export function chartSvg(title, subtitle, rowsIn) {
     })
     .sort((a, b) => (a.avg === 0) - (b.avg === 0) || a.avg - b.avg);
   if (!rows.length || !rows.some((r) => r.avg)) return "";
+  for (const r of rows) {
+    r.ranged = r.hi - r.lo > 0.05;
+    r.value = fmt(r.avg, 1) + (r.ranged ? `  (${fmt(r.lo, 0)}–${fmt(r.hi, 0)})` : "");
+  }
   const subs = rows.some((r) => r.sub);
   const band = subs ? SUB_BAND : BAND;
   const labelW = subs ? SUB_LABEL_W : LABEL_W;
   const top = Math.max(...rows.map((r) => r.hi)) || 1;
-  const plot = WIDTH - labelW - VALUE_W;
+  // The value gutter is sized to the longest value actually printed, so the text ends inside the
+  // viewBox. It used to be fixed and rely on `overflow:visible` spilling into empty page — which
+  // stopped existing the moment a second chart sat to the right.
+  const valueW = Math.max(VALUE_W,
+    Math.ceil(Math.max(...rows.map((r) => r.value.length)) * 6.8) + 14);
+  const plot = WIDTH - labelW - valueW;
   const height = PAD_T + rows.length * band + 6;
   const out = [
     `<figure class="chart"><figcaption><span class="chart-title">${esc(title)}</span>` +
@@ -809,19 +818,17 @@ export function chartSvg(title, subtitle, rowsIn) {
         `<line class="whisker-cap" x1="${wlo.toFixed(1)}" y1="${mid - 5}" x2="${wlo.toFixed(1)}" y2="${mid + 5}"/>` +
         `<line class="whisker-cap" x1="${whi.toFixed(1)}" y1="${mid - 5}" x2="${whi.toFixed(1)}" y2="${mid + 5}"/>`
       : "";
-    const ranged = r.hi - r.lo > 0.05;
-    const value = fmt(r.avg, 1) + (ranged ? `  (${fmt(r.lo, 0)}–${fmt(r.hi, 0)})` : "");
     out.push(
       `<g transform="translate(0,${y})">` +
       `<title>${esc(r.label)}${r.sub ? ` (${esc(r.sub)})` : ""}: mean ${fmt(r.avg, 1)} CU` +
-      `${ranged ? `, range ${fmt(r.lo, 1)}–${fmt(r.hi, 1)}` : ""}</title>` +
+      `${r.ranged ? `, range ${fmt(r.lo, 1)}–${fmt(r.hi, 1)}` : ""}</title>` +
       `<text class="bar-label" x="${labelW - 10}" y="${ly.toFixed(0)}" text-anchor="end">` +
       `${esc(r.label)}</text>` +
       (r.sub ? `<text class="bar-caption" x="${labelW - 10}" y="${(ly + 13).toFixed(0)}" ` +
         `text-anchor="end">${esc(r.sub)}</text>` : "") +
       `<g transform="translate(${labelW},0)"><path class="bar" d="${barPath(w, BAR_H)}"/>${spread}</g>` +
       `<text class="bar-value" x="${(labelW + Math.max(w, whi) + 8).toFixed(1)}" ` +
-      `y="${(BAR_H / 2 + 4).toFixed(0)}">${value}</text></g>`);
+      `y="${(BAR_H / 2 + 4).toFixed(0)}">${r.value}</text></g>`);
   });
   out.push(`<line class="axis" x1="${labelW}" y1="${PAD_T - 6}" x2="${labelW}" ` +
     `y2="${PAD_T + rows.length * band - band + BAR_H + 4}"/>`);
@@ -1448,15 +1455,20 @@ export function renderPage(cols, runs, ledger, opts = {}) {
 
   // ONE BAR PER LAYOUT, not per engine — Power BI never sees the engine. It opens parquet through
   // Direct Lake and transcodes row groups, so what a query costs belongs to what was written and the
-  // writer is metadata; the caption carries it. The ETL chart below is the exact opposite and stays per
+  // writer is metadata; the caption carries it. The ETL chart is the exact opposite and stays per
   // column, because there the writer and the compute it was given ARE the subject.
-  out.push(chartSvg("Analytics — what querying each LAYOUT cost",
+  //
+  // SIDE BY SIDE, analytics on the left — the two halves of one question, and the first screen
+  // should carry both. The wrapper is a flex row that wraps, so a narrow window stacks them back;
+  // each figure shrinks below the prose measure and the SVG scales with it.
+  const chartA = chartSvg("Analytics — what querying each LAYOUT cost",
     `capacity units, lower is better — INTERACTIVE CU, and Power BI sees only the parquet${over}`,
-    groupRows(cols, anaSpread, analytics, martTable)));
-  out.push(chartSvg("ETL — what building them cost",
+    groupRows(cols, anaSpread, analytics, martTable));
+  const chartB = chartSvg("ETL — what building them cost",
     `capacity units, lower is better — background CU, smoothed over 24h${over}`,
     chartRows(cols, spreadFor(runs, ledger, "etl", keyOf),
-      Object.fromEntries(cols.map(({ col }) => [col, classTotal(perCol[col], "etl")])), captions)));
+      Object.fromEntries(cols.map(({ col }) => [col, classTotal(perCol[col], "etl")])), captions));
+  out.push(chartA || chartB ? `<div class="charts">\n${chartA}\n${chartB}\n</div>` : "");
 
   // The layout table quotes the SAME number as the chart above it: the mean over every run of a
   // column, not that column's latest. They are one measurement described twice, and a page that

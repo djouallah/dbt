@@ -46,8 +46,12 @@ body { margin:0; padding:2.25rem 1.25rem 4rem; background:var(--bg); color:var(-
 main { max-width: 110rem; margin: 0 auto; }
 h2, h3, h4, p, footer { max-width: 62rem; }
 /* The charts are DRAWN at a 660-unit viewBox and scale to their box, so letting them fill a wide
-   `main` would inflate every label and value ~2.7x. They keep the prose measure. */
+   `main` would inflate every label and value ~2.7x. They keep the prose measure — and inside the
+   side-by-side row they share it: two columns that wrap back to a stack when the window is narrow.
+   `min-width:0` is what lets a flex child actually shrink below its content size. */
 figure.chart { max-width: 62rem; }
+.charts { display:flex; flex-wrap:wrap; align-items:flex-start; gap:.5rem 3rem; }
+.charts figure.chart { flex:1 1 34rem; min-width:0; max-width:53rem; }
 h2 { font-size:1.65rem; line-height:1.2; margin:0 0 1.5rem; letter-spacing:-0.015em; }
 /* The dateline rides inside the h2 so the title stays one element, but it reads as a sub-line. */
 h2 .asof { display:block; font-size:.82rem; font-weight:400; color:var(--dim);

@@ -1334,6 +1334,14 @@ test("the layout blocks sit behind a tab strip when more than one table renders"
   assert.ok(plain(out).includes("9 rows on every engine"));
 });
 
+test("the two charts share one side-by-side row, analytics first", () => {
+  const out = render([full("a-1.json", "spark")], ledger({ OUT: 1.0, SEM: 2.0 }));
+  const row = out.match(/<div class="charts">([\s\S]*?)<\/div>/);
+  assert.ok(row, "the charts are wrapped in one row");
+  assert.equal((row[1].match(/<figure class="chart">/g) || []).length, 2, "both figures inside it");
+  assert.ok(row[1].indexOf("Analytics") < row[1].indexOf("ETL"), "analytics keeps the lead");
+});
+
 test("a single table renders without a tab strip", () => {
   const out = render([full("a-1.json", "spark")], ledger({ OUT: 1.0, SEM: 2.0 }));
   assert.ok(!out.includes('class="tabs"'));
