@@ -1089,19 +1089,26 @@ capacity for the GUIDs in those records, tops up `history/cu.json`, and publishe
   second read returns bigger numbers and `max()` takes them. "May still rise" on the page is DERIVED
   from `run.finished` being under two hours old — a property of the clock, not a flag written into a
   file that then has to be kept in step.
-- **THE PAGE CARRIES TWO NON-CU SECTIONS NOW, and each states where its own number bends.**
-  *Query time — cold, warm, hot* comes from the RUN RECORDS, not the ledger: every record already
-  holds `benchmark.timings.<model>.<query>`, and `benchmark/render_report.py` renders it per
-  dispatch — but a dispatch builds ONE engine, so that report always has a single column and its
-  ranking is degenerate. The composed page is the only place the three tiers can be read ACROSS
-  engines. Three things there are easy to get wrong. **cold/warm/hot are PASS POSITIONS**, not the
-  record's own `tier` field, which is the query CATEGORY (`probe`/`composite`/`raw`/`hot_only`) and
-  names four different things. **Each tier is summed over the queries every column carries AT THAT
-  TIER**, and the sets genuinely differ — the selectivity-ladder queries have no `cold_ms` at all,
-  the top DUID being resolved after pass 1 — so cold is two queries short and the row prints its
-  count rather than leaving a small total to be misread. And it is **reimplemented, never imported**:
+- **THE PAGE CARRIES TWO NON-CU MEASURES NOW, and each states where its own number bends.**
+  *cold / warm / hot* are **THREE COLUMNS OF THE MART BLOCK, never a section of their own.** They
+  come from the RUN RECORDS, not the ledger: every record already holds
+  `benchmark.timings.<model>.<query>`, and `benchmark/render_report.py` renders it per dispatch — but
+  a dispatch builds ONE engine, so that report always has a single column and its ranking is
+  degenerate. The composed page is the only place the three tiers can be read ACROSS engines.
+  **The placement is the point and it was got wrong once.** A table of their own put the layout and
+  the speed it produced on two different tables, when whether one explains the other is the only
+  question worth asking of these numbers. On one row, `files`/`row groups`/`size MB`/`vorder` sit
+  beside the milliseconds they produced: iceberg's 357 files and 122k-row row groups next to 103,328
+  ms cold, against duckrun's 4 files and 23,491 ms. Do not move them back out.
+  Three more things easy to get wrong. **cold/warm/hot are PASS POSITIONS**, not the record's own
+  `tier` field, which is the query CATEGORY (`probe`/`composite`/`raw`/`hot_only`) and names four
+  different things. **Each tier is summed over the queries every column carries AT THAT TIER**, and
+  the sets genuinely differ — the selectivity-ladder queries have no `cold_ms` at all, the top DUID
+  being resolved after pass 1 — so cold is two queries short and the closing note counts each tier
+  rather than leaving a small total to be misread. And it is **reimplemented, never imported**:
   `render_report._totals`/`rank` take exactly this shape, and `cu/` importing `benchmark/` would end
   the isolation that makes this directory deletable by removing one folder and one workflow file.
+  Mart-block-only, for the same reason the CU column is: one number per ENGINE, not per table.
   *Time — how long the work took* is the same GUID→role→bucket join as the CU table read off the
   ledger's `seconds`, with a `compute CU per second` row under each class. **Those seconds are BILLED
   OPERATION seconds, not wall clock**: a duckrun leg is one long notebook run so the two nearly
@@ -1118,9 +1125,9 @@ capacity for the GUIDs in those records, tops up `history/cu.json`, and publishe
   So the check when this reads oddly is **two DuckDB legs at the SAME `cores` reading the SAME
   number** — never that they read 32. (The page cannot blend two core counts into one column anyway:
   `vcores` is part of `variant()`, so a 32-core duckrun and a 64-core one are separate columns, and
-  `engine_caption` prints the count on the chart.) Both sections
-  render **nothing** when their
-  input is absent (a record with no tier timings, a ledger with no `seconds`), which is the correct
+  `engine_caption` prints the count on the chart.) Both render **nothing** when their
+  input is absent — a record with no tier timings adds no columns, a ledger with no `seconds` has no
+  time section — which is the correct
   output: an absent section says "not measured", a table of zeros would say "free" or "instant".
   This is also why `### About these numbers` no longer says "seconds would need the caveat; CU is the
   bill" — it now has to say what the caveat IS, since the page prints seconds and milliseconds too.

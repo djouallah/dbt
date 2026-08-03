@@ -225,15 +225,16 @@ def _full(file, engine, timings=None, **kw):
     """A record that IS a whole generation: torn down, built, benchmarked.
 
     The DEFAULT `timings` carries no tier keys at all — only `ms_by_pass`, which is what
-    `incomplete()` checks for and nothing the query-time table can read. That is deliberate: it
-    keeps every pre-existing test exercising the "a section whose input is absent renders nothing"
-    path, and `timings=` is how the query-time tests opt in.
+    `incomplete()` checks for and nothing a tier column can read. That is deliberate: it keeps every
+    pre-existing test exercising the "no timings, no columns" path, and `timings=` is how the
+    query-time tests opt in.
     """
     r = rec(file, engine, {"OUT": {"role": "output", "name": f"dbt_{engine}", "deleted": ago(1)},
                            "SEM": {"role": "semantic_model", "name": f"aemo_{engine}",
                                    "deleted": ago(1)},
                            "L": {"role": "landing", "name": "dbt_landing"}},
-            stats={engine: {"fct_summary": {"total_rows": 1}}}, tables=["fct_summary"], **kw)
+            **{"stats": {engine: {"fct_summary": {"total_rows": 1}}},
+               "tables": ["fct_summary"], **kw})
     r["benchmark"] = {"timings": {f"aemo_{engine}": timings or {"q": {"ms_by_pass": [1]}}}}
     return r
 
@@ -438,7 +439,7 @@ def test_the_chart_sorts_by_the_mean():
     assert [r[0] for r in spec["rows"]] == ["dwh", "spark"], "cheapest mean first"
 
 
-# ------------------------------------------------------------------------------------ query time
+# ---------------------------------------------------------------- query time, in the mart block
 
 def test_a_tier_is_summed_over_the_queries_every_column_has():
     """A total over different queries is not a comparison. A query one engine never ran is dropped
@@ -451,46 +452,53 @@ def test_a_tier_is_summed_over_the_queries_every_column_has():
     assert totals == {"duckrun": 10.0, "dwh": 20.0}
 
 
-def test_cold_covers_fewer_queries_than_hot_and_the_row_says_so():
+def test_the_three_tiers_are_columns_of_the_mart_block_not_a_section():
+    """They were briefly a table of their own, which put the layout and the speed it produced on two
+    different tables — and whether one explains the other is the only question worth asking of these
+    numbers. On one row, `files`/`row groups`/`size MB`/`vorder` sit beside the ms they produced."""
+    t = _timings(a=(10, 5, 4), b=(20, 6, 5))
+    runs = [_full("a-1.json", "duckrun", timings=t,
+                  stats={"duckrun": {"fct_summary": {"total_rows": 1, "num_files": 4}}}),
+            _full("b-2.json", "dwh", timings=t,
+                  stats={"dwh": {"fct_summary": {"total_rows": 1, "num_files": 78}}})]
+    out = _render(runs, ledger({"OUT": 1.0, "SEM": 2.0}))
+    assert "### Query time" not in out, "no section of its own"
+    block = out.split("#### `fct_summary`")[1].split("####")[0]
+    assert "| engine | writer | CU | cold ms | warm ms | hot ms | rows | files |" in block
+    row = next(ln for ln in block.splitlines() if ln.startswith("| duckrun |"))
+    assert "| 30 | 11 | 9 |" in row, "cold/warm/hot beside the layout that produced them"
+    assert row.rstrip().endswith("| 4 | — | — | — | no |"), "and the file count on the same row"
+
+
+def test_the_tiers_appear_on_the_mart_block_alone():
+    """One number per ENGINE, not per table — on every block it would read as one measurement per
+    table, which is the same reason the CU column is mart-only."""
+    t = _timings(a=(10, 5, 4))
+    runs = [_full("a-1.json", "duckrun", timings=t,
+                  stats={"duckrun": {"fct_summary": {"total_rows": 1},
+                                     "fct_scada": {"total_rows": 9, "schema": "landing"}}},
+                  tables=["fct_summary", "fct_scada"])]
+    out = _render(runs, ledger({"OUT": 1.0, "SEM": 2.0}))
+    assert "cold ms" in out.split("#### `fct_summary`")[1].split("####")[0]
+    assert "cold ms" not in out.split("fct_scada`")[1]
+
+
+def test_cold_covers_fewer_queries_than_hot_and_the_note_says_so():
     """The selectivity-ladder queries have NO cold sample — the top DUID is resolved after pass 1 —
-    so cold is genuinely summed over a smaller set. Printing the count is what stops that reading as
-    a suspiciously small total."""
+    so cold is genuinely summed over a smaller set, and the note counts each tier rather than leaving
+    a suspiciously small total to be explained."""
     t = _timings(probe=(10, 5, 4), sel_1duid=(None, 7, 6))
     runs = [_full("a-1.json", "duckrun", timings=t), _full("b-2.json", "dwh", timings=t)]
     out = _render(runs, ledger({"OUT": 1.0, "SEM": 2.0}))
-    assert "| **cold** — 1 queries |" in out
-    assert "| **hot** — 2 queries |" in out
+    assert "cold over 1, warm over 2, hot over 2" in out
 
 
-def test_the_fastest_cell_in_each_tier_is_bold():
-    runs = [_full("a-1.json", "duckrun", timings=_timings(a=(10, 5, 4))),
-            _full("b-2.json", "dwh", timings=_timings(a=(20, 3, 9)))]
-    out = _render(runs, ledger({"OUT": 1.0, "SEM": 2.0}))
-    cold = next(ln for ln in out.splitlines() if ln.startswith("| **cold**"))
-    warm = next(ln for ln in out.splitlines() if ln.startswith("| **warm**"))
-    assert cold.endswith("| **10** | 20 |"), "duckrun wins cold"
-    assert warm.endswith("| 5 | **3** |"), "dwh wins warm — the winner is per ROW, not per table"
-
-
-def test_a_record_with_no_tier_timings_renders_no_query_time_section():
-    """`_full`'s default carries `ms_by_pass` and nothing else — enough for `incomplete()`, nothing
-    the table can read. An absent section says "not measured"; a table of zeros would say "instant"."""
+def test_a_record_with_no_tier_timings_adds_no_columns():
+    """`_full`'s default carries `ms_by_pass` and nothing else — enough for `incomplete()`, nothing a
+    tier can read. Absent columns say "not measured"; zeros would say "instant"."""
     out = _render([_full("a-1.json", "spark")], ledger({"OUT": 1.0, "SEM": 2.0}))
-    assert "### Query time" not in out
-
-
-def test_the_cold_chart_only_counts_runs_that_covered_the_whole_set():
-    """A run missing a query has a smaller total for a reason that is not speed. Letting it into the
-    range would show the engine as having once been fast."""
-    full = _timings(a=(10, 5, 4), b=(20, 6, 5))
-    runs = [_full("a-1.json", "duckrun", timings=_timings(a=(1, 1, 1)), finished_hours_ago=72),
-            _full("b-2.json", "duckrun", timings=full, finished_hours_ago=48),
-            _full("c-3.json", "dwh", timings=full, finished_hours_ago=24)]
-    out = _render(runs, ledger({"OUT": 1.0, "SEM": 2.0}))
-    spec = json.loads(out.split("<!--chart:")[3].split("-->")[0])
-    assert "first visit" in spec["title"]
-    rows = {r[0]: r[1:4] for r in spec["rows"]}
-    assert rows["duckrun"] == [30.0, 30.0, 30.0], "the partial older run must not widen the range"
+    assert "cold ms" not in out and "### Query time" not in out
+    assert "| engine | writer | CU | rows |" in out, "the block itself still renders"
 
 
 # ------------------------------------------------------------------------------------- build time

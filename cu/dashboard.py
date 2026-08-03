@@ -581,14 +581,23 @@ def render_input(cols):
 LAYOUT_TABLE = os.environ.get("CU_LAYOUT_TABLE", "fct_summary").strip()
 
 
-def render_layouts(cols, analytics):
+def render_layouts(cols, analytics, qtime=({}, {})):
     """Every shared table's physical layout, one block each, the mart first.
 
     The mart leads because it is the table the benchmark's queries land on, and it is the only block
-    carrying the CU column — the analytics CU is one number per engine, not per table, so printing it
-    in every block would read as one measurement per table. That block's rows are ordered by that CU,
-    cheapest first; the rest keep the engine order.
+    carrying the CU column AND the three query-time columns — both are one number per engine, not per
+    table, so printing them in every block would read as one measurement per table. That block's rows
+    are ordered by that CU, cheapest first; the rest keep the engine order.
+
+    **`cold`/`warm`/`hot` are here rather than in a section of their own, and that placement is the
+    point.** They were briefly a table further down the page, which put the layout and the speed it
+    produced on two different tables — and the only question worth asking of these numbers is whether
+    one explains the other. On one row, `files`, `row groups`, `size MB` and `vorder` sit beside the
+    milliseconds they produced, per engine, and a reader can see for themselves whether a smaller
+    file count bought a faster first visit. Cold especially: it is the tier that transcodes columns
+    out of parquet, so it is the one layout can move at all.
     """
+    times, counts = qtime
     stats = {col: ((rec.get("layout") or {}).get("stats") or {}).get(rec.get("engine")) or {}
              for col, _e, rec in cols}
     writers = {col: (STACK.get(base_engine(col)) or ("", "", "—"))[2] for col, _e, _r in cols}
@@ -621,22 +630,37 @@ def render_layouts(cols, analytics):
             # nothing was measured, not that querying was free, so it sorts to the END. The other
             # blocks carry no CU and keep the engine order.
             present.sort(key=lambda cd: (analytics.get(cd[0], 0.0) == 0, analytics.get(cd[0], 0.0)))
+        # Only on the mart, and only when a record actually carried timings.
+        tiers = [lbl for lbl, _m in TIERS if lbl in counts] if show_cu else []
         head = (f"`{t}` in detail — the mart the queries land on" if t == mart
                 else f"`{(schema.get(t) + '.') if schema.get(t) else ''}{t}`")
         print(f"\n#### {head}\n")
         print("| engine | writer | " + ("CU | " if show_cu else "")
+              + "".join(f"{lbl} ms | " for lbl in tiers)
               + " | ".join(h for _k, h, _d in metrics) + " | vorder |")
-        print("|:--|:--|" + ("--:|" if show_cu else "") + "--:|" * len(metrics) + ":--|")
+        print("|:--|:--|" + ("--:|" if show_cu else "") + "--:|" * len(tiers)
+              + "--:|" * len(metrics) + ":--|")
         for col, d in present:
             cells = ["—" if d.get(k) is None else f"{float(d[k]):,.{dp}f}" for k, _h, dp in metrics]
             cu_cell = (f"{analytics.get(col, 0.0):,.1f} | " if show_cu else "")
-            print(f"| {col} | `{writers.get(col, '—')}` | {cu_cell}" + " | ".join(cells)
+            ms = "".join("— | " if (times.get(col) or {}).get(lbl) is None
+                         else f"{times[col][lbl]:,.0f} | " for lbl in tiers)
+            print(f"| {col} | `{writers.get(col, '—')}` | {cu_cell}{ms}" + " | ".join(cells)
                   + f" | {'yes' if d.get('vorder') else 'no'} |")
+    counted = ", ".join(f"{lbl} over {n}" for lbl, n in counts.items())
     print("\n<sub>Every shared table the project writes, in pipeline order, as `stats.py` read the "
           "Delta log in that run's **layout** job. Sizes are what the tables held at that moment; "
           "the CU beside the mart is the engine's ANALYTICS total — what querying it cost, not what "
-          "building it did — and the queries read all of these. Nothing here re-read a Delta "
-          "log.</sub>")
+          "building it did — and the queries read all of these. Nothing here re-read a Delta log."
+          + (" **`cold`, `warm` and `hot` are the DAX suite summed per pass position** — the first "
+             "visit to a freshly deployed semantic model, the second, then the median of the rest — "
+             "so they sit beside the layout that produced them rather than in a table of their own. "
+             "Each is summed over the queries EVERY engine carries at that tier "
+             f"({counted}); cold covers fewer because the selectivity-ladder queries have no "
+             "first-pass sample at all, the top DUID being resolved after pass 1. Cold is the tier "
+             "layout can actually move: it is the one that transcodes columns out of parquet, while "
+             "warm and hot converge on what the model already holds in memory." if counts else "")
+          + "</sub>")
 
 
 # ------------------------------------------------------------------------------------ query time
@@ -678,115 +702,27 @@ def bench_totals(per_col, metric):
              for col, timings in per_col.items()}, len(common))
 
 
-def render_query_time(cols, runs):
-    """How long the SAME 25 DAX queries took on each engine, cold, warm and hot.
+def query_time(cols):
+    """`({column: {tier: ms}}, {tier: n queries})` — the whole DAX suite, per pass position.
 
-    The one thing on this page that is not capacity units. Every run record already carries it —
-    `benchmark.timings.<model>.<query>` — and `benchmark/render_report.py` renders it per dispatch,
-    but a dispatch builds ONE engine, so that report always has a single column and its ranking is
-    degenerate. Composed here from every engine's latest run, this is the only place the three tiers
-    can be read ACROSS engines at all.
-
-    Deliberately reimplemented rather than imported. `render_report._totals`/`rank` take exactly this
-    shape, and `cu/` importing `benchmark/` would end the isolation that makes this directory
-    deletable by removing one folder and one workflow file. It is twenty lines of arithmetic.
+    Feeds three columns of the mart block and nothing else. There is no query-time section: a table
+    of its own put the layout and the speed it produced side by side on the PAGE but not on the same
+    ROW, and the only question worth asking of these numbers is whether one explains the other.
+    Files, row groups, size and V-Order beside cold, warm and hot, per engine, is that question.
     """
     per_col = {col: bench_timings(rec) for col, _e, rec in cols}
     per_col = {c: t for c, t in per_col.items() if t}
     if not per_col:
-        return
-    names = [c for c, _e, _r in cols if c in per_col]
-    rows = [(label,) + bench_totals(per_col, metric) for label, metric in TIERS]
-    rows = [(label, tot, n) for label, tot, n in rows if n]
-    if not rows:
-        return
-
-    print("\n### Query time — cold, warm, hot\n")
-    # The COLD tier gets the chart. It is the one the layout moves: a first visit transcodes the
-    # columns out of parquet into VertiPaq, so it is where V-Order, file count and row-group size
-    # show up. Warm and hot converge on what the model holds in memory, which is the same shape
-    # whatever wrote it.
-    cold = next((r for r in rows if r[0] == "cold"), None)
-    if cold:
-        spread = bench_spread(runs, cols, per_col, "cold_ms")
-        n = max((len(v) for v in spread.values()), default=1)
-        chart("Query time — the first visit",
-              "milliseconds over the whole suite, lower is better — the tier the table layout moves"
-              + (f", mean of {n} runs with the range" if n > 1 else ""),
-              chart_rows([c for c in cols if c[0] in per_col], spread, cold[1],
-                         {c: engine_caption(r, c) for c, _e, r in cols}))
-    print("| ms | " + " | ".join(names) + " |")
-    print("|:--|" + "---:|" * len(names))
-    for label, totals, n in rows:
-        # Only when there is something to win. A lone column is trivially its own fastest, and
-        # bolding every cell of a one-column table states a ranking that was never run.
-        best = min((totals[c] for c in names if c in totals), default=None) if len(names) > 1 else None
-        cells = []
-        for c in names:
-            v = totals.get(c)
-            cells.append("—" if v is None else
-                         (f"**{v:,.0f}**" if v == best else f"{v:,.0f}"))
-        print(f"| **{label}** — {n} queries | " + " | ".join(cells) + " |")
-    spreads = hot_spreads(per_col)
-    if spreads:
-        print("| `hot spread` | "
-              + " | ".join("—" if names[i] not in spreads else f"{spreads[names[i]]:,.1f}%"
-                           for i in range(len(names))) + " |")
-    print("\n<sub>The same 25 DAX queries against the same semantic model on every engine — one "
-          "`.bim`, one storage mode, Direct Lake — so the adapter that wrote the parquet is the only "
-          "variable. **cold** is the first visit to a freshly deployed model, when nothing is "
-          "resident and every column has to be transcoded out of parquet; **warm** is the second "
-          "visit; **hot** is the median of the passes after that. Each tier is summed over the "
-          "queries EVERY column carries at that tier, and the count says how many — cold is two "
-          "short because the selectivity-ladder queries only exist once the top DUID has been "
-          "resolved, which happens after pass 1. `hot spread` is the median per-query spread across "
-          "the hot passes: where two columns sit closer together than that, the gap between them "
-          "means nothing. Fastest per row in bold.</sub>")
-
-
-def hot_spreads(per_col):
-    """Median per-query `hot_spread_pct` per column, over the queries every column has hot.
-
-    The honesty row. A total is a ranking only if the samples behind it are tight; this is the number
-    that says whether they are, and it is measured per query and already in the record.
-    """
-    sets = [{q for q, t in (timings or {}).items() if t.get("hot_spread_pct") is not None}
-            for timings in per_col.values()]
-    common = set.intersection(*sets) if sets else set()
-    if not common:
-        return {}
-    out = {}
-    for col, timings in per_col.items():
-        vals = sorted(float(timings[q]["hot_spread_pct"]) for q in common)
-        mid = len(vals) // 2
-        out[col] = vals[mid] if len(vals) % 2 else (vals[mid - 1] + vals[mid]) / 2
-    return out
-
-
-def bench_spread(runs, cols, per_col, metric):
-    """`{column: [total ms, …]}` over every run of that column, so the chart carries a range.
-
-    A run only counts if it covers the WHOLE common query set — otherwise its total is smaller for a
-    reason that has nothing to do with speed, and it would widen the range downward as if the engine
-    had once been fast. A column with no qualifying history simply gets its latest run, which is what
-    `chart_rows` falls back to anyway.
-    """
-    sets = [{q for q, t in (timings or {}).items() if t.get(metric) is not None}
-            for timings in per_col.values()]
-    common = set.intersection(*sets) if sets else set()
-    if not common:
-        return {}
-    key_by_variant = {(base_engine(c), variant(r)): c for c, _e, r in cols}
-    out = {}
-    for rec in runs:
-        col = key_by_variant.get((rec.get("engine"), variant(rec)))
-        if col is None:
+        return {}, {}
+    out, counts = {}, {}
+    for label, metric in TIERS:
+        totals, n = bench_totals(per_col, metric)
+        if not n:
             continue
-        timings = bench_timings(rec)
-        if not all((timings.get(q) or {}).get(metric) is not None for q in common):
-            continue
-        out.setdefault(col, []).append(round(sum(float(timings[q][metric]) for q in common), 1))
-    return out
+        counts[label] = n
+        for col, ms in totals.items():
+            out.setdefault(col, {})[label] = ms
+    return out, counts
 
 
 # ------------------------------------------------------------------------------------- build time
@@ -925,12 +861,11 @@ def render(cols, runs, ledger):
     print("\nEvery engine's latest run, summed:\n")
     engine_table(per_col, cols)
     render_input(cols)
-    render_layouts(cols, analytics)
-    # The two non-CU axes, and they come AFTER the layout because that is the order the question is
-    # asked in: what did it cost, what shape are the tables, then how long did querying and building
-    # them take. Both render nothing when their input is absent — a record with no benchmark, a
-    # ledger with no duration column — which is what keeps the page a report of what exists.
-    render_query_time(cols, runs)
+    # The query times go INTO the mart block rather than into a section of their own. A separate
+    # table put the layout and the speed it produced on two different tables, and the whole question
+    # is whether one explains the other — files, row groups, size and V-Order beside cold, warm and
+    # hot, on one row per engine, is the comparison. Nothing else on the page can be read that way.
+    render_layouts(cols, analytics, query_time(cols))
     render_time(cols, runs, ledger)
 
     n = len({base_engine(c) for c, _e, _r in cols})

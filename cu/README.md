@@ -174,23 +174,30 @@ because that artifact has to open off a local disk years later.
   it cost.
 - **Input archive**: files and bytes in the landing archive, from `stats.py`'s listing. Every other
   number on the page describes what came OUT.
-- **Table layout**, every shared table, mart first, with the analytics CU beside the mart alone (it
-  is one number per engine, not per table).
-- **Query time — cold, warm, hot.** The one thing on the page that is not capacity units, and it
-  comes from the run records, not the ledger: `benchmark.timings.<model>.<query>` is already there on
-  every record. `benchmark/render_report.py` renders it per dispatch, but a dispatch builds ONE
-  engine, so that report always has a single column and its ranking is degenerate — composed here
-  from every engine's latest run, this is the only place the three tiers can be read ACROSS engines
-  at all. **cold** is the first visit to a freshly deployed semantic model, **warm** the second,
+- **Table layout**, every shared table, mart first. The mart block alone carries the analytics CU and
+  the three query-time columns — both are one number per engine, not per table.
+- **`cold` / `warm` / `hot` are THREE COLUMNS OF THE MART BLOCK, not a section.** The one thing on
+  the page that is not capacity units, and it comes from the run records rather than the ledger:
+  `benchmark.timings.<model>.<query>` is already on every record. `benchmark/render_report.py`
+  renders it per dispatch, but a dispatch builds ONE engine, so that report always has a single
+  column and a degenerate ranking — composed here from every engine's latest run, this is the only
+  place the three tiers can be read ACROSS engines at all.
+  They were briefly a table of their own. **That was wrong, and the placement is the whole point:** a
+  separate table put the layout and the speed it produced on two different tables, when the only
+  question worth asking of these numbers is whether one explains the other. On one row, `files`,
+  `row groups`, `size MB` and `vorder` sit beside the milliseconds they produced, per engine, and a
+  reader can see for themselves whether a smaller file count bought a faster first visit — iceberg's
+  357 files and 122k-row row groups next to its 103,328 ms cold, against duckrun's 4 files and
+  23,491 ms. **cold** is the first visit to a freshly deployed semantic model, **warm** the second,
   **hot** the median of the passes after that; the record's own `tier` field is something else
   entirely (the query CATEGORY — `probe`/`composite`/`raw`/`hot_only`) and must not be confused with
-  them. Each tier is summed over the queries **every column carries at that tier**, and the count is
-  printed because it genuinely differs: the selectivity-ladder queries have no `cold_ms` at all, the
-  top DUID being resolved only after pass 1, so cold is two queries short of warm and hot. A `hot
-  spread` row carries the median per-query spread — where two columns sit closer together than that,
-  the gap between them means nothing. Fastest per row in bold. The **cold** tier gets the chart,
-  because it is the one the table layout moves: a first visit transcodes columns out of parquet, so
-  V-Order, file count and row-group size show up there and nowhere else.
+  them. Cold is the tier layout can actually MOVE — it is the one that transcodes columns out of
+  parquet, while warm and hot converge on what the model already holds in memory.
+  Mart block only, for the same reason the CU column is: one number per ENGINE, not per table, so on
+  every block it would read as one measurement per table. Each tier is summed over the queries
+  **every column carries at that tier**, and the closing note counts them, because it genuinely
+  differs — the selectivity-ladder queries have no `cold_ms` at all, the top DUID being resolved only
+  after pass 1, so cold is two queries short of warm and hot.
   Deliberately **reimplemented rather than imported** — `render_report._totals`/`rank` take exactly
   this shape, and `cu/` importing `benchmark/` would end the isolation that makes this directory
   deletable by removing one folder and one workflow file.
