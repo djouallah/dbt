@@ -565,6 +565,28 @@ def test_the_rate_is_compute_over_compute_never_total_over_total():
     assert "| **etl** | **645.8** |" in body
 
 
+def test_the_rate_scales_with_the_cores_the_column_was_given():
+    """It is `cores` ÷ 2 for a single-node Python notebook — 32 at 64 vCores, 16 at 32 — NOT the
+    constant 32 it is tempting to read it as, because `cores` is a dispatch input. The invariant is
+    that two legs at the SAME cores agree; comparing a 32-core column against a 64-core one compares
+    node sizes. The page can only ever show them apart: `vcores` is in `variant()`, so they are
+    separate columns, and the caption names each."""
+    big = _full("a-1.json", "duckrun", config={"duckrun": {"vcores": "64"}})
+    small = _full("b-2.json", "duckrun", config={"duckrun": {"vcores": "32"}})
+    big["items"] = {"NB": gone("compute", "dbt-duckrun-big")}
+    small["items"] = {"NB2": gone("compute", "dbt-duckrun-small")}
+    led = ledger({"NB": {"Jupyter Notebook Scheduled Run": 3200.0},
+                  "NB2": {"Jupyter Notebook Scheduled Run": 1600.0}})
+    led["seconds"] = _secs({"NB": {"Jupyter Notebook Scheduled Run": 100.0},
+                            "NB2": {"Jupyter Notebook Scheduled Run": 100.0}})
+    cols = d.columns_for([big, small])
+    assert [c for c, _e, _r in cols] == ["duckrun·32c", "duckrun·64c"], "never one blended column"
+    out = _render([big, small], led)
+    rate = next(ln for ln in out.splitlines() if ln.startswith("| `compute CU per second`"))
+    assert rate == "| `compute CU per second` | 16.0 | 32.0 |", "cores ÷ 2, per column"
+    assert "64 vCores" in out and "32 vCores" in out, "the caption has to name the size"
+
+
 def test_the_rate_is_computed_per_class():
     """The rate is the average capacity that class's compute drew while it ran, and the concurrency
     that makes a spark leg's billed seconds exceed its wall clock is in the numerator and the

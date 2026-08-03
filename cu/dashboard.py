@@ -103,7 +103,7 @@ def landing_guids(rec):
     and an engine's OWN endpoint — which is genuinely that engine's work — is untouched.
 
     Worth knowing what it distorted, because it is not only a total. That endpoint bills 130.4 CU
-    over 83.2 s, a rate of 1.6, against a 64-vCore notebook's fixed 32.0. Blending the two dragged
+    over 83.2 s, a rate of 1.6, against a 64-vCore notebook's 32.0. Blending the two dragged
     `compute CU per second` to 28.5 for duckrun and 26.4 for iceberg — the same DuckDB in the same
     notebook, reading differently — and the size of the gap tracked nothing but how much the rest of
     the class weighed.
@@ -809,8 +809,10 @@ def render_time(cols, runs, ledger):
     Fold a handful of those into the numerator and the denominator of a whole class and the result is
     neither the node's draw nor anything else — it just drifts upward with however much OneLake
     traffic the engine happened to make. It read 36.1 for iceberg against 31.2 for duckrun, which are
-    the SAME DuckDB in the SAME 64-vCore notebook and cannot differ: the gap was entirely iceberg's
-    heavier OneLake share. Compute-only, both land where a single node has to land.
+    the SAME DuckDB in the SAME notebook at the SAME vCores and cannot differ: the gap was entirely
+    iceberg's heavier OneLake share. Compute-only, both land where a single node has to land — which
+    is `cores` ÷ 2, NOT a constant. `cores` is a dispatch input; 64 gives 32.0 and 32 gives 16.0. So
+    the invariant is that two DuckDB legs at the same `cores` agree, never that they read 32.
 
     So `compute CU ÷ compute seconds` is the average capacity the node drew while it ran, and it is
     the sturdiest number in this section: the concurrency that makes spark's billed seconds exceed
@@ -873,9 +875,11 @@ def render_time(cols, runs, ledger):
           "CU over a duration of essentially nothing — one `OneLake Write via Redirect` is 383.25 CU "
           "in 0.049 s — so a total-over-total rate drifts upward with however much OneLake traffic "
           "an engine happened to make. It read 36.1 for iceberg against 31.2 for duckrun, which are "
-          "the same DuckDB in the same 64-vCore notebook and cannot differ. A high rate is a WIDE "
-          "engine, not a slow one; the seconds beside it say whether that width finished "
-          "sooner.</sub>")
+          "the same DuckDB in the same notebook at the same vCores and cannot differ. **It SCALES "
+          "with the compute the column was given**, so compare it across columns only at equal size: "
+          "a single-node Python notebook draws `vCores ÷ 2`, which is 32 at 64 vCores and 16 at 32, "
+          "and each chart caption names the size it ran at. A high rate is a WIDE engine, not a slow "
+          "one; the seconds beside it say whether that width finished sooner.</sub>")
 
 
 def render(cols, runs, ledger):

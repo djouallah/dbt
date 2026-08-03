@@ -206,8 +206,11 @@ because that artifact has to open off a local disk years later.
   storage operation bills real CU over a duration of essentially nothing (one `OneLake Write via
   Redirect`: 383.25 CU in **0.049 s**), so including storage does not dilute the rate, it detonates
   it, by an amount tracking only how much OneLake traffic the engine made. `CU (s)` is literally
-  capacity-units × seconds, so `CU ÷ duration` is capacity units DRAWN — a 64-vCore single node is a
-  fixed **32.0**, which is the check to apply if this ever reads oddly again. The section renders
+  capacity-units × seconds, so `CU ÷ duration` is capacity units DRAWN — for a single-node Python
+  notebook that is **`cores` ÷ 2**, fixed for a given core count and not a constant: 32.0 at the 64
+  vCores dispatched by default, 16.0 at 32. The check when this reads oddly is two DuckDB legs at the
+  **same** `cores` reading the **same** number, never that they read 32; `vcores` is part of
+  `variant()`, so two core counts are two columns and the caption names each. The section renders
   **nothing** when the ledger has no seconds, which is the correct output both for a ledger written
   before the duration read and for a model that does not expose the column: an absent section says
   "not measured", a table of zeros would say "instant".

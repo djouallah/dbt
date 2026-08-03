@@ -1083,8 +1083,8 @@ capacity for the GUIDs in those records, tops up `history/cu.json`, and publishe
   not spend. `dashboard.py`'s `landing_guids()` catches it by NAME against the record's own `landing`
   items — nothing hardcoded, and an engine's own endpoint is untouched. It distorted more than a
   total: that endpoint bills 130.4 CU over 83.2 s, a rate of **1.6**, against a 64-vCore notebook's
-  fixed **32.0**, so blending them made duckrun and iceberg — the same DuckDB in the same notebook —
-  read 28.5 and 26.4. Excluded, both read 32.0.
+  **32.0**, so blending them made duckrun and iceberg — the same DuckDB in the same notebook at the
+  same vCores — read 28.5 and 26.4. Excluded, both read 32.0.
 - **A fresh run is a LOWER BOUND and the page says so per column.** Dispatch `Dashboard` twice: the
   second read returns bigger numbers and `max()` takes them. "May still rise" on the page is DERIVED
   from `run.finished` being under two hours old — a property of the clock, not a flag written into a
@@ -1112,8 +1112,13 @@ capacity for the GUIDs in those records, tops up `history/cu.json`, and publishe
   CU over a duration of essentially nothing (one `OneLake Write via Redirect`: 383.25 CU in
   **0.049 s**, a rate of ~7,800), so including storage does not dilute the rate, it detonates it, by
   an amount tracking only how much OneLake traffic the engine happened to make. `CU (s)` is literally
-  capacity-units × seconds, so `CU ÷ duration` is capacity units DRAWN — for a 64-vCore single node
-  that is a fixed **32.0**, which is the check to apply if this ever reads oddly again. Both sections
+  capacity-units × seconds, so `CU ÷ duration` is capacity units DRAWN — for a single-node Python
+  notebook that is **`cores` ÷ 2**, fixed for a given core count and NOT a constant: 32.0 at the 64
+  vCores the dispatch defaults to, 16.0 at 32, and `cores` is a dispatch input that can be anything.
+  So the check when this reads oddly is **two DuckDB legs at the SAME `cores` reading the SAME
+  number** — never that they read 32. (The page cannot blend two core counts into one column anyway:
+  `vcores` is part of `variant()`, so a 32-core duckrun and a 64-core one are separate columns, and
+  `engine_caption` prints the count on the chart.) Both sections
   render **nothing** when their
   input is absent (a record with no tier timings, a ledger with no `seconds`), which is the correct
   output: an absent section says "not measured", a table of zeros would say "free" or "instant".
