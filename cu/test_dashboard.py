@@ -119,9 +119,9 @@ def test_columns_are_the_latest_run_per_engine_and_config():
         rec("d-4.json", "dwh", {}, finished_hours_ago=12),
     ]
     cols = d.columns_for(runs)
-    assert [c for c, _e, _r in cols] == ["spark·readHeavyForPBI", "spark·writeHeavy", "dwh"]
+    assert [c for c, _e, _r in cols] == ["spark·V-Order", "spark·default", "dwh"]
     by_col = {c: r["_file"] for c, _e, r in cols}
-    assert by_col["spark·writeHeavy"] == "b-2.json", "the LATER run of a config wins its column"
+    assert by_col["spark·default"] == "b-2.json", "the LATER run of a config wins its column"
 
 
 def test_one_config_per_engine_gets_a_bare_column_name():
@@ -135,6 +135,39 @@ def test_a_variant_tag_never_contains_the_column_separator():
                          ("resource_profile", "readHeavyForPBI"), ("vcores", "64")))
     assert d.COL_SEP not in tag
     assert d.base_engine(f"spark{d.COL_SEP}{tag}") == "spark"
+
+
+def test_a_column_header_names_a_profile_by_its_effect():
+    """`spark·readHeavyForPBI+noNEE` is Microsoft's name for an intended workload plus a double
+    negative, in a header repeated across every table and both charts. The same PROFILE_LABEL the
+    layout captions use gets it to `spark·V-Order`, so a profile reads the same wherever it appears."""
+    assert d.variant_tag((("resource_profile", "readHeavyForPBI"),)) == "V-Order"
+    assert d.variant_tag((("resource_profile", "writeHeavy"),)) == "default"
+    # An unmapped profile keeps its own name — guessing at readHeavyForSpark would be wrong.
+    assert d.variant_tag((("resource_profile", "readHeavyForSpark"),)) == "readHeavyForSpark"
+
+
+def test_a_flag_that_is_off_is_absent_from_the_header_rather_than_negated():
+    """`+noNEE` spends header width saying nothing happened. Absence carries it, and the contrast
+    with the run that DID enable it is what the reader is looking for."""
+    on = (("native_execution_engine", "true"), ("resource_profile", "writeHeavy"))
+    off = (("native_execution_engine", "false"), ("resource_profile", "writeHeavy"))
+    assert d.variant_tag(on) == "default+NEE"
+    assert d.variant_tag(off) == "default"
+
+
+def test_two_configs_that_would_share_a_header_are_spelled_out_instead():
+    """Absence-means-off is only unambiguous while every config of the engine RECORDS the flag. A
+    record predating the dispatch input has no key at all, which would collide with an explicit
+    `false` — and a page printing one column name twice is unreadable and says nothing about why."""
+    runs = [rec("a-1.json", "spark", {}, config={"spark": {"resource_profile": "writeHeavy"}},
+                finished_hours_ago=48),
+            rec("b-2.json", "spark", {},
+                config={"spark": {"resource_profile": "writeHeavy",
+                                  "native_execution_engine": "false"}}, finished_hours_ago=24)]
+    names = [c for c, _e, _r in d.columns_for(runs)]
+    assert len(set(names)) == 2, names
+    assert names == ["spark·default", "spark·default+noNEE"]
 
 
 def _render(runs, led):

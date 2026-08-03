@@ -1112,7 +1112,7 @@ capacity for the GUIDs in those records, tops up `history/cu.json`, and publishe
   2.8× (1,332 against 3,769), which is the sharpest experiment on the page; and NEE on and off
   produce the same layout, so the gap between them was never an NEE effect.
 - **A LAYOUT ROW IS A WRITER, and `producer()` decides what that means.** `spark V-Order`,
-  `spark default`, `duckrun` — not `spark·readHeavyForPBI+NEE`, not `duckrun·64c`. `LAYOUT_CONFIG` is
+  `spark default`, `duckrun` — not `spark·V-Order+NEE`, not `duckrun·64c`. `LAYOUT_CONFIG` is
   `("resource_profile",)` and the exclusions are **measured, not tidiness**: duckrun wrote 4 files and
   27 row groups at 64 cores and at 32, spark wrote the same layout with NEE on and off, so neither
   reaches the parquet and neither belongs on a chart about parquet. `PROFILE_LABEL` names a profile
@@ -1123,8 +1123,15 @@ capacity for the GUIDs in those records, tops up `history/cu.json`, and publishe
   **`duckdb iceberg`**, because it reads as a format beside three engines when the writer is the same
   DuckDB duckrun uses, pointed at an Iceberg REST catalog instead of delta-rs — and on a page about
   what got written, that is the entire reason the pair exists.
-  `variant_tag()` is untouched and still names columns everywhere the ENGINE is the subject: the ETL
-  chart, the CU table, the Time section, the sources table.
+  `variant_tag()` still names columns everywhere the ENGINE is the subject — the ETL chart, the CU
+  table, the sources table — but it now **shares `PROFILE_LABEL`**, so a profile reads the same in a
+  header as in a caption, and it **omits a flag that is OFF**: `spark·V-Order+NEE` against
+  `spark·V-Order`, never `spark·readHeavyForPBI+noNEE`. That header appears in every table and both
+  charts, so its width is a real cost, and `+noNEE` was spending it to say nothing happened.
+  Absence-means-off is only unambiguous while every config of the engine RECORDS the flag —
+  a record predating the dispatch input has no key at all and would collide with an explicit `false` —
+  so `columns_for` checks for a collision and falls the whole engine back to the explicit spelling.
+  Two identical column headers is the failure it prevents, and it is silent about why.
   The layout table groups by the DECLARED writer while the chart groups by the MEASURED parquet — two
   directions onto the same rows, and a disagreement between them is worth knowing rather than
   smoothing. Both quote the same CU (the mean over every run), because a page printing 1,916 in a bar

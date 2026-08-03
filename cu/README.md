@@ -164,6 +164,19 @@ because that artifact has to open off a local disk years later.
   splits duckrun on 1.1 MB of size. The accepted cost is the boundary — 15 row groups and 17 land in
   different bands. A record with **no** file count is `None` and keeps a bar of its own; two
   unmeasured layouts are not one identical layout.
+- **A column header is an engine plus the SHORTEST config that still tells it apart** (`variant_tag`).
+  It appears in every table and both charts, so width is a real cost, and it used to read
+  `spark·readHeavyForPBI+NEE` — Microsoft's name for an intended workload plus a double negative on
+  its sibling. Two rules cut it to `spark·V-Order+NEE` / `spark·V-Order` / `spark·default+NEE` /
+  `spark·default`. The profile is named by its **effect**, through the same `PROFILE_LABEL` the layout
+  captions use, so a profile is called the same thing wherever it appears on the page. And a flag that
+  is **off is absent** rather than negated — `+noNEE` spends header width saying nothing happened, and
+  the contrast with the run that did enable it is what a reader is looking for.
+  Absence-means-off is only unambiguous while every config of that engine RECORDS the flag, so
+  `columns_for` checks it: where two configs would collapse to one header — a record predating the
+  dispatch input has no key at all and would collide with an explicit `false` — the whole engine falls
+  back to the explicit spelling. A page printing one column name twice is unreadable and silent about
+  why. The tag still never contains `COL_SEP`; `base_engine` splits on it.
 - **Engine-major table**, engines across, **`compute` and `storage`** down, class subtotals in bold.
   The split comes from the OPERATION, and it has to: compute and storage share an ITEM. Measured
   against the live model — `dbt_spark` [Lakehouse] bills 188,636 CU of `High Concurrency Session Livy
@@ -200,7 +213,7 @@ because that artifact has to open off a local disk years later.
 - **Table layout**, every shared table, mart first, **one row per WRITER, and no `writer` column** —
   the row label IS the writer, so a `duckdb (iceberg)` cell beside a `duckdb iceberg` label was one
   fact printed twice. `spark V-Order`,
-  `spark default`, `duckrun`, not `spark·readHeavyForPBI+NEE` and `duckrun·64c`. The resource profile
+  `spark default`, `duckrun`, not `spark·V-Order+NEE` and `duckrun·64c`. The resource profile
   is named by what it does to the parquet rather than by Microsoft's name for the workload it was
   designed for, and the core count and NEE flag are dropped because two runs each showed they never
   reach it. duckrun's two core counts and spark's two NEE settings therefore collapse to one row —

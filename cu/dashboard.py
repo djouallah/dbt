@@ -319,20 +319,43 @@ def variant(rec):
     return tuple(sorted((k, str(v)) for k, v in c.items() if v is not None))
 
 
-def variant_tag(sig):
+# A resource profile named by WHAT IT DOES to the parquet, because that is the only thing a reader of
+# this page needs from it. `readHeavyForPBI` is the one profile that turns V-Order on;
+# `writeHeavy` is the workspace default and turns it off. Microsoft's names describe an intended
+# workload, which is a different question from what came out. An unmapped profile keeps its own name
+# rather than being guessed at — `readHeavyForSpark`, for one, sets no vorder at all despite reading
+# like it would. Shared by the column headers (`variant_tag`) and the layout captions (`producer`),
+# so a profile is called the same thing wherever it appears on the page.
+PROFILE_LABEL = {"readHeavyForPBI": "V-Order", "writeHeavy": "default"}
+
+
+def variant_tag(sig, terse=True):
     """The short label separating one config from another in a column header. Compact on purpose: it
-    sits in a table head, and the full reading is in the layout section."""
+    sits in a table head — the column is repeated across every table and both charts — and the full
+    reading is in the layout section and the chart captions.
+
+    Two things keep it short. The profile is named by its EFFECT via `PROFILE_LABEL`, so
+    `readHeavyForPBI` reads `V-Order`; and a flag that is OFF is simply absent, so `spark·V-Order+NEE`
+    contrasts with `spark·V-Order` rather than with `spark·readHeavyForPBI+noNEE`. Absence-means-off
+    is only unambiguous while every column of that engine RECORDS the flag — `columns_for` checks that
+    and falls back to `terse=False` for the whole engine if two configs would collide.
+    """
     d = dict(sig)
     bits = []
     if d.get("vcores"):
         bits.append(f"{d['vcores']}c")
     if d.get("resource_profile"):
-        bits.append(d["resource_profile"])
+        p = str(d["resource_profile"])
+        bits.append(PROFILE_LABEL.get(p, p))
     nee = d.get("native_execution_engine")
     if nee is not None:
-        bits.append("NEE" if nee.lower() == "true" else "noNEE")
+        on = str(nee).lower() == "true"
+        if on:
+            bits.append("NEE")
+        elif not terse:
+            bits.append("noNEE")
     # `+`, never COL_SEP — base_engine splits on that, and a tag containing one would make
-    # `spark·readHeavyForPBI+NEE` unparseable back to `spark`.
+    # `spark·V-Order+NEE` unparseable back to `spark`.
     return "+".join(bits) or "unrecorded"
 
 
@@ -354,14 +377,6 @@ LAYOUT_CONFIG = ("resource_profile",)
 
 # Which table the layout grouping and the mart block are ABOUT.
 LAYOUT_TABLE = os.environ.get("CU_LAYOUT_TABLE", "fct_summary").strip()
-
-# A resource profile named by WHAT IT DOES to the parquet, because that is the only thing a reader of
-# this page needs from it. `readHeavyForPBI` is the one profile that turns V-Order on;
-# `writeHeavy` is the workspace default and turns it off. Microsoft's names describe an intended
-# workload, which is a different question from what came out. An unmapped profile keeps its own name
-# rather than being guessed at — `readHeavyForSpark`, for one, sets no vorder at all despite reading
-# like it would.
-PROFILE_LABEL = {"readHeavyForPBI": "V-Order", "writeHeavy": "default"}
 
 # An engine named by WHO WRITES, where the target name misleads. `iceberg` reads as a format beside
 # three engines, when the writer is the same DuckDB that duckrun uses — pointed at an Iceberg REST
@@ -520,12 +535,17 @@ def columns_for(runs):
         if not engine:
             continue
         latest[(engine, variant(rec))] = rec
-    per_engine = {}
-    for e, _sig in latest:
-        per_engine[e] = per_engine.get(e, 0) + 1
+    sigs = {}
+    for e, sig in latest:
+        sigs.setdefault(e, []).append(sig)
+    # `variant_tag` drops a flag that is OFF, which is only unambiguous while every config of that
+    # engine records it. Where two configs would collapse to one header, spell the whole engine out
+    # rather than print the same column name twice — a duplicate header is unreadable and silent.
+    terse = {e: len({variant_tag(s) for s in ss}) == len(ss) for e, ss in sigs.items()}
     cols = []
     for (e, sig), rec in latest.items():
-        cols.append((e if per_engine[e] < 2 else f"{e}{COL_SEP}{variant_tag(sig)}", e, rec))
+        tag = variant_tag(sig, terse=terse.get(e, True))
+        cols.append((e if len(sigs[e]) < 2 else f"{e}{COL_SEP}{tag}", e, rec))
     order = {e: i for i, e in enumerate(ENGINES)}
     cols.sort(key=lambda c: (order.get(c[1], len(order)), c[1], c[0]))
     return cols
