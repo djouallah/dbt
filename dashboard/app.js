@@ -1067,12 +1067,17 @@ export function engineTable(perCol, cols, secsCol) {
 }
 
 /**
- * Which dispatch each column came from, and whether its CU can still rise.
+ * Which dispatch each column came from, what it cost, and whether that cost can still rise.
  *
  * The one thing a composed page owes the reader that a single-run page did not: the columns are
  * different dispatches, so a column can be days older than the one beside it. The other half is that a
  * run measured minutes ago is a LOWER BOUND — an hour's CU keeps growing for ~70 minutes after the
  * fact — so the reader is told to dispatch again rather than left to wonder.
+ *
+ * It carries the two class totals as well, which is why `ledger` is a parameter rather than a leftover.
+ * Everywhere else the two halves are read a table apart from the run that produced them; here they sit
+ * on the row that names the dispatch, its build mode and whether the number has settled — the four
+ * facts that qualify a CU figure, in one place.
  */
 export function renderSources(cols, ledger, unmeasured, repo, now = null, gen = {}) {
   const out = [note("Each column is that engine's latest run. They are different dispatches, " +
@@ -1109,10 +1114,28 @@ export function renderSources(cols, ledger, unmeasured, repo, now = null, gen = 
       state = "settled";
     }
     const load = rec.full_load ? "full" : "incremental";
-    rows.push([col, link, `${started} (${load})`, String(items.length), state]);
+    // THIS run's own two halves, not the column's mean. Same join, same GUIDs, same roles as
+    // `engineTable` — `runCu` is called again rather than threaded in, which costs one dictionary
+    // walk per row and keeps this function's signature. Because every row here IS a column and
+    // `engineTable` also quotes the latest run, the two tables agree cell for cell; the CHARTS do
+    // not, and are not meant to — they draw the mean over every run of a column, which is why the
+    // note below says which of the two a reader is looking at.
+    // A DASH where the ledger holds nothing for that class yet, never `0.0`: the whole page is built
+    // to stop a not-yet-measured run reading as work done for free. Same rule as every CU cell above.
+    const cu = runCu(rec, ledger).cells;
+    rows.push([col, link, `${started} (${load})`,
+      cu.etl ? fmt(classTotal(cu, "etl"), 1) : DASH,
+      cu.analytics ? fmt(classTotal(cu, "analytics"), 1) : DASH,
+      String(items.length), state]);
   }
-  out.push(table(["column", "run", "built", "items", "CU"],
-    ["left", "left", "left", "right", "left"], rows));
+  // `state` was headed `CU` until this table grew CU numbers of its own — one column headed `CU`
+  // holding the word "settled" beside two holding capacity units is a header doing two jobs.
+  out.push(table(["column", "run", "built", "etl CU", "analytics CU", "items", "state"],
+    ["left", "left", "left", "right", "right", "right", "left"], rows));
+  out.push(note("**`etl CU` and `analytics CU` are that RUN's own totals** — the same GUID join as " +
+    "*Cost by engine*, which quotes each column's latest run, so those two tables agree cell for " +
+    "cell. The CHARTS do not: they average every run of a column, so a column built more than once " +
+    "draws a bar its latest run alone would not."));
   const drifters = cols.map(({ col, rec }) => [col, drifting(rec)]).filter(([, v]) => v.length);
   // The drifter warning stays a VISIBLE note — it is the one state that never resolves by waiting,
   // so it must not sit behind a click. Only the general how-numbers-settle prose is folded.

@@ -1436,6 +1436,44 @@ test("a still-billing drifter is a visible note, not a folded one", () => {
     "the drifter warning is not inside a <details>");
 });
 
+test("each run carries its own etl and analytics CU", () => {
+  // The two halves used to sit a table away from the run that produced them. On the row that names
+  // the dispatch, the build mode and whether the number has settled, they are qualified by the four
+  // facts that qualify a CU figure.
+  const r = full("a-1.json", "spark");
+  const out = d.renderSources([{ col: "spark", engine: "spark", rec: r }],
+    d.normaliseLedger(ledger({ OUT: 12.5, SEM: 3.25 })), {}, "o/r");
+  const head = rows(out)[0];
+  assert.ok(head.includes("etl CU") && head.includes("analytics CU"), head);
+  assert.ok(!/\|\s*CU\s*\|/.test(head),
+    "the settle column is `state` — one header called CU beside two holding CU is doing two jobs");
+  const row = rows(out).find((x) => x.startsWith("| spark |"));
+  assert.ok(row.includes("| 12.5 |"), `etl total on the row: ${row}`);
+  assert.ok(row.includes("| 3.3 |"), `analytics total on the row: ${row}`);
+});
+
+test("a class the ledger has not read is a dash on the run row, never 0.0", () => {
+  // Same rule as every other CU cell: `0.0` there says the engine did that work for free, which is
+  // the one reading this page is built to prevent.
+  const r = full("a-1.json", "spark");
+  const out = d.renderSources([{ col: "spark", engine: "spark", rec: r }],
+    d.normaliseLedger(ledger({ OUT: 12.5 })), {}, "o/r");   // no SEM => analytics unmeasured
+  const row = rows(out).find((x) => x.startsWith("| spark |"));
+  assert.ok(row.includes("—"), `unread analytics is a dash: ${row}`);
+  assert.ok(!row.includes("| 0.0 |"), row);
+});
+
+test("the run rows and Cost by engine quote the same numbers", () => {
+  // Both read the column's latest run through the same GUID join, so a reader comparing the two
+  // tables must not find two figures for one measurement. The CHARTS may differ — they average every
+  // run of a column — which is what the note under the run table says.
+  const { html } = d.compose([full("a-1.json", "spark")], ledger({ OUT: 12.5, SEM: 3.25 }), {});
+  const engine = rows(block(html, "Cost by engine")).find((x) => x.startsWith("| **etl**"));
+  const run = rows(block(html, "different dispatches, newest first"))
+    .find((x) => x.startsWith("| spark |"));
+  assert.ok(engine.includes("12.5") && run.includes("| 12.5 |"), `${engine} / ${run}`);
+});
+
 test("an item name cannot inject markup", () => {
   // The page escapes before it interprets markdown, so a `<` in a Fabric display name is text.
   const r = rec("a-1.json", "spark", {
