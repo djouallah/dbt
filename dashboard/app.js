@@ -1127,25 +1127,36 @@ export function engineTable(perCol, cols, secsCol) {
 }
 
 /**
- * Which dispatch each column came from, what it cost, and whether that cost can still rise.
+ * EVERY run the page drew from — which dispatch, what it cost, and whether that cost can still rise.
  *
  * The one thing a composed page owes the reader that a single-run page did not: the columns are
  * different dispatches, so a column can be days older than the one beside it. The other half is that a
  * run measured minutes ago is a LOWER BOUND — an hour's CU keeps growing for ~70 minutes after the
  * fact — so the reader is told to dispatch again rather than left to wonder.
  *
+ * **Every run, not one per column, and that is a correction.** The charts average an engine's whole
+ * history at a configuration, so a run that no longer holds its column still moves a bar — and while
+ * this table listed only the column holders, that run's CU appeared NOWHERE else on the page. The
+ * older `duckrun sorted` bar reads 2,454.1 and no row said so; the note under the table conceded the
+ * charts "draw a bar its latest run alone would not" and then declined to name the run. A number on a
+ * chart with no row behind it is exactly what this table exists to prevent. Rows that no longer hold
+ * their column are marked `earlier`, because *Cost by engine* quotes the holder alone.
+ *
  * It carries the two class totals as well, which is why `ledger` is a parameter rather than a leftover.
  * Everywhere else the two halves are read a table apart from the run that produced them; here they sit
  * on the row that names the dispatch, its build mode and whether the number has settled — the four
  * facts that qualify a CU figure, in one place.
  */
-export function renderSources(cols, ledger, unmeasured, repo, now = null, gen = {}) {
-  const out = [note("Each column is that engine's latest run. They are different dispatches, " +
-    "newest first:")];
+export function renderSources(cols, entries, ledger, repo, now = null, gen = {}) {
+  const out = [note("**Every run on this page**, newest dispatch first. Each engine's latest run " +
+    "holds its column; the charts average all of them:")];
+  // The runs that hold a column, by identity — `_file` can be absent and two records can share a run
+  // id across branches, but the object a column was built from is the object itself.
+  const holds = new Set(cols.map(({ rec }) => rec));
   // NEWEST DISPATCH FIRST. Everywhere else on the page the order is the engine order, which is what
   // makes columns comparable across two renders; here the point of the table is precisely that the
-  // columns are NOT contemporaneous, so it sorts on the thing it is reporting.
-  const sorted = [...cols].sort((a, b) => {
+  // rows are NOT contemporaneous, so it sorts on the thing it is reporting.
+  const sorted = [...(entries && entries.length ? entries : cols)].sort((a, b) => {
     const sa = ((a.rec.run || {}).started || ""), sb = ((b.rec.run || {}).started || "");
     return sa < sb ? 1 : sa > sb ? -1 : 0;
   });
@@ -1159,7 +1170,12 @@ export function renderSources(cols, ledger, unmeasured, repo, now = null, gen = 
     const items = Object.entries(items_(rec))
       .filter(([g, it]) => !NON_ENGINE_ROLES.has(role_(it)) && !skip.has(g));
     const started = String((rec.run || {}).started || "?").slice(0, 16).replace("T", " ");
-    const missing = unmeasured[col] || [];
+    // THIS run's own two halves and its own unmeasured items, not the column's. Same join, same GUIDs,
+    // same roles as `engineTable` — `runCu` is called again rather than threaded in, which costs one
+    // dictionary walk per row and is the only way a row that does not hold its column can report
+    // itself. A DASH where the ledger holds nothing for that class yet, never `0.0`: the whole page is
+    // built to stop a not-yet-measured run reading as work done for free.
+    const { cells: cu, unmeasured: missing } = runCu(rec, ledger);
     const live = drifting(rec);
     let state;
     if (live.length) {
@@ -1174,16 +1190,11 @@ export function renderSources(cols, ledger, unmeasured, repo, now = null, gen = 
       state = "settled";
     }
     const load = rec.full_load ? "full" : "incremental";
-    // THIS run's own two halves, not the column's mean. Same join, same GUIDs, same roles as
-    // `engineTable` — `runCu` is called again rather than threaded in, which costs one dictionary
-    // walk per row and keeps this function's signature. Because every row here IS a column and
-    // `engineTable` also quotes the latest run, the two tables agree cell for cell; the CHARTS do
-    // not, and are not meant to — they draw the mean over every run of a column, which is why the
-    // note below says which of the two a reader is looking at.
-    // A DASH where the ledger holds nothing for that class yet, never `0.0`: the whole page is built
-    // to stop a not-yet-measured run reading as work done for free. Same rule as every CU cell above.
-    const cu = runCu(rec, ledger).cells;
-    rows.push([col, link, `${started} (${load})`,
+    // The marker rides the COLUMN cell, because what it qualifies is the column: this run was that
+    // configuration's newest once and is not now. `<sub>` is the page's dim-annotation spelling, the
+    // same one `compute seconds` uses to carry its caveat on the label rather than in a note below.
+    const name = holds.has(rec) ? col : `${col} <sub>earlier</sub>`;
+    rows.push([name, link, `${started} (${load})`,
       cu.etl ? fmt(classTotal(cu, "etl"), 1) : DASH,
       cu.analytics ? fmt(classTotal(cu, "analytics"), 1) : DASH,
       String(items.length), state]);
@@ -1193,9 +1204,11 @@ export function renderSources(cols, ledger, unmeasured, repo, now = null, gen = 
   out.push(table(["column", "run", "built", "etl CU", "analytics CU", "items", "state"],
     ["left", "left", "left", "right", "right", "right", "left"], rows));
   out.push(note("**`etl CU` and `analytics CU` are that RUN's own totals** — the same GUID join as " +
-    "*Cost by engine*, which quotes each column's latest run, so those two tables agree cell for " +
-    "cell. The CHARTS do not: they average every run of a column, so a column built more than once " +
-    "draws a bar its latest run alone would not."));
+    "*Cost by engine*, which quotes the column HOLDER alone, so the two tables agree cell for cell on " +
+    "every row not marked `earlier`. The CHARTS quote neither: each bar is the mean over the runs " +
+    "listed here that fed it, which is why an `earlier` row's number can appear on a bar and in no " +
+    "other table. The two charts group differently, so the same run can sit in a bar with different " +
+    "company on each — ETL by column, analytics by the parquet the run measured."));
   const drifters = cols.map(({ col, rec }) => [col, drifting(rec)]).filter(([, v]) => v.length);
   // The drifter warning stays a VISIBLE note — it is the one state that never resolves by waiting,
   // so it must not sit behind a click. Only the general how-numbers-settle prose is folded.
@@ -1546,12 +1559,8 @@ export function renderPage(cols, runs, ledger, opts = {}) {
   const repo = opts.repo || DEFAULTS.repo;
   const martTable = opts.table || DEFAULTS.table;
   const now = opts.now === undefined ? null : opts.now;
-  const perCol = {}, unmeasured = {};
-  for (const { col, rec } of cols) {
-    const { cells, unmeasured: missing } = runCu(rec, ledger);
-    perCol[col] = cells;
-    unmeasured[col] = missing;
-  }
+  const perCol = {};
+  for (const { col, rec } of cols) perCol[col] = runCu(rec, ledger).cells;
 
   const newest = cols.map(({ rec }) => (rec.run || {}).started || "").sort().pop() || "";
   const asOf = String(ledger.updated || newest || "?").slice(0, 16).replace("T", " ");
@@ -1644,7 +1653,7 @@ export function renderPage(cols, runs, ledger, opts = {}) {
     "what THROTTLES: the CU a user sits behind and a capacity admin asks about. An engine that builds " +
     "cheaply and queries expensively has optimised the half that does not hurt."));
 
-  out.push(renderSources(cols, ledger, unmeasured, repo, now,
+  out.push(renderSources(cols, anaEntries, ledger, repo, now,
     { dropped: opts.dropped, reference: opts.reference, table: martTable, ref: opts.ref }));
   // A record that is not a whole generation — a failed run that never benchmarked, a build half
   // that never reported — is skipped, and NAMED HERE with its reason. It used to be only a count in

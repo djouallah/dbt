@@ -551,7 +551,7 @@ test("the numbers come before the methodology", () => {
   assert.ok(firstChart > 0);
   assert.ok(firstChart < out.indexOf("Capacity units (CU-seconds) are what this page leads with"));
   assert.ok(firstChart < out.indexOf("About these numbers"));
-  assert.ok(firstChart < out.indexOf("Each column is that engine's latest run"));
+  assert.ok(firstChart < out.indexOf("Every run on this page"));
   assert.ok(firstChart < out.indexOf("[source]".replace("[", "").replace("]", "")) ||
     firstChart < out.lastIndexOf("<p>"));
   // ...and the heading still leads.
@@ -1541,8 +1541,8 @@ test("each run carries its own etl and analytics CU", () => {
   // the dispatch, the build mode and whether the number has settled, they are qualified by the four
   // facts that qualify a CU figure.
   const r = full("a-1.json", "spark");
-  const out = d.renderSources([{ col: "spark", engine: "spark", rec: r }],
-    d.normaliseLedger(ledger({ OUT: 12.5, SEM: 3.25 })), {}, "o/r");
+  const out = d.renderSources([{ col: "spark", engine: "spark", rec: r }], null,
+    d.normaliseLedger(ledger({ OUT: 12.5, SEM: 3.25 })), "o/r");
   const head = rows(out)[0];
   assert.ok(head.includes("etl CU") && head.includes("analytics CU"), head);
   assert.ok(!/\|\s*CU\s*\|/.test(head),
@@ -1556,11 +1556,36 @@ test("a class the ledger has not read is a dash on the run row, never 0.0", () =
   // Same rule as every other CU cell: `0.0` there says the engine did that work for free, which is
   // the one reading this page is built to prevent.
   const r = full("a-1.json", "spark");
-  const out = d.renderSources([{ col: "spark", engine: "spark", rec: r }],
-    d.normaliseLedger(ledger({ OUT: 12.5 })), {}, "o/r");   // no SEM => analytics unmeasured
+  const out = d.renderSources([{ col: "spark", engine: "spark", rec: r }], null,
+    d.normaliseLedger(ledger({ OUT: 12.5 })), "o/r");       // no SEM => analytics unmeasured
   const row = rows(out).find((x) => x.startsWith("| spark |"));
   assert.ok(row.includes("—"), `unread analytics is a dash: ${row}`);
   assert.ok(!row.includes("| 0.0 |"), row);
+});
+
+test("every run a chart drew from has a row, marked when it lost its column", () => {
+  // A bar with no row behind it is what this table exists to prevent. The charts average an engine's
+  // whole history, so a superseded run still moves one — and while this listed column holders only,
+  // that run's CU appeared nowhere else on the page: `duckrun sorted` read 2,454.1 and no row said so.
+  const cfg = { vcores: "64", sorted: "true" };
+  const runs = [
+    lay("duckrun", 3, 26, { cfg, file: "a-1.json", finishedHoursAgo: 72 }),
+    lay("duckrun", 4, 25, { cfg, file: "b-2.json", finishedHoursAgo: 48 }),
+  ];
+  runs[0].items = { S0: gone("semantic_model", "aemo_duckrun"), O0: gone("output", "dbt_delta") };
+  runs[1].items = { S1: gone("semantic_model", "aemo_duckrun"), O1: gone("output", "dbt_delta") };
+  const { html } = d.compose(runs, ledger({
+    S0: { "XMLA Read Operation": 2400.0 }, O0: 1.0,
+    S1: { "XMLA Read Operation": 1600.0 }, O1: 1.0,
+  }), {});
+  const body = rows(block(html, "Every run on this page")).slice(1);
+  assert.equal(body.length, 2, "both runs, not just the one holding the column");
+  assert.ok(body[0].startsWith("| duckrun |"), `the holder is unmarked: ${body[0]}`);
+  assert.ok(body[0].includes("| 1,600.0 |"), body[0]);
+  // ...and the superseded one is named, marked, and carries the CU its bar drew.
+  assert.ok(body[1].startsWith("| duckrun earlier |"), `marked: ${body[1]}`);
+  assert.ok(body[1].includes("| 2,400.0 |"), `the number the older bar reads: ${body[1]}`);
+  assert.ok(charts(html)[0].values.includes("2,400.0"), "which is on a bar");
 });
 
 test("the run rows and Cost by engine quote the same numbers", () => {
@@ -1569,7 +1594,7 @@ test("the run rows and Cost by engine quote the same numbers", () => {
   // run of a column — which is what the note under the run table says.
   const { html } = d.compose([full("a-1.json", "spark")], ledger({ OUT: 12.5, SEM: 3.25 }), {});
   const engine = rows(block(html, "Cost by engine")).find((x) => x.startsWith("| **etl**"));
-  const run = rows(block(html, "different dispatches, newest first"))
+  const run = rows(block(html, "Every run on this page"))
     .find((x) => x.startsWith("| spark |"));
   assert.ok(engine.includes("12.5") && run.includes("| 12.5 |"), `${engine} / ${run}`);
 });
@@ -1579,9 +1604,8 @@ test("an item name cannot inject markup", () => {
   const r = rec("a-1.json", "spark", {
     OUT: { role: "output", name: "<img src=x onerror=alert(1)>" },
   });
-  const out = d.renderSources([{ col: "spark", engine: "spark", rec: r }],
-    d.normaliseLedger(ledger({ OUT: 1.0 })), { spark: ["output/<img src=x onerror=alert(1)>"] },
-    "o/r");
+  const out = d.renderSources([{ col: "spark", engine: "spark", rec: r }], null,
+    d.normaliseLedger(ledger({ OUT: 1.0 })), "o/r");
   assert.ok(!out.includes("<img"));
   assert.ok(out.includes("&lt;img"));
 });
