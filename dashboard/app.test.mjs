@@ -558,6 +558,122 @@ test("the numbers come before the methodology", () => {
   assert.ok(out.indexOf("<h2>Capacity units") < firstChart);
 });
 
+// ---------------------------------------------------------------------------------------- the lede
+
+/** A record carrying a landing archive and the full eight-table inventory. */
+const scaled = (file, engine, opts = {}) => {
+  const { names = ["stg_csv_archive_log", "dim_calendar", "dim_duid", "fct_price", "fct_scada",
+    "fct_price_today", "fct_scada_today", "fct_summary"],
+    rows = [8167, 3197, 689, 4599900, 370021502, 12750, 750153, 143980961],
+    landing = { files: 8350, size_mb: 170491.5 }, ...rest } = opts;
+  const stats = {};
+  names.forEach((t, i) => { if (rows[i] !== undefined) stats[t] = { total_rows: rows[i] }; });
+  return full(file, engine, { landing, tables: names, stats: { [engine]: stats }, ...rest });
+};
+
+test("the lede states the scale of the thing, and leads the page", () => {
+  // The page named its MEASURE and never its SUBJECT: four columns of CU with no statement of how
+  // much data any of it describes.
+  const out = render([scaled("a-1.json", "spark")], ledger({ OUT: 1.0, SEM: 2.0 }));
+  const said = plain(out);
+  assert.ok(said.includes("One dbt project on **1 engine**"));
+  assert.ok(said.includes("**170 GB** of raw AEMO CSV (**8,350 files**)"));
+  assert.ok(said.includes("built into the same **8 tables**"));
+  assert.ok(said.includes("4 facts, 2 dimensions, a staging log and a mart"));
+  assert.ok(said.includes("totalling **519,377,319 rows**"));
+  // FIRST — above the section heading that used to lead, which is above the first chart.
+  assert.ok(out.indexOf('<p class="lede">') >= 0);
+  assert.ok(out.indexOf('<p class="lede">') < out.indexOf("<h2>Capacity units"));
+});
+
+test("the lede counts engines, not columns", () => {
+  // Two configs of one engine are two columns and one engine. The subject is what was measured.
+  const runs = [scaled("a-1.json", "spark", { config: { spark: { vcores: 8 } } }),
+    scaled("b-2.json", "spark", { config: { spark: { vcores: 64 } } }),
+    scaled("c-3.json", "dwh")];
+  const said = plain(render(runs, ledger({ OUT: 1.0, SEM: 2.0 })));
+  assert.ok(said.includes("One dbt project on **2 engines**"));
+});
+
+test("the lede and the Input archive table quote the SAME archive", () => {
+  // Two readers of `layout.landing` picking their own record is how a page says 170 GB at the top and
+  // 168 at the foot, which reads as a bug in the measurement rather than in the page.
+  // Which of the two records wins is `landingBlocks`' business and is not asserted here — that they
+  // AGREE is, because it is the property that survives a change to that rule.
+  const runs = [scaled("a-1.json", "dwh", { landing: { files: 10, size_mb: 1000 } }),
+    scaled("b-2.json", "spark", { landing: { files: 8350, size_mb: 170491.5 } })];
+  const out = render(runs, ledger({ OUT: 1.0, SEM: 2.0 }));
+  const foot = rows(block(out, "<h3>Input archive</h3>")).pop();
+  const files = (plain(out).match(/\(\*\*([\d,]+) files\*\*\)/) || [])[1];
+  assert.ok(files, "the lede must state a file count");
+  assert.ok(foot.includes(`**${files}**`), `lede said ${files}, Input archive said ${foot}`);
+});
+
+test("the archive is size_mb / 1000, which is what the Input archive table prints", () => {
+  // `stats.py` stores bytes/1048576, so this is really MiB and the archive is 178.8 GB decimal. The
+  // page prints the figure that agrees on sight with the `170,491.5 MB` in its own table. A later
+  // switch to /1024 is then a visible test change rather than a silent one.
+  const said = plain(render([scaled("a-1.json", "spark")], ledger({ OUT: 1.0 })));
+  assert.ok(said.includes("**170 GB**"));
+  assert.ok(!said.includes("**167 GB**") && !said.includes("**179 GB**"));
+});
+
+test("an unmeasured archive is an absent clause, never 0 GB", () => {
+  const said = plain(render([scaled("a-1.json", "spark", { landing: null })],
+    ledger({ OUT: 1.0, SEM: 2.0 })));
+  assert.ok(!said.includes("GB of raw AEMO CSV"), "no size may be claimed");
+  assert.ok(!said.includes("0 GB"));
+  // ...but what it DID measure still gets said.
+  assert.ok(said.includes("built into the same **8 tables**"));
+  assert.ok(said.includes("totalling **519,377,319 rows**"));
+});
+
+test("a record with no table inventory renders no table clause", () => {
+  const r = scaled("a-1.json", "spark", { names: [], rows: [] });
+  r.layout.stats = {};
+  const said = plain(render([r], ledger({ OUT: 1.0, SEM: 2.0 })));
+  assert.ok(!said.includes("built into the same"));
+  assert.ok(!said.includes("totalling"));
+  // The archive it DID measure still gets said.
+  assert.ok(said.includes("**170 GB** of raw AEMO CSV"));
+});
+
+test("with nothing measured at all there is no lede, not a sentence of dashes", () => {
+  const r = scaled("a-1.json", "spark", { names: [], rows: [], landing: null });
+  r.layout.stats = {};
+  const out = render([r], ledger({ OUT: 1.0, SEM: 2.0 }));
+  assert.ok(!out.includes('<p class="lede">'));
+  assert.ok(!plain(out).includes("One dbt project on"));
+});
+
+test("a PARTIAL row total is dropped, never printed as the total", () => {
+  // Seven tables of eight labelled `in total` is a WRONG number, not an incomplete one, and it would
+  // sit on the page looking entirely plausible.
+  const said = plain(render([scaled("a-1.json", "spark", { rows: [8167, 3197, 689, 4599900] })],
+    ledger({ OUT: 1.0, SEM: 2.0 })));
+  assert.ok(!said.includes("totalling"), "a short sum must not be printed");
+  assert.ok(!said.includes("4,611,953"));
+  // The table COUNT is still known and still said.
+  assert.ok(said.includes("built into the same **8 tables**"));
+});
+
+test("the total sums the run's table LIST, not every key of its stats block", () => {
+  const r = scaled("a-1.json", "spark");
+  r.layout.stats.spark.some_scratch_table = { total_rows: 999999999 };
+  assert.equal(d.totalRows(r), 519377319);
+  assert.ok(plain(render([r], ledger({ OUT: 1.0 }))).includes("totalling **519,377,319 rows**"));
+});
+
+test("a breakdown that would not add up is dropped, and the count goes out alone", () => {
+  // A decomposition quietly short of the count beside it contradicts it.
+  const said = plain(render([scaled("a-1.json", "spark",
+    { names: ["fct_summary", "dim_duid", "mystery_table"], rows: [1, 2, 3] })],
+    ledger({ OUT: 1.0, SEM: 2.0 })));
+  assert.ok(said.includes("built into the same **3 tables**"));
+  assert.ok(!said.includes("and a mart —"), "no breakdown when it does not account for every table");
+  assert.ok(said.includes("totalling **6 rows**"));
+});
+
 test("the page says which of its measures is the comparable one", () => {
   // A capacity unit already prices in how much compute an engine was given — that is the whole reason
   // CU leads. The two time measures do NOT have that property.

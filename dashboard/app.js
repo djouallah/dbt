@@ -837,7 +837,8 @@ export function matchesFilter(cells, q, picks = {}) {
 }
 
 export const note = (text) => `<p class="note">${inline(text)}</p>`;
-export const para = (text) => `<p>${inline(text)}</p>`;
+/** `cls` is optional and only the lede uses it — everything else on this page is unclassed prose. */
+export const para = (text, cls = "") => `<p${cls ? ` class="${cls}"` : ""}>${inline(text)}</p>`;
 
 /**
  * A methodology note folded behind one line. The full text stays in the DOM — every sentence the
@@ -1328,10 +1329,21 @@ export function renderSources(cols, entries, ledger, repo, now = null, gen = {})
  * dispatch with `skip_download` off extends it — that is stated rather than averaged away, because the
  * two runs then did genuinely different amounts of work.
  */
-export function renderInput(cols) {
-  const have = cols
+/**
+ * Every column's landing block, oldest first — the page's one statement of what went IN.
+ *
+ * Split out because the LEDE quotes the same archive the *Input archive* table does. Two readers of
+ * `layout.landing` picking their own record is exactly how a page ends up saying 170 GB at the top
+ * and 168 GB at the bottom, which reads as a bug in the measurement rather than in the page.
+ */
+export function landingBlocks(cols) {
+  return cols
     .map(({ col, rec }) => [col, ((rec.layout || {}).landing) || {}])
     .filter(([, d]) => Object.keys(d).length);
+}
+
+export function renderInput(cols) {
+  const have = landingBlocks(cols);
   if (!have.length) return "";
   const latest = have[have.length - 1][1];
   const folders = latest.folders || {};
@@ -1590,6 +1602,119 @@ export function queryTime(cols) {
   return { times, counts };
 }
 
+// -------------------------------------------------------------------------------------- the lede
+
+/** The shared table list a run recorded, or the tables it filed stats for. */
+const tableNames = (rec) => {
+  const layout = (rec || {}).layout || {};
+  if (Array.isArray(layout.tables) && layout.tables.length) return layout.tables;
+  return Object.keys((layout.stats || {})[(rec || {}).engine] || {});
+};
+
+/**
+ * `4 facts, 2 dimensions, a staging log and a mart` — the table count decomposed by name prefix.
+ *
+ * Returns `""` when the parts do not add up to the whole list. A breakdown that is quietly short
+ * sits beside the count it is supposed to explain and contradicts it, so an unrecognised name means
+ * the count goes out alone.
+ */
+const tableShape = (names, martTable) => {
+  const dims = names.filter((t) => t.startsWith("dim_")).length;
+  const stg = names.filter((t) => t.startsWith("stg_")).length;
+  const mart = names.includes(martTable) ? 1 : 0;
+  const facts = names.filter((t) => t.startsWith("fct_") && t !== martTable).length;
+  if (dims + stg + mart + facts !== names.length) return "";
+  const parts = [];
+  if (facts) parts.push(`${facts} fact${facts !== 1 ? "s" : ""}`);
+  if (dims) parts.push(`${dims} dimension${dims !== 1 ? "s" : ""}`);
+  if (stg) parts.push(stg === 1 ? "a staging log" : `${stg} staging logs`);
+  if (mart) parts.push("a mart");
+  if (parts.length < 2) return "";
+  return `${parts.slice(0, -1).join(", ")} and ${parts[parts.length - 1]}`;
+};
+
+/**
+ * Every shared table's rows added up, for ONE run — or `null` if any of them is missing.
+ *
+ * **A partial sum is dropped, never printed.** Seven tables of eight, labelled "in total", is a
+ * WRONG number rather than an incomplete one, and it would sit on the page looking entirely
+ * plausible. Same rule as the ledger's dash-instead-of-zero: absent says "not measured", a number
+ * says something that is not true.
+ *
+ * Summed over the run's own table LIST rather than over every key of its stats block, so a key
+ * `stats.py` adds outside that list cannot silently inflate it — and the tables it does add up are
+ * exactly the ones the layout tab strip prints, so a reader can check this against the page.
+ */
+export function totalRows(rec, names = tableNames(rec)) {
+  const stats = (((rec || {}).layout || {}).stats || {})[(rec || {}).engine] || {};
+  if (!names.length) return null;
+  let total = 0;
+  for (const t of names) {
+    const v = Number((stats[t] || {}).total_rows);
+    if (!Number.isFinite(v)) return null;
+    total += v;
+  }
+  return Math.trunc(total);
+}
+
+/**
+ * ONE SENTENCE SAYING WHAT THIS IS — how much goes in, what comes out, on how many engines.
+ *
+ * The page led with `Capacity units` and went straight into the charts, so it named its MEASURE and
+ * never its SUBJECT: a reader arriving on a link saw four columns of CU with no statement of the
+ * scale any of it describes. The `<h1>` in the shell says what the project is; this says how big.
+ *
+ * **Every number is DERIVED from the records the page already loaded.** A hardcoded `170 GB` goes
+ * stale the first dispatch that runs with `skip_download` off, and goes stale SILENTLY — the exact
+ * failure this repo is built against. It also reads the landing block through `landingBlocks`, the
+ * same call the `Input archive` table makes, so the top and the foot of the page cannot quote
+ * different archives.
+ *
+ * **An absent input is an absent clause, never a zero** — the rule the `compute seconds` row and the
+ * `cold`/`warm`/`hot` columns already follow. With nothing measurable at all it renders nothing
+ * rather than a sentence made of dashes.
+ *
+ * On the unit: `stats.py` stores `bytes / 1048576`, so `size_mb` is really MiB and the archive is
+ * 178.8 GB decimal. This prints `size_mb / 1000` because that is the figure which agrees on sight
+ * with the `170,491.5 MB` in the `Input archive` table on this same page; raw bytes never reach the
+ * record, so there is no exact byte figure to print instead.
+ */
+export function pageLede(cols, opts = {}) {
+  const martTable = opts.table || DEFAULTS.table;
+  const n = new Set(cols.map(({ col }) => baseEngine(col))).size;
+  if (!n) return "";
+
+  const land = (landingBlocks(cols).pop() || ["", {}])[1];
+  const gb = Number(land.size_mb) / 1000;
+  const files = Number(land.files);
+  const input = Number.isFinite(gb) && gb > 0
+    ? `**${fmt(gb, 0)} GB** of raw AEMO CSV` +
+      (Number.isFinite(files) && files > 0 ? ` (**${fmt(files, 0)} files**)` : "")
+    : "";
+
+  const withTables = cols.filter(({ rec }) => tableNames(rec).length);
+  const rec = ((withTables[withTables.length - 1] || cols[cols.length - 1] || {}).rec) || {};
+  const names = tableNames(rec);
+  const shape = tableShape(names, martTable);
+  const tables = names.length
+    ? `the same **${fmt(names.length, 0)} table${names.length !== 1 ? "s" : ""}**` +
+      (shape ? ` — ${shape} —` : "")
+    : "";
+  const rows = totalRows(rec, names);
+
+  const made = [input, tables && `built into ${tables}`].filter(Boolean).join(" ");
+  if (!made && rows === null) return "";
+  let sentence = `One dbt project on **${n} engine${n !== 1 ? "s" : ""}**`;
+  if (made) sentence += `: ${made}`;
+  if (rows !== null) {
+    // With the breakdown present its closing dash already separates this; without one the phrase
+    // needs its own comma, and with no preceding clause at all it opens the sentence instead.
+    const r = `**${fmt(rows, 0)} row${rows !== 1 ? "s" : ""}**`;
+    sentence += made ? `${shape ? " " : ", "}totalling ${r}` : `: ${r} in total`;
+  }
+  return para(`${sentence}.`, "lede");
+}
+
 // ------------------------------------------------------------------------------------- the whole
 
 /**
@@ -1614,7 +1739,10 @@ export function renderPage(cols, runs, ledger, opts = {}) {
 
   const newest = cols.map(({ rec }) => (rec.run || {}).started || "").sort().pop() || "";
   const asOf = String(ledger.updated || newest || "?").slice(0, 16).replace("T", " ");
-  const out = [`<h2>Capacity units <span class="asof">the latest run per engine, as of ` +
+  // FIRST — the scale of the thing, under the `<h1>` the shell carries. `Capacity units` names the
+  // measure and stays where it is, now heading the section it always described rather than the page.
+  const out = [pageLede(cols, { table: martTable }),
+    `<h2>Capacity units <span class="asof">the latest run per engine, as of ` +
     `${esc(asOf)}</span></h2>`];
 
   // EVERY run maps to its column, not just the one the column was named after: the chart's mean is

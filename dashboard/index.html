@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Capacity units</title>
+<title>Fabric dbt benchmark</title>
 <!--
   The shell. It holds the stylesheet and three empty elements; `app.js` fills them at load time from
   `history/` on GitHub.
@@ -46,7 +46,7 @@ body { margin:0; padding:2.25rem 1.25rem 4rem; background:var(--bg); color:var(-
    capped. No `vw` anywhere: on Windows `100vw` includes the classic scrollbar and a full-bleed trick
    built on it makes the whole page scroll sideways — which is the bug being fixed, one level up. */
 main { max-width: 110rem; margin: 0 auto; }
-h2, h3, h4, p, footer { max-width: 62rem; }
+h1, h2, h3, h4, p, footer { max-width: 62rem; }
 /* The charts are DRAWN at a 660-unit viewBox and scale to their box, so letting them fill a wide
    `main` would inflate every label and value ~2.7x. They keep the prose measure — and inside the
    side-by-side row they share it: two columns that wrap back to a stack when the window is narrow.
@@ -58,10 +58,21 @@ figure.chart { border:1px solid var(--line); border-radius:12px; padding:1rem 1.
 .charts { display:flex; flex-wrap:wrap; align-items:flex-start; gap:1rem 1.5rem; }
 .charts figure.chart { flex:1 1 34rem; min-width:0; max-width:53rem; margin:1.25rem 0 .5rem; }
 figure.chart[data-kind="etl"] .bar { fill:var(--series2); }
+/* What this page IS, above what it measures. The h2 under it used to lead, which named the measure
+   and never the project — a reader arriving from a link had no statement of either. */
+h1 { font-size:2rem; line-height:1.15; margin:0 0 .6rem; letter-spacing:-0.02em; }
 h2 { font-size:1.65rem; line-height:1.2; margin:0 0 1.5rem; letter-spacing:-0.015em; }
 /* The dateline rides inside the h2 so the title stays one element, but it reads as a sub-line. */
 h2 .asof { display:block; font-size:.82rem; font-weight:400; color:var(--dim);
   letter-spacing:0; margin-top:.4rem; }
+/* The repo link rides inside the h1 the same way — same idiom, same metrics — but it KEEPS the link
+   colour rather than going dim like the dateline: it is the only way back to the source and it has
+   to look clickable, not like a caption. */
+h1 .repo { display:block; font-size:.82rem; font-weight:400; letter-spacing:0; margin-top:.4rem;
+  width:max-content; max-width:100%; }
+/* The summary sentence: body prose, not a `.note`. It is the one line stating the SCALE of what
+   every number below it describes, so it is the last thing that should read as an aside. */
+p.lede { font-size:1.02rem; margin:0 0 1.6rem; }
 /* A ruled heading per section is what gives the page its rhythm — the sections used to run into
    each other and the only cue was font size. */
 h3 { font-size:1.12rem; margin:3rem 0 .9rem; padding-top:1.4rem; border-top:1px solid var(--line);
@@ -204,6 +215,17 @@ figure.chart svg { max-width:100%; height:auto; display:block; overflow:visible;
 </head>
 <body>
 <main>
+  <!-- The TITLE lives in the shell, not in `app.js`, because it needs no data: it is then already
+       there while the page says Loading…, on the empty-records page and on the boot error page,
+       and there is only one copy of it to keep in step. The summary line under it does need data,
+       so `app.js` renders that one — see `pageLede`.
+       The repo link is hardcoded exactly as the footer's is. `?repo=` redirects where the DATA is
+       read from, not what this page is; the `[source]` line `app.js` renders is the one that
+       follows it. -->
+  <h1>Fabric dbt benchmark
+    <a class="repo"
+       href="https://github.com/djouallah/fabric-dbt-benchmark">djouallah/fabric-dbt-benchmark</a>
+  </h1>
   <div class="status" id="status"></div>
   <div id="app"><p class="note">Loading…</p></div>
   <footer id="foot">

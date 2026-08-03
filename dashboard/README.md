@@ -12,7 +12,7 @@ Python renderer whose output had to be republished for every measurement — whi
 had looked at could be published by a workflow nobody had watched.
 
 ```
-index.html   the shell: one stylesheet, three empty elements
+index.html   the shell: one stylesheet, the title, three empty elements
 app.js       the whole page — loader, join, layout grouping, render, charts
 build.mjs    index.html + app.js -> one file, twice (live, and offline with data inlined)
 app.test.mjs 88 offline tests, no browser, no network
@@ -106,6 +106,34 @@ without a build, a token or a dispatch.
 
 ## The page
 
+- **The page says what it IS before what it measures.** It opened on `Capacity units` and went
+  straight into the charts, so it named its measure and never its subject: a reader arriving on a
+  link met four columns of CU with no statement of the scale any of it describes. Now an `<h1>`
+  **Fabric dbt benchmark** with the repo link under it, then one sentence of scale, then
+  `Capacity units` — kept, and heading the section it always described rather than the page.
+  **The title is in the SHELL and the sentence is in `app.js`**, and the split is what each needs:
+  the title needs no data, so putting it in `index.html` means it is already there while the page
+  says `Loading…`, on the empty-records page and on the boot error page, with one copy to maintain
+  instead of four. The sentence needs the records, so it cannot live there.
+  **Every number in it is DERIVED** — engines from the columns, GB and files from `layout.landing`,
+  the table count and its `4 facts, 2 dimensions, a staging log and a mart` breakdown from
+  `layout.tables` by name prefix, the row total summed over that same list. A hardcoded `170 GB`
+  goes stale the first dispatch that runs with `skip_download` off, and goes stale **silently**.
+  It reads the archive through `landingBlocks`, the same call the *Input archive* table at the foot
+  of the page makes, so the top and the bottom cannot quote different archives — a test asserts they
+  agree rather than asserting which record wins, so it survives a change to that rule.
+  Three things it refuses to say. **An absent input is an absent clause, never a zero** — no landing
+  block, no size; the same rule as the `compute seconds` row. **A partial row total is dropped
+  entirely**: seven tables of eight labelled "in total" is a *wrong* number, not an incomplete one,
+  and it would sit there looking perfectly plausible. And a **breakdown that does not account for
+  every table** is dropped while the count stays, because a decomposition quietly short of the
+  number beside it contradicts it. With nothing measurable at all there is no lede rather than a
+  sentence of dashes.
+  On the unit: `stats.py` stores `bytes / 1048576`, so `size_mb` is really MiB and the archive is
+  178.8 GB decimal. The lede prints `size_mb / 1000` because that is the figure which agrees on
+  sight with the `170,491.5 MB` in the *Input archive* table on the same page; raw bytes are
+  discarded inside `landing_stats()` and never reach the record, so there is no exact byte figure to
+  print instead. A test pins the `/1000`, so a later "fix" to `/1024` is a visible change.
 - **Numbers are visible, methodology is opt-in.** The long how-to-read notes are folded behind a
   one-line `<details>` each (`fold()` in `app.js`); every sentence stays in the DOM — the tests and
   ctrl-F still see it all — but the page reads numbers-first. Two things are deliberately NEVER
