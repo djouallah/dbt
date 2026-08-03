@@ -1134,13 +1134,12 @@ export function engineTable(perCol, cols, secsCol) {
  * run measured minutes ago is a LOWER BOUND — an hour's CU keeps growing for ~70 minutes after the
  * fact — so the reader is told to dispatch again rather than left to wonder.
  *
- * **Every run, not one per column, and that is a correction.** The charts average an engine's whole
- * history at a configuration, so a run that no longer holds its column still moves a bar — and while
- * this table listed only the column holders, that run's CU appeared NOWHERE else on the page. The
- * older `duckrun sorted` bar reads 2,454.1 and no row said so; the note under the table conceded the
- * charts "draw a bar its latest run alone would not" and then declined to name the run. A number on a
- * chart with no row behind it is exactly what this table exists to prevent. Rows that no longer hold
- * their column are marked `earlier`, because *Cost by engine* quotes the holder alone.
+ * **THE RUN IS THE KEY — one row per dispatch, and nothing is marked or ranked against a column.**
+ * This listed one run per column, so the runs that hold no column were invisible while still moving
+ * every bar: a `duckrun sorted` bar read 2,454.1 and no row on the page said so. A number on a chart
+ * with no row behind it is exactly what this table exists to prevent. The rows that also hold a column
+ * carry no annotation saying so — which run is newest is already in the `built` column, and a marker
+ * on top of it was inventing a second grammar for a fact the sort order states.
  *
  * It carries the two class totals as well, which is why `ledger` is a parameter rather than a leftover.
  * Everywhere else the two halves are read a table apart from the run that produced them; here they sit
@@ -1148,11 +1147,8 @@ export function engineTable(perCol, cols, secsCol) {
  * facts that qualify a CU figure, in one place.
  */
 export function renderSources(cols, entries, ledger, repo, now = null, gen = {}) {
-  const out = [note("**Every run on this page**, newest dispatch first. Each engine's latest run " +
-    "holds its column; the charts average all of them:")];
-  // The runs that hold a column, by identity — `_file` can be absent and two records can share a run
-  // id across branches, but the object a column was built from is the object itself.
-  const holds = new Set(cols.map(({ rec }) => rec));
+  const out = [note("**Every run on this page**, newest dispatch first. The RUN is the key — one row " +
+    "per dispatch, with its own totals:")];
   // NEWEST DISPATCH FIRST. Everywhere else on the page the order is the engine order, which is what
   // makes columns comparable across two renders; here the point of the table is precisely that the
   // rows are NOT contemporaneous, so it sorts on the thing it is reporting.
@@ -1190,11 +1186,7 @@ export function renderSources(cols, entries, ledger, repo, now = null, gen = {})
       state = "settled";
     }
     const load = rec.full_load ? "full" : "incremental";
-    // The marker rides the COLUMN cell, because what it qualifies is the column: this run was that
-    // configuration's newest once and is not now. `<sub>` is the page's dim-annotation spelling, the
-    // same one `compute seconds` uses to carry its caveat on the label rather than in a note below.
-    const name = holds.has(rec) ? col : `${col} <sub>earlier</sub>`;
-    rows.push([name, link, `${started} (${load})`,
+    rows.push([col, link, `${started} (${load})`,
       cu.etl ? fmt(classTotal(cu, "etl"), 1) : DASH,
       cu.analytics ? fmt(classTotal(cu, "analytics"), 1) : DASH,
       String(items.length), state]);
@@ -1204,11 +1196,10 @@ export function renderSources(cols, entries, ledger, repo, now = null, gen = {})
   out.push(table(["column", "run", "built", "etl CU", "analytics CU", "items", "state"],
     ["left", "left", "left", "right", "right", "right", "left"], rows));
   out.push(note("**`etl CU` and `analytics CU` are that RUN's own totals** — the same GUID join as " +
-    "*Cost by engine*, which quotes the column HOLDER alone, so the two tables agree cell for cell on " +
-    "every row not marked `earlier`. The CHARTS quote neither: each bar is the mean over the runs " +
-    "listed here that fed it, which is why an `earlier` row's number can appear on a bar and in no " +
-    "other table. The two charts group differently, so the same run can sit in a bar with different " +
-    "company on each — ETL by column, analytics by the parquet the run measured."));
+    "*Cost by engine*, which quotes each column's newest run. The CHARTS quote neither: each bar is " +
+    "the mean over the runs listed here that fed it. The two group differently, so one run can sit in " +
+    "a bar with different company on each — ETL by column, analytics by the parquet the run " +
+    "measured."));
   const drifters = cols.map(({ col, rec }) => [col, drifting(rec)]).filter(([, v]) => v.length);
   // The drifter warning stays a VISIBLE note — it is the one state that never resolves by waiting,
   // so it must not sit behind a click. Only the general how-numbers-settle prose is folded.

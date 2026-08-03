@@ -1563,7 +1563,7 @@ test("a class the ledger has not read is a dash on the run row, never 0.0", () =
   assert.ok(!row.includes("| 0.0 |"), row);
 });
 
-test("every run a chart drew from has a row, marked when it lost its column", () => {
+test("every run a chart drew from has a row of its own", () => {
   // A bar with no row behind it is what this table exists to prevent. The charts average an engine's
   // whole history, so a superseded run still moves one — and while this listed column holders only,
   // that run's CU appeared nowhere else on the page: `duckrun sorted` read 2,454.1 and no row said so.
@@ -1580,10 +1580,11 @@ test("every run a chart drew from has a row, marked when it lost its column", ()
   }), {});
   const body = rows(block(html, "Every run on this page")).slice(1);
   assert.equal(body.length, 2, "both runs, not just the one holding the column");
-  assert.ok(body[0].startsWith("| duckrun |"), `the holder is unmarked: ${body[0]}`);
+  assert.ok(body[0].startsWith("| duckrun |"), body[0]);
   assert.ok(body[0].includes("| 1,600.0 |"), body[0]);
-  // ...and the superseded one is named, marked, and carries the CU its bar drew.
-  assert.ok(body[1].startsWith("| duckrun earlier |"), `marked: ${body[1]}`);
+  // ...and the superseded one is a row like any other: the RUN is the key, and which one is newest is
+  // already what the sort order and the `built` column say.
+  assert.ok(body[1].startsWith("| duckrun |"), body[1]);
   assert.ok(body[1].includes("| 2,400.0 |"), `the number the older bar reads: ${body[1]}`);
   assert.ok(charts(html)[0].values.includes("2,400.0"), "which is on a bar");
 });
