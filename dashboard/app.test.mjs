@@ -690,6 +690,162 @@ test("a changed archive between runs is stated, not averaged", () => {
   assert.ok(out.includes("did not all read the same archive") && out.includes("150,000.0"));
 });
 
+// ------------------------------------------------------------- the run table's autofilter
+//
+// A stub DOM, because the alternative is shipping the only interactive code on the page with nothing
+// checking it. It implements exactly what `wireTables` touches and nothing else — if that function
+// starts reaching for something new, this stub is where it will say so.
+
+class El {
+  constructor(tag) {
+    this.tagName = String(tag).toUpperCase();
+    this.children = []; this.dataset = {}; this.style = {}; this.attrs = {};
+    this.listeners = {}; this.classes = new Set(); this._text = "";
+    this.classList = {
+      toggle: (c, on) => (on ? this.classes.add(c) : this.classes.delete(c)),
+      contains: (c) => this.classes.has(c),
+    };
+  }
+  get className() { return [...this.classes].join(" "); }
+  set className(v) { this.classes = new Set(String(v).split(/\s+/).filter(Boolean)); }
+  get textContent() { return this.children.length ? this.children.map((c) => c.textContent).join("") : this._text; }
+  set textContent(v) { this._text = String(v); this.children = []; }
+  get firstChild() { return this.children[0] || null; }
+  appendChild(c) { this.children = this.children.filter((x) => x !== c); this.children.push(c); return c; }
+  insertBefore(c, ref) {
+    const at = ref ? this.children.indexOf(ref) : this.children.length;
+    this.children.splice(at < 0 ? this.children.length : at, 0, c);
+    return c;
+  }
+  setAttribute(k, v) { this.attrs[k] = String(v); }
+  addEventListener(k, fn) { (this.listeners[k] = this.listeners[k] || []).push(fn); }
+  fire(k, ev = {}) { for (const fn of this.listeners[k] || []) fn(ev); }
+  find(pred, out = []) {
+    for (const c of this.children) { if (pred(c)) out.push(c); c.find && c.find(pred, out); }
+    return out;
+  }
+  querySelector(sel) { return this.querySelectorAll(sel)[0] || null; }
+  querySelectorAll(sel) {
+    return sel.startsWith(".")
+      ? this.find((c) => c.classes.has(sel.slice(1)))
+      : this.find((c) => c.tagName === sel.toUpperCase());
+  }
+}
+
+/** A `.filtered` box holding one table, plus the document that built it. */
+function stubTable(head, body, data = {}) {
+  const doc = { createElement: (t) => new El(t) };
+  const box = new El("div");
+  box.className = "filtered";
+  Object.assign(box.dataset, data);
+  const tbl = new El("table");
+  const th = head.map((h) => { const e = new El("th"); e.textContent = h; return e; });
+  tbl.tHead = { rows: [{ cells: th }] };
+  const rows = body.map((cells) => {
+    const tr = new El("tr");
+    tr.cells = cells.map((c) => { const e = new El("td"); e.textContent = c; return e; });
+    return tr;
+  });
+  tbl.tBodies = [Object.assign(new El("tbody"), {
+    rows, appendChild(r) { const i = this.rows.indexOf(r); if (i >= 0) this.rows.splice(i, 1); this.rows.push(r); return r; },
+  })];
+  box.appendChild(tbl);
+  const root = new El("div");
+  root.appendChild(box);
+  return { root, box, tbl, doc, th, rows };
+}
+
+const visible = (rows) => rows.filter((r) => r.style.display !== "none")
+  .map((r) => r.cells[0].textContent);
+
+test("a number sorts as a number, and what is not one sorts last", () => {
+  // `26,583.6` against `9,986.3`: text order puts the smaller first on its leading digit.
+  assert.equal(d.cellNumber("26,583.6"), 26583.6);
+  assert.ok(Number.isNaN(d.cellNumber("—")));
+  assert.ok(Number.isNaN(d.cellNumber("2026-08-03 11:32 (full)")));
+  assert.ok(d.compareCells("9,986.3", "26,583.6") < 0);
+  assert.ok(d.compareCells("100", "—") < 0, "a dash is not measured, so it never wins a ranking");
+  assert.ok(d.compareCells("—", "100") > 0, "...in either direction");
+  assert.ok(d.compareCells("duckrun", "spark") < 0);
+});
+
+test("the free text is a substring and a menu is exact, ANDed", () => {
+  const cells = ["duckrun·64c", "30809945203", "2026-08-03 11:32 (full)", "26,591.0", "settled"];
+  assert.ok(d.matchesFilter(cells, "DUCK"), "case-insensitive substring");
+  assert.ok(d.matchesFilter(cells, "3080"), "and it reaches the run id");
+  assert.ok(!d.matchesFilter(cells, "spark"));
+  assert.ok(d.matchesFilter(cells, "", { 4: "settled" }));
+  assert.ok(!d.matchesFilter(cells, "", { 4: "may still rise" }), "a menu is EXACT, not substring");
+  assert.ok(!d.matchesFilter(cells, "spark", { 4: "settled" }), "both, never either");
+  assert.ok(d.matchesFilter(cells, "", { 4: "" }), "an unset menu constrains nothing");
+});
+
+test("the filter bar is built from the rows that are already there", () => {
+  // The dropdown's options ARE the column's distinct values, read off the DOM — so the list cannot
+  // describe a column it no longer matches, and the render layer stays a pure string function.
+  const { root, box, doc, rows } = stubTable(
+    ["column", "run", "etl CU", "state"],
+    [["duckrun·64c", "301", "26,990.9", "settled"],
+      ["duckrun·64c", "302", "22,623.6", "settled"],
+      ["spark·V-Order", "303", "34,048.3", "may still rise"]],
+    { find: "filter runs", menus: "0,3" });
+  assert.equal(d.wireTables(root, doc), 1);
+  const bar = box.querySelector(".filterbar");
+  const menus = bar.querySelectorAll("select");
+  assert.equal(menus.length, 2, "one per declared column, and no more");
+  assert.deepEqual(menus[0].children.map((o) => o.textContent),
+    ["all column", "duckrun·64c", "spark·V-Order"], "distinct, with an all-clear first");
+  assert.deepEqual(menus[1].children.map((o) => o.textContent),
+    ["all state", "may still rise", "settled"]);
+  assert.equal(bar.querySelector(".fcount").textContent, "3 rows");
+
+  // Free text narrows...
+  const find = bar.querySelector("input");
+  find.value = "spark";
+  find.fire("input");
+  assert.deepEqual(visible(rows), ["spark·V-Order"]);
+  assert.equal(bar.querySelector(".fcount").textContent, "1 of 3 rows");
+  // ...and a hidden row is HIDDEN, never removed: ctrl-F and the offline copy still see every run.
+  assert.equal(rows.length, 3);
+  find.value = "";
+  find.fire("input");
+  assert.deepEqual(visible(rows), ["duckrun·64c", "duckrun·64c", "spark·V-Order"]);
+  // A menu is ANDed with the text.
+  menus[0].value = "duckrun·64c";
+  menus[0].fire("change");
+  assert.equal(bar.querySelector(".fcount").textContent, "2 of 3 rows");
+});
+
+test("a header click sorts, and clicking it again reverses", () => {
+  const { root, doc, th, tbl } = stubTable(
+    ["column", "etl CU"],
+    [["duckrun", "26,990.9"], ["spark", "9,986.3"], ["dwh", "38,225.3"]],
+    { menus: "" });
+  d.wireTables(root, doc);
+  const order = () => tbl.tBodies[0].rows.map((r) => r.cells[0].textContent);
+  th[1].fire("click");
+  assert.deepEqual(order(), ["spark", "duckrun", "dwh"], "cheapest first, numerically");
+  th[1].fire("click");
+  assert.deepEqual(order(), ["dwh", "duckrun", "spark"], "and the same header reverses it");
+  th[0].fire("click");
+  assert.deepEqual(order(), ["duckrun", "dwh", "spark"], "a new column starts ascending");
+  assert.ok(th[0].classList.contains("asc") && !th[1].classList.contains("desc"),
+    "the caret marks one column, and only the current one");
+});
+
+test("the run table is the only filterable one, and renders whole without JS", () => {
+  // Progressive enhancement: the markup carries every row and no controls at all. A reader with
+  // scripts off, and every test here, sees the table as it always was.
+  const { html } = d.compose([full("a-1.json", "spark")], ledger({ OUT: 12.5, SEM: 3.25 }), {});
+  const runs = block(html, "Every run on this page");
+  assert.ok(runs.includes('class="filtered"'), "the run table is marked for the autofilter");
+  assert.ok(runs.includes('data-menus="0,6"'), "menus on `column` and `state`");
+  assert.ok(!runs.includes("<select") && !runs.includes("<input"),
+    "and it emits no controls — `wireTables` builds them from the rows");
+  assert.equal((html.match(/class="filtered"/g) || []).length, 1, "no other table gets one");
+  assert.ok(rows(runs).length >= 2, "header and at least one run, filter or no filter");
+});
+
 // ------------------------------------------------------------------------------------- the charts
 
 test("the chart shows the mean and the range across runs", () => {

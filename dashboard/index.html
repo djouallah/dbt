@@ -89,6 +89,23 @@ tbody tr.sub td { background:var(--sub); font-weight:600; }
 tbody tr:not(.sub):hover td { background:var(--head); }
 tbody tr:last-child td { border-bottom:none; }
 .left { text-align:left; } .right { text-align:right; }
+/* THE RUN TABLE IS AN AUTOFILTER — search box, a dropdown per repeating column, sortable headers.
+   `wireTables` builds the bar in the browser from the rows already in the DOM, so with scripts off
+   the whole table is simply there and nothing is ever removed, only hidden. */
+.filterbar { display:flex; flex-wrap:wrap; gap:.4rem; align-items:center; margin:.9rem 0 0;
+  max-width:62rem; }
+.filterbar input, .filterbar select { font:inherit; font-size:.82rem; padding:.32rem .55rem;
+  border:1px solid var(--line); border-radius:8px; background:var(--bg); color:var(--fg); }
+.filterbar input { flex:1 1 15rem; min-width:11rem; max-width:24rem; }
+.filterbar input:focus, .filterbar select:focus { outline:2px solid var(--series);
+  outline-offset:1px; border-color:var(--series); }
+.fcount { color:var(--dim); font-size:.78rem; margin-left:auto; white-space:nowrap; }
+/* The header is the sort control, so it has to look like one — and the caret marks the sorted
+   column in place rather than needing a legend. */
+.filtered thead th { cursor:pointer; user-select:none; }
+.filtered thead th:hover { color:var(--fg); }
+.filtered thead th.asc::after { content:" \25B2"; font-size:.65em; color:var(--series); }
+.filtered thead th.desc::after { content:" \25BC"; font-size:.65em; color:var(--series); }
 /* METHODOLOGY IS OPT-IN. The long notes are all still on the page — every sentence a test pins is
    in the DOM — but folded behind one line each, so the numbers read first and the reasoning is
    there when a number looks wrong. The exclusion notice is deliberately NOT one of these. */

@@ -771,16 +771,69 @@ const DASH = "—";
  * One table. `align` is per column, `"left"` or `"right"`; a row whose first cell starts with `**` is
  * a subtotal and gets ruled off rather than only emboldened. Wrapped in a scroller, because a wide
  * table must scroll inside itself and never make the page scroll sideways.
+ *
+ * `filter` — `{find, menus}` — marks the table as one a reader can search and sort, the way a
+ * spreadsheet's autofilter does. It emits NO controls: `wireTables` builds the bar in the browser from
+ * the rows already in the DOM, so the markup carries the data once and a distinct-value list cannot
+ * drift from the column it describes. With scripts off, or in a test reading the HTML, the whole table
+ * is simply there — the same progressive-enhancement rule the CSS-only tab strip follows for the same
+ * reason.
  */
-export function table(head, align, rows) {
-  const th = head.map((c, i) => `<th class="${align[i] || "left"}">${inline(c)}</th>`).join("");
+export function table(head, align, rows, filter = null) {
+  const th = head.map((c, i) => `<th class="${align[i] || "left"}"${filter ? ` data-col="${i}"` : ""}` +
+    `>${inline(c)}</th>`).join("");
   const body = rows.map((r) => {
     const cls = r.length && String(r[0]).startsWith("**") ? ' class="sub"' : "";
     const td = r.map((c, i) => `<td class="${align[i] || "left"}">${inline(c)}</td>`).join("");
     return `<tr${cls}>${td}</tr>`;
   }).join("\n");
-  return `<div class="scroll"><table>\n<thead><tr>${th}</tr></thead>\n<tbody>\n${body}\n` +
+  const out = `<div class="scroll"><table>\n<thead><tr>${th}</tr></thead>\n<tbody>\n${body}\n` +
     "</tbody></table></div>";
+  if (!filter) return out;
+  return `<div class="filtered" data-find="${esc(filter.find || "filter")}" ` +
+    `data-menus="${esc((filter.menus || []).join(","))}">${out}</div>`;
+}
+
+/** A table cell as the filter sees it: its text, whitespace collapsed. */
+export const cellText = (td) => String((td && td.textContent) || "").replace(/\s+/g, " ").trim();
+
+/**
+ * `"26,583.6"` → `26583.6`, `"—"` → `NaN`. Thousands separators are the page's own formatting, so a
+ * sort that did not strip them would order 9,986 above 26,583 on the first digit.
+ */
+export function cellNumber(text) {
+  const s = String(text == null ? "" : text).replace(/,/g, "").trim();
+  return s === "" || !/^[-+]?[0-9]*\.?[0-9]+$/.test(s) ? NaN : Number(s);
+}
+
+/**
+ * Sort order for two cells: numeric when BOTH parse, otherwise text.
+ *
+ * A cell that is not a number — a dash, an unread class — sorts to the END in either direction, which
+ * is the same rule the charts use for a zero: "not measured" must never take the top of a ranking.
+ */
+export function compareCells(a, b) {
+  const x = cellNumber(a), y = cellNumber(b);
+  const nx = Number.isFinite(x), ny = Number.isFinite(y);
+  if (nx && ny) return x === y ? 0 : x < y ? -1 : 1;
+  if (nx !== ny) return nx ? -1 : 1;
+  return String(a).localeCompare(String(b), "en");
+}
+
+/**
+ * Does a row survive the filter bar? `q` is matched against every cell; `picks` is `{index: value}`
+ * from the dropdowns and each entry must match its column EXACTLY.
+ *
+ * Substring on the free text, exact on a menu, and the two are ANDed — a reader who typed `duckrun`
+ * and then chose a state means both, which is what a spreadsheet does.
+ */
+export function matchesFilter(cells, q, picks = {}) {
+  const needle = String(q || "").trim().toLowerCase();
+  if (needle && !cells.some((c) => String(c).toLowerCase().includes(needle))) return false;
+  for (const [i, want] of Object.entries(picks)) {
+    if (want && cells[Number(i)] !== want) return false;
+  }
+  return true;
 }
 
 export const note = (text) => `<p class="note">${inline(text)}</p>`;
@@ -1193,8 +1246,14 @@ export function renderSources(cols, entries, ledger, repo, now = null, gen = {})
   }
   // `state` was headed `CU` until this table grew CU numbers of its own — one column headed `CU`
   // holding the word "settled" beside two holding capacity units is a header doing two jobs.
+  // THE ONE FILTERABLE TABLE ON THE PAGE, and the only one that wants to be: it is the only one with
+  // a row per RUN rather than a row per measured thing, so it is the only one that grows without bound
+  // and the only one a reader arrives at looking for a particular dispatch. Menus on `column` and
+  // `state` — the two cells that repeat; `run`, `built` and the CU columns are unique per row, so a
+  // dropdown of them would just be the table again.
   out.push(table(["column", "run", "built", "etl CU", "analytics CU", "items", "state"],
-    ["left", "left", "left", "right", "right", "right", "left"], rows));
+    ["left", "left", "left", "right", "right", "right", "left"], rows,
+    { find: "filter runs — engine, run id, date…", menus: [0, 6] }));
   out.push(note("**`etl CU` and `analytics CU` are that RUN's own totals** — the same GUID join as " +
     "*Cost by engine*, which quotes each column's newest run. The CHARTS quote neither: each bar is " +
     "the mean over the runs listed here that fed it. The two group differently, so one run can sit in " +
@@ -1783,6 +1842,109 @@ export function optsFromSearch(search) {
 }
 
 /**
+ * Turn every `table(…, filter)` into a spreadsheet-style autofilter: a search box, a dropdown per
+ * declared column, sortable headers, and a live count.
+ *
+ * **Built here, not in the markup, and that is the point.** The dropdown's options are the DISTINCT
+ * VALUES ALREADY IN THE COLUMN, read off the DOM, so the list cannot describe a column it no longer
+ * matches and the render layer stays a pure string function with the data in it once. Nothing is
+ * removed from the DOM either — filtering only sets `display`, so ctrl-F, the offline snapshot and
+ * every test still see all of it, the same rule the CSS-only tab strip follows.
+ *
+ * Progressive enhancement throughout: with scripts off there is no bar and the whole table is simply
+ * there, which is the state a reader can always fall back to.
+ */
+export function wireTables(root, doc = null) {
+  const d = doc || (root && root.ownerDocument) || (typeof document === "undefined" ? null : document);
+  if (!root || !d || !root.querySelectorAll) return 0;
+  let wired = 0;
+  for (const box of root.querySelectorAll(".filtered")) {
+    const tbl = box.querySelector("table");
+    if (!tbl || !tbl.tHead || !tbl.tBodies[0]) continue;
+    const heads = [...tbl.tHead.rows[0].cells];
+    const body = tbl.tBodies[0];
+    const all = [...body.rows];
+    const text = all.map((r) => [...r.cells].map(cellText));
+
+    const bar = d.createElement("div");
+    bar.className = "filterbar";
+    const find = d.createElement("input");
+    find.type = "search";
+    find.className = "ffind";
+    find.placeholder = box.dataset.find || "filter";
+    find.setAttribute("aria-label", find.placeholder);
+    bar.appendChild(find);
+
+    const picks = new Map();
+    for (const raw of String(box.dataset.menus || "").split(",")) {
+      const i = Number(raw);
+      if (raw === "" || !Number.isInteger(i) || !heads[i]) continue;
+      const sel = d.createElement("select");
+      sel.className = "fpick";
+      const label = cellText(heads[i]) || `column ${i + 1}`;
+      sel.setAttribute("aria-label", `filter by ${label}`);
+      const seen = [...new Set(text.map((cells) => cells[i]))].sort((a, b) => compareCells(a, b));
+      // `createElement("option")`, never `new Option(…)`: that constructor is a browser GLOBAL, so it
+      // would put this function out of reach of an offline test for no gain.
+      const opt = (label_, value) => {
+        const o = d.createElement("option");
+        o.value = value;
+        o.textContent = label_;
+        return o;
+      };
+      sel.appendChild(opt(`all ${label}`, ""));
+      for (const v of seen) sel.appendChild(opt(v, v));
+      picks.set(i, sel);
+      bar.appendChild(sel);
+    }
+    const count = d.createElement("span");
+    count.className = "fcount";
+    bar.appendChild(count);
+    box.insertBefore(bar, box.firstChild);
+
+    const apply = () => {
+      const chosen = {};
+      for (const [i, sel] of picks) chosen[i] = sel.value;
+      let shown = 0;
+      all.forEach((r, k) => {
+        const ok = matchesFilter(text[k], find.value, chosen);
+        // `display`, never `remove()` — a filtered row is hidden, not gone, so nothing the page says
+        // about how many runs it read stops being true while a filter is on.
+        r.style.display = ok ? "" : "none";
+        if (ok) shown++;
+      });
+      count.textContent = shown === all.length ? `${all.length} rows` : `${shown} of ${all.length} rows`;
+    };
+    find.addEventListener("input", apply);
+    for (const [, sel] of picks) sel.addEventListener("change", apply);
+
+    let at = -1, dir = 1;
+    const sortBy = (i) => {
+      dir = at === i ? -dir : 1;
+      at = i;
+      const order = all.map((r, k) => k)
+        .sort((a, b) => compareCells(text[a][i], text[b][i]) * dir);
+      for (const k of order) body.appendChild(all[k]);
+      heads.forEach((th, k) => {
+        th.classList.toggle("asc", k === i && dir > 0);
+        th.classList.toggle("desc", k === i && dir < 0);
+      });
+    };
+    heads.forEach((th, i) => {
+      th.tabIndex = 0;
+      th.setAttribute("role", "button");
+      th.addEventListener("click", () => sortBy(i));
+      th.addEventListener("keydown", (e) => {
+        if (e.key === "Enter" || e.key === " ") { e.preventDefault(); sortBy(i); }
+      });
+    });
+    apply();
+    wired++;
+  }
+  return wired;
+}
+
+/**
  * The browser entry point. An inlined snapshot wins when present — that is the offline artifact copy,
  * which has to open from a local disk years later with no network — and otherwise the page reads
  * `history/` live.
@@ -1807,6 +1969,7 @@ export async function boot(doc = document, loc = location) {
     }
     const { html, skipped } = compose(records, ledger, opts);
     app.innerHTML = html;
+    wireTables(app, doc);
     if (live) {
       say(inline(`Live — read from \`${opts.repo}@${opts.ref}\` at ` +
         `${new Date().toISOString().slice(0, 16).replace("T", " ")} UTC. ` +
