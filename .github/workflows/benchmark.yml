@@ -79,7 +79,7 @@ on:
         type: boolean
         default: false
       sorted:
-        description: "duckrun writes fct_summary sorted by date, time, DUID (duckrun only)"
+        description: "duckrun picks a sort key for fct_summary and writes it sorted (duckrun only)"
         type: boolean
         default: false
 
@@ -154,7 +154,8 @@ env:
   # Spark leg only. writeHeavy is the workspace default, so the default dispatch writes what a plain
   # Fabric session writes — and therefore NO V-Order, which readHeavyForPBI alone enables.
   SPARK_RESOURCE_PROFILE: ${{ inputs.spark_resource_profile }}
-  # DuckDB legs only, off by default: fct_summary's `sort_by` renders to ['date','time','DUID'].
+  # DuckDB legs only, off by default: fct_summary's `sort_by` renders to duckrun's `'auto'` picker,
+  # so the run measures what the ADAPTER chooses rather than a key chosen here.
   # Reaches the notebook through fabric_run.py's _FORWARD — a var missing from that tuple is
   # silently inert, which is how a 4GB DUCKDB_MEMORY_LIMIT nobody could dispatch around stood for
   # months — and reaches the `layout` job through this env, which is what puts it in the record and

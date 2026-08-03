@@ -142,9 +142,10 @@ export const PROFILE_LABEL = { readHeavyForPBI: "V-Order", writeHeavy: "default"
 // value alone. `PROFILE_LABEL` gets away with a value-keyed map because a profile name says which
 // knob it is; a bare `true` does not, and would label every boolean config in LAYOUT_CONFIG the
 // same way the moment a second one joins. Consulted before `PROFILE_LABEL`, which still serves the
-// profile. Deliberately does NOT spell the sort key out: there is exactly one sort in this project
-// and the columns are in the model, so `duckrun sorted by date, time, DUID` spent a wide caption on
-// a detail beside `spark V-Order`, which does not list what V-Order does either.
+// profile. Deliberately does NOT spell the sort key out — which is now also the only honest label:
+// the key comes from duckrun's `sort_by='auto'` picker, which re-profiles every batch, so no fixed
+// column list would be true across runs. `duckrun sorted` sits beside `spark V-Order`, which does
+// not list what V-Order does either.
 export const CONFIG_LABEL = { "sorted=true": "sorted" };
 
 // The dispatch config that is SHOWN to change what gets written. `vcores` and

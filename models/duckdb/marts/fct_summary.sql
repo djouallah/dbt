@@ -23,49 +23,65 @@
 -- mistake in it. Full story: LEARNINGS.md, "Two branches of one model, two different unit
 -- universes"; CLAUDE.md, "fct_summary must be a pure function of its inputs".
 --
--- sort_by is the `sorted` DISPATCH INPUT, off by default, and it is the physical order the rows
--- are written in -- the same grain as unique_key above, so this table has ONE stated order rather
--- than two. DUCKRUN-ONLY without breaking the one-config-for-both rule, for the same reason
--- partition_by was: `sort_by` occurs ZERO times in dbt-duckdb's adapter and macro package, so on
--- iceberg it is parsed into the manifest and read by nobody. Both targets still run byte-identical
--- model code and there is still no `target.name` in this tree. Off it renders to `none`, which is
--- what every run before the input did.
+-- sort_by is the `sorted` DISPATCH INPUT, off by default, and it hands the CHOICE OF KEY to
+-- duckrun: 'auto' profiles the staged model result and picks the sort columns itself, writing
+-- unsorted when nothing pays off. The point of the input is therefore what the ADAPTER does out of
+-- the box, not what a hand-tuned key can reach. DUCKRUN-ONLY without breaking the
+-- one-config-for-both rule, for the same reason partition_by was: `sort_by` occurs ZERO times in
+-- dbt-duckdb's adapter and macro package, so on iceberg it is parsed into the manifest and read by
+-- nobody. Both targets still run byte-identical model code and there is still no `target.name` in
+-- this tree. Off it renders to `none`, which is what every run before the input did.
+-- Needs duckrun >= 0.4.39; an older adapter reads 'auto' as a COLUMN NAME and fails the binder,
+-- which is at least loud. The notebook pip-installs duckrun unpinned, so it takes the latest.
 --
 -- Honored on this model despite the adapter docs calling sort_by inert on the delta_rs merge path:
 -- the merge here is insert-only, so the engine seam routes it to a DuckDB anti-join committed as a
--- plain append, and that path forwards sort_by -- as does the first-build overwrite.
+-- plain append, and that path forwards sort_by -- as does the first-build overwrite. delta_plugin
+-- resolves 'auto' in store() and rewrites cfg before dispatch, so the merge branch sees columns.
 --
--- WHY DATE FIRST, and why this is not the trailing ORDER BY below doing the job. That ORDER BY
--- reaches no stored table on any engine (CLAUDE.md, "fairness invariant"), and at 143M rows with
--- spilling it demonstrably did not reach duckrun's write either: adding a sort key changed the
--- parquet, which it could not have done if the order were already there. The key itself is read
--- off the query suite in benchmark/xmla_compare.py -- dim_calendar[year]/[month] filters or groups
--- 9 of the 25 queries while fct_summary[DUID] is a filter in 2, and both relationships are
--- relyOnReferentialIntegrity so a year filter propagates onto date. A DUID-first key would give
--- DUID runs of ~209k rows and destroy date monotonicity: 9 queries hurt to help 2. `time` second
--- earns its place through `price`, which is RRP per (SETTLEMENTDATE, REGIONID) -- 5 regions -- so
--- one (date, time) holds ~156 rows carrying at most 5 distinct prices, collapsed into a 156-row
--- window here and smeared over ~45,036 rows under a bare ['date'].
+-- WHAT THE PICKER IS, so a result is read correctly: a greedy single pass over statistical
+-- sketches, which duckrun's own limitations.md calls "a naive, lightly-tested heuristic ... not
+-- guaranteed to shrink anything" and warns "can occasionally pick a worse key than the default".
+-- It re-profiles EVERY batch, so the key can differ between the create and a later incremental
+-- write, and profiling costs a full extra evaluation of this model's query -- it samples the
+-- STAGED RELATION, which duckrun materializes as a VIEW. That is real money here: the auto run
+-- paid +19% ETL CU against unsorted, where a named key paid +3.7%.
 --
--- MEASURED, and this is the reason the input exists rather than a guess: sort_by='auto' (which
--- resolved to `date` alone) on run 30796667149 against 30752070535, both 64 vCores, both full
--- loads, both 143,980,961 rows -- 985.5 -> 777.2 MB, 27 -> 25 row groups, warm 6,300 -> 3,498 ms,
--- hot 5,420 -> 3,056 ms. So ~777 MB / ~3,498 ms warm is the FLOOR this key should reach; the
--- interesting outcome is it doing worse, since `time` and `DUID` are added on reasoning and not on
--- measurement. Read the mechanism as Direct Lake, not file skipping: VertiPaq inherits the parquet
--- row order when it transcodes, so a sorted table gives longer RLE runs in the resident columns --
--- which is why warm and hot moved and not only cold.
+-- THREE MEASURED POINTS, all 64 vCores, all full loads, all 143,980,961 rows. They are the
+-- yardstick for whatever the picker does next:
+--   none                 985.5 MB  4 files/27 RG  cold 23,491  warm 6,300  hot 5,420  etl 22,624
+--   auto (chose `date`)  777.2 MB  4 files/25 RG  cold 27,740  warm 3,498  hot 3,056  etl 26,991
+--   ['date','time','DUID'] 652.6 MB 3 files/26 RG cold 24,523  warm 3,141  hot 3,572  etl 23,465
+-- (runs 30752070535, 30796667149, 30805417412.) So the picker left ~16% of size and some warm on
+-- the table against a key chosen from the query suite, and charged more to do it. That gap IS the
+-- measurement now; if it matters, the lever is `sort_by=['date','time','DUID']` here.
 --
--- Two costs, both expected. The write does a real ORDER BY of 143M rows, so duckrun's ETL CU
--- rises. And with this on, the duckrun/iceberg pair differs by more than the writer -- the pair
--- CLAUDE.md calls the sharpest comparison on the dashboard. There is no fix: dbt-duckdb has no
--- sort config at all, so iceberg cannot follow.
+-- WHY THAT KEY IS THE YARDSTICK, read off benchmark/xmla_compare.py rather than guessed:
+-- dim_calendar[year]/[month] filters or groups 9 of the 25 queries while fct_summary[DUID] is a
+-- filter in 2, and both relationships are relyOnReferentialIntegrity so a year filter propagates
+-- onto date -- so date-first. A DUID-first key would give DUID runs of ~209k rows and destroy date
+-- monotonicity: 9 queries hurt to help 2. `time` second earns its place through `price`, which is
+-- RRP per (SETTLEMENTDATE, REGIONID) -- 5 regions -- so one (date, time) holds ~156 rows carrying
+-- at most 5 distinct prices, collapsed into a 156-row window and smeared over ~45,036 rows under a
+-- bare ['date']. Read the mechanism as Direct Lake, not file skipping: VertiPaq inherits the
+-- parquet row order when it transcodes, so a sorted table gives longer RLE runs in the resident
+-- columns -- which is why warm and hot move and not only cold.
+--
+-- Not the trailing ORDER BY below doing any of this: that reaches no stored table on any engine
+-- (CLAUDE.md, "fairness invariant"), and at 143M rows with spilling it demonstrably did not reach
+-- duckrun's write either -- adding a sort key changed the parquet, which it could not have done if
+-- the order were already there.
+--
+-- Two costs, both expected. The write does a real ORDER BY of 143M rows on top of the profiling
+-- pass, so duckrun's ETL CU rises. And with this on, the duckrun/iceberg pair differs by more than
+-- the writer -- the pair CLAUDE.md calls the sharpest comparison on the dashboard. There is no fix:
+-- dbt-duckdb has no sort config at all, so iceberg cannot follow.
 {{ config(
     materialized='incremental',
     incremental_strategy='merge',
     unique_key=['date', 'time', 'DUID'],
     merge_clauses={'when_matched': [{'action': 'do_nothing'}]},
-    sort_by=(['date', 'time', 'DUID'] if env_var('DUCKDB_SORTED', 'false') == 'true' else none),
+    sort_by=('auto' if env_var('DUCKDB_SORTED', 'false') == 'true' else none),
     schema='mart'
 ) }}
 
