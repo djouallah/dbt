@@ -1255,8 +1255,34 @@ no data at all. `all.yml`, `dbt.yml` and `cu.yml` are gone.
   beside `duckdb iceberg` and `spark` beside `spark V-Order`. `STACK`'s third entry is now unread.
   **Row counts live in the block HEADING**, not a column: identical on every row by design — the
   parity statement the project rests on — so repeating 143,980,961 down a table is a wide column
-  carrying one fact. When the engines disagree the heading says so and the column returns, because
-  that is the loudest signal this page has.
+  carrying one fact. When the engines disagree the heading says so and the column returns.
+  **For the MART that branch is now unreachable, and the signal MOVED** — see the generation filter
+  below. It still fires for every other table, where nothing filters on the count.
+- **THE PAGE SHOWS ONE SOURCE GENERATION, DEFINED BY THE NEWEST RUN.** `sameGeneration()` takes the
+  mart's `total_rows` from the latest record and DROPS every run that disagrees. The columns are
+  different dispatches days apart and nothing else made them comparable: if the AEMO archive changes,
+  an engine nobody has rebuilt keeps its column and its numbers sit beside engines built from
+  different data, in the tables and inside both charts' means.
+  **Newest wins, NOT the most common value**, and that is the point rather than a shortcut — right
+  after a genuine source change the old count is still the majority, which is exactly the case this
+  handles; a mode would keep the stale generation and drop the new run.
+  **It runs BEFORE `columnsFor`, and the order is load-bearing twice.** `columnsFor` takes the latest
+  run per (engine, config), so filtering after it would let a stale run hold a column; and
+  `spreadFor` walks the whole `runs` array for the charts' means and ranges, so filtering the array is
+  what stops a mean blending two generations. Both come free from filtering at that one point.
+  **The exclusion MUST stay loud, and that is what pays for the heading it silenced.** `renderSources`
+  names every dropped run — engine, run id, its own count and the delta against current — plus the
+  reference, and the footer says `(+N excluded)`. A silent drop would trade the `row counts DISAGREE`
+  shout for nothing; named, it is strictly sharper ("duckrun wrote 143,980,960 against the current
+  143,980,961"). Do not quiet this down.
+  Two behaviours that are deliberate: a run recording **no** count is KEPT (unmeasured is a different
+  claim from different — the same distinction `layoutKey` makes by keying `null` to its own bar), and
+  with no reference anywhere **nothing** is filtered rather than everything vanishing. `?record=`
+  bypasses it entirely, because pinning a run means asking for that run.
+  **The failure mode, stated on the page as well as here:** newest-wins cannot tell "the source
+  changed" from "the newest run is broken", so a bad newest run excludes all the good history. That is
+  survivable only because it is loud — the note calls out `N of M runs were excluded` and says the
+  newest is then the likelier anomaly — and because the next good run reverses it on its own.
 - **THE SECONDS GET NO CHART. Do not add one back** — and this is exactly why they are a table ROW
   and nothing more. The page carries two bars and both are capacity units, the measure it leads with
   and can defend. A third in the same visual language, drawn from billed operation seconds that SUM

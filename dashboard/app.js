@@ -441,6 +441,53 @@ export function layoutBand(n) {
 const martStats = (rec, table) =>
   ((((rec || {}).layout || {}).stats || {})[(rec || {}).engine] || {})[table] || {};
 
+/** The mart's row count for one run, or `null` when the run did not record one. */
+export function martRows(rec, table = DEFAULTS.table) {
+  const v = martStats(rec, table).total_rows;
+  return v === undefined || v === null ? null : Math.trunc(Number(v));
+}
+
+/**
+ * ONE SOURCE GENERATION — the newest run defines it, and every run that disagrees is dropped.
+ *
+ * The page's columns are different dispatches, days apart, and NOTHING made them comparable. If the
+ * AEMO archive changes, an engine that has not been rebuilt since keeps its column, and its numbers
+ * sit beside engines built from different data — in the same table, and inside both charts' means.
+ * The reference is the mart's `total_rows` from the LATEST record, because the source may
+ * legitimately change and when it does the newest run is right: everything built before it is a
+ * different experiment, not a slower one.
+ *
+ * **Newest wins, NOT the most common value**, and that is the whole point rather than a shortcut.
+ * Right after a genuine source change the old count is still the majority, which is precisely the
+ * case this exists to handle — a mode would keep the stale generation and drop the new run.
+ *
+ * The failure mode that buys: **if the newest run is itself the anomaly, it excludes all the good
+ * history.** Inherent to newest-wins — a bad run and a real source change look identical from here —
+ * and survivable only because it is LOUD (`renderSources` names every excluded run and its count, so
+ * "10 of 11 excluded" is unmistakable) and because the next good run reverses it.
+ *
+ * Two things it deliberately does not do. A run with NO recorded count is **kept**: unmeasured is a
+ * different claim from different, the same distinction `layoutKey` makes by keying `null` to a bar of
+ * its own. And with no reference anywhere it filters **nothing** — a record set where nobody recorded
+ * `total_rows` must render whole rather than vanish.
+ */
+export function sameGeneration(runs, table = DEFAULTS.table) {
+  let reference = null;
+  // `runs` arrives oldest-first from `selectRuns`, so the last one carrying a count is the newest.
+  for (let i = runs.length - 1; i >= 0 && reference === null; i--) {
+    reference = martRows(runs[i], table);
+  }
+  if (reference === null) return { runs, dropped: [], reference: null };
+  const kept = [], dropped = [];
+  for (const rec of runs) {
+    const rows = martRows(rec, table);
+    if (rows === null || rows === reference) kept.push(rec);
+    else dropped.push({ file: rec._file || "?", engine: rec.engine || "?", rows,
+      run: (rec.run || {}).id || null });
+  }
+  return { runs: kept, dropped, reference };
+}
+
 /**
  * What Power BI can actually tell apart: `[V-Order, files band, row-groups band]` for the mart.
  *
@@ -989,7 +1036,7 @@ export function engineTable(perCol, cols, secsCol) {
  * run measured minutes ago is a LOWER BOUND — an hour's CU keeps growing for ~70 minutes after the
  * fact — so the reader is told to dispatch again rather than left to wonder.
  */
-export function renderSources(cols, ledger, unmeasured, repo, now = null) {
+export function renderSources(cols, ledger, unmeasured, repo, now = null, gen = {}) {
   const out = [note("Each column is that engine's latest run. They are different dispatches, " +
     "newest first:")];
   // NEWEST DISPATCH FIRST. Everywhere else on the page the order is the engine order, which is what
@@ -1037,6 +1084,43 @@ export function renderSources(cols, ledger, unmeasured, repo, now = null) {
       v.map((x) => `\`${x}\``).join(", ") +
       " — Fabric keeps billing them, so its total creeps upward and is an upper bound on that " +
       "run rather than a measurement of it. Delete them and it settles.").join("")));
+
+  // THE EXCLUSION HAS TO BE LOUD. Filtering to one source generation replaced a shout with a
+  // silence: the mart's `row counts DISAGREE` heading — the loudest signal this page had — can no
+  // longer fire, because every surviving column agrees by construction. Naming each dropped run and
+  // its count is what pays that back, and it is strictly sharper than the heading was: "duckrun
+  // wrote 143,980,960 against the current 143,980,961" beats "row counts DISAGREE".
+  const dropped = gen.dropped || [];
+  if (dropped.length) {
+    const total = dropped.length + cols.length;
+    out.push(`<h4>${inline(`**${dropped.length} run(s) excluded** — built from a different source`)}` +
+      "</h4>");
+    out.push(table(["run", "engine", `${gen.table || DEFAULTS.table} rows`, "against current"],
+      ["left", "left", "right", "right"],
+      dropped.map((d) => [
+        d.run ? `[${d.run}](${runUrl(repo, d.run)})` : `\`${d.file}\``,
+        d.engine,
+        d.rows === null ? DASH : fmt(d.rows, 0),
+        d.rows === null || gen.reference == null ? DASH
+          : (d.rows > gen.reference ? "+" : "") + fmt(d.rows - gen.reference, 0),
+      ])));
+    out.push(note("**The newest run defines the current source**, and a run whose mart row count " +
+      "disagrees with it was built from different data — a different experiment, not a slower one, " +
+      "so it is dropped rather than ranked beside the others. It is excluded from the tables, from " +
+      "both charts, and from the means and ranges those charts draw. The current count is " +
+      `**${gen.reference == null ? "—" : fmt(gen.reference, 0)}**. ` +
+      "A run that recorded no count at all is KEPT, because unmeasured is a different claim from " +
+      "different." +
+      // The one reading that would be wrong, stated where it can be seen rather than only in the
+      // docs. Newest-wins cannot distinguish "the source changed" from "the newest run is broken",
+      // and this is the shape that tells you which.
+      (dropped.length > cols.length
+        ? ` **Note that ${dropped.length} of ${total} runs were excluded** — when nearly everything ` +
+          "is dropped, the more likely reading is that the NEWEST run is the anomaly rather than " +
+          "that every earlier one is. Check it before trusting this page; the next good run reverses " +
+          "the exclusion on its own."
+        : "")));
+  }
   return out.join("\n");
 }
 
@@ -1376,7 +1460,8 @@ export function renderPage(cols, runs, ledger, opts = {}) {
     "what THROTTLES: the CU a user sits behind and a capacity admin asks about. An engine that builds " +
     "cheaply and queries expensively has optimised the half that does not hurt."));
 
-  out.push(renderSources(cols, ledger, unmeasured, repo, now));
+  out.push(renderSources(cols, ledger, unmeasured, repo, now,
+    { dropped: opts.dropped, reference: opts.reference, table: martTable }));
   // LAST. Every other number on the page is about what came OUT; this is the one copy of what went in,
   // shared by every engine, so it belongs with the provenance rather than among the columns it is not
   // one of. It sat between the engine table and the layout, where a table with no engine in it read as
@@ -1384,8 +1469,13 @@ export function renderPage(cols, runs, ledger, opts = {}) {
   out.push(renderInput(cols));
 
   const reads = (ledger.reads || []).length;
+  // `runs` here is already filtered to one source generation, so the count would UNDERSTATE what was
+  // read. Say both — a footer that quietly drops three records is the silence this whole section is
+  // built to avoid.
+  const excluded = (opts.dropped || []).length;
   out.push(para([`[source](${SERVER}/${repo})`,
-    `\`history/runs/\` — ${runs.length} run(s), ${cols.length} on this page`,
+    `\`history/runs/\` — ${runs.length} run(s)` +
+    (excluded ? ` (+${excluded} excluded)` : "") + `, ${cols.length} on this page`,
     `\`history/cu.json\` — ${Object.keys(ledger.items).length} item GUID(s) over ${reads} read(s)`,
   ].join(" · ")));
   return out.filter(Boolean).join("\n");
@@ -1416,18 +1506,28 @@ export function renderEmpty(repo = DEFAULTS.repo) {
  */
 export function compose(records, ledgerDoc, opts = {}) {
   const ledger = normaliseLedger(ledgerDoc);
-  const { runs, skipped } = selectRuns(records);
-  if (!runs.length) return { html: renderEmpty(opts.repo || DEFAULTS.repo), skipped, cols: [] };
+  const { runs: whole, skipped } = selectRuns(records);
+  if (!whole.length) return { html: renderEmpty(opts.repo || DEFAULTS.repo), skipped, cols: [] };
   const pick = (opts.record || "").trim();
   if (pick) {
-    let hits = runs.filter((r) => String(r._file || "").includes(pick));
-    if (!hits.length) hits = runs.slice(-1);
+    // Pinning a run means asking for THAT run, so the generation filter does not apply — the whole
+    // point of `?record=` is reproducing a page as it was, including one from an older source.
+    let hits = whole.filter((r) => String(r._file || "").includes(pick));
+    if (!hits.length) hits = whole.slice(-1);
     const rec = hits[hits.length - 1];
     const cols = [{ col: ENGINE_LABEL[rec.engine] || rec.engine || "?", engine: rec.engine, rec }];
-    return { html: renderPage(cols, runs, ledger, opts), skipped, cols };
+    return { html: renderPage(cols, whole, ledger, opts), skipped, cols, dropped: [] };
   }
+  // BEFORE `columnsFor`, and the order is load-bearing twice over. `columnsFor` takes the latest run
+  // per (engine, config), so filtering afterwards would let a stale-generation run hold a column; and
+  // `spreadFor` walks this whole array to build the charts' means and ranges, so filtering the array
+  // is what stops a mean blending two generations. Both come free from filtering here.
+  const { runs, dropped, reference } = sameGeneration(whole, opts.table || DEFAULTS.table);
   const cols = columnsFor(runs);
-  return { html: renderPage(cols, runs, ledger, opts), skipped, cols };
+  return {
+    html: renderPage(cols, runs, ledger, { ...opts, dropped, reference }),
+    skipped, cols, dropped,
+  };
 }
 
 // ------------------------------------------------------------------------------------ the loader

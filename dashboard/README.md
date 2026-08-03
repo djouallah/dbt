@@ -15,7 +15,7 @@ had looked at could be published by a workflow nobody had watched.
 index.html   the shell: one stylesheet, three empty elements
 app.js       the whole page — loader, join, layout grouping, render, charts
 build.mjs    index.html + app.js -> one file, twice (live, and offline with data inlined)
-app.test.mjs 74 offline tests, no browser, no network
+app.test.mjs 84 offline tests, no browser, no network
 ```
 
 Where the data comes from is [`cu/`](../cu/README.md) (the CU ledger) and the `Benchmark` workflow
@@ -201,10 +201,35 @@ without a build, a token or a dispatch.
   over every run, not that column's latest.
   **The row count is in the heading, not a column**: it is identical on every row by design, which is
   the parity statement the whole project rests on, and 143,980,961 repeated down a table is a wide
-  column carrying one fact. When the engines DISAGREE the heading says so and the column comes back,
-  because that disagreement is the loudest signal this page has. `rows per RG` is abbreviated
-  (`13.1M`, `122.9K`) — that number spans four orders of magnitude across these engines and the ratio
-  is the finding, not the twelve digits.
+  column carrying one fact. When the engines DISAGREE the heading says so and the column comes back —
+  though **for the mart that branch is now unreachable**, because the generation filter below has
+  already dropped anything that disagrees. It still fires for every other table. `rows per RG` is
+  abbreviated (`13.1M`, `122.9K`) — that number spans four orders of magnitude across these engines
+  and the ratio is the finding, not the twelve digits.
+- **THE PAGE SHOWS ONE SOURCE GENERATION, AND THE NEWEST RUN DEFINES IT.** `sameGeneration()` reads
+  the mart's `total_rows` from the latest record and drops every run that disagrees. The columns are
+  different dispatches days apart and nothing else made them comparable: change the AEMO archive and
+  an engine nobody has rebuilt keeps its column, with its numbers sitting beside engines built from
+  different data — in the tables, and inside both charts' means.
+  **Newest wins, not the most common value.** Right after a genuine source change the old count is
+  still the majority, which is exactly the case this exists for; a mode would keep the stale
+  generation and drop the new run.
+  It runs **before `columnsFor`**, which matters twice: `columnsFor` takes the latest run per
+  (engine, config), so filtering later would let a stale run hold a column, and `spreadFor` walks the
+  whole array for the charts' means, so filtering the array is what stops a mean blending two
+  generations.
+  **The exclusion is loud on purpose, and must stay that way.** It bought its silence from the
+  `row counts DISAGREE` heading, so it pays it back: every dropped run is named with its engine, run
+  id, own count and delta against current, plus the reference, plus `(+N excluded)` in the footer.
+  Named, it is sharper than the heading was — "duckrun wrote 143,980,960 against the current
+  143,980,961" beats "row counts DISAGREE".
+  A run recording **no** count is KEPT (unmeasured is a different claim from different), with no
+  reference anywhere **nothing** is filtered rather than everything vanishing, and `?record=` bypasses
+  it entirely because pinning a run means asking for that run.
+  **Its failure mode is stated on the page:** newest-wins cannot tell "the source changed" from "the
+  newest run is broken", so a bad newest run excludes all the good history. Survivable because it is
+  loud — the note says `N of M runs were excluded` and that the newest is then the likelier anomaly —
+  and because the next good run reverses it.
 - **`cold` / `warm` / `hot` are THREE COLUMNS OF THE MART BLOCK, not a section.** The one thing on
   the page that is not capacity units, and it comes from the run records rather than the ledger:
   `benchmark.timings.<model>.<query>` is already on every record. `benchmark/render_report.py`

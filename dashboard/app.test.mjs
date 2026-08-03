@@ -1049,6 +1049,146 @@ test("the rate is computed per class", () => {
 
 // ------------------------------------------------------------------------ live loading, new here
 
+// ------------------------------------------------------------------- one source generation
+
+/** A whole-generation record whose mart row count is spelled out. */
+function gen(file, engine, rows, opts = {}) {
+  const r = lay(engine, 4, 27, { file, ...opts });
+  if (rows === null) delete r.layout.stats[engine].fct_summary.total_rows;
+  else r.layout.stats[engine].fct_summary.total_rows = rows;
+  return r;
+}
+
+test("the newest run defines the source, and disagreeing runs are dropped", () => {
+  // The columns are different dispatches days apart and nothing made them comparable. If the archive
+  // changes, an engine that has not been rebuilt keeps its column and its numbers sit beside engines
+  // built from different data — in the table and inside both charts' means.
+  const runs = [
+    gen("a-1.json", "duckrun", 143980960, { finishedHoursAgo: 72 }),
+    gen("b-2.json", "spark", 143980961, { finishedHoursAgo: 48 }),
+    gen("c-3.json", "dwh", 143980961, { finishedHoursAgo: 24 }),
+  ];
+  const { runs: kept, dropped, reference } = d.sameGeneration(runs);
+  assert.equal(reference, 143980961, "the LATEST run sets it");
+  assert.deepEqual(kept.map((r) => r._file), ["b-2.json", "c-3.json"]);
+  assert.deepEqual(dropped.map((x) => [x.engine, x.rows]), [["duckrun", 143980960]]);
+});
+
+test("newest wins, never the most common value", () => {
+  // Right after a genuine source change the OLD count is still the majority — which is precisely the
+  // case this filter exists to handle. A mode would keep the stale generation and drop the new run.
+  const runs = [
+    gen("a-1.json", "duckrun", 100, { finishedHoursAgo: 72 }),
+    gen("b-2.json", "spark", 100, { finishedHoursAgo: 48 }),
+    gen("c-3.json", "dwh", 200, { finishedHoursAgo: 24 }),
+  ];
+  const { kept, reference } = (({ runs: kept, reference }) => ({ kept, reference }))(
+    d.sameGeneration(runs));
+  assert.equal(reference, 200);
+  assert.deepEqual(kept.map((r) => r._file), ["c-3.json"], "the two-strong majority is the one dropped");
+});
+
+test("a run that recorded no row count is kept, not dropped", () => {
+  // Unmeasured is a different claim from different — the same distinction `layoutKey` makes by
+  // keying `null` to a bar of its own.
+  const runs = [
+    gen("a-1.json", "duckrun", null, { finishedHoursAgo: 72 }),
+    gen("b-2.json", "spark", 143980961, { finishedHoursAgo: 24 }),
+  ];
+  const { runs: kept, dropped } = d.sameGeneration(runs);
+  assert.deepEqual(kept.map((r) => r._file), ["a-1.json", "b-2.json"]);
+  assert.deepEqual(dropped, []);
+});
+
+test("with no reference anywhere, nothing is filtered", () => {
+  // A record set where nobody recorded total_rows must render WHOLE rather than vanish.
+  const runs = [gen("a-1.json", "duckrun", null), gen("b-2.json", "spark", null)];
+  const { runs: kept, dropped, reference } = d.sameGeneration(runs);
+  assert.equal(reference, null);
+  assert.equal(kept.length, 2);
+  assert.deepEqual(dropped, []);
+});
+
+test("the filter runs BEFORE columnsFor, so a stale engine loses its column entirely", () => {
+  // Order is load-bearing: columnsFor takes the latest run per (engine, config), so filtering
+  // afterwards would let a stale-generation run hold a column of its own.
+  const runs = [
+    gen("a-1.json", "duckrun", 999, { finishedHoursAgo: 72 }),   // duckrun's ONLY run, stale
+    gen("b-2.json", "spark", 143980961, { finishedHoursAgo: 24 }),
+  ];
+  const { cols, dropped } = d.compose(runs, ledger({ OUT: 1.0, SEM: 2.0 }), {});
+  assert.deepEqual(cols.map((c) => c.col), ["spark"], "duckrun is gone, not merely re-ranked");
+  assert.equal(dropped.length, 1);
+});
+
+test("a chart mean never blends two generations", () => {
+  // spreadFor walks the whole runs array, so filtering the array is what stops a stale run from
+  // pulling the mean. Two spark runs, one stale: the bar must be the survivor's number alone.
+  const runs = [
+    gen("a-1.json", "spark", 999, { finishedHoursAgo: 72 }),
+    gen("b-2.json", "spark", 143980961, { finishedHoursAgo: 24 }),
+  ];
+  runs[0].items = { S0: gone("semantic_model", "aemo_spark"), O0: gone("output", "dbt_spark") };
+  runs[1].items = { S1: gone("semantic_model", "aemo_spark"), O1: gone("output", "dbt_spark") };
+  const { html } = d.compose(runs, ledger({
+    S0: { "XMLA Read Operation": 5000.0 }, O0: { "Warehouse Query": 1.0 },
+    S1: { "XMLA Read Operation": 1000.0 }, O1: { "Warehouse Query": 1.0 },
+  }), {});
+  const c = charts(html)[0];
+  assert.equal(c.values[0], "1,000.0", "no range, no mean of 5000 and 1000 — one sample survives");
+});
+
+test("the excluded runs are NAMED on the page, with their counts", () => {
+  // The loudness test, and the reason this is not a silent drop. Filtering to one generation made
+  // the mart's `row counts DISAGREE` heading unreachable — that shout has to be paid back here.
+  const runs = [
+    gen("a-1.json", "duckrun", 143980960, { finishedHoursAgo: 72 }),
+    gen("b-2.json", "spark", 143980961, { finishedHoursAgo: 48 }),
+    gen("c-3.json", "dwh", 143980961, { finishedHoursAgo: 24 }),
+  ];
+  const { html } = d.compose(runs, ledger({ OUT: 1.0, SEM: 2.0 }), {});
+  const text = plain(html);
+  assert.ok(text.includes("**1 run(s) excluded**"), "a heading, not a footnote");
+  assert.ok(text.includes("143,980,960"), "the excluded run's own count");
+  assert.ok(text.includes("143,980,961"), "and the current one");
+  const row = rows(html).find((r) => r.includes("143,980,960"));
+  assert.ok(row.includes("duckrun"), `the engine is named: ${row}`);
+  assert.ok(row.includes("-1"), `and the delta against current: ${row}`);
+});
+
+test("excluding nearly everything says the newest run is the likely anomaly", () => {
+  // Newest-wins cannot tell "the source changed" from "the newest run is broken". When almost
+  // everything is dropped, the page has to say which reading is more likely.
+  const runs = [
+    gen("a-1.json", "duckrun", 143980961, { finishedHoursAgo: 96 }),
+    gen("b-2.json", "spark", 143980961, { finishedHoursAgo: 72 }),
+    gen("c-3.json", "dwh", 143980961, { finishedHoursAgo: 48 }),
+    gen("d-4.json", "iceberg", 7, { finishedHoursAgo: 24 }),          // the newest, and wrong
+  ];
+  const { cols, html } = d.compose(runs, ledger({ OUT: 1.0, SEM: 2.0 }), {});
+  assert.deepEqual(cols.map((c) => c.col), ["duckdb iceberg"]);
+  const text = plain(html);
+  assert.ok(text.includes("3 of 4 runs were excluded"), text.slice(0, 200));
+  assert.ok(text.includes("NEWEST run is the anomaly"));
+});
+
+test("a pinned record bypasses the generation filter", () => {
+  // `?record=` means "reproduce this page as it was", including from an older source.
+  const runs = [
+    gen("a-1.json", "duckrun", 143980960, { finishedHoursAgo: 72 }),
+    gen("b-2.json", "spark", 143980961, { finishedHoursAgo: 24 }),
+  ];
+  const { cols, dropped } = d.compose(runs, ledger({ OUT: 1.0, SEM: 2.0 }), { record: "a-1" });
+  assert.deepEqual(cols.map((c) => c.col), ["duckrun"], "the stale run renders when asked for");
+  assert.deepEqual(dropped, []);
+});
+
+test("martRows reads the mart's count and says null when absent", () => {
+  assert.equal(d.martRows(gen("a.json", "spark", 143980961)), 143980961);
+  assert.equal(d.martRows(gen("a.json", "spark", null)), null);
+  assert.equal(d.martRows({}), null);
+});
+
 test("the loader reads raw for files and the contents API for the listing", async () => {
   // raw.githubusercontent serves the repo's own files with CORS and a CDN; it has no directory index,
   // which is the only reason the contents API is touched at all. A `legacy/` DIRECTORY entry must not
