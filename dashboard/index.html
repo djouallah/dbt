@@ -22,17 +22,19 @@
 :root { color-scheme: light dark;
   --bg:#fff; --fg:#1a1a1a; --dim:#5b6472; --line:#e3e6ea; --head:#f6f7f9; --sub:#eef1f5;
   --code:#f2f3f5;
-  /* Series hue, validated against both surfaces with the dataviz palette validator: lightness band,
-     chroma floor and contrast all pass. The dark value is a SELECTED step for the dark surface, not
-     an automatic flip of the light one. */
-  --series:#2a78d6; }
+  /* Series hues, validated as a pair against both surfaces with the dataviz palette validator:
+     lightness band, chroma floor, CVD separation and contrast all pass. `--series` is categorical
+     slot 1 (blue, the page's accent — analytics); `--series2` is slot 2 (orange — the ETL bars,
+     which measure a different thing and must not read as the same dataset split in half). The dark
+     values are SELECTED steps for the dark surface, not automatic flips of the light ones. */
+  --series:#2a78d6; --series2:#eb6834; }
 @media (prefers-color-scheme: dark) {
   :root { --bg:#14171a; --fg:#e8eaed; --dim:#9aa4b2; --line:#2a2f36; --head:#1c2025; --sub:#20252b;
-    --code:#22262c; --series:#3987e5; } }
+    --code:#22262c; --series:#3987e5; --series2:#d95926; } }
 :root[data-theme="dark"] { --bg:#14171a; --fg:#e8eaed; --dim:#9aa4b2; --line:#2a2f36;
-  --head:#1c2025; --sub:#20252b; --code:#22262c; --series:#3987e5; }
+  --head:#1c2025; --sub:#20252b; --code:#22262c; --series:#3987e5; --series2:#d95926; }
 :root[data-theme="light"] { --bg:#fff; --fg:#1a1a1a; --dim:#5b6472; --line:#e3e6ea; --head:#f6f7f9;
-  --sub:#eef1f5; --code:#f2f3f5; --series:#2a78d6; }
+  --sub:#eef1f5; --code:#f2f3f5; --series:#2a78d6; --series2:#eb6834; }
 * { box-sizing: border-box; }
 body { margin:0; padding:2.25rem 1.25rem 4rem; background:var(--bg); color:var(--fg);
   font:15px/1.6 ui-sans-serif, -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; }
@@ -50,8 +52,12 @@ h2, h3, h4, p, footer { max-width: 62rem; }
    side-by-side row they share it: two columns that wrap back to a stack when the window is narrow.
    `min-width:0` is what lets a flex child actually shrink below its content size. */
 figure.chart { max-width: 62rem; }
-.charts { display:flex; flex-wrap:wrap; align-items:flex-start; gap:.5rem 3rem; }
-.charts figure.chart { flex:1 1 34rem; min-width:0; max-width:53rem; }
+/* Each chart is a bounded card, so the pair reads as two designed panels rather than two floats —
+   and the shorter chart's trailing whitespace ends at its own border instead of mid-page. */
+figure.chart { border:1px solid var(--line); border-radius:12px; padding:1rem 1.15rem .65rem; }
+.charts { display:flex; flex-wrap:wrap; align-items:flex-start; gap:1rem 1.5rem; }
+.charts figure.chart { flex:1 1 34rem; min-width:0; max-width:53rem; margin:1.25rem 0 .5rem; }
+figure.chart[data-kind="etl"] .bar { fill:var(--series2); }
 h2 { font-size:1.65rem; line-height:1.2; margin:0 0 1.5rem; letter-spacing:-0.015em; }
 /* The dateline rides inside the h2 so the title stays one element, but it reads as a sub-line. */
 h2 .asof { display:block; font-size:.82rem; font-weight:400; color:var(--dim);

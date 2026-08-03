@@ -63,11 +63,11 @@ export const SERVER = "https://github.com";
 // just sorts to the end.
 export const ENGINES = ["duckrun", "iceberg", "spark", "dwh"];
 
-// What each engine IS. Only the ADAPTER is read now, by `engineCaption` for the ETL chart — the
-// layout table used to carry the third entry as a `writer` column and no longer does, because its row
-// label became the writer itself (`duckdb iceberg` beside `duckdb (iceberg)` was one fact printed
-// twice). The other two are kept as the description of the stack this page compares; they match
-// stats.py's WRITER map exactly, which is what `ENGINE_LABEL` is derived from.
+// What each engine IS. NOTHING renders from this any more — the layout table's `writer` column
+// became the row label, and the ETL captions stopped restating the adapter because the column name
+// already implies it (`spark·default` under `dbt-fabricspark` was one fact twice). Kept as the
+// description of the stack this page compares; the entries match stats.py's WRITER map exactly,
+// which is what `ENGINE_LABEL` is derived from.
 export const STACK = {
   landing: ["download_aemo.py", "the shared AEMO archive every leg reads", "—"],
   duckrun: ["dbt-duckrun", "DuckDB → delta-rs", "delta-rs"],
@@ -268,8 +268,8 @@ export function selectRuns(records) {
     runs.push(rec);
   }
   runs.sort((a, b) => {
-    const ka = ((a.run || {}).started || "") + " " + (a._file || "");
-    const kb = ((b.run || {}).started || "") + " " + (b._file || "");
+    const ka = ((a.run || {}).started || "") + "\u0000" + (a._file || "");
+    const kb = ((b.run || {}).started || "") + "\u0000" + (b._file || "");
     return ka < kb ? -1 : ka > kb ? 1 : 0;
   });
   return { runs, skipped };
@@ -765,7 +765,7 @@ function barPath(w, h, r = 4) {
  * such work", and at the top under that caption it would read as the winner — the one value whose rank
  * would lie. A chart with nothing but zeros is not drawn at all.
  */
-export function chartSvg(title, subtitle, rowsIn) {
+export function chartSvg(title, subtitle, rowsIn, kind = "") {
   const rows = [...(rowsIn || [])]
     .map((r) => {
       // `[label, mean, min, max, caption]`, tolerating the older `[label, value, caption]` — so a
@@ -785,21 +785,26 @@ export function chartSvg(title, subtitle, rowsIn) {
   if (!rows.length || !rows.some((r) => r.avg)) return "";
   for (const r of rows) {
     r.ranged = r.hi - r.lo > 0.05;
-    r.value = fmt(r.avg, 1) + (r.ranged ? `  (${fmt(r.lo, 0)}–${fmt(r.hi, 0)})` : "");
+    // The MEAN alone at the tip. The range used to ride beside it in parentheses, which doubled the
+    // ink for a fact the whisker already draws — the exact numbers stay in the tooltip.
+    r.value = fmt(r.avg, 1);
   }
   const subs = rows.some((r) => r.sub);
   const band = subs ? SUB_BAND : BAND;
-  const labelW = subs ? SUB_LABEL_W : LABEL_W;
+  // Both gutters are sized to what is actually printed, so the text ends inside the viewBox and the
+  // bars get whatever is left. They used to be fixed and rely on `overflow:visible` spilling into
+  // empty page — which stopped existing the moment a second chart sat to the right.
+  const need = Math.max(...rows.map((r) =>
+    Math.max(r.label.length * 7.2, (r.sub || "").length * 5.4)));
+  const labelW = Math.max(LABEL_W, Math.min(SUB_LABEL_W + 12, Math.ceil(need) + 14));
   const top = Math.max(...rows.map((r) => r.hi)) || 1;
-  // The value gutter is sized to the longest value actually printed, so the text ends inside the
-  // viewBox. It used to be fixed and rely on `overflow:visible` spilling into empty page — which
-  // stopped existing the moment a second chart sat to the right.
   const valueW = Math.max(VALUE_W,
     Math.ceil(Math.max(...rows.map((r) => r.value.length)) * 6.8) + 14);
   const plot = WIDTH - labelW - valueW;
   const height = PAD_T + rows.length * band + 6;
   const out = [
-    `<figure class="chart"><figcaption><span class="chart-title">${esc(title)}</span>` +
+    `<figure class="chart"${kind ? ` data-kind="${esc(kind)}"` : ""}>` +
+    `<figcaption><span class="chart-title">${esc(title)}</span>` +
     `<span class="chart-sub">${esc(subtitle)}</span></figcaption>`,
     `<svg viewBox="0 0 ${WIDTH} ${height}" width="100%" height="${height}" role="img" ` +
     `aria-label="${esc(title)}">`,
@@ -839,21 +844,19 @@ export function chartSvg(title, subtitle, rowsIn) {
 // ------------------------------------------------------------------------------------- the page
 
 /**
- * The "what this bar actually is" line: the adapter, then whatever the run RECORDED about the compute
- * it was given. Never a default — an unrecorded profile is simply absent, because a filled-in one
- * reads exactly like a measurement.
+ * The ETL bar's caption: ONLY what the column name does not already say.
+ *
+ * It used to restate the whole configuration — `dbt-fabricspark · writeHeavy · NEE off` under a bar
+ * already labelled `spark·default` was three facts the label carries (the profile named by its
+ * effect, an off flag absent, the adapter implied by the engine name). The one thing that can
+ * genuinely be missing is the compute size: a single-config engine gets a BARE column name with no
+ * `64c` tag, so the vCores are stated iff the label does not carry them. Never a default — an
+ * unrecorded size is simply absent, because a filled-in one reads exactly like a measurement.
  */
 export function engineCaption(rec, col) {
-  const adapter = (STACK[baseEngine(col)] || [""])[0];
-  const bits = adapter ? [adapter] : [];
   const c = (((rec || {}).layout || {}).config || {})[(rec || {}).engine] || {};
-  if (c.vcores) bits.push(`${c.vcores} vCores`);
-  if (c.resource_profile) bits.push(String(c.resource_profile));
-  const nee = c.native_execution_engine;
-  if (nee !== undefined && nee !== null) {
-    bits.push(String(nee).toLowerCase() === "true" ? "NEE on" : "NEE off");
-  }
-  return bits.join(" · ");
+  if (!c.vcores) return "";
+  return String(col).includes(`${c.vcores}c`) ? "" : `${c.vcores} vCores`;
 }
 
 /**
@@ -1464,10 +1467,14 @@ export function renderPage(cols, runs, ledger, opts = {}) {
   const chartA = chartSvg("Analytics — what querying each LAYOUT cost",
     `capacity units, lower is better — INTERACTIVE CU, and Power BI sees only the parquet${over}`,
     groupRows(cols, anaSpread, analytics, martTable));
+  // `data-kind="etl"` gives the ETL bars their own hue (categorical slot 2, validated with slot 1
+  // on both surfaces) — beside each other the two charts measure different things, and one blue
+  // for both read as one dataset split in half.
   const chartB = chartSvg("ETL — what building them cost",
     `capacity units, lower is better — background CU, smoothed over 24h${over}`,
     chartRows(cols, spreadFor(runs, ledger, "etl", keyOf),
-      Object.fromEntries(cols.map(({ col }) => [col, classTotal(perCol[col], "etl")])), captions));
+      Object.fromEntries(cols.map(({ col }) => [col, classTotal(perCol[col], "etl")])), captions),
+    "etl");
   out.push(chartA || chartB ? `<div class="charts">\n${chartA}\n${chartB}\n</div>` : "");
 
   // The layout table quotes the SAME number as the chart above it: the mean over every run of a

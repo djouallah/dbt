@@ -118,6 +118,12 @@ without a build, a token or a dispatch.
   enumerated to 12 panels in the stylesheet; past that `renderLayouts` falls back to stacked blocks
   rather than render tabs whose panels could never show. The `?table=` param still picks which table
   leads, i.e. which tab is first and checked.
+- **The two charts share one row, each in its own card** — analytics left in the page's blue, ETL
+  right in orange (categorical slots 1 and 2 of the dataviz reference palette, validated as a pair
+  on both surfaces), because side by side one hue for both read as one dataset split in half. The
+  bar tip carries the **mean alone**; the spread is the whisker's job, with the exact range in the
+  tooltip — the parenthetical range beside every bar doubled the ink for a fact already drawn. Both
+  gutters (labels, values) are sized to what is actually printed so nothing leaves the viewBox.
 - **Bar charts first**, analytics then ETL, **cheapest first** because "lower is better" makes the
   ranking the finding. A **zero sorts to the bottom**, never the top: zero means the engine did no
   such work, and at the top under that caption it would read as the winner.
@@ -128,7 +134,8 @@ without a build, a token or a dispatch.
   `V-Order · 10–11 files · 10–11 RG`: the grouping is the layout, but a file count is a poor name
   even when it is the real subject, so the shape sits underneath where it explains why two writers
   would ever share a bar. **ETL is one bar per column**, because there the writer and the compute it
-  was given are the entire subject, and it keeps the adapter-and-vCores caption.
+  was given are the entire subject; its caption states only what the column name does not already
+  say — see the caption note at the end of this file.
   What forced this: duckrun at 64 cores and at 32 wrote 4 files and 27 row groups either way, so two
   bars 50% apart was not a comparison — it was one layout measured twice, presented as two results.
   Grouping merges them and the range says what the gap really was.
@@ -331,9 +338,12 @@ because they answer a question CU cannot — how long a person waits, and how ha
 while they did — and each states where its own number bends. Do not flatten the three into one
 ranking.
 
-The chart captions still name the configuration (`dbt-duckrun · 64 vCores`) because it says which
-setting produced the number — a run at a different core count is a different data point, not an
-invalid one.
+The core count still reaches the chart because a run at a different size is a different data point —
+but through the column tag (`duckrun·64c`), not a caption. An ETL caption states only what the
+column name does not already say, which in practice is the vCores of a single-config engine whose
+bare column carries no tag: `dbt-fabricspark · writeHeavy · NEE off` under a bar already labelled
+`spark·default` was three facts the label carries (the profile named by its effect, an off flag
+absent, the adapter implied by the engine name).
 
 ## Things that will bite
 

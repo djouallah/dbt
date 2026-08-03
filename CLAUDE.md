@@ -1345,7 +1345,8 @@ no data at all. `all.yml`, `dbt.yml` and `cu.yml` are gone.
   So the check when this reads oddly is **two DuckDB legs at the SAME `cores` reading the SAME
   number** — never that they read 32. (The page cannot blend two core counts into one column anyway:
   `vcores` is part of `variant()`, so a 32-core duckrun and a 64-core one are separate columns, and
-  `engineCaption` prints the count on the chart.) Both render **nothing** when their
+  the column tag prints the count on the chart — `duckrun·32c` against `duckrun·64c`; a bare
+  single-config column gets it as a caption instead.) Both render **nothing** when their
   input is absent — a record with no tier timings adds no columns, a ledger with no `seconds` has no
   time section — which is the correct
   output: an absent section says "not measured", a table of zeros would say "free" or "instant".

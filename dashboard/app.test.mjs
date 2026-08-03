@@ -60,7 +60,7 @@ function block(html, heading) {
 
 /** `[{title, subtitle, labels, values, captions}]` for each chart drawn, in page order. */
 function charts(html) {
-  return [...String(html).matchAll(/<figure class="chart">([\s\S]*?)<\/figure>/g)].map(([, f]) => ({
+  return [...String(html).matchAll(/<figure class="chart"[^>]*>([\s\S]*?)<\/figure>/g)].map(([, f]) => ({
     title: plain((f.match(/<span class="chart-title">([\s\S]*?)<\/span>/) || [])[1] || ""),
     subtitle: plain((f.match(/<span class="chart-sub">([\s\S]*?)<\/span>/) || [])[1] || ""),
     labels: [...f.matchAll(/<text class="bar-label"[^>]*>([\s\S]*?)<\/text>/g)].map((m) => plain(m[1])),
@@ -434,7 +434,9 @@ test("the page renders end to end with charts and a layout", () => {
   assert.deepEqual(c[0].captions, ["4 files · 79 RG"], "the shape is the sub-label");
   assert.ok(c[0].values[0].startsWith("2,041.0"));
   assert.deepEqual(c[1].labels, ["duckrun"]);
-  assert.deepEqual(c[1].captions, ["dbt-duckrun · 64 vCores"]);
+  // A single-config engine gets a bare column name, so the vCores are the one fact the caption
+  // still has to carry — the adapter and profile are dropped because the label already says them.
+  assert.deepEqual(c[1].captions, ["64 vCores"]);
   assert.ok(c[1].values[0].startsWith("31,080.0"));
 });
 
@@ -660,7 +662,10 @@ test("the chart shows the mean and the range across runs", () => {
   const out = render(runs, led);
   const c = charts(out)[0];
   assert.deepEqual(c.labels, ["spark"], "the analytics bar is NAMED for its writer");
-  assert.equal(c.values[0], "1,500.0  (1,000–2,000)");
+  // The tip carries the MEAN alone — the spread is the whisker's job, with the exact numbers in
+  // the tooltip rather than doubling the ink beside every bar.
+  assert.equal(c.values[0], "1,500.0");
+  assert.ok(c.svg.includes("range 1,000.0–2,000.0"), "the exact spread rides in the tooltip");
   assert.ok(c.subtitle.includes("mean of 3 runs"));
 });
 
@@ -681,7 +686,7 @@ test("the svg draws a whisker only when there is a range", () => {
   const wide = d.chartSvg("t", "s", [["spark", 1500.0, 1000.0, 2000.0, "cap"]]);
   assert.equal((wide.match(/class="whisker"/g) || []).length, 1);
   assert.equal((wide.match(/whisker-cap/g) || []).length, 2);
-  assert.ok(wide.includes("(1,000–2,000)"));
+  assert.ok(wide.includes("range 1,000.0–2,000.0"), "the exact spread is in the tooltip");
   const flat = d.chartSvg("t", "s", [["dwh", 1853.5, 1853.5, 1853.5, "cap"]]);
   assert.ok(!flat.includes('class="whisker"'));
 });
@@ -715,7 +720,7 @@ test("the same parquet is one bar however many engines wrote it", () => {
   }));
   const c = charts(out);
   assert.deepEqual(c[0].labels, ["duckrun"], "one layout, one bar");
-  assert.equal(c[0].values[0], "1,500.0  (1,000–2,000)");
+  assert.equal(c[0].values[0], "1,500.0");
   assert.deepEqual(c[0].captions, ["4 files · 27 RG"], "the shape it grouped on sits underneath");
   // ...while the ETL chart keeps BOTH columns, because there the writer and the compute it was given
   // are the entire subject. That asymmetry is the change, and it must not be tidied away.
@@ -1026,8 +1031,12 @@ test("the rate scales with the cores the column was given", () => {
   const out = render([big, small], led);
   const rate = rows(out).find((r) => r.startsWith("| `compute CU per second`"));
   assert.equal(rate, "| `compute CU per second` | 16.0 | 32.0 |", "cores ÷ 2, per column");
-  const text = plain(out);
-  assert.ok(text.includes("64 vCores") && text.includes("32 vCores"), "the caption names the size");
+  // The size reaches the chart through the column TAG; a caption repeating `32 vCores` under
+  // `duckrun·32c` would be the label twice, so with a tagged column there is no caption at all.
+  const etl = charts(out).find((c) => c.title.includes("ETL"));
+  assert.ok(etl.labels.includes("duckrun·32c") && etl.labels.includes("duckrun·64c"),
+    "the tag names the size");
+  assert.deepEqual(etl.captions, [], "nothing the label already says");
 });
 
 test("the rate is computed per class", () => {
@@ -1338,8 +1347,11 @@ test("the two charts share one side-by-side row, analytics first", () => {
   const out = render([full("a-1.json", "spark")], ledger({ OUT: 1.0, SEM: 2.0 }));
   const row = out.match(/<div class="charts">([\s\S]*?)<\/div>/);
   assert.ok(row, "the charts are wrapped in one row");
-  assert.equal((row[1].match(/<figure class="chart">/g) || []).length, 2, "both figures inside it");
+  assert.equal((row[1].match(/<figure class="chart"/g) || []).length, 2, "both figures inside it");
   assert.ok(row[1].indexOf("Analytics") < row[1].indexOf("ETL"), "analytics keeps the lead");
+  // Two measures, two hues: the ETL figure is marked so the stylesheet can give it slot 2.
+  assert.ok(row[1].includes('<figure class="chart" data-kind="etl">'), "the ETL figure is marked");
+  assert.ok(!row[1].includes('data-kind="analytics"'), "analytics keeps the page's own series hue");
 });
 
 test("a single table renders without a tab strip", () => {
