@@ -90,6 +90,30 @@ def bucket(op):
     return "storage" if str(op).startswith(STORAGE_PREFIX) else "compute"
 
 
+def landing_guids(rec):
+    """Every GUID in this record that is really the LANDING lakehouse, including its SQL endpoint.
+
+    `NON_ENGINE_ROLES` filters on the role, and the landing lakehouse's paired SQL analytics endpoint
+    does not carry it: Fabric makes that endpoint a separate billable `Warehouse` item with its own
+    GUID, and `provision.py` records it under the role `sql_endpoint`. So landing CU reached the page
+    through the one door the role check does not cover — the SAME item, `A8CF6202-…`, in every run
+    record, charging every engine 130.4 CU it did not spend.
+
+    It is caught by NAME, matched against the record's own `landing` items, so nothing is hardcoded
+    and an engine's OWN endpoint — which is genuinely that engine's work — is untouched.
+
+    Worth knowing what it distorted, because it is not only a total. That endpoint bills 130.4 CU
+    over 83.2 s, a rate of 1.6, against a 64-vCore notebook's fixed 32.0. Blending the two dragged
+    `compute CU per second` to 28.5 for duckrun and 26.4 for iceberg — the same DuckDB in the same
+    notebook, reading differently — and the size of the gap tracked nothing but how much the rest of
+    the class weighed.
+    """
+    names = {it.get("name") for it in (rec.get("items") or {}).values()
+             if (it.get("role") or "") == "landing" and it.get("name")}
+    return {g for g, it in (rec.get("items") or {}).items()
+            if (it.get("role") or "") == "sql_endpoint" and it.get("name") in names}
+
+
 def log(msg):
     sys.stderr.write(msg + "\n")
 
@@ -245,9 +269,10 @@ def run_cu(rec, ledger, key="items"):
     `render_input`) — that is the input volume, not the cost of ingesting it.
     """
     cells, unmeasured = {}, []
+    skip = landing_guids(rec)
     for guid, item in (rec.get("items") or {}).items():
         role = item.get("role") or "?"
-        if role in NON_ENGINE_ROLES:
+        if role in NON_ENGINE_ROLES or guid in skip:
             continue
         value = item_cu(ledger, guid, key)
         if value is None:
@@ -487,8 +512,9 @@ def render_sources(cols, ledger, unmeasured):
             cols, key=lambda c: ((c[2].get("run") or {}).get("started") or ""), reverse=True):
         rid = (rec.get("run") or {}).get("id")
         link = f"[{rid}]({run_url(rid)})" if rid else "—"
+        skip = landing_guids(rec)
         items = [g for g, it in (rec.get("items") or {}).items()
-                 if (it.get("role") or "") not in NON_ENGINE_ROLES]
+                 if (it.get("role") or "") not in NON_ENGINE_ROLES and g not in skip]
         started = ((rec.get("run") or {}).get("started") or "?")[:16].replace("T", " ")
         missing = unmeasured.get(col) or []
         live = drifting(rec)
@@ -777,10 +803,19 @@ def render_time(cols, runs, ledger):
     concurrent Livy REPLs under one session and their durations sum to more than the clock ever
     showed. That is why CU stays the page's lead measure and this is second.
 
-    **The rate is the robust number of the two.** `CU ÷ seconds` is the average capacity the work drew
-    while it was running, and the overlap that makes spark's seconds hard to read appears in the
-    numerator and the denominator alike — both are summed over the same operations — so it cancels.
-    A high rate is a wide engine, not a slow one; read it beside the seconds, not instead of them.
+    **The rate is COMPUTE ONLY, and that is not a refinement — a total-over-total rate is wrong.**
+    A storage operation bills real CU against a duration that is essentially zero: measured on the
+    live model, one `OneLake Write via Redirect` is 383.25 CU over **0.049 s**, a rate of ~7,800.
+    Fold a handful of those into the numerator and the denominator of a whole class and the result is
+    neither the node's draw nor anything else — it just drifts upward with however much OneLake
+    traffic the engine happened to make. It read 36.1 for iceberg against 31.2 for duckrun, which are
+    the SAME DuckDB in the SAME 64-vCore notebook and cannot differ: the gap was entirely iceberg's
+    heavier OneLake share. Compute-only, both land where a single node has to land.
+
+    So `compute CU ÷ compute seconds` is the average capacity the node drew while it ran, and it is
+    the sturdiest number in this section: the concurrency that makes spark's billed seconds exceed
+    its wall clock is in the numerator and the denominator alike, so it cancels. A high rate is a
+    WIDE engine, not a slow one; read it beside the seconds, not instead of them.
 
     Renders NOTHING when the ledger has no seconds. That is the correct output for a ledger written
     before the duration read, or one whose model does not expose the column: an absent section says
@@ -816,21 +851,31 @@ def render_time(cols, runs, ledger):
             continue
         print(f"| **{cls}** | "
               + " | ".join(f"**{class_total(per_col[c], cls):,.1f}**" for c in names) + " |")
+        # COMPUTE against COMPUTE. A storage operation bills real CU over a near-zero duration —
+        # 383.25 CU in 0.049 s, measured — so including it does not dilute the rate, it detonates it,
+        # and by an amount that tracks how much OneLake traffic the engine made rather than anything
+        # about the engine. See the docstring: this is what made two runs of the same DuckDB on the
+        # same notebook read 31.2 and 36.1.
         rates = []
         for c in names:
-            secs = class_total(per_col[c], cls)
-            cu = class_total(cu_col.get(c) or {}, cls)
+            secs = (per_col[c].get(cls) or {}).get("compute")
+            cu = ((cu_col.get(c) or {}).get(cls) or {}).get("compute")
             rates.append("—" if not secs or not cu else f"{cu / secs:,.1f}")
-        print("| `CU per second` | " + " | ".join(rates) + " |")
+        print("| `compute CU per second` | " + " | ".join(rates) + " |")
     print("\n<sub>Read from `Duration (s)` in the same Capacity Metrics row as the CU above, in the "
           "same query — it costs no extra request and no capacity. These are **billed operation "
           "seconds, not wall clock**: a duckrun leg is one long notebook run so the two nearly "
           "agree, while spark's five concurrent Livy REPLs bill against one session and sum to more "
-          "than the clock ever showed. **`CU per second` is the sturdier of the two** — it is the "
-          "average capacity the work drew while it ran, and the concurrency that makes spark's "
-          "seconds hard to read is in the numerator and the denominator alike, so it cancels. A high "
-          "rate is a WIDE engine, not a slow one; the seconds beside it say whether that width "
-          "finished sooner.</sub>")
+          "than the clock ever showed. **`compute CU per second` is the sturdiest number here** — the "
+          "average capacity the node drew while it ran, with the concurrency that inflates spark's "
+          "seconds appearing in the numerator and the denominator alike, so it cancels. It is "
+          "**compute against compute**, and that is not a refinement: a storage operation bills real "
+          "CU over a duration of essentially nothing — one `OneLake Write via Redirect` is 383.25 CU "
+          "in 0.049 s — so a total-over-total rate drifts upward with however much OneLake traffic "
+          "an engine happened to make. It read 36.1 for iceberg against 31.2 for duckrun, which are "
+          "the same DuckDB in the same 64-vCore notebook and cannot differ. A high rate is a WIDE "
+          "engine, not a slow one; the seconds beside it say whether that width finished "
+          "sooner.</sub>")
 
 
 def render(cols, runs, ledger):

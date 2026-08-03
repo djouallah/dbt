@@ -1077,6 +1077,14 @@ capacity for the GUIDs in those records, tops up `history/cu.json`, and publishe
   `properties.sqlEndpointProperties.id` and recording it under the role `sql_endpoint`. It is in
   `TEARDOWN_KEEP` for a different reason from landing and the folder: it is not ours to delete —
   Fabric removes it with its parent lakehouse, so a DELETE would fail or race.
+  **`dbt_landing` HAS ONE TOO, and it is the one door landing CU got onto the page through.** The
+  role is `sql_endpoint`, not `landing`, so `NON_ENGINE_ROLES` never saw it: the same item
+  (`A8CF6202-…`, `created: false`) is in EVERY run record and charged EVERY engine 130.4 CU it did
+  not spend. `dashboard.py`'s `landing_guids()` catches it by NAME against the record's own `landing`
+  items — nothing hardcoded, and an engine's own endpoint is untouched. It distorted more than a
+  total: that endpoint bills 130.4 CU over 83.2 s, a rate of **1.6**, against a 64-vCore notebook's
+  fixed **32.0**, so blending them made duckrun and iceberg — the same DuckDB in the same notebook —
+  read 28.5 and 26.4. Excluded, both read 32.0.
 - **A fresh run is a LOWER BOUND and the page says so per column.** Dispatch `Dashboard` twice: the
   second read returns bigger numbers and `max()` takes them. "May still rise" on the page is DERIVED
   from `run.finished` being under two hours old — a property of the clock, not a flag written into a
@@ -1095,11 +1103,18 @@ capacity for the GUIDs in those records, tops up `history/cu.json`, and publishe
   `render_report._totals`/`rank` take exactly this shape, and `cu/` importing `benchmark/` would end
   the isolation that makes this directory deletable by removing one folder and one workflow file.
   *Time — how long the work took* is the same GUID→role→bucket join as the CU table read off the
-  ledger's `seconds`, with a `CU per second` row under each class. **Those seconds are BILLED
+  ledger's `seconds`, with a `compute CU per second` row under each class. **Those seconds are BILLED
   OPERATION seconds, not wall clock**: a duckrun leg is one long notebook run so the two nearly
   agree, while spark's five concurrent Livy REPLs sum to more than the clock ever showed. **The RATE
-  is the sturdier of the two** — the concurrency is in the numerator and the denominator alike, so it
-  cancels; a high rate is a WIDE engine, not a slow one. Both sections render **nothing** when their
+  is the sturdiest number in the section** — the concurrency is in the numerator and the denominator
+  alike, so it cancels; a high rate is a WIDE engine, not a slow one. **It is COMPUTE ÷ COMPUTE, and
+  that is not a refinement — a total-over-total rate is simply wrong.** A storage operation bills real
+  CU over a duration of essentially nothing (one `OneLake Write via Redirect`: 383.25 CU in
+  **0.049 s**, a rate of ~7,800), so including storage does not dilute the rate, it detonates it, by
+  an amount tracking only how much OneLake traffic the engine happened to make. `CU (s)` is literally
+  capacity-units × seconds, so `CU ÷ duration` is capacity units DRAWN — for a 64-vCore single node
+  that is a fixed **32.0**, which is the check to apply if this ever reads oddly again. Both sections
+  render **nothing** when their
   input is absent (a record with no tier timings, a ledger with no `seconds`), which is the correct
   output: an absent section says "not measured", a table of zeros would say "free" or "instant".
   This is also why `### About these numbers` no longer says "seconds would need the caveat; CU is the

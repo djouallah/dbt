@@ -522,10 +522,53 @@ def test_a_ledger_with_no_seconds_renders_no_time_section():
     assert out.count("<!--chart:") == 2, "no seconds, no ETL-time chart"
 
 
-def test_the_rate_is_cu_over_seconds():
-    """`CU ÷ seconds` is the average capacity the work drew while it ran, and it is the sturdier of
-    the two: the concurrency that makes a spark leg's billed seconds exceed its wall clock is in the
-    numerator and the denominator alike, so it cancels."""
+def test_the_landing_lakehouses_sql_endpoint_is_not_an_engines_cu():
+    """Fabric pairs every lakehouse with a SQL analytics endpoint — a separate billable `Warehouse`
+    item with its own GUID and the role `sql_endpoint`, not `landing`. So landing CU reached the page
+    through the one door the role check does not cover: the SAME endpoint item appears in every run
+    record and charged every engine 130.4 CU it did not spend. Caught by NAME against the record's own
+    landing items, so an engine's OWN endpoint is untouched."""
+    r = rec("r-1.json", "spark", {
+        "L": {"role": "landing", "name": "dbt_landing"},
+        "LEP": {"role": "sql_endpoint", "name": "dbt_landing"},        # landing's — not this engine's
+        "OEP": {"role": "sql_endpoint", "name": "dbt_spark"},          # the engine's own — keep
+        "OUT": {"role": "output", "name": "dbt_spark"}})
+    assert d.landing_guids(r) == {"LEP"}
+    cells, missing = d.run_cu(r, ledger({"L": {"Warehouse Query": 70.2},
+                                         "LEP": {"SQL Endpoint Query": 130.4},
+                                         "OEP": {"SQL Endpoint Query": 306.3},
+                                         "OUT": {"High Concurrency Session Livy Run": 900.0}}))
+    assert d.class_total(cells, "etl") == 1206.3, "900 + the engine's own endpoint, and nothing else"
+    assert missing == [], "landing's endpoint is not an item whose CU could be missing"
+
+
+def test_the_rate_is_compute_over_compute_never_total_over_total():
+    """A storage operation bills real CU over a duration of essentially nothing — 383.25 CU in
+    0.049 s, measured — so putting it in the ratio does not dilute the rate, it detonates it, by an
+    amount that tracks only how much OneLake traffic the engine happened to make. Live symptom: the
+    same DuckDB in the same 64-vCore notebook read 36.1 for iceberg and 31.2 for duckrun. Compute
+    against compute, both read 32.0."""
+    runs = [_full("a-1.json", "duckrun")]
+    runs[0]["items"] = {"NB": gone("compute", "dbt-duckrun-ab12"),
+                        "OUT": gone("output", "dbt_delta"),
+                        "SEM": gone("semantic_model", "aemo_duckrun")}
+    led = ledger({"NB": {"Jupyter Notebook Scheduled Run": 20665.6},
+                  "OUT": {"OneLake Write via Redirect": 384.1},
+                  "SEM": {"XMLA Read Operation": 1287.2}})
+    led["seconds"] = _secs({"NB": {"Jupyter Notebook Scheduled Run": 645.79},
+                            "OUT": {"OneLake Write via Redirect": 0.031},
+                            "SEM": {"XMLA Read Operation": 25.93}})
+    body = _render(runs, led).split("### Time —")[1].split("###")[0]
+    rate = [ln for ln in body.splitlines() if ln.startswith("| `compute CU per second`")]
+    assert rate[0] == "| `compute CU per second` | 32.0 |", "the node's own draw, not a blend"
+    # And the SECONDS row still counts storage — it is the rate alone that must not.
+    assert "| **etl** | **645.8** |" in body
+
+
+def test_the_rate_is_computed_per_class():
+    """The rate is the average capacity that class's compute drew while it ran, and the concurrency
+    that makes a spark leg's billed seconds exceed its wall clock is in the numerator and the
+    denominator alike, so it cancels."""
     runs = [_full("a-1.json", "spark")]
     led = ledger({"OUT": {"High Concurrency Session Livy Run": 900.0},
                   "SEM": {"XMLA Read Operation": 40.0}})
@@ -534,9 +577,9 @@ def test_the_rate_is_cu_over_seconds():
     out = _render(runs, led)
     body = out.split("### Time —")[1].split("###")[0]
     assert "| **etl** | **30.0** |" in body
-    assert "| `CU per second` | 30.0 |" in body, "900 CU over 30 s"
+    assert "| `compute CU per second` | 30.0 |" in body, "900 CU over 30 s"
     assert "| **analytics** | **4.0** |" in body
-    assert "| `CU per second` | 10.0 |" in body, "40 CU over 4 s"
+    assert "| `compute CU per second` | 10.0 |" in body, "40 CU over 4 s"
     assert out.count("<!--chart:") == 3, "the ETL-time chart joins the two CU ones"
 
 

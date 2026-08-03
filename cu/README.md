@@ -155,7 +155,11 @@ because that artifact has to open off a local disk years later.
   the same display name: `dbt_spark` 306.3 CU, `dbt_iceberg` 245.7, `dbt_delta` 278.9, all of it
   `SQL Endpoint Query`. It was invisible to the ledger until `provision.py` started recording it —
   the GUID is not the lakehouse's. It is never deleted by the teardown: Fabric removes it with its
-  parent.
+  parent. **`dbt_landing` has one too, and it is the one door landing CU got onto the page through:**
+  its role is `sql_endpoint`, not `landing`, so the role filter never saw it, and the same item
+  appeared in every run record charging every engine 130.4 CU it did not spend. `landing_guids()`
+  catches it by NAME against the record's own `landing` items, leaving an engine's own endpoint
+  alone.
 - **Engine-major is what makes the width work**: item-major needs a column per operation type and a
   lakehouse alone brings a dozen. **No total column and no grand-total row** — both would sum ACROSS
   engines, which is the one sum on this page that answers nothing, since the engines are alternatives
@@ -189,13 +193,19 @@ because that artifact has to open off a local disk years later.
   this shape, and `cu/` importing `benchmark/` would end the isolation that makes this directory
   deletable by removing one folder and one workflow file.
 - **Time — how long the work took, and how hard it drew.** The same GUID→role→bucket join as the CU
-  table, read off the ledger's `seconds` dict, with a `CU per second` row under each class.
+  table, read off the ledger's `seconds` dict, with a `compute CU per second` row under each class.
   **Seconds here are BILLED OPERATION seconds, not wall clock**, and the difference is not small on
   every engine: a duckrun leg is one long notebook run so the two nearly agree, while spark opens
   five concurrent Livy REPLs under one session whose durations sum to more than the clock ever
-  showed. **The rate is the sturdier of the two** — it is the average capacity the work drew while it
-  ran, and the concurrency that makes spark's seconds hard to read appears in the numerator and the
-  denominator alike, so it cancels. A high rate is a WIDE engine, not a slow one. The section renders
+  showed. **The rate is the sturdiest number in the section** — the average capacity the node drew
+  while it ran, and the concurrency that makes spark's seconds hard to read appears in the numerator
+  and the denominator alike, so it cancels. A high rate is a WIDE engine, not a slow one.
+  **It is COMPUTE ÷ COMPUTE, and that is not a refinement — a total-over-total rate is wrong.** A
+  storage operation bills real CU over a duration of essentially nothing (one `OneLake Write via
+  Redirect`: 383.25 CU in **0.049 s**), so including storage does not dilute the rate, it detonates
+  it, by an amount tracking only how much OneLake traffic the engine made. `CU (s)` is literally
+  capacity-units × seconds, so `CU ÷ duration` is capacity units DRAWN — a 64-vCore single node is a
+  fixed **32.0**, which is the check to apply if this ever reads oddly again. The section renders
   **nothing** when the ledger has no seconds, which is the correct output both for a ledger written
   before the duration read and for a model that does not expose the column: an absent section says
   "not measured", a table of zeros would say "instant".
