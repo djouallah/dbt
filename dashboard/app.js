@@ -796,6 +796,9 @@ export function table(head, align, rows, filter = null) {
   const out = `<div class="scroll"><table>\n<thead><tr>${th}</tr></thead>\n<tbody>\n${body}\n` +
     "</tbody></table></div>";
   if (!filter) return out;
+  // `{sort: true}` alone: clickable headers with none of the bar. A short ranking table wants to be
+  // reordered, but a search box and a row count over seven rows is furniture pretending to be a tool.
+  if (filter.sort) return `<div class="sortable">${out}</div>`;
   return `<div class="filtered" data-find="${esc(filter.find || "filter")}" ` +
     `data-menus="${esc((filter.menus || []).join(","))}">${out}</div>`;
 }
@@ -1087,7 +1090,8 @@ export function renderFit(groups, times, tiers) {
   return ["<h3>Cost and speed by layout</h3>",
     table(["layout", "CU", ...cols.map((l) => `${l} ms`)],
       ["left", "right", ...cols.map(() => "right")],
-      pts.map((p) => [p.name, fmt(p.cu, 0), ...cols.map((l) => (p.ms[l] ? fmt(p.ms[l], 0) : DASH))])),
+      pts.map((p) => [p.name, fmt(p.cu, 0), ...cols.map((l) => (p.ms[l] ? fmt(p.ms[l], 0) : DASH))]),
+      { sort: true }),
   ].join("\n");
 }
 
@@ -2068,13 +2072,20 @@ export function wireTables(root, doc = null) {
   const d = doc || (root && root.ownerDocument) || (typeof document === "undefined" ? null : document);
   if (!root || !d || !root.querySelectorAll) return 0;
   let wired = 0;
-  for (const box of root.querySelectorAll(".filtered")) {
+  // Two selectors, not `".filtered, .sortable"` — the offline test's stub DOM resolves one plain
+  // class per query, and a combined selector would silently match nothing there.
+  for (const box of [...root.querySelectorAll(".filtered"), ...root.querySelectorAll(".sortable")]) {
     const tbl = box.querySelector("table");
     if (!tbl || !tbl.tHead || !tbl.tBodies[0]) continue;
     const heads = [...tbl.tHead.rows[0].cells];
     const body = tbl.tBodies[0];
     const all = [...body.rows];
     const text = all.map((r) => [...r.cells].map(cellText));
+    if (box.classList.contains("sortable")) {
+      wireSort(heads, body, all, text);
+      wired++;
+      continue;
+    }
 
     const bar = d.createElement("div");
     bar.className = "filterbar";
@@ -2128,30 +2139,38 @@ export function wireTables(root, doc = null) {
     find.addEventListener("input", apply);
     for (const [, sel] of picks) sel.addEventListener("change", apply);
 
-    let at = -1, dir = 1;
-    const sortBy = (i) => {
-      dir = at === i ? -dir : 1;
-      at = i;
-      const order = all.map((r, k) => k)
-        .sort((a, b) => compareCells(text[a][i], text[b][i]) * dir);
-      for (const k of order) body.appendChild(all[k]);
-      heads.forEach((th, k) => {
-        th.classList.toggle("asc", k === i && dir > 0);
-        th.classList.toggle("desc", k === i && dir < 0);
-      });
-    };
-    heads.forEach((th, i) => {
-      th.tabIndex = 0;
-      th.setAttribute("role", "button");
-      th.addEventListener("click", () => sortBy(i));
-      th.addEventListener("keydown", (e) => {
-        if (e.key === "Enter" || e.key === " ") { e.preventDefault(); sortBy(i); }
-      });
-    });
+    wireSort(heads, body, all, text);
     apply();
     wired++;
   }
   return wired;
+}
+
+/** Clickable, keyboard-reachable column sort on one table — shared by the autofilter and the
+ *  sort-only `.sortable` box. Click sorts ascending, a second click reverses, a caret marks the
+ *  current column. Reordering is `appendChild` on the existing rows, so a filter's `display`
+ *  state and the row objects survive a sort. */
+function wireSort(heads, body, all, text) {
+  let at = -1, dir = 1;
+  const sortBy = (i) => {
+    dir = at === i ? -dir : 1;
+    at = i;
+    const order = all.map((r, k) => k)
+      .sort((a, b) => compareCells(text[a][i], text[b][i]) * dir);
+    for (const k of order) body.appendChild(all[k]);
+    heads.forEach((th, k) => {
+      th.classList.toggle("asc", k === i && dir > 0);
+      th.classList.toggle("desc", k === i && dir < 0);
+    });
+  };
+  heads.forEach((th, i) => {
+    th.tabIndex = 0;
+    th.setAttribute("role", "button");
+    th.addEventListener("click", () => sortBy(i));
+    th.addEventListener("keydown", (e) => {
+      if (e.key === "Enter" || e.key === " ") { e.preventDefault(); sortBy(i); }
+    });
+  });
 }
 
 /**

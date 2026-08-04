@@ -117,10 +117,12 @@ tbody tr:last-child td { border-bottom:none; }
 .fcount { color:var(--dim); font-size:.78rem; margin-left:auto; white-space:nowrap; }
 /* The header is the sort control, so it has to look like one — and the caret marks the sorted
    column in place rather than needing a legend. */
-.filtered thead th { cursor:pointer; user-select:none; }
-.filtered thead th:hover { color:var(--fg); }
-.filtered thead th.asc::after { content:" \25B2"; font-size:.65em; color:var(--series); }
-.filtered thead th.desc::after { content:" \25BC"; font-size:.65em; color:var(--series); }
+.filtered thead th, .sortable thead th { cursor:pointer; user-select:none; }
+.filtered thead th:hover, .sortable thead th:hover { color:var(--fg); }
+.filtered thead th.asc::after, .sortable thead th.asc::after {
+  content:" \25B2"; font-size:.65em; color:var(--series); }
+.filtered thead th.desc::after, .sortable thead th.desc::after {
+  content:" \25BC"; font-size:.65em; color:var(--series); }
 /* METHODOLOGY IS OPT-IN. The long notes are all still on the page — every sentence a test pins is
    in the DOM — but folded behind one line each, so the numbers read first and the reasoning is
    there when a number looks wrong. The exclusion notice is deliberately NOT one of these. */

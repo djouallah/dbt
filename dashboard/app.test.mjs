@@ -983,6 +983,23 @@ test("a header click sorts, and clicking it again reverses", () => {
     "the caret marks one column, and only the current one");
 });
 
+test("a sort-only table gets clickable headers and none of the bar", () => {
+  // `table(…, {sort: true})` — the Cost-and-speed table wants reordering, not a search box and a
+  // row count over seven rows.
+  const { root, box, doc, th, tbl } = stubTable(
+    ["layout", "CU"],
+    [["duckrun", "1,810.1"], ["spark V-Order", "1,381.0"]], {});
+  box.className = "sortable";
+  assert.equal(d.wireTables(root, doc), 1, "a .sortable box counts as wired");
+  assert.equal(box.querySelector(".filterbar"), null, "no bar, no menus, no count");
+  th[1].fire("click");
+  assert.deepEqual(tbl.tBodies[0].rows.map((r) => r.cells[0].textContent),
+    ["spark V-Order", "duckrun"], "and the headers sort, cheapest first");
+  th[1].fire("click");
+  assert.deepEqual(tbl.tBodies[0].rows.map((r) => r.cells[0].textContent),
+    ["duckrun", "spark V-Order"], "and reverse");
+});
+
 test("the run table is the only filterable one, and renders whole without JS", () => {
   // Progressive enhancement: the markup carries every row and no controls at all. A reader with
   // scripts off, and every test here, sees the table as it always was.
@@ -1828,6 +1845,8 @@ test("a tier nothing recorded is not a column", () => {
   const head = rows(html)[0];
   assert.ok(head.includes("| cold ms | warm ms |"), head);
   assert.ok(!head.includes("hot ms"), "a tier with no samples adds no column");
+  assert.ok(html.includes('class="sortable"'),
+    "the reader can reorder it by any column — sort-only, no filter bar");
 });
 
 test("the cost-and-speed table and the mart block are one measurement, not two", () => {
