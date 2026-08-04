@@ -481,7 +481,8 @@ test("the page renders end to end with charts and a layout", () => {
   // ANALYTICS is the only chart: it is the interactive CU that throttles, which is the point of the
   // project. It is labelled by the LAYOUT's writer and captioned by the shape, because Power BI
   // never sees the engine.
-  assert.ok(c[0].title.includes("Analytics") && c[0].subtitle.includes("INTERACTIVE"));
+  assert.ok(c[0].title.includes("Capacity units per parquet layout"));
+  assert.ok(c[0].subtitle.includes("lower is better"));
   assert.deepEqual(c[0].labels, ["duckrun"]);
   assert.deepEqual(c[0].captions, ["4 files · 79 RG"], "the shape is the sub-label");
   assert.ok(c[0].values[0].startsWith("2,041.0"));
@@ -1819,7 +1820,7 @@ test("ONE chart, full width, and it is the analytics one", () => {
   assert.ok(!out.includes('<div class="charts">'), "no side-by-side wrapper to share a row with");
   assert.equal((out.match(/<figure class="chart"/g) || []).length, 1, "one figure");
   assert.ok(!out.includes("data-kind"), "one measure, one hue, nothing to mark");
-  assert.ok(out.includes("Analytics — what querying each LAYOUT cost"));
+  assert.ok(out.includes("Capacity units per parquet layout"));
   assert.ok(!out.includes("ETL — what building them cost"), "the ETL chart is gone");
   // Gone from the CHART, not from the page.
   assert.ok(rows(block(out, "Cost by engine")).some((r) => r.startsWith("| **etl** |")));

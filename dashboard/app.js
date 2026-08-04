@@ -2240,8 +2240,14 @@ export function renderPage(cols, runs, ledger, opts = {}) {
   // ever said. What is bought is the prose measure instead of a 53rem flex child — the widest a
   // chart gets here, since the SVG is drawn at a 660-unit viewBox and a wider box would inflate
   // every label with it.
-  out.push(chartSvg("Analytics — what querying each LAYOUT cost",
-    `capacity units, lower is better — INTERACTIVE CU, and Power BI sees only the parquet`,
+  // The title names the measure and the grouping, and the subtitle says which way is good. It used
+  // to be `Analytics — what querying each LAYOUT cost` over `capacity units, lower is better —
+  // INTERACTIVE CU, and Power BI sees only the parquet`: three qualifications carried because there
+  // was a second chart to be told apart from. With one chart the contrast has nobody to draw, and
+  // both facts it carried are already stated where they can be read properly — `Analytics is the
+  // half that matters` in the methodology explains INTERACTIVE against background CU, and `per
+  // parquet layout` is itself the statement that Power BI sees the parquet and not the engine.
+  out.push(chartSvg("Capacity units per parquet layout", "lower is better",
     groupRows(groups, martTable)));
   // The one place the ADAPTERS are named and linked. The bars stopped captioning them because the
   // column name already implies the adapter — this line is where that implication resolves.
