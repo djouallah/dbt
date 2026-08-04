@@ -16,11 +16,163 @@ stops the leg at the node that broke. There is no separate neutral-reader test j
 """
 import json
 import os
+import shutil
 import subprocess
 import sys
+import threading
 import time
 
 _MAX_ATTEMPTS = 3
+
+_SAMPLE_INTERVAL = 15
+
+
+def _gib(n) -> str:
+    """Auto-scaled, because the spill figure is the one being read for "is it still zero" and a
+    fixed GiB unit prints 12 MiB of real spilling as `0.0GiB`."""
+    if n is None:
+        return "?"
+    for unit, size in (("GiB", 2**30), ("MiB", 2**20), ("KiB", 2**10)):
+        if n >= size:
+            return f"{n / size:.1f}{unit}"
+    return f"{n}B"
+
+
+def _meminfo(key: str):
+    """One /proc/meminfo field in bytes, or None off Linux."""
+    try:
+        with open("/proc/meminfo") as fh:
+            for line in fh:
+                if line.startswith(key + ":"):
+                    return int(line.split()[1]) * 1024
+    except Exception:
+        pass
+    return None
+
+
+def _cgroup_limit():
+    """The container's own memory ceiling, which is what actually kills us — /proc/meminfo
+    reports the HOST's RAM and can be far larger."""
+    for path in ("/sys/fs/cgroup/memory.max", "/sys/fs/cgroup/memory/memory.limit_in_bytes"):
+        try:
+            with open(path) as fh:
+                raw = fh.read().strip()
+            return None if raw == "max" else int(raw)
+        except Exception:
+            continue
+    return None
+
+
+def _spill_usage(path: str):
+    """(bytes, file count) currently in the DuckDB temp dir. Zero while it is climbing to the
+    memory limit means nothing ever spilled."""
+    total = files = 0
+    try:
+        for root, _, names in os.walk(path):
+            for name in names:
+                try:
+                    total += os.path.getsize(os.path.join(root, name))
+                    files += 1
+                except OSError:
+                    pass
+    except Exception:
+        return None, None
+    return total, files
+
+
+def _rss(pid: int):
+    try:
+        with open(f"/proc/{pid}/status") as fh:
+            for line in fh:
+                if line.startswith("VmRSS:"):
+                    return int(line.split()[1]) * 1024
+    except Exception:
+        pass
+    return None
+
+
+def _log_node_facts(engine: str) -> None:
+    """Everything about the machine and the spill directory that the leg log cannot otherwise say.
+
+    A `cores: 4` dispatch OOMed on fct_summary at 24.6 GiB while `cores: 8` passes, and nothing in
+    the log distinguished "DuckDB is misconfigured" from "this node has less RAM". These are the
+    inputs to that question: how much memory the container really has, where the spill directory
+    is, and how much free disk backs it — max_temp_directory_size defaults to 90% of THAT, so a
+    small work disk is a small spill budget, silently.
+    """
+    tmp = os.environ["DUCKDB_TEMP_DIR"]
+    parent = tmp if os.path.isdir(tmp) else os.path.dirname(tmp) or "."
+    try:
+        usage = shutil.disk_usage(parent)
+        disk = f"free={_gib(usage.free)} of {_gib(usage.total)}"
+    except Exception as ex:
+        disk = f"unreadable ({ex})"
+    try:
+        cwd_usage = shutil.disk_usage(".")
+        cwd_disk = f"free={_gib(cwd_usage.free)} of {_gib(cwd_usage.total)}"
+    except Exception as ex:
+        cwd_disk = f"unreadable ({ex})"
+
+    print(f"[fabric_build] node: engine={engine} cpu_count={os.cpu_count()} "
+          f"MemTotal={_gib(_meminfo('MemTotal'))} MemAvailable={_gib(_meminfo('MemAvailable'))} "
+          f"cgroup_max={_gib(_cgroup_limit())}", flush=True)
+    print(f"[fabric_build] spill: DUCKDB_TEMP_DIR={tmp} exists={os.path.isdir(tmp)} "
+          f"writable={os.access(parent, os.W_OK)} disk[{parent}] {disk}", flush=True)
+    print(f"[fabric_build] cwd: {os.getcwd()} TMPDIR={os.environ.get('TMPDIR')} disk {cwd_disk}",
+          flush=True)
+
+    # duckrun pip-installs itself with -q, so the notebook's actual versions appear nowhere.
+    try:
+        frozen = subprocess.run([sys.executable, "-m", "pip", "freeze"],
+                                capture_output=True, text=True, timeout=120).stdout
+        wanted = ("duckdb", "duckrun", "dbt-", "deltalake", "obstore")
+        pkgs = sorted(l.strip() for l in frozen.splitlines()
+                      if l.lower().startswith(wanted))
+        print(f"[fabric_build] versions: {', '.join(pkgs)}", flush=True)
+    except Exception as ex:
+        print(f"[fabric_build] versions: unreadable ({ex})", flush=True)
+
+
+class _Sampler:
+    """One line every 15s while dbt runs: process RSS, free memory, and how much has spilled.
+
+    OS reads only — /proc and a walk of the temp dir, no DuckDB connection and no query — so it
+    cannot perturb what the leg is measuring. It is the timeline the OOM stack trace does not
+    give: if spill stays at 0B while RSS climbs to the memory limit, the memory in use was never
+    evictable and the answer is more RAM, not a setting.
+    """
+
+    def __init__(self, pid: int, tmp: str):
+        self._pid, self._tmp = pid, tmp
+        self._stop = threading.Event()
+        self._thread = threading.Thread(target=self._run, daemon=True)
+
+    def __enter__(self):
+        self._t0 = time.monotonic()
+        self._thread.start()
+        return self
+
+    def __exit__(self, *exc):
+        self._stop.set()
+        self._thread.join(timeout=5)
+        self._emit(final=True)
+        return False
+
+    def _emit(self, final: bool = False) -> None:
+        spill, files = _spill_usage(self._tmp)
+        try:
+            free = _gib(shutil.disk_usage(
+                self._tmp if os.path.isdir(self._tmp) else ".").free)
+        except Exception:
+            free = "?"
+        print(f"[fabric_build] {'final ' if final else ''}t=+{time.monotonic() - self._t0:.0f}s "
+              f"rss={_gib(_rss(self._pid))} mem_avail={_gib(_meminfo('MemAvailable'))} "
+              f"spill={_gib(spill)}/{'?' if files is None else files} files disk_free={free}",
+              flush=True)
+
+    def _run(self) -> None:
+        while not self._stop.wait(_SAMPLE_INTERVAL):
+            self._emit()
 
 
 def _only_tests_failed() -> bool:
@@ -57,6 +209,11 @@ def main() -> int:
     scratch = os.environ.get("TMPDIR") or "/tmp"
     os.environ.setdefault("DUCKDB_TEMP_DIR", os.path.join(scratch, "duckdb_spill"))
 
+    # No `pip install --pre duckdb` here, and it is not an oversight: a nightly resolves fine for
+    # both adapters (dbt-duckdb wants duckdb>=1.0.0, duckrun >=1.5.4) but its extensions come from
+    # a nightly repo that does not carry `azure` — and every read here goes through OneLake.
+    _log_node_facts(engine)
+
     # `dbt build`: models and their tests in one DAG walk. The singular tests in tests/ are gated to
     # the duckdb-family targets by `data_tests: +enabled`, so this is the only place they run.
     #
@@ -85,7 +242,11 @@ def main() -> int:
         else:
             cmd = ["dbt", "retry", *base]
         print(f"[fabric_build] $ {' '.join(cmd)}", flush=True)
-        ok = subprocess.run(cmd).returncode == 0
+        # Popen + wait, not subprocess.run: identical behaviour (run is that wrapper), but the pid
+        # is needed to sample the child's RSS while it works.
+        proc = subprocess.Popen(cmd)
+        with _Sampler(proc.pid, os.environ["DUCKDB_TEMP_DIR"]):
+            ok = proc.wait() == 0
         if ok:
             break
         if _only_tests_failed():

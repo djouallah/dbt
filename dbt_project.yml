@@ -35,6 +35,14 @@ on-run-start:
   # — temp_directory below still applies.
   - "{% if target.name == 'duckrun' %}SET GLOBAL preserve_insertion_order = false{% endif %}"
   - "{% if target.name == 'duckrun' %}SET GLOBAL temp_directory = '{{ env_var('DUCKDB_TEMP_DIR', '/tmp/duckdb_spill') }}'{% endif %}"
+  # Read the settings BACK, from the session that is about to run the models — the hooks above say
+  # what was asked for, this says what is in force. It is the only thing that can tell a DuckDB
+  # misconfiguration from a node that simply has less RAM, which is the question a `cores: 4`
+  # dispatch OOMing on fct_summary at 24.6 GiB leaves open. Watch max_temp_directory_size in
+  # particular: it defaults to 90% of free disk under temp_directory, so a small work disk is a
+  # small spill budget and nothing announces it. Runs on BOTH duckdb targets, so the pair stays on
+  # identical settings; renders to whitespace on dwh and spark.
+  - "{% if target.name in ['duckrun', 'iceberg'] %}{{ log_duckdb_settings() }}{% endif %}"
   # Fabric Warehouse has no implicit schemas — create them before any model runs.
   - "{% if target.type == 'fabric' %}{{ create_schemas_if_not_exists(['landing', 'mart']) }}{% endif %}"
 

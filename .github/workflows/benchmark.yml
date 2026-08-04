@@ -363,6 +363,14 @@ jobs:
       # hands back the notebook's item id (ScriptResult.item_id) instead of it being resolved by
       # display name here. pytz goes into the notebook's own pip list, not here.
       - run: pip install "duckrun>=0.4.38" requests
+      # Not where the build runs — that is the Fabric notebook, whose cores/RAM/disk fabric_build.py
+      # prints on arrival. Here so the two are on the same record: when a leg dies of memory it is
+      # worth being able to say, without inferring it, which machine ran out.
+      - name: Runner hardware
+        run: |
+          echo "cores: $(nproc) — $(lscpu | sed -n 's/^Model name: *//p' | head -1)"
+          free -h
+          df -h / /mnt 2>/dev/null || df -h /
       - run: python .github/scripts/provision.py ${{ matrix.engine }} >> "$GITHUB_ENV"
       - name: dbt build in Fabric
         run: python .github/scripts/fabric_run.py ${{ matrix.engine }}
@@ -396,6 +404,13 @@ jobs:
       - uses: actions/setup-python@v5
         with: {python-version: "3.11"}
       - run: pip install ${{ matrix.install }} requests pytz
+      # Here the runner really is the dbt client — compute is Fabric's, but the process doing the
+      # planning, the CSV reads' round trips and any local sort lives on this box.
+      - name: Runner hardware
+        run: |
+          echo "cores: $(nproc) — $(lscpu | sed -n 's/^Model name: *//p' | head -1)"
+          free -h
+          df -h / /mnt 2>/dev/null || df -h /
       - uses: azure/login@v2
         with:
           client-id: ${{ secrets.AZURE_CLIENT_ID }}
