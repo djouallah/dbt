@@ -1,0 +1,72 @@
+{
+ "engine": "duckrun",
+ "full_load": true,
+ "inputs": {
+  "benchmark": "true",
+  "build": "true",
+  "cores": "4",
+  "download_limit": "200",
+  "gap_seconds": "600",
+  "native_execution_engine": "false",
+  "runs": "6",
+  "skip_download": "true",
+  "sorted": "false",
+  "spark_resource_profile": "writeHeavy",
+  "think_seconds": "4"
+ },
+ "items": {
+  "4FBE4130-1717-4FC9-A985-3FB7B4A13067": {
+   "at": "2026-08-04T03:55:09+00:00",
+   "created": false,
+   "kind": "Lakehouse",
+   "name": "dbt_landing",
+   "role": "landing"
+  },
+  "68FB95A8-D0D4-4A30-B175-F8FCF243E02F": {
+   "at": "2026-08-04T05:17:25+00:00",
+   "created": true,
+   "deleted": "2026-08-04T05:18:04+00:00",
+   "engine": "duckrun",
+   "kind": "Notebook",
+   "name": "dbt-duckrun-9e6a5aee",
+   "role": "compute"
+  },
+  "6C23854F-CF0F-460D-8AFB-01D9BEA9A92D": {
+   "at": "2026-08-04T05:18:02+00:00",
+   "created": false,
+   "kind": "Folder",
+   "name": "benchmark",
+   "role": "folder"
+  },
+  "79999EE1-F9ED-450B-A568-61DDC8ECBFFD": {
+   "at": "2026-08-04T03:55:57+00:00",
+   "created": true,
+   "deleted": "2026-08-04T05:18:05+00:00",
+   "kind": "Lakehouse",
+   "name": "dbt_delta",
+   "role": "output"
+  },
+  "A8CF6202-AE31-45E4-9CC8-7FFE463250C9": {
+   "at": "2026-08-04T03:55:11+00:00",
+   "created": false,
+   "kind": "Warehouse",
+   "name": "dbt_landing",
+   "role": "sql_endpoint"
+  },
+  "F50469D2-8347-4464-9EE8-97C768B4F355": {
+   "at": "2026-08-04T05:18:03+00:00",
+   "created": false,
+   "kind": "Folder",
+   "name": "landing",
+   "role": "folder"
+  }
+ },
+ "run": {
+  "finished": "2026-08-04T05:18:24+00:00",
+  "id": "30876056186",
+  "sha": "3ccbfef981bee51e978e8070b7f747bc47ff0c6e",
+  "started": "2026-08-04T03:54:15+00:00",
+  "url": "https://github.com/djouallah/fabric-dbt-benchmark/actions/runs/30876056186"
+ },
+ "schema": 1
+}
