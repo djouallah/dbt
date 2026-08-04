@@ -465,7 +465,7 @@ test("the page renders end to end with charts and a layout", () => {
     SEM: { "XMLA Read Operation": 2041.0 },
   }));
   const c = charts(out);
-  assert.equal(c.length, 2);
+  assert.equal(c.length, 1, "analytics alone — the ETL chart is gone, its numbers are in the tables");
   const text = plain(out);
   const rr = rows(out);
   assert.ok(rr.some((r) => r.startsWith("| **etl** |")));
@@ -478,19 +478,15 @@ test("the page renders end to end with charts and a layout", () => {
     "the layout block, with row-group size abbreviated");
   assert.ok(text.includes("8,167") && text.includes("12,345.60"),
     "the input archive should be on the page");
-  // ANALYTICS leads: it is the interactive CU that throttles, which is the point of the project.
+  // ANALYTICS is the only chart: it is the interactive CU that throttles, which is the point of the
+  // project. It is labelled by the LAYOUT's writer and captioned by the shape, because Power BI
+  // never sees the engine.
   assert.ok(c[0].title.includes("Analytics") && c[0].subtitle.includes("INTERACTIVE"));
-  assert.ok(c[1].title.includes("ETL") && c[1].subtitle.includes("background"));
-  // ANALYTICS is labelled by the LAYOUT's writer and captioned by the shape; ETL is labelled by the
-  // column and captioned by the adapter and its compute. That asymmetry is the point of both charts.
   assert.deepEqual(c[0].labels, ["duckrun"]);
   assert.deepEqual(c[0].captions, ["4 files · 79 RG"], "the shape is the sub-label");
   assert.ok(c[0].values[0].startsWith("2,041.0"));
-  assert.deepEqual(c[1].labels, ["duckrun"]);
-  // A single-config engine gets a bare column name, so the vCores are the one fact the caption
-  // still has to carry — the adapter and profile are dropped because the label already says them.
-  assert.deepEqual(c[1].captions, ["64 vCores"]);
-  assert.ok(c[1].values[0].startsWith("31,080.0"));
+  // The ETL total is still on the page, in the table that reports it per bucket.
+  assert.ok(rr.some((r) => r.startsWith("| **etl** |") && r.includes("31,080.0")), rr.join(" / "));
 });
 
 test("a column with no operations of a kind prints a dash, not a zero", () => {
@@ -1133,9 +1129,12 @@ test("the same parquet is one bar however many engines wrote it", () => {
   assert.deepEqual(c[0].labels, ["duckrun"], "one layout, one bar");
   assert.equal(c[0].values[0], "1,500.0");
   assert.deepEqual(c[0].captions, ["4 files · 27 RG"], "the shape it grouped on sits underneath");
-  // ...while the ETL chart keeps BOTH columns, because there the writer and the compute it was given
-  // are the entire subject. That asymmetry is the change, and it must not be tidied away.
-  assert.deepEqual(c[1].labels.sort(), ["duckrun·32c", "duckrun·64c"]);
+  assert.equal(c.length, 1, "and it is the only chart");
+  // ...while the ETL side keeps BOTH columns, because there the writer and the compute it was given
+  // are the entire subject. That asymmetry is the change and it must not be tidied away — it just
+  // reads across a chart and a table now rather than across two charts.
+  assert.deepEqual(rows(block(out, "Cost by engine"))[0],
+    "| CU (s) | duckrun·32c | duckrun·64c |");
 });
 
 test("two runs of ONE column that wrote different parquet are two bars", () => {
@@ -1168,11 +1167,10 @@ test("two runs of ONE column that wrote different parquet are two bars", () => {
   assert.ok(body[0].startsWith("| duckrun sorted | 3 | 26 |"), body[0]);
   assert.ok(body[1].startsWith("| duckrun sorted | 4 | 25 |"), body[1]);
   assert.ok(!body[0].includes("1,600"), "no CU column on the layout block");
-  // The ETL half is unmoved: there the writer and its compute are the subject, so both runs are
-  // samples of ONE column and the bar is their mean with a range.
-  const etl = charts(out)[1];
-  assert.deepEqual(etl.labels, ["duckrun"], "one column — the tag is only added to tell two apart");
-  assert.equal(etl.values[0], "1.0");
+  // The ETL half is unmoved and it is now a TABLE rather than a bar: both runs are samples of ONE
+  // column, so `Cost by engine` reports the column once.
+  assert.equal(charts(out).length, 1, "analytics only");
+  assert.ok(rows(block(out, "Cost by engine")).some((r) => r.startsWith("| **etl** |")));
 });
 
 test("a column whose runs recorded no layout stays ONE bar", () => {
@@ -1367,7 +1365,7 @@ test("the rate is a row of the engine table, not a section", () => {
   const rr = rows(out);
   assert.ok(rr.some((r) => r === "| **etl** | **900.0** |"));
   assert.ok(rr.some((r) => r === "| `compute CU per second` | 30.0 |"), "under its class");
-  assert.equal(charts(out).length, 2, "and it brought no bar with it");
+  assert.equal(charts(out).length, 1, "and it brought no bar with it");
 });
 
 test("etl carries a duration row and analytics deliberately does not", () => {
@@ -1455,7 +1453,7 @@ test("a class the ledger has not read yet is a dash, not a zero", () => {
 test("a ledger with no seconds renders no rate row", () => {
   const out = render([full("a-1.json", "spark")], ledger({ OUT: 1.0, SEM: 2.0 }));
   assert.ok(!rows(out).some((r) => r.startsWith("| `compute CU per second` |")), "no ROW");
-  assert.equal(charts(out).length, 2, "no seconds, no third chart");
+  assert.equal(charts(out).length, 1, "no seconds, no second chart");
 });
 
 test("the rate is compute over compute, never total over total", () => {
@@ -1503,12 +1501,10 @@ test("the rate scales with the cores the column was given", () => {
   const out = render([big, small], led);
   const rate = rows(out).find((r) => r.startsWith("| `compute CU per second`"));
   assert.equal(rate, "| `compute CU per second` | 16.0 | 32.0 |", "cores ÷ 2, per column");
-  // The size reaches the chart through the column TAG; a caption repeating `32 vCores` under
-  // `duckrun·32c` would be the label twice, so with a tagged column there is no caption at all.
-  const etl = charts(out).find((c) => c.title.includes("ETL"));
-  assert.ok(etl.labels.includes("duckrun·32c") && etl.labels.includes("duckrun·64c"),
-    "the tag names the size");
-  assert.deepEqual(etl.captions, [], "nothing the label already says");
+  // The size reaches the reader through the column TAG, which is what keeps two core counts from
+  // blending into one column. With the ETL chart gone the tables are where it shows.
+  assert.ok(rate.includes("16.0") && rate.includes("32.0"), rate);
+  assert.ok(!charts(out).some((c) => c.title.includes("ETL")), "and no ETL bar remains");
 });
 
 test("the rate is computed per class", () => {
@@ -1525,7 +1521,7 @@ test("the rate is computed per class", () => {
   assert.ok(rr.some((r) => r === "| `compute CU per second` | 30.0 |"), "900 CU over 30 s");
   assert.ok(rr.some((r) => r === "| **analytics** | **40.0** |"));
   assert.ok(rr.some((r) => r === "| `compute CU per second` | 10.0 |"), "40 CU over 4 s");
-  assert.equal(charts(out).length, 2, "the two CU charts and no third");
+  assert.equal(charts(out).length, 1, "the one CU chart and no second");
 });
 
 // ------------------------------------------------------------------------ live loading, new here
@@ -1815,15 +1811,18 @@ test("the layout blocks sit behind a tab strip when more than one table renders"
   assert.ok(plain(out).includes("9 rows on every engine"));
 });
 
-test("the two charts share one side-by-side row, analytics first", () => {
+test("ONE chart, full width, and it is the analytics one", () => {
+  // The page's own thesis applied to itself: background CU is smoothed over 24h and nobody waits for
+  // it, query CU is interactive and is what throttles. A second bar chart ranking the build gave the
+  // half that does not hurt equal visual weight.
   const out = render([full("a-1.json", "spark")], ledger({ OUT: 1.0, SEM: 2.0 }));
-  const row = out.match(/<div class="charts">([\s\S]*?)<\/div>/);
-  assert.ok(row, "the charts are wrapped in one row");
-  assert.equal((row[1].match(/<figure class="chart"/g) || []).length, 2, "both figures inside it");
-  assert.ok(row[1].indexOf("Analytics") < row[1].indexOf("ETL"), "analytics keeps the lead");
-  // Two measures, two hues: the ETL figure is marked so the stylesheet can give it slot 2.
-  assert.ok(row[1].includes('<figure class="chart" data-kind="etl">'), "the ETL figure is marked");
-  assert.ok(!row[1].includes('data-kind="analytics"'), "analytics keeps the page's own series hue");
+  assert.ok(!out.includes('<div class="charts">'), "no side-by-side wrapper to share a row with");
+  assert.equal((out.match(/<figure class="chart"/g) || []).length, 1, "one figure");
+  assert.ok(!out.includes("data-kind"), "one measure, one hue, nothing to mark");
+  assert.ok(out.includes("Analytics — what querying each LAYOUT cost"));
+  assert.ok(!out.includes("ETL — what building them cost"), "the ETL chart is gone");
+  // Gone from the CHART, not from the page.
+  assert.ok(rows(block(out, "Cost by engine")).some((r) => r.startsWith("| **etl** |")));
 });
 
 // ------------------------------------------------------------------- cost and speed by layout
@@ -2209,7 +2208,8 @@ test("Part A quotes the CHARTS' numbers, not a second derivation", () => {
   const out = render(runs, ledger({ Od: 100, Sd: 40, Os: 300, Ss: 90 }));
   const find = (what) => rows(block(out, "Where the rankings hold")).find((r) => r.includes(what));
   assert.ok(find("cheapest to build").includes("| 100.0 |"), find("cheapest to build"));
-  assert.ok(charts(out)[1].values.includes("100.0"), "which is the cheapest ETL bar");
+  assert.ok(rows(block(out, "Cost by engine")).some((r) => r.includes("| **100.0** |")),
+    "which is what `Cost by engine` reports for that column");
   assert.ok(find("cheapest to query").includes("| 40.0 |"), find("cheapest to query"));
   assert.ok(charts(out)[0].values.includes("40.0"), "which is the cheapest analytics bar");
 });

@@ -908,7 +908,7 @@ function barPath(w, h, r = 4) {
  * such work", and at the top under that caption it would read as the winner — the one value whose rank
  * would lie. A chart with nothing but zeros is not drawn at all.
  */
-export function chartSvg(title, subtitle, rowsIn, kind = "") {
+export function chartSvg(title, subtitle, rowsIn) {
   const rows = [...(rowsIn || [])]
     .map((r) => {
       // `[label, mean, min, max, caption]`, tolerating the older `[label, value, caption]` — so a
@@ -946,7 +946,7 @@ export function chartSvg(title, subtitle, rowsIn, kind = "") {
   const plot = WIDTH - labelW - valueW;
   const height = PAD_T + rows.length * band + 6;
   const out = [
-    `<figure class="chart"${kind ? ` data-kind="${esc(kind)}"` : ""}>` +
+    '<figure class="chart">' +
     `<figcaption><span class="chart-title">${esc(title)}</span>` +
     `<span class="chart-sub">${esc(subtitle)}</span></figcaption>`,
     `<svg viewBox="0 0 ${WIDTH} ${height}" width="100%" height="${height}" role="img" ` +
@@ -986,21 +986,6 @@ export function chartSvg(title, subtitle, rowsIn, kind = "") {
 
 // ------------------------------------------------------------------------------------- the page
 
-/**
- * The ETL bar's caption: ONLY what the column name does not already say.
- *
- * It used to restate the whole configuration — `dbt-fabricspark · writeHeavy · NEE off` under a bar
- * already labelled `spark·writeHeavy` was three facts the label carries (the profile named by its
- * effect, an off flag absent, the adapter implied by the engine name). The one thing that can
- * genuinely be missing is the compute size: a single-config engine gets a BARE column name with no
- * `64c` tag, so the vCores are stated iff the label does not carry them. Never a default — an
- * unrecorded size is simply absent, because a filled-in one reads exactly like a measurement.
- */
-export function engineCaption(rec, col) {
-  const c = (((rec || {}).layout || {}).config || {})[(rec || {}).engine] || {};
-  if (!c.vcores) return "";
-  return String(col).includes(`${c.vcores}c`) ? "" : `${c.vcores} vCores`;
-}
 
 /**
  * `{column: [CU, …]}` — every run's total for `cls`, not just the latest. `key="seconds"` reads the
@@ -1114,21 +1099,6 @@ export function groupRows(groups, table = DEFAULTS.table) {
   return out;
 }
 
-/**
- * `[label, mean, min, max, caption]` per column, from every run that column has had.
- *
- * Per COLUMN, unlike `groupRows` — this is the shape for the ETL chart, where the engine and the
- * compute it was given are the entire subject rather than metadata. A column with no history falls
- * back to its latest run, so a first-ever engine still charts.
- */
-export function chartRows(cols, spread, latest, captions) {
-  return cols.map(({ col }) => {
-    const vals = spread[col] || (latest[col] ? [latest[col]] : []);
-    if (!vals.length) return [col, 0, 0, 0, captions[col] || ""];
-    return [col, round1(meanOf(vals)), round1(Math.min(...vals)), round1(Math.max(...vals)),
-      captions[col] || ""];
-  });
-}
 
 /**
  * Engines across, BUCKETS down, grouped by class — the shape the whole repo reads in.
@@ -1805,12 +1775,12 @@ export function verdictOf(rel, floor, a = null, b = null) {
  * `[{label, unit, winner, value, runnerUp, margin, a, b, verdict}]` — what the page ranks, and whether
  * the ranking holds.
  *
- * **THE VALUES ARE THE CHARTS' OWN.** The ETL means come from the array `chartRows` averages, and the
- * analytics and tier means come from `martPoints` — the same object the bars and `Cost and speed by
- * layout` quote. Nothing is derived a second time, so this table cannot print 1,916 under a bar
- * showing 1,960.
+ * **NOTHING IS DERIVED A SECOND TIME.** The analytics and tier means come from `martPoints` — the
+ * same object the chart's bars and `Cost and speed by layout` quote — so this table cannot print
+ * 1,916 under a bar showing 1,960. The ETL means come through `spreadFor`, which is what `Cost by
+ * engine` reads for the same columns.
  *
- * ETL ranks COLUMNS and everything else ranks LAYOUT GROUPS, matching the two charts exactly: Power BI
+ * ETL ranks COLUMNS and everything else ranks LAYOUT GROUPS, matching the chart exactly: Power BI
  * never sees the engine, so what a query cost belongs to what was written.
  */
 export function findings(cols, samples, groups, times, floors) {
@@ -2240,7 +2210,6 @@ export function renderPage(cols, runs, ledger, opts = {}) {
   const byVariant = new Map(cols.map(({ col, rec }) =>
     [JSON.stringify([baseEngine(col), variant(rec)]), col]));
   const keyOf = (rec) => byVariant.get(JSON.stringify([rec.engine, variant(rec)]));
-  const captions = Object.fromEntries(cols.map(({ col, rec }) => [col, engineCaption(rec, col)]));
 
   // ONE ENTRY PER RUN, carrying that run's own analytics CU and a key into its own query timings. The
   // analytics half groups on the parquet a run MEASURED, and two runs of one column can write different
@@ -2261,21 +2230,19 @@ export function renderPage(cols, runs, ledger, opts = {}) {
   // writer is metadata; the caption carries it. The ETL chart is the exact opposite and stays per
   // column, because there the writer and the compute it was given ARE the subject.
   //
-  // SIDE BY SIDE, analytics on the left — the two halves of one question, and the first screen
-  // should carry both. The wrapper is a flex row that wraps, so a narrow window stacks them back;
-  // each figure shrinks below the prose measure and the SVG scales with it.
-  const chartA = chartSvg("Analytics — what querying each LAYOUT cost",
+  // ONE CHART, FULL WIDTH, and it is the analytics one. There was a second bar chart beside it
+  // ranking what each column cost to BUILD, and dropping it is this page's own thesis applied to
+  // itself: `About these numbers` says analytics is the half that matters — background CU is
+  // smoothed over 24 hours and nobody waits for it, query CU is interactive and is what throttles —
+  // while the layout gave both equal visual weight and put the half that does not hurt beside it.
+  // The ETL numbers did not go anywhere: `Cost by engine` carries them per bucket on the run that
+  // measured them, and `Analysis` ranks them with a margin and a verdict, which is more than a bar
+  // ever said. What is bought is the prose measure instead of a 53rem flex child — the widest a
+  // chart gets here, since the SVG is drawn at a 660-unit viewBox and a wider box would inflate
+  // every label with it.
+  out.push(chartSvg("Analytics — what querying each LAYOUT cost",
     `capacity units, lower is better — INTERACTIVE CU, and Power BI sees only the parquet`,
-    groupRows(groups, martTable));
-  // `data-kind="etl"` gives the ETL bars their own hue (categorical slot 2, validated with slot 1
-  // on both surfaces) — beside each other the two charts measure different things, and one blue
-  // for both read as one dataset split in half.
-  const chartB = chartSvg("ETL — what building them cost",
-    `capacity units, lower is better — background CU, smoothed over 24h`,
-    chartRows(cols, spreadFor(runs, ledger, "etl", keyOf),
-      Object.fromEntries(cols.map(({ col }) => [col, classTotal(perCol[col], "etl")])), captions),
-    "etl");
-  out.push(chartA || chartB ? `<div class="charts">\n${chartA}\n${chartB}\n</div>` : "");
+    groupRows(groups, martTable)));
   // The one place the ADAPTERS are named and linked. The bars stopped captioning them because the
   // column name already implies the adapter — this line is where that implication resolves.
   //

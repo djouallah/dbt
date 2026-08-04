@@ -22,19 +22,19 @@
 :root { color-scheme: light dark;
   --bg:#fff; --fg:#1a1a1a; --dim:#5b6472; --line:#e3e6ea; --head:#f6f7f9; --sub:#eef1f5;
   --code:#f2f3f5;
-  /* Series hues, validated as a pair against both surfaces with the dataviz palette validator:
-     lightness band, chroma floor, CVD separation and contrast all pass. `--series` is categorical
-     slot 1 (blue, the page's accent — analytics); `--series2` is slot 2 (orange — the ETL bars,
-     which measure a different thing and must not read as the same dataset split in half). The dark
-     values are SELECTED steps for the dark surface, not automatic flips of the light ones. */
-  --series:#2a78d6; --series2:#eb6834; }
+  /* ONE series hue: categorical slot 1 (blue, the page's accent), validated against both surfaces
+     with the dataviz palette validator — lightness band, chroma floor, CVD separation and contrast
+     all pass. Slot 2 (orange) went with the ETL chart; there is one chart now and one measure on it,
+     so a second hue would be a distinction with nothing to distinguish. The dark value is a SELECTED
+     step for the dark surface, not an automatic flip of the light one. */
+  --series:#2a78d6; }
 @media (prefers-color-scheme: dark) {
   :root { --bg:#14171a; --fg:#e8eaed; --dim:#9aa4b2; --line:#2a2f36; --head:#1c2025; --sub:#20252b;
-    --code:#22262c; --series:#3987e5; --series2:#d95926; } }
+    --code:#22262c; --series:#3987e5; } }
 :root[data-theme="dark"] { --bg:#14171a; --fg:#e8eaed; --dim:#9aa4b2; --line:#2a2f36;
-  --head:#1c2025; --sub:#20252b; --code:#22262c; --series:#3987e5; --series2:#d95926; }
+  --head:#1c2025; --sub:#20252b; --code:#22262c; --series:#3987e5; }
 :root[data-theme="light"] { --bg:#fff; --fg:#1a1a1a; --dim:#5b6472; --line:#e3e6ea; --head:#f6f7f9;
-  --sub:#eef1f5; --code:#f2f3f5; --series:#2a78d6; --series2:#eb6834; }
+  --sub:#eef1f5; --code:#f2f3f5; --series:#2a78d6; }
 * { box-sizing: border-box; }
 body { margin:0; padding:2.25rem 1.25rem 4rem; background:var(--bg); color:var(--fg);
   font:15px/1.6 ui-sans-serif, -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; }
@@ -47,17 +47,14 @@ body { margin:0; padding:2.25rem 1.25rem 4rem; background:var(--bg); color:var(-
    built on it makes the whole page scroll sideways — which is the bug being fixed, one level up. */
 main { max-width: 110rem; margin: 0 auto; }
 h1, h2, h3, h4, p, footer { max-width: 62rem; }
-/* The charts are DRAWN at a 660-unit viewBox and scale to their box, so letting them fill a wide
-   `main` would inflate every label and value ~2.7x. They keep the prose measure — and inside the
-   side-by-side row they share it: two columns that wrap back to a stack when the window is narrow.
-   `min-width:0` is what lets a flex child actually shrink below its content size. */
+/* THE CHART KEEPS THE PROSE MEASURE, and that IS its full width here. It is DRAWN at a 660-unit
+   viewBox and scales to its box, so letting it fill a wide `main` would inflate every label and
+   value ~2.7x — wider would be less legible, not more. It had a second chart beside it in a flex
+   row capped at 53rem each; alone it gets the whole 62rem. */
 figure.chart { max-width: 62rem; }
-/* Each chart is a bounded card, so the pair reads as two designed panels rather than two floats —
-   and the shorter chart's trailing whitespace ends at its own border instead of mid-page. */
+/* A bounded card, so the chart reads as a designed panel and its trailing whitespace ends at its own
+   border instead of mid-page. */
 figure.chart { border:1px solid var(--line); border-radius:12px; padding:1rem 1.15rem .65rem; }
-.charts { display:flex; flex-wrap:wrap; align-items:flex-start; gap:1rem 1.5rem; }
-.charts figure.chart { flex:1 1 34rem; min-width:0; max-width:53rem; margin:1.25rem 0 .5rem; }
-figure.chart[data-kind="etl"] .bar { fill:var(--series2); }
 /* What this page IS, above what it measures. The h2 under it used to lead, which named the measure
    and never the project — a reader arriving from a link had no statement of either. */
 h1 { font-size:2rem; line-height:1.15; margin:0 0 .6rem; letter-spacing:-0.02em; }
