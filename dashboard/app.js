@@ -1574,7 +1574,8 @@ export function renderLayouts(cols, groups, times, counts, martTable = DEFAULTS.
         : dp < 0 ? compact(d[k]) : fmt(d[k], dp))),
       d.vorder ? "**yes**" : "·",
     ]);
-    blocks.push({ name: t, html: `<h4>${inline(head)}</h4>\n` + table(header, align, body) });
+    blocks.push({ name: t,
+      html: `<h4>${inline(head)}</h4>\n` + table(header, align, body, { sort: true }) });
   }
   // ONE BLOCK VISIBLE AT A TIME. Eight stacked tables buried the mart under seven it explains; a
   // tab per table keeps them all one click away without the scroll. CSS-only — radio inputs, no
