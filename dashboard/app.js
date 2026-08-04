@@ -101,6 +101,11 @@ export const ENGINE_LABEL = { iceberg: "duckdb iceberg" };
 const ENGINE_OF_LABEL = Object.fromEntries(
   Object.entries(ENGINE_LABEL).map(([k, v]) => [v, k]));
 
+// The COMPUTE behind a target, where two targets share one. `iceberg` is the same DuckDB as
+// `duckrun` pointed at an Iceberg REST catalog instead of delta-rs — a table format, not a fourth
+// engine — so the lede folds the pair into one engine and calls the columns what they are: targets.
+export const ENGINE_FAMILY = { duckrun: "duckdb", iceberg: "duckdb" };
+
 // Role -> which half of the page an item's CU belongs to. Everything that is not a semantic model is
 // work done to BUILD the tables; a semantic model is only ever queried. This replaces classification
 // by Fabric item kind, read out of a snapshot that had usually not catalogued a minutes-old item.
@@ -1762,7 +1767,8 @@ export function totalRows(rec, names = tableNames(rec)) {
  */
 export function pageLede(cols, opts = {}) {
   const martTable = opts.table || DEFAULTS.table;
-  const n = new Set(cols.map(({ col }) => baseEngine(col))).size;
+  const targets = new Set(cols.map(({ col }) => baseEngine(col)));
+  const n = new Set([...targets].map((e) => ENGINE_FAMILY[e] || e)).size;
   if (!n) return "";
 
   const land = (landingBlocks(cols).pop() || ["", {}])[1];
@@ -1786,6 +1792,9 @@ export function pageLede(cols, opts = {}) {
   const made = [input, tables && `built into ${tables}`].filter(Boolean).join(" ");
   if (!made && rows === null) return "";
   let sentence = `One dbt project on **${n} engine${n !== 1 ? "s" : ""}**`;
+  // Only said when it differs: "3 engines across 4 targets" is the DuckDB pair writing two table
+  // formats, and a table format is not an engine.
+  if (targets.size > n) sentence += ` across **${targets.size} dbt targets**`;
   if (made) sentence += `: ${made}`;
   if (rows !== null) {
     // With the breakdown present its closing dash already separates this; without one the phrase

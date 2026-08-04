@@ -618,6 +618,19 @@ test("the lede counts engines, not columns", () => {
   assert.ok(said.includes("One dbt project on **2 engines**"));
 });
 
+test("the lede counts engines, not table formats", () => {
+  // `iceberg` is the same DuckDB as `duckrun` pointed at an Iceberg REST catalog — a table format,
+  // not a fourth engine. Both targets still show, as what they are.
+  const runs = [scaled("a-1.json", "duckrun"), scaled("b-2.json", "iceberg"),
+    scaled("c-3.json", "spark"), scaled("d-4.json", "dwh")];
+  const said = plain(render(runs, ledger({ OUT: 1.0, SEM: 2.0 })));
+  assert.ok(said.includes("One dbt project on **3 engines** across **4 dbt targets**"), said.slice(0, 200));
+  // With no shared family the clause would repeat the engine count, so it is not said at all.
+  const two = plain(render([scaled("a-1.json", "spark"), scaled("b-2.json", "dwh")],
+    ledger({ OUT: 1.0, SEM: 2.0 })));
+  assert.ok(!two.includes("dbt targets"));
+});
+
 test("the lede and the Input archive table quote the SAME archive", () => {
   // Two readers of `layout.landing` picking their own record is how a page says 170 GB at the top and
   // 168 at the foot, which reads as a bug in the measurement rather than in the page.
