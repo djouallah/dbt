@@ -612,10 +612,13 @@ to `provision.py teardown`, which polls for a 404 and goes red if it is still li
   limit** (`set_merge_memory_limit`), so the routed anti-join now gets 0.3 × default instead of
   0.3 × 4GB. Spill is unaffected — `temp_directory` is still set for both.
   **The `sorted` dispatch input is a KNOWING exception, and the only one.** With it on, duckrun
-  writes `fct_summary` sorted — `sort_by='auto'`, so the adapter's own picker chooses the key — and
-  iceberg writes it unsorted, so the pair differs by more than the writer for that run. This is not a settings drift to be corrected: it
-  cannot be corrected. `sort_by` occurs **zero times** in dbt-duckdb's adapter and its macro package,
-  so iceberg has no way to express a sort at all, and the trailing `ORDER BY date` in the model does
+  writes `fct_summary` sorted by the declared key `['date','time','DUID']` with declared geometry —
+  `max_row_group_size: 48000000` and `target_file_size_mb: 1024`, i.e. ~3 row groups in 1 GB files
+  instead of the adaptive ~25 (it was `sort_by='auto'` for one era, retired when the picker
+  measurably stopped at `date, time` and cost more ETL for a worse layout; see the model header) —
+  and iceberg writes it unsorted, so the pair differs by more than the writer for that run. This is not a settings drift to be corrected: it
+  cannot be corrected. `sort_by` and the geometry keys occur **zero times** in dbt-duckdb's adapter and its macro package,
+  so iceberg has no way to express a sort or row-group size at all, and the trailing `ORDER BY date` in the model does
   not reach any engine's stored table (see the fairness invariant under `fct_summary`). Off — the
   default — the two are identical exactly as before, which is why the flag is a dispatch input rather
   than a config in the tree. `stats.py` records it under **duckrun only**: recording it under iceberg
