@@ -461,11 +461,21 @@ jobs:
   layout:
     name: table layout
     needs: [plan, fabric, server]
-    # Not `success()`: a skipped matrix (no engine of that kind selected) would skip this too, and a
-    # leg that FAILED still wrote tables worth recording. `inputs.build` is needed alongside it
-    # because `!cancelled()` overrides GitHub's skip-when-a-dependency-skipped rule — without it this
-    # would run on a benchmark-only dispatch and read BUILD_ENGINES off a `plan` job that never ran.
-    if: ${{ !cancelled() && inputs.build }}
+    # Not `success()`: a skipped matrix (no engine of that kind selected) would skip this too.
+    # `inputs.build` is needed alongside `!cancelled()` because that overrides GitHub's
+    # skip-when-a-dependency-skipped rule — without it this would run on a benchmark-only dispatch
+    # and read BUILD_ENGINES off a `plan` job that never ran.
+    #
+    # The `!= 'failure'` clauses are why a red leg does not pay for this. It used to run anyway, on
+    # the argument that a failed leg still wrote tables worth recording. It does write them, and
+    # they are not worth recording: the teardown deletes them minutes later and the next dispatch
+    # rebuilds from nothing, so a half-built table is a state that existed once and will not recur —
+    # there is nothing to compare it against. The record cannot carry it either, since a failed
+    # build means no benchmark timings and `incomplete()` drops the whole record from the page. So
+    # it was 10-15 minutes of paid OneLake reads (the iceberg item alone 12m+) for a table read by
+    # one human who is already looking at the dbt log above it.
+    if: ${{ !cancelled() && inputs.build
+            && needs.fabric.result != 'failure' && needs.server.result != 'failure' }}
     runs-on: ubuntu-latest
     # get_stats() over OneLake is slow on the iceberg item (12m+ observed); 15 minutes was cancelling
     # stats.py mid-table and turning slowness into a red run.

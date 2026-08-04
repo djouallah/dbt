@@ -738,10 +738,10 @@ to `provision.py teardown`, which polls for a 404 and goes red if it is still li
   is unavailable. And **a called workflow can never hold MORE permission than its caller grants** —
   run 30735526504 died as a `startup_failure` with no jobs and no log because `dbt.yml` asked for
   `actions: read` after `all.yml` stopped granting it. One file has one permission block.
-  One consequence worth holding: `layout` carries `if: !cancelled() && inputs.build`, and the second
-  half is load-bearing. A status function overrides GitHub's skip-when-a-dependency-skipped rule, so
-  without it a benchmark-only dispatch would run `layout` and read `BUILD_ENGINES` off a `plan` job
-  that never ran.
+  One consequence worth holding: `layout`'s `if:` carries `inputs.build` alongside `!cancelled()`,
+  and that half is load-bearing. A status function overrides GitHub's skip-when-a-dependency-skipped
+  rule, so without it a benchmark-only dispatch would run `layout` and read `BUILD_ENGINES` off a
+  `plan` job that never ran.
 - Jobs no longer cancel the run when they fail, and no matrix is `fail-fast`. Every leg runs to
   its own conclusion, so `gh run view <id> --json jobs` reads straight: `failure` means that
   leg failed. Cancelling never saved the Fabric compute anyway — the notebook or Livy session
@@ -752,6 +752,16 @@ to `provision.py teardown`, which polls for a 404 and goes red if it is still li
   That lost: nothing else compares the engines, and a dashboard nobody remembers to dispatch reports
   nothing. It must run BEFORE the teardown — it reads every table through the Delta log, and the
   teardown deletes them.
+  **A FAILED LEG DOES NOT PAY FOR IT** — the `if:` also carries
+  `needs.fabric.result != 'failure' && needs.server.result != 'failure'`. It used to run regardless,
+  on the argument that a leg that failed late still wrote tables worth recording. It does write
+  them; they are not worth recording. Every dispatch tears down its own items and the next one
+  rebuilds from nothing, so a half-built table is a state that existed once and cannot recur, with
+  nothing to compare it against — and the record cannot carry it anyway, because a failed build
+  means no benchmark timings and `incomplete()` drops the whole record from the page. So it was
+  10-15 minutes of paid OneLake reads producing a step-summary table for someone already reading the
+  dbt log above it. Keep `!cancelled()` rather than `success()`: a skipped matrix (no engine of that
+  kind selected) is not a failure and must still record.
 - Every leg is `dbt build` — the engine tests its own output, in the same DAG walk that wrote it.
   This replaced a separate test job that graded all four items with one neutral duckrun reader.
   What was bought: a failure stops at the node that broke, and four jobs disappeared. What was
