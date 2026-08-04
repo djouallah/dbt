@@ -209,8 +209,11 @@ figure.chart svg { max-width:100%; height:auto; display:block; overflow:visible;
 .bar { fill:var(--series); }
 /* Drawn over the bar in the page background colour, so it reads as a range ON the quantity rather
    than as a second series beside it. */
-.whisker { stroke:var(--bg); stroke-width:2; opacity:.75; }
-.whisker-cap { stroke:var(--bg); stroke-width:2; opacity:.75; }
+/* Text ink, not the background: the min–max line runs from inside the bar out past its tip to the
+   max, and a bg-coloured stroke vanished the moment it left the fill — which read as "no range
+   shown". One ink that stays legible on the bar fill and on the page ground alike, both themes. */
+.whisker { stroke:var(--fg); stroke-width:1.5; opacity:.55; }
+.whisker-cap { stroke:var(--fg); stroke-width:1.5; opacity:.55; }
 .bar-label { fill:var(--fg); font-size:12px; font-weight:600; }
 .bar-caption { fill:var(--dim); font-size:10px; }
 .bar-value { fill:var(--dim); font-size:12px; font-variant-numeric:tabular-nums; }

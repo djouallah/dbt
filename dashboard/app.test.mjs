@@ -1020,7 +1020,7 @@ test("the chart shows the mean and the range across runs", () => {
   // the tooltip rather than doubling the ink beside every bar.
   assert.equal(c.values[0], "1,500.0");
   assert.ok(c.svg.includes("range 1,000.0–2,000.0"), "the exact spread rides in the tooltip");
-  assert.ok(c.subtitle.includes("mean of 3 runs"));
+  assert.ok(!c.subtitle.includes("mean of"), "no run-count chatter in the subtitle — the whisker shows it");
 });
 
 test("the chart sorts by the mean", () => {

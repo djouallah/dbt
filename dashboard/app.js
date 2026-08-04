@@ -1842,8 +1842,6 @@ export function renderPage(cols, runs, ledger, opts = {}) {
       cu: classTotal(runCu(rec, ledger).cells, "analytics") });
   }
   const groups = layoutGroups(anaEntries, martTable);
-  const nRuns = Math.max(1, ...groups.map(([, ms]) => ms.filter((m) => m.cu).length));
-  const over = nRuns > 1 ? `, mean of ${nRuns} runs with the range` : "";
 
   // ONE BAR PER LAYOUT, not per engine — Power BI never sees the engine. It opens parquet through
   // Direct Lake and transcodes row groups, so what a query costs belongs to what was written and the
@@ -1854,13 +1852,13 @@ export function renderPage(cols, runs, ledger, opts = {}) {
   // should carry both. The wrapper is a flex row that wraps, so a narrow window stacks them back;
   // each figure shrinks below the prose measure and the SVG scales with it.
   const chartA = chartSvg("Analytics — what querying each LAYOUT cost",
-    `capacity units, lower is better — INTERACTIVE CU, and Power BI sees only the parquet${over}`,
+    `capacity units, lower is better — INTERACTIVE CU, and Power BI sees only the parquet`,
     groupRows(groups, martTable));
   // `data-kind="etl"` gives the ETL bars their own hue (categorical slot 2, validated with slot 1
   // on both surfaces) — beside each other the two charts measure different things, and one blue
   // for both read as one dataset split in half.
   const chartB = chartSvg("ETL — what building them cost",
-    `capacity units, lower is better — background CU, smoothed over 24h${over}`,
+    `capacity units, lower is better — background CU, smoothed over 24h`,
     chartRows(cols, spreadFor(runs, ledger, "etl", keyOf),
       Object.fromEntries(cols.map(({ col }) => [col, classTotal(perCol[col], "etl")])), captions),
     "etl");
