@@ -569,8 +569,12 @@ test("EVERY table comes before the methodology, and the methodology is last", ()
   const runs = [lay("spark", 11, 11, { file: "a-1.json", landing: { files: 8350, size_mb: 170491.5 } }),
     lay("dwh", 78, 78, { file: "b-2.json", landing: { files: 8350, size_mb: 170491.5 } })];
   const out = render(runs, ledger({ OUT: 34046.3, SEM: 1514.0 }));
+  // `Analysis` renders here on two ties — two ETL candidates at identical CU and two layout groups
+  // ditto. That depends on a tie being REPORTED rather than dropped, which is the design: two
+  // indistinguishable numbers is a finding, not a missing one.
   const order = ["<h2>Capacity units", "<h3>Cost and speed by layout", "<h3>Cost by engine",
-    "<h3>Table layout", "<h3>Input archive", "<h3>Every run", "<h3>About these numbers"];
+    "<h3>Table layout", "<h3>Input archive", "<h3>Every run", "<h3>Analysis",
+    "<h3>About these numbers"];
   const at = order.map((h) => out.indexOf(h));
   for (const [i, v] of at.entries()) assert.ok(v > 0, `${order[i]} is missing`);
   assert.deepEqual([...at].sort((a, b) => a - b), at,
@@ -2052,4 +2056,183 @@ test("an item name cannot inject markup", () => {
     d.normaliseLedger(ledger({ OUT: 1.0 })), "o/r");
   assert.ok(!out.includes("<img"));
   assert.ok(out.includes("&lt;img"));
+});
+
+// ---------------------------------------------------------------------------------- the analysis
+
+/**
+ * One run with its OWN item GUIDs, so the ledger can hand two runs of one column different CU.
+ *
+ * `full()`/`lay()` hardcode `OUT`/`SEM`, which is right everywhere else and fatal here: two runs
+ * sharing a GUID read identical CU and the measured floor comes out at 0%.
+ */
+const own = (r, tag) => {
+  r.items = { [`O${tag}`]: gone("output", `dbt_${r.engine}`),
+    [`S${tag}`]: gone("semantic_model", `aemo_${r.engine}`) };
+  return r;
+};
+
+/**
+ * The whole section, `<h4>`s and tables included — `block()` cuts at the next heading of any level,
+ * which here is the section's own first sub-block.
+ */
+const analysis = (html) => {
+  const at = String(html).indexOf("<h3>Analysis");
+  return at < 0 ? "" : String(html).slice(at, String(html).indexOf("<h3>About these numbers"));
+};
+
+/** Two runs of ONE column, each with its own GUIDs — a repeat for the floor to measure. */
+const twice = (engine, opts = {}) => [
+  own(lay(engine, 4, 4, { file: `${engine}-1.json`, ...opts }), `${engine}1`),
+  own(lay(engine, 4, 4, { file: `${engine}-2.json`, ...opts }), `${engine}2`),
+];
+
+/** …and a second column, because one column is not a ranking and renders nothing at all. */
+const rival = () => own(lay("dwh", 78, 78, { file: "dwh-1.json" }), "dwh");
+const repeated = () => [...twice("duckrun"), rival()];
+const REPEAT = ledger({ Oduckrun1: 100, Oduckrun2: 120, Odwh: 300 });
+
+test("the noise floor is MEASURED from the repeats, not assumed", () => {
+  // Two runs of one column at 100 and 120 CU: the spread is 20/110 = 18.2%, and the page prints that
+  // rather than carrying a constant somebody chose.
+  const text = plain(analysis(render(repeated(), REPEAT)));
+  assert.ok(text.includes("etl CU 18.2%"), text.slice(0, 400));
+  assert.ok(text.includes("1 column(s) here have been run more than once"), text.slice(0, 400));
+});
+
+test("spread is a mean, a range and a RELATIVE width", () => {
+  assert.deepEqual(d.spread([100, 120]), { n: 2, mean: 110, min: 100, max: 120, rel: 20 / 110 });
+  assert.equal(d.spread([]), null, "no readings is not a spread of zero");
+  assert.equal(d.spread([0, 0]), null, "a run that measured nothing is dropped, not averaged in");
+  assert.equal(d.spread([5]).rel, 0, "one reading has no width");
+});
+
+test("a margin inside the floor is `within spread`, outside it is not", () => {
+  const floor = { n: 1, rel: 0.2, lo: 0.2, hi: 0.2 };
+  assert.equal(d.verdictOf(0.1, floor), "within spread");
+  assert.equal(d.verdictOf(0.5, floor), "beyond spread");
+  assert.equal(d.verdictOf(0, floor), "tie");
+  assert.equal(d.verdictOf(0.5, null), "no repeat", "no floor means no verdict, not a pass");
+});
+
+test("the range check only applies when BOTH sides repeat", () => {
+  const floor = { n: 1, rel: 0.1, lo: 0.1, hi: 0.1 };
+  const a = { n: 2, mean: 10, min: 9, max: 11, rel: 0.2 };
+  const far = { n: 2, mean: 30, min: 29, max: 31, rel: 0.07 };
+  const near = { n: 2, mean: 30, min: 10, max: 50, rel: 1.3 };
+  assert.equal(d.verdictOf(2.0, floor, a, far), "beyond spread, ranges disjoint");
+  assert.equal(d.verdictOf(2.0, floor, a, near), "beyond spread, ranges overlap");
+  // One reading is not a range, and asserting separation from a single point is the error this whole
+  // section exists to avoid.
+  assert.equal(d.verdictOf(2.0, floor, { n: 1 }, far), "beyond spread");
+});
+
+test("with nothing measured twice, every verdict is `no repeat` and the page says so", () => {
+  const runs = [lay("spark", 11, 11, { file: "a-1.json" }), lay("dwh", 78, 78, { file: "b-2.json" })];
+  const text = plain(analysis(render(runs, ledger({ OUT: 30.0, SEM: 5.0 }))));
+  assert.ok(text.includes("Nothing on this page has been measured twice"), text.slice(0, 400));
+  assert.ok(!text.includes("The yardstick is measured"));
+});
+
+test("the section states its scope, and the counts are DERIVED", () => {
+  // One dataset, one query suite, one capacity — the caveat that qualifies every number under it.
+  const text = plain(analysis(render(repeated(), REPEAT)));
+  assert.ok(text.includes("One dataset, one query suite, one capacity"), text.slice(0, 300));
+  assert.ok(text.includes("3 run(s) across 2 configuration(s) of 2 engine(s)"), text.slice(0, 300));
+  // The row count is a fact about the DATA, so it is derived from the records when the caller passes
+  // no generation reference — `render()` does not, and the sentence must still be complete.
+  assert.ok(text.includes("143,980,961 rows"), text.slice(0, 300));
+});
+
+test("the scope caveat is NOT folded", () => {
+  // Repo rule: explanation folds, anything qualifying a number does not.
+  const sec = analysis(render(repeated(), REPEAT));
+  const at = sec.indexOf("One dataset");
+  assert.ok(at > 0, "the caveat renders");
+  assert.ok(!sec.slice(0, at).includes("<details"), "nothing has opened a fold before it");
+  assert.ok(sec.slice(0, at).includes('<p class="note">'), "it is a note");
+});
+
+test("`variantPairs` takes one-key differences and rejects everything else", () => {
+  const col = (name, cfg) => ({ col: name, engine: "duckrun", rec: lay("duckrun", 4, 4, { cfg }) });
+  assert.deepEqual(d.variantPairs([col("a", { vcores: "8" }), col("b", { vcores: "64" })])
+    .map((p) => [p.key, p.from, p.to]), [["vcores", "8", "64"]]);
+  // Two keys apart is not a controlled comparison and must not be presented as one.
+  assert.deepEqual(d.variantPairs([col("a", { vcores: "8", sorted: "true" }),
+    col("b", { vcores: "64", sorted: "false" })]), []);
+  // Nor across engines: a pair is one engine's own two configurations.
+  assert.deepEqual(d.variantPairs([col("a", { vcores: "8" }),
+    { col: "b", engine: "spark", rec: lay("spark", 4, 4, { cfg: { vcores: "64" } }) }]), []);
+});
+
+test("ABSENCE IS A VALUE — an off flag is not recorded, and still pairs", () => {
+  // This is what makes `sorted`, NEE and V-Order findable without any of the three being named in
+  // the code. A missing key reads `off`, not "no comparison".
+  const col = (name, cfg) => ({ col: name, engine: "duckrun", rec: lay("duckrun", 4, 4, { cfg }) });
+  assert.deepEqual(d.variantPairs([col("a", { vcores: "64" }),
+    col("b", { vcores: "64", sorted: "true" })]).map((p) => [p.key, p.from, p.to, p.a, p.b]),
+  [["sorted", "off", "true", "a", "b"]]);
+});
+
+test("the lower value leads, so a delta reads as what turning it UP did", () => {
+  const col = (name, cfg) => ({ col: name, engine: "duckrun", rec: lay("duckrun", 4, 4, { cfg }) });
+  // Declared high-first; `compareCells` puts it back NUMERICALLY, so it is 8 → 64 and never sorted
+  // as text on the first digit.
+  const p = d.variantPairs([col("hi", { vcores: "64" }), col("lo", { vcores: "8" })])[0];
+  assert.deepEqual([p.from, p.to, p.a, p.b], ["8", "64", "lo", "hi"]);
+});
+
+test("the knob table pairs columns, bolds what clears the floor, and says whose layout differs", () => {
+  const runs = [...twice("duckrun", { cfg: { vcores: "8" } }),
+    own(lay("duckrun", 4, 4, { file: "duckrun-3.json", cfg: { vcores: "64" } }), "big")];
+  const out = render(runs, ledger({ Oduckrun1: 100, Oduckrun2: 120, Obig: 400 }));
+  const row = rows(block(out, "One knob at a time")).find((r) => r.includes("vcores"));
+  assert.ok(row.includes("8 → 64"), row);
+  assert.ok(row.includes("2 vs 1"), `both sides' run counts: ${row}`);
+  // 110 → 400 is +263.6%, far outside the 18.2% floor the repeat measured.
+  assert.ok(row.includes("**+263.6**"), row);
+  // Same files, same row groups: Power BI cannot tell the two apart, so any query-side delta between
+  // them is two readings of one bar.
+  assert.ok(row.includes("| same |"), row);
+});
+
+test("Part A quotes the CHARTS' numbers, not a second derivation", () => {
+  // A page printing 1,916 in a bar and 1,960 in the row under it is asking which one it meant.
+  const runs = [own(lay("duckrun", 4, 4, { file: "d-1.json" }), "d"),
+    own(lay("spark", 11, 11, { file: "s-1.json", vorder: true }), "s")];
+  const out = render(runs, ledger({ Od: 100, Sd: 40, Os: 300, Ss: 90 }));
+  const find = (what) => rows(block(out, "Where the rankings hold")).find((r) => r.includes(what));
+  assert.ok(find("cheapest to build").includes("| 100.0 |"), find("cheapest to build"));
+  assert.ok(charts(out)[1].values.includes("100.0"), "which is the cheapest ETL bar");
+  assert.ok(find("cheapest to query").includes("| 40.0 |"), find("cheapest to query"));
+  assert.ok(charts(out)[0].values.includes("40.0"), "which is the cheapest analytics bar");
+});
+
+test("nothing to compare renders NOTHING, not an empty heading", () => {
+  const out = render([full("a-1.json", "spark")], ledger({ OUT: 12.5, SEM: 3.25 }));
+  assert.ok(!out.includes("<h3>Analysis"), "one column is not a ranking and has no pair");
+});
+
+test("a tier nothing recorded produces no finding row", () => {
+  // `full()`'s default timings carry `ms_by_pass` and no tier keys at all.
+  const runs = [own(lay("duckrun", 4, 4, { file: "d-1.json" }), "d"),
+    own(lay("spark", 11, 11, { file: "s-1.json", vorder: true }), "s")];
+  const text = plain(analysis(render(runs, ledger({ Od: 100, Sd: 40, Os: 300, Ss: 90 }))));
+  assert.ok(text.includes("cheapest to build"));
+  assert.ok(!text.includes("fastest cold"), "no timings, no tier ranking");
+});
+
+test("the page says why there is no p-value", () => {
+  const text = plain(analysis(render(repeated(), REPEAT)));
+  assert.ok(text.includes("No p-value is offered"), "stated where the verdicts are");
+  assert.ok(text.includes("not independent draws"), "and the reason is given");
+});
+
+test("the analysis section introduces no new CSS", () => {
+  // Every class it emits has to already exist in `index.html`, which this file cannot read — so the
+  // guard is that the set stays the one the rest of the page already uses.
+  const sec = analysis(render(repeated(), REPEAT));
+  for (const m of sec.matchAll(/class="([^"]+)"/g)) {
+    assert.ok(["note", "sortable", "scroll", "left", "right", "sub"].includes(m[1]), m[1]);
+  }
 });

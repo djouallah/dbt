@@ -1682,6 +1682,356 @@ export function queryTime(cols) {
   return { times, counts };
 }
 
+// ---------------------------------------------------------------------------------- the analysis
+//
+// The page RANKS — cheapest bar first, `Cost and speed by layout` sorted by CU — and never says
+// whether a ranking is a result or a coin toss. A reader sees `spark readHeavyForPBI` at 1,381 CU
+// above `duckrun` at 1,794 with no way to learn that the gap is the size of either one's own
+// run-to-run wobble. This section attaches a margin, a sample size and a verdict to the findings the
+// charts already imply.
+//
+// EVERY CLAIM IS COMPUTED, none is written down. The page reads `history/` in the reader's browser
+// on every load, so prose naming a winner goes stale the moment a run lands. The winners, the knobs
+// compared and the yardstick itself are all derived from the same joined data the charts are drawn
+// from — the rule `layoutLabel` and the lede already follow.
+
+export const MEASURES = ["etl", "analytics", ...TIERS.map(([l]) => l)];
+
+/** The value a config key has when it is ABSENT. A pair differing only by a key one side never
+ *  recorded is a real comparison — it is how `sorted` and NEE become findable — and this is what
+ *  lets it print as one. */
+const OFF = "off";
+
+const hasOwn = (o, k) => Object.prototype.hasOwnProperty.call(o, k);
+
+const median = (vals) => {
+  const a = [...vals].sort((x, y) => x - y);
+  if (!a.length) return 0;
+  const mid = a.length / 2;
+  return a.length % 2 ? a[Math.floor(mid)] : (a[mid - 1] + a[mid]) / 2;
+};
+
+/**
+ * `{n, mean, min, max, rel}` over one cell's readings, or `null` when it has none.
+ *
+ * `rel` is `(max - min) / mean` — the RELATIVE spread, which is the only form comparable between a
+ * capacity unit and a millisecond. Zeros are dropped rather than averaged in, the same rule
+ * `groupMean` follows: a run that measured nothing is not a run that measured zero.
+ */
+export function spread(vals) {
+  const v = (vals || []).filter((x) => x);
+  if (!v.length) return null;
+  const mean = v.reduce((a, b) => a + b, 0) / v.length;
+  const min = Math.min(...v), max = Math.max(...v);
+  return { n: v.length, mean, min, max, rel: mean ? (max - min) / mean : 0 };
+}
+
+/**
+ * `{column: {measure: [reading per run]}}` across every measure this page carries.
+ *
+ * The ETL half comes through `spreadFor` rather than being re-derived, so the floor is measured from
+ * the very samples the ETL chart's whisker draws. The analytics and tier halves come off `entries`,
+ * which is the only place a run's own CU and its own timings are keyed together.
+ */
+export function columnSamples(runs, ledger, keyOf, entries, times) {
+  const out = {};
+  const at = (col) => (out[col] = out[col] || Object.fromEntries(MEASURES.map((m) => [m, []])));
+  for (const [col, vals] of Object.entries(spreadFor(runs, ledger, "etl", keyOf))) {
+    at(col).etl.push(...vals);
+  }
+  for (const e of entries || []) {
+    if (e.col === undefined || e.col === null) continue;
+    const b = at(e.col);
+    if (e.cu) b.analytics.push(e.cu);
+    const t = (times || {})[e.qid] || {};
+    for (const [label] of TIERS) if (t[label]) b[label].push(t[label]);
+  }
+  return out;
+}
+
+/**
+ * `{measure: {n, rel, lo, hi} | null}` — THE NOISE FLOOR, measured rather than assumed.
+ *
+ * A repeated CELL is one column run more than once: same engine, same config, nothing changed but the
+ * hour it ran in. Its relative spread is therefore what this page's numbers do when the answer should
+ * be identical, and that is the only yardstick these sample sizes can support. The floor is the MEDIAN
+ * across such columns; `lo`/`hi` ride along because one 0.6% repeat beside one 17.8% repeat is itself
+ * a fact about the measure.
+ *
+ * **COLUMN-LEVEL, NEVER GROUP-LEVEL.** A layout group mixes configurations — the `duckrun` bar holds
+ * six runs at five different core counts — so its internal spread is partly a real config effect and
+ * would inflate the floor into hiding the very differences this section is looking for.
+ *
+ * `null` for a measure nothing has repeated at, which is a state the section STATES rather than one it
+ * papers over with a zero.
+ */
+export function noiseFloor(samples, measures = MEASURES) {
+  const out = {};
+  for (const m of measures) {
+    const rels = [];
+    for (const bucket of Object.values(samples || {})) {
+      const s = spread((bucket || {})[m]);
+      if (s && s.n > 1) rels.push(s.rel);
+    }
+    out[m] = rels.length
+      ? { n: rels.length, rel: median(rels), lo: Math.min(...rels), hi: Math.max(...rels) }
+      : null;
+  }
+  return out;
+}
+
+/**
+ * The verdict on one margin: `tie` · `within spread` · `beyond spread` · `no repeat`.
+ *
+ * **NO P-VALUE, AND THAT IS THE HONEST ANSWER RATHER THAN A MISSING FEATURE.** Four cells on this page
+ * have been measured more than once, at n of 2 or 3; the runs share one capacity and one 24-hour
+ * smoothing window, so they are not independent draws. A t-test on two degrees of freedom would put a
+ * decimal point on a claim the design cannot carry. What the data does support is the comparison
+ * above: is this gap bigger than the gap the same thing shows against itself.
+ *
+ * The range check is appended only when BOTH sides repeat — with one reading there is no range, and
+ * asserting separation from a single point is the error this whole section exists to avoid.
+ */
+export function verdictOf(rel, floor, a = null, b = null) {
+  if (!rel) return "tie";
+  if (!floor) return "no repeat";
+  if (Math.abs(rel) <= floor.rel) return "within spread";
+  if (!(a && b && a.n > 1 && b.n > 1)) return "beyond spread";
+  return a.max < b.min || b.max < a.min
+    ? "beyond spread, ranges disjoint" : "beyond spread, ranges overlap";
+}
+
+/**
+ * `[{label, unit, winner, value, runnerUp, margin, a, b, verdict}]` — what the page ranks, and whether
+ * the ranking holds.
+ *
+ * **THE VALUES ARE THE CHARTS' OWN.** The ETL means come from the array `chartRows` averages, and the
+ * analytics and tier means come from `martPoints` — the same object the bars and `Cost and speed by
+ * layout` quote. Nothing is derived a second time, so this table cannot print 1,916 under a bar
+ * showing 1,960.
+ *
+ * ETL ranks COLUMNS and everything else ranks LAYOUT GROUPS, matching the two charts exactly: Power BI
+ * never sees the engine, so what a query cost belongs to what was written.
+ */
+export function findings(cols, samples, groups, times, floors) {
+  const rows = [];
+  const rank = (label, unit, cands, floor) => {
+    const ok = cands.filter((c) => c.s && c.value > 0);
+    // One candidate is not a ranking. Nothing to be runner-up to means nothing to report.
+    if (ok.length < 2) return;
+    ok.sort((x, y) => x.value - y.value);
+    const [a, b] = ok;
+    const margin = a.value ? (b.value - a.value) / a.value : 0;
+    rows.push({ label, unit, winner: a.name, value: a.value, runnerUp: b.name, margin,
+      a: a.s, b: b.s, verdict: verdictOf(margin, floor, a.s, b.s) });
+  };
+  rank("cheapest to build", "CU", (cols || []).map(({ col }) => {
+    const s = spread(((samples || {})[col] || {}).etl);
+    return { name: col, s, value: s ? s.mean : 0 };
+  }), (floors || {}).etl);
+
+  // `martPoints` and `groups` are both in group order — the former `.map`s over the latter — so index
+  // is a safe join and the printed mean stays the one the bar drew.
+  const pts = martPoints(groups || [], times);
+  const members = (groups || []).map(([, ms]) => ms);
+  rank("cheapest to query", "CU", pts.map((p, i) => ({
+    name: p.name, s: spread(members[i].map((m) => m.cu)), value: p.cu,
+  })), (floors || {}).analytics);
+  for (const [label] of TIERS) {
+    rank(`fastest ${label}`, "ms", pts.map((p, i) => ({
+      name: p.name,
+      s: spread(members[i].map((m) => ((times || {})[m.qid] || {})[label])),
+      value: p.ms[label],
+    })), (floors || {})[label]);
+  }
+  return rows;
+}
+
+/**
+ * `[{engine, key, from, to, a, b}]` — every pair of ONE engine's columns differing in exactly one
+ * `variant()` key.
+ *
+ * The only place on this page where one variable moves and the rest are held fixed. V-Order, NEE,
+ * `sorted` and core scaling all fall out of this rule and **not one of them is named in the code**,
+ * which is what keeps a fifth knob working without an edit here.
+ *
+ * **ABSENCE IS A VALUE.** `{vcores:64}` against `{vcores:64, sorted:true}` is a pair reading
+ * `off → true` — a flag that is off is simply not recorded (see `variantTag`), so treating a missing
+ * key as "no comparison" would hide every on/off knob the project has.
+ *
+ * LOWER VALUE LEADS, ordered by `compareCells` — the page's own numeric-when-both-parse rule — so
+ * `8 → 16 → 32 → 64` orders numerically and `off → true` as text. One rule, no per-key table, and a
+ * delta always reads as "what turning it up did".
+ */
+export function variantPairs(cols) {
+  const byEngine = new Map();
+  for (const c of cols || []) {
+    const list = byEngine.get(c.engine) || [];
+    list.push({ col: c.col, cfg: Object.fromEntries(variant(c.rec)) });
+    byEngine.set(c.engine, list);
+  }
+  const out = [];
+  for (const [engine, list] of byEngine) {
+    for (let i = 0; i < list.length; i++) {
+      for (let j = i + 1; j < list.length; j++) {
+        let A = list[i], B = list[j];
+        const keys = [...new Set([...Object.keys(A.cfg), ...Object.keys(B.cfg)])];
+        const diff = keys.filter((k) =>
+          hasOwn(A.cfg, k) !== hasOwn(B.cfg, k) || A.cfg[k] !== B.cfg[k]);
+        if (diff.length !== 1) continue;
+        const key = diff[0];
+        let from = hasOwn(A.cfg, key) ? A.cfg[key] : OFF;
+        let to = hasOwn(B.cfg, key) ? B.cfg[key] : OFF;
+        if (compareCells(from, to) > 0) { [A, B] = [B, A]; [from, to] = [to, from]; }
+        out.push({ engine, key, from, to, a: A.col, b: B.col });
+      }
+    }
+  }
+  const order = new Map(ENGINES.map((e, i) => [e, i]));
+  const at = (e) => (order.has(e) ? order.get(e) : order.size);
+  out.sort((x, y) => at(x.engine) - at(y.engine) || (x.engine < y.engine ? -1 : x.engine > y.engine
+    ? 1 : 0) || x.key.localeCompare(y.key, "en") || compareCells(x.from, y.from)
+    || compareCells(x.to, y.to));
+  return out;
+}
+
+/** `+26.0` / `-4.7`, no `%` sign — `cellNumber` rejects one, and the sortable header would then text
+ *  sort `+138.4` below `+26.0`. The unit is in the column head. */
+const pct = (v) => `${v >= 0 ? "+" : ""}${fmt(v * 100, 1)}`;
+
+/**
+ * `<h3>Analysis</h3>` and its two tables, or `""` when there is nothing to compare.
+ *
+ * Positional for what every renderer takes, a trailing bag for the rest — the shape `renderSources`
+ * already uses.
+ */
+export function renderAnalysis(cols, entries, groups, times, ctx = {}) {
+  const { runs = [], ledger = { items: {} }, keyOf = () => undefined, table: martTable, counts = {},
+    reference = null } = ctx;
+  const samples = columnSamples(runs, ledger, keyOf, entries, times);
+  const floors = noiseFloor(samples);
+  const rows = findings(cols, samples, groups, times, floors);
+  const pairs = variantPairs(cols);
+
+  // Which columns wrote which layouts — the single most interpretive fact in the knob table. Two
+  // columns sharing a bar means their analytics and tier deltas are two readings of ONE layout rather
+  // than a comparison of two.
+  const gs = new Map();
+  (groups || []).forEach(([, ms], i) => {
+    for (const m of ms) {
+      if (m.col === undefined || m.col === null) continue;
+      if (!gs.has(m.col)) gs.set(m.col, new Set());
+      gs.get(m.col).add(i);
+    }
+  });
+  const layoutRel = (a, b) => {
+    const A = gs.get(a), B = gs.get(b);
+    if (!A || !B) return DASH;
+    if (![...A].some((i) => B.has(i))) return "differs";
+    return A.size === 1 && B.size === 1 ? "same" : "mixed";
+  };
+
+  const delta = (col, other, m) => {
+    const x = spread(((samples[col] || {})[m])), y = spread(((samples[other] || {})[m]));
+    if (!x || !y || !x.mean) return null;
+    return (y.mean - x.mean) / x.mean;
+  };
+  const shown = MEASURES.filter((m) => pairs.some((p) => delta(p.a, p.b, m) !== null));
+  const pairRows = pairs.map((p) => [
+    `\`${p.key}\` ${p.from} → ${p.to}`, `${p.a} → ${p.b}`, layoutRel(p.a, p.b),
+    `${(spread((samples[p.a] || {}).etl) || { n: 0 }).n} vs ` +
+      `${(spread((samples[p.b] || {}).etl) || { n: 0 }).n}`,
+    ...shown.map((m) => {
+      const d = delta(p.a, p.b, m);
+      if (d === null) return DASH;
+      const floor = floors[m];
+      // Bold means "clears the floor". Never the first cell — `table()` reads a leading `**` as a
+      // subtotal row and would rule the whole row off.
+      return floor && Math.abs(d) > floor.rel ? `**${pct(d)}**` : pct(d);
+    }),
+  ]);
+
+  if (!rows.length && !pairRows.length) return "";
+
+  const out = ["<h3>Analysis</h3>"];
+
+  // THE SCOPE CAVEAT, VISIBLE AND FIRST. Repo convention folds explanation and never folds anything
+  // that qualifies a number; this qualifies every number below it. Derived, so it cannot drift from
+  // what it describes — only the standing "one workload" clause is fixed prose.
+  const dates = (runs || []).map((r) => String((r.run || {}).started || "").slice(0, 10))
+    .filter(Boolean).sort();
+  const engines = new Set((cols || []).map(({ col }) => baseEngine(col))).size;
+  const queries = Math.max(0, ...Object.values(counts || {}));
+  const scope = [`\`${martTable || DEFAULTS.table}\``];
+  // The generation's reference count when the caller has one, else the newest run that recorded one.
+  // The size of the thing measured is a fact about the data, not about who called this.
+  let rowCount = reference;
+  for (let i = runs.length - 1; i >= 0 && (rowCount === null || rowCount === undefined); i--) {
+    rowCount = martRows(runs[i], martTable || DEFAULTS.table);
+  }
+  if (rowCount) scope.push(`${fmt(rowCount, 0)} rows`);
+  if (queries) scope.push(`${queries} DAX queries`);
+  scope.push(`${runs.length} run(s) across ${cols.length} configuration(s) of ${engines} engine(s)`);
+  if (dates.length) {
+    scope.push(dates[0] === dates[dates.length - 1] ? `on ${dates[0]}`
+      : `between ${dates[0]} and ${dates[dates.length - 1]}`);
+  }
+  out.push(note("**One dataset, one query suite, one capacity.** Everything below describes this " +
+    `project and nothing wider — ${scope.join(", ")}, on a single Fabric capacity. A different data ` +
+    "shape, cardinality or query mix could reorder every row here, and none of it has been tried on " +
+    "a second workload. Read these as findings about this benchmark, not about the engines."));
+
+  const floorBits = MEASURES.filter((m) => floors[m])
+    .map((m) => `${m === "etl" || m === "analytics" ? `${m} CU` : m} ${fmt(floors[m].rel * 100, 1)}%`);
+  const repeats = Math.max(0, ...MEASURES.map((m) => (floors[m] ? floors[m].n : 0)));
+  out.push(note(floorBits.length
+    ? `**The yardstick is measured, not assumed.** ${repeats} column(s) here have been run more than ` +
+      "once with nothing changed, and the median spread between their own repeats is " +
+      `${floorBits.join(" · ")}. A margin inside that reads \`within spread\`. ` +
+      "**No p-value is offered** — see below for why."
+    : "**Nothing on this page has been measured twice**, so there is no floor to judge a margin " +
+      "against and every verdict reads `no repeat`. The margins below are real; whether they would " +
+      "survive a second run of the same configuration is not yet known."));
+
+  if (rows.length) {
+    out.push("<h4>Where the rankings hold</h4>");
+    out.push(table(["finding", "winner", "value", "runner-up", "margin %", "runs", "verdict"],
+      ["left", "left", "right", "left", "right", "left", "left"],
+      rows.map((r) => [r.label, r.winner, fmt(r.value, r.unit === "ms" ? 0 : 1), r.runnerUp,
+        fmt(r.margin * 100, 1), `${r.a.n} vs ${r.b.n}`, r.verdict]),
+      { sort: true }));
+  }
+  if (pairRows.length) {
+    out.push("<h4>One knob at a time</h4>");
+    out.push(table(["change", "columns", "layout", "runs",
+      ...shown.map((m) => (m === "etl" || m === "analytics" ? `${m} CU Δ%` : `${m} Δ%`))],
+      ["left", "left", "left", "left", ...shown.map(() => "right")],
+      pairRows, { sort: true }));
+  }
+
+  out.push(fold("why there is no p-value, and what the floor is instead",
+    "**The sample cannot carry a significance test.** Only a handful of configurations here have " +
+    "been run more than once, at two or three runs each, and those runs share one capacity and one " +
+    "24-hour smoothing window — so they are not independent draws. A t-test on two degrees of " +
+    "freedom would put a decimal point on a claim the design does not support.",
+    "**What the repeats DO support is a floor.** Running the same engine at the same configuration " +
+    "again changes nothing but the hour, so the gap between those two readings is what this page's " +
+    "numbers do when the answer should be identical. Any margin smaller than that is reported as " +
+    "`within spread`, which does not mean the ranking is wrong — it means this page cannot tell it " +
+    "apart from the wobble, and the next run of either side could reverse it. " +
+    "Where both sides of a comparison have been run twice, whether their min–max ranges overlap is " +
+    "stated as well — a gap between two means whose ranges still overlap is weaker than one whose " +
+    "ranges are disjoint.",
+    "**The floor is measured per COLUMN, never per layout bar.** A bar groups every run that wrote " +
+    "the same parquet shape, which on this page means several core counts at once, so its internal " +
+    "spread already contains a real effect and would hide the differences this section looks for.",
+    "**In the knob table a bold delta is one that clears the floor for its measure.** `layout` says " +
+    "whether the two columns wrote parquet Power BI can tell apart: `same` means their analytics " +
+    "and query-time deltas are two readings of one bar rather than a comparison, so a difference " +
+    "there is noise by construction."));
+  return out.join("\n");
+}
+
 // -------------------------------------------------------------------------------------- the lede
 
 /** The shared table list a run recorded, or the tables it filed stats for. */
@@ -1977,6 +2327,12 @@ export function renderPage(cols, runs, ledger, opts = {}) {
         return `[\`${file}\`](${recordUrl(repo, file, opts.ref)}) — ${s.slice(at + 2)}`;
       }).join(" · ")));
   }
+  // LAST OF THE TABLES, and after the run table on purpose: it is the only section that reads the
+  // others rather than reporting a measurement of its own, and its verdicts are unreadable until a
+  // reader has seen what they are verdicts ON. It sits ABOVE the methodology because it carries
+  // tables, and every table on this page comes before every paragraph.
+  out.push(renderAnalysis(cols, anaEntries, groups, times,
+    { runs, ledger, keyOf, table: martTable, counts, reference: opts.reference }));
   // FOOTNOTES, LAST — after every chart and every table. This block explains the measure rather than
   // reporting one, so it belongs where a reader goes looking for it rather than in the middle of the
   // page they came for.
