@@ -603,7 +603,8 @@ test("the lede states the scale of the thing, and leads the page", () => {
   assert.ok(said.includes("built into the same **8 tables**"));
   // ONE fact. `fct_price`/`fct_scada` and their `_today` siblings are raw CSV in the `landing`
   // schema; only `fct_summary` reaches `mart`. The prefix is not the classifier.
-  assert.ok(said.includes("1 fact, 2 dimensions, 4 staging and a log"));
+  assert.ok(said.includes(
+    "1 fact (144.0M), 2 dimensions (3.9K), 4 staging (375.4M) and a log (8.2K)"));
   assert.ok(said.includes("totalling **519,377,319 rows**"));
   // FIRST — above the section heading that used to lead, which is above the first chart.
   assert.ok(out.indexOf('<p class="lede">') >= 0);
@@ -710,10 +711,27 @@ test("the fct_ prefix is not the classifier — there is exactly ONE fact", () =
   // schema; only `fct_summary` reaches `mart` and is the (date, time, DUID) grain Power BI queries.
   // Counting the prefix called four landed sources "facts" and the real one "a mart".
   const said = plain(render([scaled("a-1.json", "spark")], ledger({ OUT: 1.0, SEM: 2.0 })));
-  assert.ok(said.includes("1 fact,"), "the mart is the fact");
+  assert.ok(said.includes("1 fact ("), "the mart is the fact");
   assert.ok(!said.includes("4 facts"), "the landed fct_ tables are staging, not facts");
   assert.ok(said.includes("4 staging"));
   assert.ok(said.includes("and a log"), "stg_csv_archive_log is the log");
+  // The ROWS are what make the breakdown worth reading: the four landed sources carry 370M+ and
+  // the one real fact 144M, which the shape alone hides. Compacted — the exact total closes the
+  // same sentence, so twelve digits twice is precision nobody reads.
+  assert.ok(said.includes("1 fact (144.0M)"), said);
+  assert.ok(said.includes("4 staging (375.4M)"), said);
+  assert.ok(said.includes("2 dimensions (3.9K)"), said);
+  assert.ok(said.includes("a log (8.2K)"), said);
+});
+
+test("one unmeasured table withholds every row count, not just its own", () => {
+  // Same rule as totalRows dropping a partial sum: a category quietly short of a table sits beside
+  // the others looking complete. The SHAPE still goes out — it is measured by name, not by stats.
+  const said = plain(render([scaled("a-1.json", "spark",
+    { rows: [8167, 3197, 689, 4599900, 370021502, 12750, 750153, undefined] })],
+    ledger({ OUT: 1.0, SEM: 2.0 })));
+  assert.ok(said.includes("1 fact, 2 dimensions, 4 staging and a log"), said.slice(0, 240));
+  assert.ok(!said.includes("(375.4M)"), "no category may print while another cannot");
 });
 
 test("a breakdown that would not add up is dropped, and the count goes out alone", () => {

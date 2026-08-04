@@ -1692,7 +1692,8 @@ const tableNames = (rec) => {
 };
 
 /**
- * `1 fact, 2 dimensions, 4 staging and a log` — the table count decomposed.
+ * `1 fact (144.0M), 2 dimensions (4.0K), 4 staging (375.4M) and a log (3.2K)` — the table count
+ * decomposed, each part carrying its own rows.
  *
  * **THE `fct_` PREFIX IS NOT THE CLASSIFIER, and reading it as one got this wrong.** Four of the
  * five `fct_*` tables — `fct_price`, `fct_scada` and their `_today` siblings — are raw AEMO CSV
@@ -1700,21 +1701,54 @@ const tableNames = (rec) => {
  * table: the `(date, time, DUID)` grain Power BI queries. So the split is the MART TABLE against
  * everything else, not the prefix, and the record's own `schema` field says so.
  *
- * Returns `""` when the parts do not add up to the whole list. A breakdown that is quietly short
- * sits beside the count it is supposed to explain and contradicts it, so an unrecognised name means
- * the count goes out alone.
+ * **THE ROWS ARE WHAT MAKE THE BREAKDOWN WORTH READING.** "1 fact, 2 dimensions, 4 staging and a
+ * log" describes the SHAPE and hides the scale, which on this project is the interesting half: the
+ * four staging tables carry 375M rows of raw CSV and the one fact carries 144M, while the two
+ * dimensions are four thousand. A reader seeing only the total — 519,377,319 — cannot tell whether
+ * it is one huge table or eight middling ones.
+ *
+ * Compacted (`144.0M`, not `143,980,961`): the sentence already ends with the exact total, so a
+ * second set of twelve-digit numbers inside it is precision nobody reads, in the place it is
+ * hardest to read.
+ *
+ * **Counts are all-or-nothing, the same rule `totalRows` follows.** One table missing its
+ * `total_rows` drops the numbers from EVERY part rather than printing a category short — a
+ * breakdown quietly missing a table sits beside a total that includes it and contradicts it. The
+ * shape still goes out; only the numbers are withheld.
+ *
+ * Returns `""` when the parts do not add up to the whole list, for the same reason.
  */
-const tableShape = (names, martTable) => {
-  const fact = names.includes(martTable) ? 1 : 0;
-  const dims = names.filter((t) => t.startsWith("dim_")).length;
-  const logs = names.filter((t) => t.startsWith("stg_")).length;
-  const stg = names.filter((t) => t.startsWith("fct_") && t !== martTable).length;
-  if (fact + dims + logs + stg !== names.length) return "";
+const tableShape = (names, martTable, stats = null) => {
+  const of = (pred) => names.filter(pred);
+  const groups = [
+    ["1 fact", of((t) => t === martTable)],
+    [null, of((t) => t.startsWith("dim_"))],
+    [null, of((t) => t.startsWith("fct_") && t !== martTable)],
+    [null, of((t) => t.startsWith("stg_"))],
+  ];
+  const [fact, dims, stg, logs] = groups.map(([, ts]) => ts.length);
+  if (fact + dims + stg + logs !== names.length) return "";
+
+  // One unmeasured table withholds every number, never just its own category's.
+  const rowsOf = (ts) => {
+    if (!stats) return null;
+    let total = 0;
+    for (const t of ts) {
+      const v = Number((stats[t] || {}).total_rows);
+      if (!Number.isFinite(v)) return null;
+      total += v;
+    }
+    return total;
+  };
+  const counts = groups.map(([, ts]) => rowsOf(ts));
+  const measured = counts.every((c) => c !== null);
+  const label = (text, i) => (measured ? `${text} (${compact(counts[i])})` : text);
+
   const parts = [];
-  if (fact) parts.push("1 fact");
-  if (dims) parts.push(`${dims} dimension${dims !== 1 ? "s" : ""}`);
-  if (stg) parts.push(`${stg} staging`);
-  if (logs) parts.push(logs === 1 ? "a log" : `${logs} logs`);
+  if (fact) parts.push(label("1 fact", 0));
+  if (dims) parts.push(label(`${dims} dimension${dims !== 1 ? "s" : ""}`, 1));
+  if (stg) parts.push(label(`${stg} staging`, 2));
+  if (logs) parts.push(label(logs === 1 ? "a log" : `${logs} logs`, 3));
   if (parts.length < 2) return "";
   return `${parts.slice(0, -1).join(", ")} and ${parts[parts.length - 1]}`;
 };
@@ -1785,7 +1819,8 @@ export function pageLede(cols, opts = {}) {
   const withTables = cols.filter(({ rec }) => tableNames(rec).length);
   const rec = ((withTables[withTables.length - 1] || cols[cols.length - 1] || {}).rec) || {};
   const names = tableNames(rec);
-  const shape = tableShape(names, martTable);
+  const shape = tableShape(names, martTable,
+    ((rec.layout || {}).stats || {})[rec.engine] || null);
   const tables = names.length
     ? `the same **${fmt(names.length, 0)} table${names.length !== 1 ? "s" : ""}**` +
       (shape ? ` — ${shape} —` : "")
