@@ -1918,6 +1918,12 @@ test("the adapters are named and linked once, under the charts", () => {
   assert.ok(text.includes("dbt-fabric-samdebruyn") && text.includes("dbt-fabricspark"));
   assert.ok(out.indexOf('<div class="charts">') < out.indexOf("The adapters:"), "under the charts");
   assert.ok(out.indexOf("The adapters:") < out.indexOf("Cost by engine"), "not buried below");
+  // ONE PER LINE — joined with `·`, the separator between two entries looked like the em dash inside
+  // one, so four `name — what it is` pairs read as one wrapped run of text.
+  const note_ = out.slice(out.indexOf("The adapters:"), out.indexOf("</p>", out.indexOf("The adapters:")));
+  assert.equal(note_.split("<br>").length - 1, Object.keys(d.ADAPTER_URLS).length,
+    `one break for the label and one between each pair: ${note_}`);
+  assert.ok(!note_.includes(" · "), "and no inline separator left over");
 });
 
 test("methodology folds, but the exclusion notice never does", () => {

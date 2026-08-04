@@ -2278,10 +2278,15 @@ export function renderPage(cols, runs, ledger, opts = {}) {
   out.push(chartA || chartB ? `<div class="charts">\n${chartA}\n${chartB}\n</div>` : "");
   // The one place the ADAPTERS are named and linked. The bars stopped captioning them because the
   // column name already implies the adapter — this line is where that implication resolves.
-  out.push(note("The adapters: " + ENGINES
+  //
+  // ONE PER LINE. Four `name — what it is` pairs joined with `·` ran together as a single wrapped
+  // paragraph, where the separator between two entries looked exactly like the separator inside one;
+  // a reader scanning for "which adapter is dwh" had to parse the line to find out. Broken, each row
+  // is one engine and the em dash only ever separates a name from its description.
+  out.push(note("The adapters:<br>" + ENGINES
     .filter((e) => ADAPTER_URLS[e])
     .map((e) => `[${STACK[e][0]}](${ADAPTER_URLS[e]}) — ${STACK[e][1]}`)
-    .join(" · ")));
+    .join("<br>")));
 
   // The mart block and the fit chart quote the SAME numbers as the analytics bars above — the same
   // groups, the same members, the same mean, all of it through `martPoints`. They are one measurement
