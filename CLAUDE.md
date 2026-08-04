@@ -612,10 +612,13 @@ to `provision.py teardown`, which polls for a 404 and goes red if it is still li
   limit** (`set_merge_memory_limit`), so the routed anti-join now gets 0.3 × default instead of
   0.3 × 4GB. Spill is unaffected — `temp_directory` is still set for both.
   **The `sorted` dispatch input is a KNOWING exception, and the only one.** With it on, duckrun
-  writes `fct_summary` sorted by the declared key `['date','time','DUID']` with declared geometry —
-  `max_row_group_size: 48000000` and `target_file_size_mb: 1024`, i.e. ~3 row groups in 1 GB files
-  instead of the adaptive ~25 (it was `sort_by='auto'` for one era, retired when the picker
-  measurably stopped at `date, time` and cost more ETL for a worse layout; see the model header) —
+  writes `fct_summary` sorted by the declared key `['date','time']` (the key the retired `'auto'`
+  picker kept choosing, without its +19% profiling pass; DUID's ~16% of size deliberately left on
+  the table) and declares geometry — `max_row_group_size: 48000000`, `target_file_size_mb: 1024` —
+  **which is INERT as of duckrun 0.4.43**: the adapter's `_delta_core.sql` macro forwards a fixed
+  key list to the plugin that carries `sort_by` and not the two geometry keys, so run 30955591822
+  wrote the estimator's 3f/19RG despite the config. It starts working when a duckrun release adds
+  the keys to that dict (the notebook installs latest from PyPI; nothing here to change) —
   and iceberg writes it unsorted, so the pair differs by more than the writer for that run. This is not a settings drift to be corrected: it
   cannot be corrected. `sort_by` and the geometry keys occur **zero times** in dbt-duckdb's adapter and its macro package,
   so iceberg has no way to express a sort or row-group size at all, and the trailing `ORDER BY date` in the model does

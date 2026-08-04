@@ -23,38 +23,45 @@
 -- mistake in it. Full story: LEARNINGS.md, "Two branches of one model, two different unit
 -- universes"; CLAUDE.md, "fct_summary must be a pure function of its inputs".
 --
--- sort_by is the `sorted` DISPATCH INPUT, off by default, and it now DECLARES the whole write
--- layout rather than delegating it: the named key ['date','time','DUID'] plus explicit geometry —
+-- sort_by is the `sorted` DISPATCH INPUT, off by default, and it now DECLARES the write layout
+-- rather than delegating it: the named key ['date','time'] plus explicit geometry —
 -- max_row_group_size 48M rows and target_file_size_mb 1024, so the 143.98M-row table should land
 -- near 1 file / 3 row groups (readHeavyForPBI's 1 GB bin, without the spark profile). It spent one
--- era as 'auto' so the input measured what the adapter's picker does out of the box; that question
--- is ANSWERED in the table below — the picker stopped at `date, time` and paid +19% ETL CU for a
--- worse layout than the named key's +3.7% — so auto was retired. DUCKRUN-ONLY without breaking the
--- one-config-for-both rule, for the same reason partition_by was: `sort_by` and the geometry keys
--- occur ZERO times in dbt-duckdb's adapter and macro package, so on iceberg they are parsed into
--- the manifest and read by nobody. Both targets still run byte-identical model code and there is
--- still no `target.name` in this tree. Off they render to `none`, which is what every run before
--- the input did. The geometry knobs need a duckrun with _geometry_config (a typo'd or oversized
--- value fails the model loudly, before any Delta access); the notebook pip-installs duckrun
--- unpinned, so it takes the latest.
+-- era as 'auto' so the input measured what the adapter's picker does out of the box; the picker
+-- kept choosing `date, time` and paid +19% ETL CU for the profiling pass against a named key's
+-- +3.7%, so the key it picked is now simply written down. DUID was measured worth ~16% of size
+-- (652.6 vs 777.2 MB below) and deliberately NOT taken: date,time only, the safe pick.
+-- DUCKRUN-ONLY without breaking the one-config-for-both rule, for the same reason partition_by
+-- was: `sort_by` and the geometry keys occur ZERO times in dbt-duckdb's adapter and macro package,
+-- so on iceberg they are parsed into the manifest and read by nobody. Both targets still run
+-- byte-identical model code and there is still no `target.name` in this tree. Off they render to
+-- `none`, which is what every run before the input did.
 --
--- Honored on this model despite the adapter docs calling sort_by inert on the delta_rs merge path:
--- the merge here is insert-only, so the engine seam routes it to a DuckDB anti-join committed as a
--- plain append, and that path forwards sort_by AND the geometry -- as does the first-build
--- overwrite, where an explicit row-group size also bypasses the adaptive planner (a declared
--- geometry is not a guess to second-guess). An explicit size is honored verbatim: _writer_properties
--- has no 16M clamp, the 48M cap goes straight into deltalake's WriterProperties, and the 1 GB file
--- roll is what actually bounds a group (a row group cannot span files).
+-- ⚠️ THE GEOMETRY KEYS ARE INERT AS OF duckrun 0.4.43, AND THE FAILURE IS SILENT. Measured on run
+-- 30955591822 (sorted=true, this config at 48M/1024): 651.1 MB, 3 files, 19 row groups — the
+-- adaptive estimator's layout (log: "row-group geometry was sized for ~14,911,911 rows", 8M floor
+-- x 18 = the 19 RG), not the declared one. The plugin and engine honor the values fine
+-- (_geometry_config -> WriterProperties, no 16M clamp; duckrun's own parquet_layout CI pins the
+-- same seam directly and gets 3 RG) — but the dbt materialization macro `_delta_core.sql` builds
+-- its plugin config dict as a fixed key list that carries `sort_by` and NOT these two, so they
+-- die between the manifest and the plugin. sort_by is unaffected (the 651 MB proves it sorted).
+-- They start working when a duckrun release adds the two keys to that dict; the notebook installs
+-- duckrun unpinned from PyPI, so no change is needed here — just re-measure after the release.
 --
--- THREE MEASURED POINTS, all 64 vCores, all full loads, all 143,980,961 rows. They are the
--- before/after for the declared layout — all three predate the geometry knobs, so their row-group
--- counts are the adaptive planner's (~5.5M-row groups), not the 48M cap's:
+-- sort_by is honored on this model despite the adapter docs calling it inert on the delta_rs
+-- merge path: the merge here is insert-only, so the engine seam routes it to a DuckDB anti-join
+-- committed as a plain append, and that path forwards sort_by and the geometry -- as does the
+-- first-build overwrite, where an explicit row-group size bypasses the adaptive planner.
+--
+-- FOUR MEASURED POINTS, all 64 vCores, all full loads, all 143,980,961 rows. Every row-group
+-- count is the adaptive planner's — the 48M cap has never reached a write (see the ⚠️ above):
 --   none                    985.5 MB  4f/27RG  cold 23,491  warm 6,300  hot 5,420  etl 22,624
 --   auto -> `date, time`    777.2 MB  4f/25RG  cold 27,740  warm 3,498  hot 3,056  etl 26,991
 --   ['date','time','DUID']  652.6 MB  3f/26RG  cold 24,523  warm 3,141  hot 3,572  etl 23,465
--- (runs 30752070535, 30796667149, 30805417412. The auto-era note "what auto chose is in the CI
--- log, not the record" is history now: the key is spelled in this config, durably. fabric_run.py's
--- sort_by_auto scrape still exists but matches nothing unless someone hand-sets 'auto' again.)
+--   ['date','time','DUID']  651.1 MB  3f/19RG  (geometry declared 48M/1GB and silently dropped)
+-- (runs 30752070535, 30796667149, 30805417412, 30955591822. The key is spelled in this config,
+-- durably; fabric_run.py's sort_by_auto scrape still exists but matches nothing unless someone
+-- hand-sets 'auto' again.)
 --
 -- READ THAT TABLE CAREFULLY, because the obvious reading is wrong. auto did NOT pick `date` alone —
 -- it picked `date, time`, the same first two columns the query suite argues for. So the picker got
@@ -77,11 +84,11 @@
 -- sorted table gives longer RLE runs in the resident columns -- which is why warm and hot move and
 -- not only cold.
 --
--- That question is CLOSED: the picker never added DUID, so the ~16% was bought by naming the key,
--- and the picker was paying more (+19% ETL against the named key's +3.7%) to reach a worse layout.
--- What the input measures now is the declared layout itself — the named key plus 48M-row groups in
--- 1 GB files against the adaptive default, i.e. does collapsing ~25 row groups to ~3 move
--- cold/warm/hot the way Direct Lake's segment story says it should.
+-- The picker question is CLOSED — it never added DUID — and the key is now written down as the
+-- `date, time` it kept choosing, minus the profiling pass that cost +19% ETL. DUID's ~16% of size
+-- is deliberately left on the table (the safe pick). What the input measures once the geometry
+-- keys actually land (⚠️ above) is the declared layout against the adaptive default: does
+-- collapsing ~25 row groups to ~3 move cold/warm/hot the way Direct Lake's segment story says.
 --
 -- Not the trailing ORDER BY below doing any of this: that reaches no stored table on any engine
 -- (CLAUDE.md, "fairness invariant"), and at 143M rows with spilling it demonstrably did not reach
@@ -98,7 +105,7 @@
     incremental_strategy='merge',
     unique_key=['date', 'time', 'DUID'],
     merge_clauses={'when_matched': [{'action': 'do_nothing'}]},
-    sort_by=(['date', 'time', 'DUID'] if env_var('DUCKDB_SORTED', 'false') == 'true' else none),
+    sort_by=(['date', 'time'] if env_var('DUCKDB_SORTED', 'false') == 'true' else none),
     max_row_group_size=(48000000 if env_var('DUCKDB_SORTED', 'false') == 'true' else none),
     target_file_size_mb=(1024 if env_var('DUCKDB_SORTED', 'false') == 'true' else none),
     schema='mart'
