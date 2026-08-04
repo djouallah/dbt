@@ -1768,7 +1768,10 @@ export function totalRows(rec, names = tableNames(rec)) {
 export function pageLede(cols, opts = {}) {
   const martTable = opts.table || DEFAULTS.table;
   const targets = new Set(cols.map(({ col }) => baseEngine(col)));
-  const n = new Set([...targets].map((e) => ENGINE_FAMILY[e] || e)).size;
+  // Alphabetical, the same order the side-by-side columns use — the only order that is neutral
+  // between peers and stable enough to read two runs against each other.
+  const families = [...new Set([...targets].map((e) => ENGINE_FAMILY[e] || e))].sort();
+  const n = families.length;
   if (!n) return "";
 
   const land = (landingBlocks(cols).pop() || ["", {}])[1];
@@ -1791,7 +1794,18 @@ export function pageLede(cols, opts = {}) {
 
   const made = [input, tables && `built into ${tables}`].filter(Boolean).join(" ");
   if (!made && rows === null) return "";
-  let sentence = `One dbt project on **${n} engine${n !== 1 ? "s" : ""}**`;
+  // NAMED, not just counted. "3 engines" states the scale and withholds the subject — a reader
+  // arriving on a link had to scroll to a chart's column headers to learn WHICH three, and the
+  // answer is the whole point of the project. One engine names itself and drops the count, which
+  // would otherwise read "1 engine (spark)".
+  //
+  // Parenthesised rather than set off with dashes, because the clause that may follow is itself a
+  // dashless insert: "**3 engines** — duckdb, dwh and spark across **4 dbt targets**" reads as the
+  // list swallowing the targets, and a closing dash only works when that clause is present.
+  const named = n === 1
+    ? `**${families[0]}**`
+    : `**${n} engines** (${families.slice(0, -1).join(", ")} and ${families[n - 1]})`;
+  let sentence = `One dbt project on ${named}`;
   // Only said when it differs: "3 engines across 4 targets" is the DuckDB pair writing two table
   // formats, and a table format is not an engine.
   if (targets.size > n) sentence += ` across **${targets.size} dbt targets**`;

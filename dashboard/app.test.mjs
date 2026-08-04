@@ -597,7 +597,8 @@ test("the lede states the scale of the thing, and leads the page", () => {
   // much data any of it describes.
   const out = render([scaled("a-1.json", "spark")], ledger({ OUT: 1.0, SEM: 2.0 }));
   const said = plain(out);
-  assert.ok(said.includes("One dbt project on **1 engine**"));
+  // A lone engine NAMES itself and drops the count — "1 engine (spark)" says the same thing twice.
+  assert.ok(said.includes("One dbt project on **spark**"));
   assert.ok(said.includes("**170 GB** of raw AEMO CSV (**8,350 files**)"));
   assert.ok(said.includes("built into the same **8 tables**"));
   // ONE fact. `fct_price`/`fct_scada` and their `_today` siblings are raw CSV in the `landing`
@@ -615,7 +616,7 @@ test("the lede counts engines, not columns", () => {
     scaled("b-2.json", "spark", { config: { spark: { vcores: 64 } } }),
     scaled("c-3.json", "dwh")];
   const said = plain(render(runs, ledger({ OUT: 1.0, SEM: 2.0 })));
-  assert.ok(said.includes("One dbt project on **2 engines**"));
+  assert.ok(said.includes("One dbt project on **2 engines** (dwh and spark)"));
 });
 
 test("the lede counts engines, not table formats", () => {
@@ -624,7 +625,11 @@ test("the lede counts engines, not table formats", () => {
   const runs = [scaled("a-1.json", "duckrun"), scaled("b-2.json", "iceberg"),
     scaled("c-3.json", "spark"), scaled("d-4.json", "dwh")];
   const said = plain(render(runs, ledger({ OUT: 1.0, SEM: 2.0 })));
-  assert.ok(said.includes("One dbt project on **3 engines** across **4 dbt targets**"), said.slice(0, 200));
+  // Named, and named by FAMILY: the pair is one `duckdb`, never `duckrun` and `iceberg` both.
+  // Alphabetical, the order the side-by-side columns already use.
+  assert.ok(said.includes(
+    "One dbt project on **3 engines** (duckdb, dwh and spark) across **4 dbt targets**"),
+    said.slice(0, 200));
   // With no shared family the clause would repeat the engine count, so it is not said at all.
   const two = plain(render([scaled("a-1.json", "spark"), scaled("b-2.json", "dwh")],
     ledger({ OUT: 1.0, SEM: 2.0 })));
