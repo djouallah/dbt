@@ -390,6 +390,21 @@ to `provision.py teardown`, which polls for a 404 and goes red if it is still li
   the trailing-space case), and it reports `DATALENGTH`, because `LEN()` ignores trailing spaces and
   would print the padded and clean values as the same length. Any new string key crossing engines
   needs the same three copies.
+- **`cores: 4` cannot build `fct_summary`, and that is a DuckDB limit rather than a setting.**
+  Measured twice (runs 30867258967 and 30876056186), instrumented the second time. Everything is configured
+  correctly — `temp_directory` on a 142 GiB disk with 135 GiB free, `max_temp_directory_size` ~121 GiB
+  (five times the memory limit), `preserve_insertion_order` false — and spilling **does** engage:
+  4.6 GiB written across 9-10 files. It still dies, because DuckDB spills REACTIVELY: `rss` goes
+  0 → 25.6 GiB in thirty seconds and eviction only starts at the wall, with `mem_avail` down to
+  1.4 GiB on a 31.4 GiB node, and only ~4.6 GiB of the 24.6 GiB working set is evictable at all —
+  the rest is a 143M-group hash table that is resident by nature. Out-of-core execution is not
+  robust for every plan shape and this is one of the shapes it is not. Do not hunt for a setting,
+  do not blame duckrun's 85% memory pin (the same pin is fine at `cores: 8`), and do not read table
+  size as the predictor: `fct_scada` builds on the same node at **370M rows, 2.5× bigger**, because
+  it streams CSV batch by batch and never exceeds 2.4 GiB. The evidence lives in
+  [LEARNINGS.md](LEARNINGS.md); the instrumentation that produced it — node facts plus a 15s
+  `rss`/`spill` sampler in `fabric_build.py`, and `macros/log_duckdb_settings.sql` reading the
+  settings back from the live session — is permanent, free, and touches no DuckDB connection.
 - **A DuckDB assertion cannot grade another engine's rounding.** `DOUBLE → DECIMAL` tie-breaking
   differs per dialect — Spark HALF_UP, DuckDB HALF_EVEN, T-SQL a third — so a test asserting a
   DuckDB recomputation *exactly* equals a stored value can only ever pass for `duckrun`. The

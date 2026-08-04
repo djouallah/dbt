@@ -68,6 +68,71 @@ Two things that were true only of the detour, and are worth not re-deriving:
   the file-literal macro serves both targets. That predicate was always the stronger of the two —
   0/60 files scanned against 60/60 — which is what made the partition column affordable to lose.
 
+## `cores: 4` cannot build `fct_summary`, and nothing here is misconfigured
+
+Runs 30867258967 and 30876056186 both died on `fct_summary` at `cores: 4`:
+
+```
+Out of Memory Error: could not allocate block of size 256.0 KiB (24.6 GiB/24.6 GiB used)
+Out of Memory Error: failed to pin block of size 256.0 KiB (24.6 GiB/24.6 GiB used)
+```
+
+The obvious reading — spilling is off, or the temp dir is on a cramped `/tmp` — is **wrong on
+every count**, and the second run was instrumented to prove it rather than argue about it. The
+settings, read back from the session dbt actually ran the models on (`macros/log_duckdb_settings.sql`,
+an `on-run-start` hook on both duckdb targets):
+
+```
+temp_directory           = /home/trusted-service-user/work/duckrun_tmp/duckdb_spill
+max_temp_directory_size  = 90% of available disk space          -> ~121 GiB
+memory_limit             = 24.6 GiB                             -> 85% of 29.0 GiB, duckrun's pin
+preserve_insertion_order = false
+threads                  = 4
+```
+
+The spill dir sits on a 142.6 GiB disk with 135.2 GiB free, i.e. a spill budget five times the
+memory limit. And it **was used**: `disk_free` fell 135.2 → 130.6 GiB and 9-10 spill files
+appeared. Spilling is on, correctly targeted, and working.
+
+The timeline is the finding. From `fabric_build.py`'s sampler, identical across all three attempts
+of both runs:
+
+| t | rss | mem_avail | spill |
+|---|---:|---:|---:|
+| +0s | 836 MiB | 26.0 GiB | 0B |
+| +15s | 14.1 GiB | 12.9 GiB | 0B |
+| +30s | **25.6 GiB** | **1.4 GiB** | 0B |
+| +45s | 25.6 GiB | 1.4 GiB | 3.0 GiB / 8 files |
+| +60s | 20.0 GiB | 6.9 GiB | 3.5 GiB |
+| +90s | 25.1 GiB | 3.9 GiB | 4.6 GiB → OOM |
+
+Three things it settles:
+
+- **DuckDB does not spill preemptively.** It runs to the wall first — 0 → 25.6 GiB in thirty
+  seconds — and only then starts evicting, by which point the machine has 1.4 GiB left. The
+  spilling is reactive, so the allocation rate, not the disk, decides whether it can recover.
+- **Only ~4.6 GiB of a 24.6 GiB working set was ever evictable.** `fct_summary` is a 370M-row join
+  feeding a `GROUP BY ALL` that produces 143M groups; that hash table is resident by nature. A
+  bigger spill budget could not have helped, which is why the 121 GiB available is beside the point.
+- **`mem_avail` bottomed at 1.4 GiB on a 31.4 GiB box.** `rss` reached 25.6 GiB — above the 24.6 GiB
+  `memory_limit`, by allocator overhead plus dbt itself. The DuckDB error arrived before the kernel
+  did, but not by much.
+
+**This is a DuckDB limitation, not a defect in this project or in duckrun.** Out-of-core execution
+is not robust for every plan shape; a large grouped aggregate is one of the shapes where the
+unspillable residency dominates and no amount of temp space substitutes for RAM. Do not go looking
+for a setting, and do not "fix" duckrun's 85% pin — the same pin is fine at `cores: 8`, where 4
+vCores' worth of extra RAM is what actually closes the gap.
+
+`fct_scada` builds fine on the same node — **370M rows, 2.5× bigger** — because it streams CSV batch
+by batch, sawtoothing between 1.8 and 2.4 GiB and never spilling at all. Table size is not what
+predicts this; plan shape is.
+
+The instrumentation that produced all of the above is permanent and costs nothing: node facts and a
+15s `rss`/`spill` sampler in `.github/scripts/fabric_build.py`, plus the settings hook. It reads
+`/proc` and walks the spill dir — no DuckDB connection, no query — so it cannot perturb a
+measurement. Leave it in; the next surprise is already instrumented.
+
 ## Reading CSV with an explicit schema in Spark SQL
 
 This was the single biggest time sink. The data needs an explicit schema because AEMO rows are
