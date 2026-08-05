@@ -184,7 +184,7 @@ without a build, a token or a dispatch.
 - **The two charts share one row, each in its own card** — analytics left in the page's blue, ETL
   right in orange (categorical slots 1 and 2 of the dataviz reference palette, validated as a pair
   on both surfaces), because side by side one hue for both read as one dataset split in half. The
-  bar tip carries the **mean alone**; the spread is the whisker's job, with the exact range in the
+  bar tip carries the **median alone**, one mark per row; the exact range is in the
   tooltip — the parenthetical range beside every bar doubled the ink for a fact already drawn. Both
   gutters (labels, values) are sized to what is actually printed so nothing leaves the viewBox.
 - **Bar charts first**, analytics then ETL, **cheapest first** because "lower is better" makes the
@@ -227,7 +227,10 @@ without a build, a token or a dispatch.
   49s against ~33s and its refresh took 28.4s against ~8s — Fabric being busy, not the parquet being
   slow. A mean let it lift that bar 11% and dwh's 16%. **It is not a noise fix, and the page should
   not be read as if it were**: at n=1 and n=2 the median IS the mean, and four of nine bars are that
-  thin. The whiskers stay min/max so the outlier is visible rather than quietly averaged away.
+  thin. **Nothing is plotted over the bar** — a bar with an interval laid on it is two marks for one
+  row, and once the bar became a median the interval drew a spread the bar deliberately ignores. The
+  min/max are still measured and still stated, in the tooltip and in `Every run`'s per-run rows, so
+  the outlier is findable rather than quietly averaged away.
   **Grouping is MEASURED, labelling is DECLARED.** The key is
   `(V-Order, power-of-two band of files, power-of-two band of row groups, sort columns)` read off
   the parquet

@@ -932,15 +932,16 @@ function barPath(w, h, r = 4) {
 }
 
 /**
- * A bar at the MEAN, with a whisker spanning min..max across that engine's runs.
+ * A bar at the group's MEDIAN across its runs. One mark per row, nothing overlaid.
  *
  * One run is one sample and Fabric's capacity is shared, so a single number is a reading rather than a
- * result. The bar is the average because that is what a ranking should be built on; the whisker is
- * there so a reader can see when two averages are closer together than either engine's own spread —
- * which is the case where the ranking means nothing. With one run the whisker collapses to the bar and
- * says so honestly.
+ * result — which is why the bar is a median rather than a mean (see `groupMid`) and why the min..max
+ * range is still carried in every row and in the tooltip. It is no longer DRAWN: a bar with an
+ * interval laid over it is two marks for one row, and once the bar stopped following the extremes the
+ * interval was plotting a spread the bar deliberately ignores. A reader who wants the samples has the
+ * tooltip and the per-run rows in `Every run`, both of which name the actual dispatches.
  *
- * Rows arrive as `[label, mean, min, max, caption]`, and are sorted CHEAPEST FIRST because "lower is
+ * Rows arrive as `[label, median, min, max, caption]`, and are sorted CHEAPEST FIRST because "lower is
  * better" makes the ranking the finding. A ZERO sorts to the BOTTOM: zero means "this engine did no
  * such work", and at the top under that caption it would read as the winner — the one value whose rank
  * would lie. A chart with nothing but zeros is not drawn at all.
@@ -949,8 +950,8 @@ export function chartSvg(title, subtitle, rowsIn) {
   const rows = [...(rowsIn || [])]
     .map((r) => {
       // `[label, mean, min, max, caption]`, tolerating the older `[label, value, caption]` — so a
-      // chart spec carried in an artifact rendered months ago still draws, with the whisker collapsed
-      // onto the bar because there was never a range in it.
+      // chart spec carried in an artifact rendered months ago still draws, with lo/hi collapsed
+      // onto the value because there was never a range in it.
       const avg = Number(r[1]) || 0;
       const ranged = r.length >= 4 && r[2] !== null && r[2] !== undefined &&
         r[3] !== null && r[3] !== undefined;
@@ -966,7 +967,7 @@ export function chartSvg(title, subtitle, rowsIn) {
   for (const r of rows) {
     r.ranged = r.hi - r.lo > 0.05;
     // The MEAN alone at the tip. The range used to ride beside it in parentheses, which doubled the
-    // ink for a fact the whisker already draws — the exact numbers stay in the tooltip.
+    // ink beside every bar for a fact the tooltip states exactly.
     r.value = fmt(r.avg, 1);
   }
   const subs = rows.some((r) => r.sub);
@@ -977,7 +978,10 @@ export function chartSvg(title, subtitle, rowsIn) {
   const need = Math.max(...rows.map((r) =>
     Math.max(r.label.length * 7.2, (r.sub || "").length * 5.4)));
   const labelW = Math.max(LABEL_W, Math.min(SUB_LABEL_W + 12, Math.ceil(need) + 14));
-  const top = Math.max(...rows.map((r) => r.hi)) || 1;
+  // Scaled to the largest BAR, not the largest `hi`. While the whisker was drawn the plot had to fit
+  // it, so every bar was shortened to leave room for a mark that is no longer there — the widest-
+  // spread row would have squashed the whole chart for nothing.
+  const top = Math.max(...rows.map((r) => r.avg)) || 1;
   const valueW = Math.max(VALUE_W,
     Math.ceil(Math.max(...rows.map((r) => r.value.length)) * 6.8) + 14);
   const plot = WIDTH - labelW - valueW;
@@ -991,28 +995,29 @@ export function chartSvg(title, subtitle, rowsIn) {
   ];
   rows.forEach((r, i) => {
     const y = PAD_T + i * band;
-    const w = plot * (r.avg / top), wlo = plot * (r.lo / top), whi = plot * (r.hi / top);
+    const w = plot * (r.avg / top);
     // With a caption the name sits on the bar's upper half and the caption under it, so the pair reads
     // as one block against the bar rather than as two columns.
     const ly = subs ? BAR_H / 2 : BAR_H / 2 + 4;
-    const mid = BAR_H / 2;
-    // Drawn OVER the bar, not beside it: the range belongs to the same quantity the bar measures, and
-    // a separate mark would read as a second series.
-    const spread = whi - wlo > 0.5
-      ? `<line class="whisker" x1="${wlo.toFixed(1)}" y1="${mid}" x2="${whi.toFixed(1)}" y2="${mid}"/>` +
-        `<line class="whisker-cap" x1="${wlo.toFixed(1)}" y1="${mid - 5}" x2="${wlo.toFixed(1)}" y2="${mid + 5}"/>` +
-        `<line class="whisker-cap" x1="${whi.toFixed(1)}" y1="${mid - 5}" x2="${whi.toFixed(1)}" y2="${mid + 5}"/>`
-      : "";
+    // NO WHISKER IS DRAWN. The range is still measured, still carried in
+    // `[label, mid, min, max, caption]`, and still readable in the tooltip and in the run table's
+    // per-run rows — it is only not plotted. A bar plus an overlaid interval is two marks for one
+    // row, and once the bar became a median the interval was drawing a spread the bar deliberately
+    // does not follow.
+    //
+    // The value sits against the BAR (`w`), not against the old `max(w, whi)`. While the whisker was
+    // drawn the label had to clear it; keeping that would leave a gap on exactly the rows with the
+    // widest spread, i.e. the number floating away from the bar it belongs to.
     out.push(
       `<g transform="translate(0,${y})">` +
-      `<title>${esc(r.label)}${r.sub ? ` (${esc(r.sub)})` : ""}: mean ${fmt(r.avg, 1)} CU` +
-      `${r.ranged ? `, range ${fmt(r.lo, 1)}–${fmt(r.hi, 1)}` : ""}</title>` +
+      `<title>${esc(r.label)}${r.sub ? ` (${esc(r.sub)})` : ""}: median ${fmt(r.avg, 1)} CU` +
+      `${r.ranged ? `, range ${fmt(r.lo, 1)}–${fmt(r.hi, 1)} over the group's runs` : ""}</title>` +
       `<text class="bar-label" x="${labelW - 10}" y="${ly.toFixed(0)}" text-anchor="end">` +
       `${esc(r.label)}</text>` +
       (r.sub ? `<text class="bar-caption" x="${labelW - 10}" y="${(ly + 13).toFixed(0)}" ` +
         `text-anchor="end">${esc(r.sub)}</text>` : "") +
-      `<g transform="translate(${labelW},0)"><path class="bar" d="${barPath(w, BAR_H)}"/>${spread}</g>` +
-      `<text class="bar-value" x="${(labelW + Math.max(w, whi) + 8).toFixed(1)}" ` +
+      `<g transform="translate(${labelW},0)"><path class="bar" d="${barPath(w, BAR_H)}"/></g>` +
+      `<text class="bar-value" x="${(labelW + w + 8).toFixed(1)}" ` +
       `y="${(BAR_H / 2 + 4).toFixed(0)}">${r.value}</text></g>`);
   });
   out.push(`<line class="axis" x1="${labelW}" y1="${PAD_T - 6}" x2="${labelW}" ` +
@@ -1065,8 +1070,8 @@ const median = (vals) => {
  * What it does NOT fix, and the page must not pretend otherwise: with n=1 or n=2 the median IS the
  * mean, and four of nine bars are that thin today. It dampens an outlier once there are three
  * samples; it does not make one dispatch trustworthy. More runs is the only thing that does, which
- * is why the whiskers stay MIN/MAX — the full spread is still drawn, so a reader sees the bad sample
- * rather than having it quietly averaged away.
+ * is why min/max are still CARRIED and stated in the tooltip and the per-run rows — a reader can
+ * still find the bad sample rather than having it quietly averaged away, it is just not plotted.
  *
  * A run that measured NOTHING is dropped rather than counted as a zero, which would pull the value
  * toward "free" for a run that was never read.
@@ -1152,8 +1157,8 @@ export function groupRows(groups, table = DEFAULTS.table) {
     if (!vals.length) { out.push([label, 0, 0, 0, caption]); continue; }
     // `groupMid`, the same call `martPoints` makes — the bar and the two tables under it are one
     // measurement shown three times, and deriving the middle differently here is exactly how a page
-    // ends up plotting 1,582 above a row reading 1,781. The whiskers stay MIN/MAX: the median is
-    // what the bar CLAIMS, the full spread is what the reader gets to check it against.
+    // ends up plotting 1,582 above a row reading 1,781. min/max ride along unplotted: the median is
+    // what the bar CLAIMS, and the tooltip is where a reader checks it against the spread.
     out.push([label, round1(groupMid(vals)), round1(Math.min(...vals)), round1(Math.max(...vals)),
       caption]);
   }
@@ -1762,7 +1767,7 @@ export function spread(vals) {
  * `{column: {measure: [reading per run]}}` across every measure this page carries.
  *
  * The ETL half comes through `spreadFor` rather than being re-derived, so the floor is measured from
- * the very samples the ETL chart's whisker draws. The analytics and tier halves come off `entries`,
+ * the very samples the ETL spread is built from. The analytics and tier halves come off `entries`,
  * which is the only place a run's own CU and its own timings are keyed together.
  */
 export function columnSamples(runs, ledger, keyOf, entries, times) {

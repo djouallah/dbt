@@ -1277,8 +1277,9 @@ no data at all. `all.yml`, `dbt.yml` and `cu.yml` are gone.
   dispatch lifted its bar 11% and dwh's 16%, i.e. the chart reported Fabric's weather as a property
   of the layout. **What the median does NOT fix, and must not be sold as fixing: at n=1 and n=2 it IS
   the mean**, and four of nine bars are that thin — it dampens an outlier once there are three
-  samples, and only more dispatches make one trustworthy. **The whiskers stay MIN/MAX** for exactly
-  that reason: the median is what the bar claims, the full spread is what lets a reader check it.
+  samples, and only more dispatches make one trustworthy. **Nothing is plotted over the bar** — one
+  mark per row — but min/max are still measured and stated in the tooltip and in `Every run`'s
+  per-run rows, so the median is what the bar claims and the spread stays checkable.
   **Grouping is MEASURED, labelling is DECLARED — with ONE stated exception.** The key is
   `(V-Order, band(files), band(row groups), sort columns)`, the first three from the parquet as
   `stats.py`

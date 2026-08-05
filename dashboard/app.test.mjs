@@ -1123,14 +1123,14 @@ test("every run carries its own RG count, and a run without one carries a dash",
 
 // ------------------------------------------------------------------------------------- the charts
 
-test("the bar is the MEDIAN across runs, and the whisker is the full range", () => {
+test("the bar is the MEDIAN across runs", () => {
   // One dispatch is one sample of a SHARED capacity, so a single number is a reading rather than a
   // result — and a BAD sample is not a property of the layout. Real case: run 30966983384 read
   // 2,629.3 against 1,331.5/1,577.1/1,586.7 for byte-identical parquet, because its XMLA read billed
   // 49s against ~33s and its refresh took 28.4s against ~8s. A mean lets that one run lift the bar;
   // the median does not. The values below are that shape — mean 2,000, median 1,500 — so this test
-  // fails if anyone puts the mean back. The whisker still shows the outlier: the median is what the
-  // bar claims, the range is what the reader checks it against.
+  // fails if anyone puts the mean back. The outlier is still reachable — the tooltip carries the
+  // range and `Every run` carries the dispatch — it is simply not plotted.
   const runs = [full("a-1.json", "spark", { finishedHoursAgo: 72 }),
     full("b-2.json", "spark", { finishedHoursAgo: 48 }),
     full("c-3.json", "spark", { finishedHoursAgo: 24 })];
@@ -1147,7 +1147,7 @@ test("the bar is the MEDIAN across runs, and the whisker is the full range", () 
   assert.deepEqual(c.labels, ["spark"], "the analytics bar is NAMED for its writer");
   assert.equal(c.values[0], "1,500.0", "the median, NOT the 2,000.0 mean");
   assert.ok(c.svg.includes("range 1,000.0–3,500.0"), "the outlier is still drawn, not averaged away");
-  assert.ok(!c.subtitle.includes("mean of"), "no run-count chatter in the subtitle — the whisker shows it");
+  assert.ok(!c.subtitle.includes("mean of"), "no run-count chatter in the subtitle");
   // ...and the two tables under it quote that same 1,500: one measurement shown three times.
   assert.ok(rows(block(out, "Cost and speed by layout")).some((r) => r.includes("| 1,500 |")),
     rows(block(out, "Cost and speed by layout")).join(" / "));
@@ -1184,15 +1184,29 @@ test("the chart sorts by the bar value", () => {
   assert.deepEqual(charts(out)[0].labels, ["dwh", "spark"], "cheapest mean first");
 });
 
-test("the svg draws a whisker only when there is a range", () => {
-  // A single run is a point, and drawing a zero-width whisker on it would suggest a spread that was
-  // never measured.
+test("the svg draws ONE mark per row — no whisker over the bar", () => {
+  // A bar with an interval laid over it is two marks for one row, and once the bar became a median
+  // the interval plotted a spread the bar deliberately ignores. The range is still MEASURED and
+  // still carried — it just is not drawn.
   const wide = d.chartSvg("t", "s", [["spark", 1500.0, 1000.0, 2000.0, "cap"]]);
-  assert.equal((wide.match(/class="whisker"/g) || []).length, 1);
-  assert.equal((wide.match(/whisker-cap/g) || []).length, 2);
-  assert.ok(wide.includes("range 1,000.0–2,000.0"), "the exact spread is in the tooltip");
-  const flat = d.chartSvg("t", "s", [["dwh", 1853.5, 1853.5, 1853.5, "cap"]]);
-  assert.ok(!flat.includes('class="whisker"'));
+  assert.ok(!wide.includes("whisker"), "nothing overlaid on the bar");
+  assert.equal((wide.match(/class="bar"/g) || []).length, 1, "one bar, one row");
+  assert.ok(wide.includes("range 1,000.0–2,000.0"), "the exact spread survives in the tooltip");
+  assert.ok(wide.includes("median 1,500.0 CU"), "and the tooltip names the statistic");
+});
+
+test("the plot is scaled to the widest BAR, not to a range it no longer draws", () => {
+  // While the whisker was drawn the plot had to fit `hi`, so every bar was shortened to leave room
+  // for it. Kept after removing it, one wide-spread row would squash the whole chart for nothing.
+  const svg = d.chartSvg("t", "s", [["a", 100.0, 10.0, 9000.0, ""], ["b", 50.0, 50.0, 50.0, ""]]);
+  // `barPath` ends the straight run one corner-radius short, so add it back to compare widths.
+  const widths = [...svg.matchAll(/class="bar" d="M0,0 H([\d.]+) A([\d.]+)/g)]
+    .map((m) => Number(m[1]) + Number(m[2]));
+  assert.equal(widths.length, 2);
+  // Rows sort cheapest first, so `b` (50) is drawn above `a` (100). `a` is the largest VALUE and
+  // fills the plot; `b` is exactly half of it. Neither is scaled against the 9,000 that set `top`
+  // while the whisker existed — under that scale both bars would be a sliver.
+  assert.equal(widths[0] / widths[1], 0.5, `the 50 bar should be half the 100 bar: ${widths}`);
 });
 
 test("the svg still takes the older three-field row", () => {
