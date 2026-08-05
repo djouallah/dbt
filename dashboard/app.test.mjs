@@ -356,9 +356,9 @@ test("a sorted write gets its own column, and absence reads as unsorted", () => 
   assert.ok(cols.some((c) => c.endsWith("sorted")), cols);
 });
 
-test("the layout caption names the sort without listing its columns", () => {
+test("the layout LABEL names the sort without listing its columns", () => {
   // `duckrun sorted`, beside `spark V-Order` — which does not spell out what V-Order does either.
-  // There is one sort in this project and its columns are in the model.
+  // The columns live in the CAPTION now (`layoutLabel`), where the shape already sits.
   assert.equal(d.producer(lay("duckrun", 4, 25, { cfg: { sorted: "true" } })), "duckrun sorted");
   assert.equal(d.producer(lay("duckrun", 4, 27, { cfg: { vcores: "64" } })), "duckrun",
     "vcores still never reaches a caption about parquet");
@@ -374,6 +374,8 @@ test("a sort splits the layout bar even though the bands do not move", () => {
   assert.deepEqual(d.layoutKey(plain).slice(0, 3), d.layoutKey(sorted).slice(0, 3),
     "same V-Order and same bands — the measured half cannot tell them apart");
   assert.notDeepEqual(d.layoutKey(plain), d.layoutKey(sorted));
+  // The key carries the resolved COLUMNS, not a boolean — see the two-sorts test below.
+  assert.equal(d.layoutKey(sorted)[3], "date,time");
 });
 
 test("a record with no sorted key groups with an unsorted run, not alone", () => {
@@ -384,6 +386,36 @@ test("a record with no sorted key groups with an unsorted run, not alone", () =>
   const off = lay("iceberg", 4, 27, { cfg: { vcores: "64" } });
   assert.deepEqual(d.layoutKey(old), d.layoutKey(off));
   assert.equal(d.layoutKey(old)[3], false);
+});
+
+test("two sorts on different keys never share a bar, even when the bands agree", () => {
+  // The real pair — `['date','time','DUID']` and `['date','time']` — sits in separate bars today
+  // only because 3 and 4 files cross a band boundary. That is luck, so the key carries the columns:
+  // a `sort_by='auto'`-era record witnesses its own (`dbt.<engine>.sort_by_auto`), a recent record
+  // carries only the boolean and gets the model's declared key.
+  const auto = lay("duckrun", 4, 25, { cfg: { sorted: "true" }, file: "a-1.json" });
+  auto.dbt = { duckrun: { sort_by_auto: { fct_summary: ["date", "time", "DUID"] } } };
+  const declared = lay("duckrun", 4, 25, { cfg: { sorted: "true" }, file: "b-2.json" });
+  assert.equal(d.layoutKey(auto)[3], "date,time,DUID");
+  assert.equal(d.layoutKey(declared)[3], "date,time");
+  assert.deepEqual(d.layoutKey(auto).slice(0, 3), d.layoutKey(declared).slice(0, 3));
+  const groups = d.layoutGroups([{ rec: auto }, { rec: declared }]);
+  assert.equal(groups.length, 2, "identical shape, different sort — two bars");
+});
+
+test("the caption says which columns a sorted bar is ordered by, row groups only", () => {
+  // `by date, time, DUID · 25 RG` — the measured key when the record has one, the declared
+  // `date, time` otherwise, nothing for an unsorted bar. Files are not printed at all: segments are
+  // what drive Direct Lake's cost, and the file BAND still separates bars without being said.
+  const auto = lay("duckrun", 4, 25, { cfg: { sorted: "true" } });
+  auto.dbt = { duckrun: { sort_by_auto: { fct_summary: ["date", "time", "DUID"] } } };
+  assert.equal(d.layoutLabel([{ rec: auto }]), "by date, time, DUID · 25 RG");
+  const declared = lay("duckrun", 1, 9, { cfg: { sorted: "true" } });
+  assert.equal(d.layoutLabel([{ rec: declared }]), "by date, time · 9 RG");
+  const plain = lay("duckrun", 4, 27, { cfg: { vcores: "64" } });
+  assert.equal(d.layoutLabel([{ rec: plain }]), "27 RG");
+  const vo = lay("spark", 11, 11, { vorder: true, cfg: { resource_profile: "readHeavyForPBI" } });
+  assert.equal(d.layoutLabel([{ rec: vo }]), "V-Order · 11 RG");
 });
 
 test("a column header calls a profile by its own name", () => {
@@ -484,7 +516,7 @@ test("the page renders end to end with charts and a layout", () => {
   assert.ok(c[0].title.includes("Capacity units per parquet layout"));
   assert.ok(c[0].subtitle.includes("lower is better"));
   assert.deepEqual(c[0].labels, ["duckrun"]);
-  assert.deepEqual(c[0].captions, ["4 files · 79 RG"], "the shape is the sub-label");
+  assert.deepEqual(c[0].captions, ["79 RG"], "the shape is the sub-label, row groups only");
   assert.ok(c[0].values[0].startsWith("2,041.0"));
   // The ETL total is still on the page, in the table that reports it per bucket.
   assert.ok(rr.some((r) => r.startsWith("| **etl** |") && r.includes("31,080.0")), rr.join(" / "));
@@ -1129,7 +1161,7 @@ test("the same parquet is one bar however many engines wrote it", () => {
   const c = charts(out);
   assert.deepEqual(c[0].labels, ["duckrun"], "one layout, one bar");
   assert.equal(c[0].values[0], "1,500.0");
-  assert.deepEqual(c[0].captions, ["4 files · 27 RG"], "the shape it grouped on sits underneath");
+  assert.deepEqual(c[0].captions, ["27 RG"], "the shape it grouped on sits underneath");
   assert.equal(c.length, 1, "and it is the only chart");
   // ...while the ETL side keeps BOTH columns, because there the writer and the compute it was given
   // are the entire subject. That asymmetry is the change and it must not be tidied away — it just
@@ -1159,7 +1191,8 @@ test("two runs of ONE column that wrote different parquet are two bars", () => {
   assert.deepEqual(c.labels, ["duckrun sorted", "duckrun sorted"], "one label, two layouts");
   assert.deepEqual(c.values, ["1,600.0", "2,400.0"], "each run's OWN CU, never their mean");
   // The caption is the whole reason two bars with one label read: the label answers who wrote it.
-  assert.deepEqual(c.captions, ["4 files · 25 RG", "3 files · 26 RG"]);
+  // Neither fixture carries `sort_by_auto`, so the sort columns are the declared fallback.
+  assert.deepEqual(c.captions, ["by date, time · 25 RG", "by date, time · 26 RG"]);
   // ...and the mart block says the same thing, because its rows ARE these groups.
   const body = rows(block(out, "the mart the queries land on")).slice(1);
   assert.equal(body.length, 2, "one mart row per bar, not one per writer");

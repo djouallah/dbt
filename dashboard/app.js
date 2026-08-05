@@ -142,8 +142,8 @@ export const DELETABLE_ROLES = new Set(["output", "dwh_src", "compute", "semanti
 // the record disagreed about the name of the same setting. `default` was the worse half: it named the
 // workspace's CHOICE rather than the profile, so it would silently become a lie the day the workspace
 // default changed, and it hid which profile a bare dispatch actually got.
-// The effect is still said — where it is MEASURED rather than declared. `layoutCaption` reads
-// `vorder` off the parquet, so a bar reads `spark readHeavyForPBI` over `V-Order · 10–11 files ·
+// The effect is still said — where it is MEASURED rather than declared. `layoutLabel` reads
+// `vorder` off the parquet, so a bar reads `spark readHeavyForPBI` over `V-Order ·
 // 10–11 RG`: the label names the knob that was turned, the caption states what came out. That split
 // also survives a profile whose name misleads, which is not hypothetical — `readHeavyForSpark` reads
 // like it enables V-Order and sets no vorder at all.
@@ -153,9 +153,8 @@ export const DELETABLE_ROLES = new Set(["output", "dwh_src", "compute", "semanti
 // LAYOUT_CONFIG the same way the moment a second one joins. It is the ONLY relabelling left: the
 // resource profile is now printed verbatim (see above), and this exists because `sorted=true` has no
 // name of its own to print.
-// Deliberately does NOT spell the sort key out — which is also the only honest label: the key comes
-// from duckrun's `sort_by='auto'` picker, which re-profiles every batch, so no fixed column list
-// would be true across runs.
+// The LABEL still does not spell the sort key out — the caption does (`sortKeyOf`), which is where
+// the shape of what was written already lives.
 export const CONFIG_LABEL = { "sorted=true": "sorted" };
 
 // The dispatch config that is SHOWN to change what gets written. `vcores` and
@@ -555,7 +554,10 @@ export function sameGeneration(runs, table = DEFAULTS.table) {
  * `stats.py` measures sort ORDER, so the config the run recorded is the only witness that the parquet
  * differs. Leaving it out is not neutral — a sorted and an unsorted duckrun run wrote 4 files and the
  * same bands either way, so they would share one bar and have their cold/warm/hot means averaged
- * together, which is precisely the comparison the flag exists to make.
+ * together, which is precisely the comparison the flag exists to make. It carries the resolved
+ * COLUMN LIST, not a boolean, so two sorts on different keys can never share a bar either — the
+ * `['date','time','DUID']` and `['date','time']` runs land in separate bars today only because their
+ * file bands happen to differ, and that is luck, not a rule.
  *
  * A measured version is possible later and would be better: per-file `date` min/max from the Delta log
  * says whether files cover disjoint date ranges, which is what a date sort actually produces.
@@ -564,12 +566,33 @@ export function layoutKey(rec, table = DEFAULTS.table) {
   const d = martStats(rec, table);
   if (d.num_files === undefined && d.num_row_groups === undefined) return null;
   if (d.num_files === null && d.num_row_groups === null) return null;
-  // `Boolean` so a record with no `sorted` key — every run before the input existed — keys
-  // identically to an unsorted one rather than opening a bar of its own. Unlike the file counts
-  // above, absence here is not "unmeasured": those runs demonstrably wrote unsorted parquet.
-  const cfg = ((rec || {}).layout || {}).config || {};
-  const sorted = Boolean((cfg[(rec || {}).engine] || {}).sorted);
-  return [Boolean(d.vorder), layoutBand(d.num_files), layoutBand(d.num_row_groups), sorted];
+  return [Boolean(d.vorder), layoutBand(d.num_files), layoutBand(d.num_row_groups),
+    sortKeyOf(rec, table)];
+}
+
+// The declared sort key of the one sorted model in the project: `models/duckdb/marts/fct_summary.sql`
+// sets `sort_by=['date','time']` behind DUCKDB_SORTED, and the run record carries only the boolean —
+// so this constant is the fallback witness for WHICH columns a sorted run ordered by. Change the
+// model's key and this must move with it.
+export const DECLARED_SORT_KEY = ["date", "time"];
+
+/**
+ * The sort key one run wrote under, as a `"date,time"` string, or `false` when it wrote unsorted.
+ *
+ * `false` — not `null` — for a record with no `sorted` config at all: every run before the input
+ * existed demonstrably wrote unsorted parquet, so absence here is not "unmeasured" (unlike the file
+ * counts in `layoutKey`) and must key identically to an explicit unsorted run.
+ *
+ * A `sort_by='auto'`-era record carries the picker's own answer under
+ * `dbt.<engine>.sort_by_auto.<table>`, and that measured value wins; otherwise the declared constant
+ * stands in, because the record's boolean is all the recent runs wrote down.
+ */
+export function sortKeyOf(rec, table = DEFAULTS.table) {
+  const engine = (rec || {}).engine || "?";
+  const cfg = (((rec || {}).layout || {}).config || {})[engine] || {};
+  if (!cfg.sorted) return false;
+  const auto = ((((rec || {}).dbt || {})[engine] || {}).sort_by_auto || {})[table];
+  return (Array.isArray(auto) && auto.length ? auto : DECLARED_SORT_KEY).join(",");
 }
 
 /**
@@ -616,8 +639,11 @@ export function layoutGroups(entries, table = DEFAULTS.table) {
 /**
  * The bar label: the layout itself, short enough for the chart's 224px label gutter.
  *
- * `V-Order · 11 files · 11 RG`, `4 files · 27 RG`, `357 files · 1,172 RG`. A metric that differs across
- * the group's members prints as a range, which is what a band means in practice.
+ * `V-Order · 11 RG`, `19–27 RG`, `by date, time · 9 RG`. Row groups only — segments are what drive
+ * Direct Lake's transcode and scan cost, and the file count was a second number saying less; the
+ * file BAND still separates bars (`layoutKey`), it just is not printed. A metric that differs across
+ * the group's members prints as a range, which is what a band means in practice. A sorted bar names
+ * its sort columns, because "sorted" alone does not say what Power BI is reading in order.
  */
 export function layoutLabel(members, table = DEFAULTS.table) {
   const stats = members.map(({ rec }) => martStats(rec, table));
@@ -631,7 +657,11 @@ export function layoutLabel(members, table = DEFAULTS.table) {
   };
   const bits = [];
   if (stats.some((s) => s.vorder)) bits.push("V-Order");
-  for (const [field, unit] of [["num_files", "files"], ["num_row_groups", "RG"]]) {
+  // One value per bar when grouping came through `layoutKey` (the sort key is IN the key); the
+  // dedup only matters for the unmeasured-column fallback, where members are grouped by column.
+  const sorts = [...new Set(members.map(({ rec }) => sortKeyOf(rec, table)).filter(Boolean))];
+  if (sorts.length) bits.push(`by ${sorts.join(" / ").split(",").join(", ")}`);
+  for (const [field, unit] of [["num_row_groups", "RG"]]) {
     const v = rng(field);
     if (v) bits.push(`${v} ${unit}`);
   }

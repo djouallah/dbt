@@ -1245,16 +1245,25 @@ no data at all. `all.yml`, `dbt.yml` and `cu.yml` are gone.
   **Analytics is one bar per PARQUET LAYOUT.** Power BI never sees the engine: it opens parquet
   through Direct Lake and transcodes row groups, so what a query costs belongs to what was WRITTEN
   and the writer is metadata. The bar is **named for its writer and captioned with the shape** —
-  `spark V-Order` over `V-Order · 10–11 files · 10–11 RG`: the grouping is the layout, but a file
+  `spark readHeavyForPBI` over `V-Order · 10–11 RG`: the grouping is the layout, but a file
   count is a poor NAME even when it is the real subject, so the shape sits underneath where it
-  explains why two writers would ever share a bar. **ETL is one bar per column**, unchanged, because
+  explains why two writers would ever share a bar. **The caption prints ROW GROUPS ONLY** — segments
+  are what drive Direct Lake's transcode/scan cost and the file count was a second number saying
+  less; the file BAND still separates bars, it just is not printed. **A sorted bar's caption names
+  its sort columns** (`by date, time · 9 RG`): the record's own `dbt.<engine>.sort_by_auto` when the
+  `'auto'`-era scrape recorded one, else `DECLARED_SORT_KEY` in `app.js`, the constant mirroring the
+  one sort the model declares — change `fct_summary.sql`'s `sort_by` and that constant must move
+  with it. **ETL is one bar per column**, unchanged, because
   there the writer and the compute it was given are the entire subject.
   What forced it: duckrun at 64 cores and at 32 wrote 4 files and 27 row groups either way, so two
   bars 50% apart was not a comparison — it was one layout measured twice, presented as two results.
   **Grouping is MEASURED, labelling is DECLARED — with ONE stated exception.** The key is
-  `(V-Order, band(files), band(row groups), sorted)`, the first three from the parquet as `stats.py`
+  `(V-Order, band(files), band(row groups), sort columns)`, the first three from the parquet as
+  `stats.py`
   read it, so two unrelated engines that wrote the same shape *do* share a bar; the caption comes
-  from `LAYOUT_CONFIG` so it does not re-word itself whenever a record lands.
+  from `LAYOUT_CONFIG` so it does not re-word itself whenever a record lands. The sort element is
+  the resolved COLUMN LIST, not a boolean, so two sorts on different keys never share a bar — the
+  `['date','time','DUID']` and `['date','time']` runs split by file band today only by luck.
   **IT GROUPS RUNS, NOT COLUMNS, and that was got wrong for one release.** A column is
   `(engine, config)` and the layout is measured per RUN, so two runs of one column can write different
   parquet — which is not hypothetical: `duckrun·64c+sorted` wrote **3 files / 26 RG** under an explicit
@@ -1297,10 +1306,10 @@ no data at all. `all.yml`, `dbt.yml` and `cu.yml` are gone.
   case and needed no measuring to admit — it is *nothing but* a physical ordering of the rows, so it
   reaches the parquet by definition. Its caption comes from `CONFIG_LABEL`, keyed `<key>=<value>`
   rather than by value: `PROFILE_LABEL` can be value-keyed because a profile NAME says which knob it
-  is, and a bare `true` does not. The label is just **`sorted`**, not the column list — there is one
-  sort in this project and its columns are in the model, so `duckrun sorted by date, time, DUID`
-  spent a wide caption on a detail beside `spark V-Order`, which does not spell out what V-Order does
-  either. `PROFILE_LABEL` names a profile
+  is, and a bare `true` does not. The LABEL is just **`sorted`**, not the column list —
+  `duckrun sorted by date, time, DUID` spent a wide label on a detail beside `spark V-Order`, which
+  does not spell out what V-Order does either. The columns live in the CAPTION instead
+  (`by date, time · 9 RG`), where the shape already sits. `PROFILE_LABEL` names a profile
   by its EFFECT (`readHeavyForPBI` → `V-Order`, `writeHeavy` → `default`) because that is the only
   thing a reader of this page wants from it; an unmapped profile keeps its own name rather than being
   guessed at — `readHeavyForSpark` reads like it enables V-Order and sets no vorder at all.

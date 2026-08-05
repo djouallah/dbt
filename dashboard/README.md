@@ -200,18 +200,29 @@ without a build, a token or a dispatch.
   per PARQUET LAYOUT**, because Power BI never sees the engine — it opens parquet through Direct Lake
   and transcodes row groups, so what a query costs belongs to what was written and the writer is
   metadata. The bar is **named for its writer and captioned with the shape** — `spark readHeavyForPBI`
-  over `V-Order · 10–11 files · 10–11 RG`: the grouping is the layout, but a file count is a poor name
+  over `V-Order · 10–11 RG`: the grouping is the layout, but a file count is a poor name
   even when it is the real subject, so the shape sits underneath where it explains why two writers
-  would ever share a bar. **ETL is one bar per column**, because there the writer and the compute it
+  would ever share a bar. **The caption prints row groups only** — segments are what drive Direct
+  Lake's transcode and scan cost, and the file count was a second number saying less; the file BAND
+  still separates bars, it just is not printed. **A sorted bar names its sort columns** —
+  `by date, time · 9 RG` — because `sorted` alone does not say what Power BI is reading in order.
+  The columns come from the record's own `dbt.<engine>.sort_by_auto` when the `sort_by='auto'`-era
+  scrape recorded one, else from `DECLARED_SORT_KEY`, the constant mirroring the one sort the model
+  declares (`models/duckdb/marts/fct_summary.sql`). **ETL is one bar per column**, because there the
+  writer and the compute it
   was given are the entire subject; its caption states only what the column name does not already
   say — see the caption note at the end of this file.
   What forced this: duckrun at 64 cores and at 32 wrote 4 files and 27 row groups either way, so two
   bars 50% apart was not a comparison — it was one layout measured twice, presented as two results.
   Grouping merges them and the range says what the gap really was.
   **Grouping is MEASURED, labelling is DECLARED.** The key is
-  `(V-Order, power-of-two band of files, power-of-two band of row groups, sorted)` read off the parquet
+  `(V-Order, power-of-two band of files, power-of-two band of row groups, sort columns)` read off
+  the parquet
   as `stats.py` saw it, so two unrelated engines that wrote the same shape *do* share a bar. The caption
-  comes from `LAYOUT_CONFIG`, so it does not re-word itself every time a record lands.
+  comes from `LAYOUT_CONFIG`, so it does not re-word itself every time a record lands. The sort
+  element is the resolved COLUMN LIST, not a boolean, so two sorts on different keys can never share
+  a bar — the `['date','time','DUID']` and `['date','time']` runs split by file band today only by
+  luck.
   **It groups RUNS, not columns, and that distinction is load-bearing.** A column is
   `(engine, config)`, so two of its runs can write different parquet — `duckrun·64c+sorted` wrote
   3 files / 26 row groups under an explicit `sort_by=['date','time','DUID']` and 4 files / 25 under the
@@ -243,8 +254,8 @@ without a build, a token or a dispatch.
   the record called one setting two things. `default` was the worse half: it named the workspace's
   *choice* rather than the profile, so it would silently become a lie the day that default changed,
   and it hid which profile a bare dispatch actually got. The effect is still said — **where it is
-  measured rather than declared**: `layoutCaption` reads `vorder` off the parquet, so a bar reads
-  `spark readHeavyForPBI` over `V-Order · 10–11 files · 10–11 RG`. The label names the knob that was
+  measured rather than declared**: `layoutLabel` reads `vorder` off the parquet, so a bar reads
+  `spark readHeavyForPBI` over `V-Order · 10–11 RG`. The label names the knob that was
   turned, the caption states what came out — a split that also survives a profile whose name misleads,
   which is not hypothetical, since `readHeavyForSpark` reads like it enables V-Order and sets no
   vorder at all. One cost, worth knowing: column order is alphabetical, so renaming moved
