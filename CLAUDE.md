@@ -704,14 +704,23 @@ to `provision.py teardown`, which polls for a 404 and goes red if it is still li
   item carries `created: true` — i.e. the previous run's teardown really did run. An input only ever
   stated an intention; 143M rows written from nothing and 3M rows appended are not the same run, and
   the record has to say which one a layout or a CU number describes.
-- **`native_execution_engine` toggles Fabric's NEE on the spark leg, off by default.** It sets
+- **`native_execution_engine` toggles Fabric's NEE on the spark leg, ON by default.** It sets
   `SPARK_NATIVE_ENABLED` → `spark.native.enabled` in the Livy conf, and that one key is the whole
   recipe: Microsoft's current session-level doc sets nothing else. Earlier preview guidance and
   most community posts pair it with
   `spark.shuffle.manager=org.apache.spark.shuffle.sort.ColumnarShuffleManager` — that spelling is
   **absent from the current doc**, so this repo does not set it; check the doc, not a blog, before
-  adding it. Read the NEE bullet above before using the toggle: execution-side semantic
+  adding it. Read the NEE bullet above before drawing conclusions from a run: execution-side semantic
   divergences, silent JVM fallback for unsupported operators, and V-Order behaviour still unstated.
+  **It was off by default and is now on.** That is a deliberate change of what a bare dispatch
+  measures, not a finding: across seven spark runs NEE moves **nothing** — analytics CU 1,149 /
+  1,306 / 1,480 with it on against 1,514 with it off under `readHeavyForPBI`, and the same file and
+  row-group layout either way, which is why `LAYOUT_CONFIG` excludes it from the analytics bars in
+  the first place. The default flipped because it is what a Fabric user gets by choosing the faster
+  engine. Note the consequence for the page: `variantTag` omits a flag that is OFF, so spark columns
+  now read `spark·readHeavyForPBI+NEE` by default and a deliberately-disabled run is the one that
+  needs the explicit spelling — `columnsFor` already falls the whole engine back to explicit when two
+  configs would collide, so nothing breaks, but the common column gains `+NEE`.
 - **`spark_resource_profile` is a dispatch choice, default `writeHeavy`** (the workspace default,
   i.e. no V-Order). `readHeavyForPBI` is the only value that enables V-Order, and it also flips
   `optimizeWrite` to a 1 GB bin size, so ticking it rewrites file layout broadly — judge it in the

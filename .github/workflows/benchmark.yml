@@ -77,7 +77,7 @@ on:
       native_execution_engine:
         description: "spark NEE"
         type: boolean
-        default: false
+        default: true
       sorted:
         description: "duckrun writes fct_summary sorted by date, time in 16M-row row groups / 1 GB files — spark readHeavyForPBI's segment size (needs duckrun >= 0.4.44; duckrun only)"
         type: boolean
@@ -148,8 +148,15 @@ env:
   DUCKDB_TEMP_DIR: /tmp/duckdb_spill
   CI_DOWNLOAD_LIMIT: ${{ inputs.download_limit }}
   FABRIC_CORES: ${{ inputs.cores }}
-  # Spark leg only, off by default: profiles.yml puts spark.native.enabled into the Livy conf. That
+  # Spark leg only, ON by default: profiles.yml puts spark.native.enabled into the Livy conf. That
   # single key is Microsoft's current documented session-level recipe.
+  # Measured across seven spark runs, NEE moves NOTHING here — analytics CU 1,149/1,306/1,480 with it
+  # on against 1,514 with it off under readHeavyForPBI, and it produces the same file/row-group
+  # layout either way, which is why `LAYOUT_CONFIG` excludes it from the analytics bars. The default
+  # flipped anyway: it is what a Fabric user gets by choosing the faster engine, so a bare dispatch
+  # should measure that. Read the NEE bullet in CLAUDE.md before drawing conclusions from a run with
+  # it on — execution-side semantic divergences (`round()`, DECIMAL->FLOAT), silent JVM fallback for
+  # unsupported operators, and V-Order behaviour under NEE still undocumented.
   SPARK_NATIVE_ENABLED: ${{ inputs.native_execution_engine && 'true' || 'false' }}
   # Spark leg only. writeHeavy is the workspace default, so the default dispatch writes what a plain
   # Fabric session writes — and therefore NO V-Order, which readHeavyForPBI alone enables.
