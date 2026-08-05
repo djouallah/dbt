@@ -84,6 +84,9 @@ ENGINES = [t for t in ALL_ENGINES if not _want or t[0] in _want]
 TABLES = ["stg_csv_archive_log", "dim_calendar", "dim_duid",
           "fct_price", "fct_scada", "fct_price_today", "fct_scada_today", "fct_summary"]
 
+# The one table the query benchmark touches, the layout chart is about, and `encodings_for` reads.
+MART = "fct_summary"
+
 # The get_stats() detail carried per table (see stats_for) and how each column is rendered.
 DETAIL_KEYS = ("schema", "total_rows", "num_files", "num_row_groups",
                "avg_row_group", "size_mb", "vorder", "compression")
@@ -206,6 +209,69 @@ def stats_for(guid):
             for r in rows}
 
 
+def encodings_for(guid, table=MART):
+    """`{column: {encodings, type, dict_pages, chunks, mb}}` for one engine's MART parquet.
+
+    WHY THIS EXISTS. Every other lever on the layout chart is confounded, and the one hypothesis the
+    record could not test was the interesting one: whether the engines differ in what Power BI has to
+    transcode, i.e. PER-COLUMN PARQUET ENCODING. `compression` was captured (SNAPPY everywhere except
+    dwh, which is UNCOMPRESSED) and encoding was not, so a 2.6x gap between spark's two resource
+    profiles at the same row-group band had no measurable explanation. Bytes-per-row rules out size
+    as the cause — duckrun writes the DENSEST parquet on the page (5.63 B/row) and does not win, and
+    the smallest of all (4.74, the date,time,DUID sort) has that engine's worst CU.
+
+    No pyarrow: `get_stats(detailed=True)` returns DuckDB's raw `parquet_metadata()`, one row per
+    column chunk, carrying `encodings`, `type`, `dictionary_page_offset` and the compressed size. The
+    footers are already being read for the aggregate call, so the marginal cost is one more read of
+    the same files.
+
+    SCOPED TO THE MART, and that is a cost decision rather than a preference. The layout job already
+    runs ~10 minutes (the iceberg item alone reads at 12m+ over OneLake), a full pass would be one
+    chunk row per column per row group across all eight tables — iceberg's 1,172 row groups times
+    `fct_price`'s ~130 columns is six figures of rows for a question nobody asked — and `fct_summary`
+    is the only table the query benchmark touches, the only one the layout chart is about, and the
+    only one at row-count parity by construction.
+
+    Aggregated to one row per COLUMN, never per chunk: the distinct encodings across every chunk
+    (sorted, so two engines are string-comparable), whether a dictionary page was written, and the
+    compressed megabytes. That is what answers "same encoding or not" and it stays a handful of keys.
+
+    Best-effort, like `landing_stats`: any failure returns `{}` and the record simply has no
+    `encodings`. An absent key reads as "not measured"; `{}` per column would read as "no encodings",
+    which is not a thing parquet can be.
+    """
+    try:
+        # ONE relation: `description` and `fetchall` off the same object, because a second
+        # `get_stats(detailed=True)` would re-read every parquet footer over OneLake.
+        rel = reader(guid).get_stats(table, detailed=True)
+        at = {name: i for i, name in enumerate(d[0] for d in rel.description)}
+        rows = rel.fetchall()
+    except Exception as e:                              # noqa: BLE001 — never fail the layout job
+        sys.stderr.write(f"  encodings unavailable for {table} ({type(e).__name__}: {e})\n")
+        return {}
+    if not rows:
+        return {}
+    cols = {}
+    # `parquet_metadata()` column order is stable across DuckDB versions but not worth trusting by
+    # index alone — resolved by NAME above.
+    need = ("path_in_schema", "type", "encodings", "dictionary_page_offset", "total_compressed_size")
+    if any(k not in at for k in need):
+        sys.stderr.write(f"  parquet_metadata is missing {[k for k in need if k not in at]}\n")
+        return {}
+    for r in rows:
+        c = cols.setdefault(r[at["path_in_schema"]],
+                            {"encodings": set(), "type": r[at["type"]], "dict_pages": 0,
+                             "chunks": 0, "mb": 0.0})
+        for enc in str(r[at["encodings"]] or "").split(","):
+            if enc.strip():
+                c["encodings"].add(enc.strip())
+        c["dict_pages"] += 1 if r[at["dictionary_page_offset"]] else 0
+        c["chunks"] += 1
+        c["mb"] += (r[at["total_compressed_size"]] or 0) / 1048576
+    return {name: {**c, "encodings": sorted(c["encodings"]), "mb": round(c["mb"], 2)}
+            for name, c in sorted(cols.items())}
+
+
 def fmt(v, kind):
     if v is None:
         return "—"
@@ -324,7 +390,36 @@ def declared_sort_key():
     return {"fct_summary": cols} if cols else {}
 
 
-def build_doc(per_engine, engines, guids=None, landing=None):
+def encoding_table(encodings, engines):
+    """`fct_summary`'s per-column parquet encoding, engines side by side.
+
+    The question this answers is whether two engines hand Power BI the same thing to transcode. It
+    sits beside the layout table because that one reports SHAPE — files, row groups, size — and shape
+    turned out not to explain the CU: duckrun writes the densest parquet on the page and does not
+    win, and dwh writes UNCOMPRESSED and beats a SNAPPY spark build.
+    """
+    have = [e for e in engines if encodings.get(e)]
+    if not have:
+        return
+    print(f"## 🔤 `{MART}` column encoding\n")
+    print("| column | type | " + " | ".join(have) + " |")
+    print("| --- | --- | " + " | ".join("---" for _ in have) + " |")
+    for col in sorted({c for e in have for c in encodings[e]}):
+        # The type is the PARQUET physical type and the engines can legitimately disagree (a DATE is
+        # INT32 to one writer and INT64 to another), which is itself worth seeing — so it is printed
+        # from whichever engine has it and any disagreement shows up in the cells beside it.
+        typ = next((encodings[e][col]["type"] for e in have if col in encodings[e]), "—")
+        cells = []
+        for e in have:
+            c = encodings[e].get(col)
+            cells.append("—" if not c else
+                         f"`{'+'.join(c['encodings'])}`"
+                         f"{'' if c['dict_pages'] else ' ⚠️ no dict'} · {c['mb']:,.1f} MB")
+        print(f"| `{col}` | `{typ}` | " + " | ".join(cells) + " |")
+    print()
+
+
+def build_doc(per_engine, engines, guids=None, landing=None, encodings=None):
     """The layout document: run stamp, hardware config, per-engine item + GUID, per-table detail.
 
     Carries the run stamp too: a consumer reading this out of an artifact needs to know WHICH dbt run
@@ -376,6 +471,12 @@ def build_doc(per_engine, engines, guids=None, landing=None):
         "tables": list(TABLES),
         "detail_keys": list(DETAIL_KEYS),
         "stats": {e: per_engine.get(e) or {} for e in engines},
+        # `fct_summary`'s per-column parquet encoding — the one thing about what Power BI transcodes
+        # that nothing measured, and therefore the only untested explanation left for the CU gaps.
+        # Absent rather than `{}` when nothing was profiled, same rule as `landing`: an empty dict
+        # would read as "no encodings", which is not a state parquet can be in.
+        **({"encodings": {e: encodings[e] for e in engines if encodings.get(e)}}
+           if any((encodings or {}).get(e) for e in engines) else {}),
         # The INPUT side: files and bytes in the landing archive every engine reads. Absent, never
         # empty, when the listing failed — `{}` would read as "an empty archive", which is a
         # different statement from "not measured".
@@ -411,13 +512,20 @@ def write_json(doc, engines):
 
 
 def one_engine(item, kind):
-    """(guid, stats) for one Fabric item; exceptions propagate to the caller."""
+    """(guid, stats, mart encodings) for one Fabric item; exceptions propagate to the caller.
+
+    The encodings ride along in the SAME worker rather than a second pass: this function already
+    owns a reader for that item, and the pool is sized one thread per engine, so a separate pass
+    would either serialise behind the slowest engine again or double the connections.
+    """
     guid = find_guid(kind, item)
-    return guid, (stats_for(guid) if guid else {})
+    if not guid:
+        return guid, {}, {}
+    return guid, stats_for(guid), encodings_for(guid)
 
 
 def main():
-    per_engine, guids = {}, {}
+    per_engine, guids, encodings = {}, {}, {}
     # The items are independent and the iceberg one alone can take >10 minutes to read over
     # OneLake, so fetch them concurrently: wall-clock = slowest engine, not the sum. The landing
     # listing rides along in the same pool — it is a different item and a different question, and
@@ -427,12 +535,14 @@ def main():
         futures = {engine: pool.submit(one_engine, item, kind) for engine, item, kind in ENGINES}
     for engine, item, kind in ENGINES:
         try:
-            guids[engine], per_engine[engine] = futures[engine].result()
+            guids[engine], per_engine[engine], encodings[engine] = futures[engine].result()
             sys.stderr.write(f"  {engine} ({item} {guids[engine]}): "
                              f"{sum(d.get('total_rows') or 0 for d in per_engine[engine].values()):,}"
-                             f" rows total (all tables)\n")
+                             f" rows total (all tables), "
+                             f"{len(encodings[engine])} {MART} column(s) profiled\n")
         except Exception as e:
             per_engine[engine] = {}
+            encodings[engine] = {}
             sys.stderr.write(f"  {engine} ({item}) FAILED: {e}\n")
 
     engines = [e for e, _, _ in ENGINES]
@@ -440,7 +550,8 @@ def main():
     landing_table(land)
     parity_table(per_engine, engines)
     detail_tables(per_engine, engines)
-    write_json(build_doc(per_engine, engines, guids, land), engines)
+    encoding_table(encodings, engines)
+    write_json(build_doc(per_engine, engines, guids, land, encodings), engines)
 
 
 if __name__ == "__main__":

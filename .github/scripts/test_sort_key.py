@@ -110,6 +110,67 @@ def test_the_key_lands_at_the_top_LEVEL_dbt_branch_not_under_layout(stats, tmp_p
     assert record  # imported for the merge under test
 
 
+def _sample_parquet(tmp_path):
+    """A file with one dictionary-encoded column and one that falls back to PLAIN, so the
+    aggregation is exercised on both branches rather than on a uniform file."""
+    import duckdb
+    p = tmp_path / "p.parquet"
+    duckdb.connect().execute(
+        f"COPY (SELECT i::INT AS mw, (i%7)::VARCHAR AS duid FROM range(200000) t(i)) "
+        f"TO '{p.as_posix()}' (FORMAT PARQUET, COMPRESSION SNAPPY)")
+    return p
+
+
+def _reader_over(stats, monkeypatch, rel):
+    class R:
+        def get_stats(self, table=None, detailed=False):
+            return rel
+    monkeypatch.setattr(stats, "reader", lambda guid: R())
+
+
+def test_encodings_are_aggregated_per_column_not_per_chunk(stats, tmp_path, monkeypatch):
+    """The record has to stay small: `parquet_metadata` is one row per column per row group, and
+    iceberg's 1,172 row groups would be six figures of rows. One row per COLUMN is the contract."""
+    import duckdb
+    p = _sample_parquet(tmp_path)
+    rel = duckdb.connect().sql(f"SELECT * FROM parquet_metadata('{p.as_posix()}')")
+    _reader_over(stats, monkeypatch, rel)
+    got = stats.encodings_for("guid")
+    assert set(got) == {"mw", "duid"}, "one entry per column"
+    assert got["duid"]["encodings"] == ["PLAIN_DICTIONARY"]
+    assert got["duid"]["dict_pages"] == got["duid"]["chunks"], "every chunk wrote a dictionary"
+    # The discriminating case: a high-cardinality column the writer gave up dictionary-encoding on.
+    # If this ever reads PLAIN_DICTIONARY the measurement has stopped telling engines apart.
+    assert got["mw"]["encodings"] == ["PLAIN"]
+    assert got["mw"]["dict_pages"] == 0
+    assert got["mw"]["mb"] > got["duid"]["mb"], "and it is the one that costs bytes"
+    assert isinstance(got["mw"]["encodings"], list), "sets do not survive json.dump"
+
+
+def test_a_failed_or_empty_profile_is_absent_never_empty(stats, monkeypatch):
+    """`{}` per column would read as "no encodings", which parquet cannot be. Absent means the
+    layout job could not profile it — the same rule `landing` follows."""
+    class Boom:
+        def get_stats(self, table=None, detailed=False):
+            raise RuntimeError("OneLake said no")
+    monkeypatch.setattr(stats, "reader", lambda guid: Boom())
+    assert stats.encodings_for("guid") == {}
+    doc = stats.build_doc({}, ["duckrun"], {}, None, {"duckrun": {}})
+    assert "encodings" not in doc, "nothing profiled -> no key at all"
+
+
+def test_the_encodings_reach_the_document_under_their_engine(stats, tmp_path, monkeypatch):
+    import duckdb
+    p = _sample_parquet(tmp_path)
+    rel = duckdb.connect().sql(f"SELECT * FROM parquet_metadata('{p.as_posix()}')")
+    _reader_over(stats, monkeypatch, rel)
+    enc = {"duckrun": stats.encodings_for("g"), "spark": {}}
+    doc = stats.build_doc({}, ["duckrun", "spark"], {}, None, enc)
+    assert doc["encodings"]["duckrun"]["mw"]["encodings"] == ["PLAIN"]
+    assert "spark" not in doc["encodings"], "an engine that profiled nothing adds no column"
+    json.dumps(doc, default=str)      # the record is written with json.dump
+
+
 def test_an_unsorted_run_records_no_key_at_all(stats, tmp_path, monkeypatch):
     """Absence is what tells the page a run wrote unsorted parquet. A key here would caption an
     unsorted bar `by date, time`."""
