@@ -25,12 +25,25 @@
 --
 -- sort_by is the `sorted` DISPATCH INPUT, off by default, and it now DECLARES the write layout
 -- rather than delegating it: the named key ['date','time'] plus explicit geometry —
--- max_row_group_size 48M rows and target_file_size_mb 1024, so the 143.98M-row table should land
--- near 1 file / 3 row groups (readHeavyForPBI's 1 GB bin, without the spark profile). It spent one
--- era as 'auto' so the input measured what the adapter's picker does out of the box; the picker
--- kept choosing `date, time` and paid +19% ETL CU for the profiling pass against a named key's
--- +3.7%, so the key it picked is now simply written down. DUID was measured worth ~16% of size
--- (652.6 vs 777.2 MB below) and deliberately NOT taken: date,time only, the safe pick.
+-- max_row_group_size 16000000 and target_file_size_mb 1024. The three values are AIMED AT
+-- V-ORDER'S ANALYTICS CU (spark readHeavyForPBI, 4 measured runs: 1,149-1,514, mean ~1,362,
+-- always 9-11 files = 9-11 row groups of ~16.0M rows). Segment shape is V-Order's only
+-- STRUCTURAL edge — every duckrun run so far wrote 19-27 ragged 5.5-8M-row segments — so 16M
+-- (also VertiPaq's ceiling; the 48M declared first was over it) buys segment parity:
+-- 143,980,961 rows = 8 x 16M + 15.98M, exactly 9 full segments. The sort key owns the best
+-- warm/hot in the whole history (2,783/2,624 ms, run 30809945203 — better than every V-Order
+-- warm), so the bet is 9 clean segments + that key lands in V-Order's CU band without V-Order.
+-- THE 1 GB FILE CAP IS LOAD-BEARING, NOT A MIRROR OF binSize: delta-rs rolls files on in-flight
+-- buffered bytes and TRUNCATES the current row group at the cap (measured: a cap of 1.15x one
+-- RG's bytes wrote groups at 0.43x the declared rows), so chasing spark's 9 FILES with a small
+-- cap would shred the 16M segments. ~777 MB under a 1 GB cap = one file, and max_row_group_size
+-- alone cuts the groups. File count never separated engines in the CU data (dwh ships 78 files,
+-- iceberg 357); segments did.
+-- It spent one era as 'auto' so the input measured what the adapter's picker does out of the
+-- box; the picker kept choosing `date, time` and paid +19% ETL CU for the profiling pass against
+-- a named key's +3.7%, so the key it picked is now simply written down. DUID was measured worth
+-- ~16% of size (652.6 vs 777.2 MB below) and deliberately NOT taken: its run posted the worst
+-- duckrun CU (2,247.8) and warm (8,071 ms) in the table.
 -- DUCKRUN-ONLY without breaking the one-config-for-both rule, for the same reason partition_by
 -- was: `sort_by` and the geometry keys occur ZERO times in dbt-duckdb's adapter and macro package,
 -- so on iceberg they are parsed into the manifest and read by nobody. Both targets still run
@@ -53,7 +66,7 @@
 -- first-build overwrite, where an explicit row-group size bypasses the adaptive planner.
 --
 -- FOUR MEASURED POINTS, all 64 vCores, all full loads, all 143,980,961 rows. Every row-group
--- count is the adaptive planner's — the 48M cap first reaches a write with 0.4.44 (see above):
+-- count is the adaptive planner's — a declared cap first reaches a write with 0.4.44 (see above):
 --   none                    985.5 MB  4f/27RG  cold 23,491  warm 6,300  hot 5,420  etl 22,624
 --   auto -> `date, time`    777.2 MB  4f/25RG  cold 27,740  warm 3,498  hot 3,056  etl 26,991
 --   ['date','time','DUID']  652.6 MB  3f/26RG  cold 24,523  warm 3,141  hot 3,572  etl 23,465
@@ -86,8 +99,9 @@
 -- The picker question is CLOSED — it never added DUID — and the key is now written down as the
 -- `date, time` it kept choosing, minus the profiling pass that cost +19% ETL. DUID's ~16% of size
 -- is deliberately left on the table (the safe pick). What the input measures now is the declared
--- layout against the adaptive default: does collapsing ~25 row groups to ~3 move cold/warm/hot
--- the way Direct Lake's segment story says.
+-- layout against the adaptive default: does collapsing ~25 row groups to ~9 full 16M segments —
+-- spark readHeavyForPBI's exact geometry, minus V-Order — move cold/warm/hot the way Direct
+-- Lake's segment story says.
 --
 -- Not the trailing ORDER BY below doing any of this: that reaches no stored table on any engine
 -- (CLAUDE.md, "fairness invariant"), and at 143M rows with spilling it demonstrably did not reach
@@ -105,7 +119,7 @@
     unique_key=['date', 'time', 'DUID'],
     merge_clauses={'when_matched': [{'action': 'do_nothing'}]},
     sort_by=(['date', 'time'] if env_var('DUCKDB_SORTED', 'false') == 'true' else none),
-    max_row_group_size=(48000000 if env_var('DUCKDB_SORTED', 'false') == 'true' else none),
+    max_row_group_size=(16000000 if env_var('DUCKDB_SORTED', 'false') == 'true' else none),
     target_file_size_mb=(1024 if env_var('DUCKDB_SORTED', 'false') == 'true' else none),
     schema='mart'
 ) }}

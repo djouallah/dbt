@@ -614,7 +614,9 @@ to `provision.py teardown`, which polls for a 404 and goes red if it is still li
   **The `sorted` dispatch input is a KNOWING exception, and the only one.** With it on, duckrun
   writes `fct_summary` sorted by the declared key `['date','time']` (the key the retired `'auto'`
   picker kept choosing, without its +19% profiling pass; DUID's ~16% of size deliberately left on
-  the table) and declares geometry — `max_row_group_size: 48000000`, `target_file_size_mb: 1024`,
+  the table) and declares geometry — `max_row_group_size: 16000000` (spark readHeavyForPBI's
+  measured segment size, 9×16.0M on this table, and VertiPaq's ceiling — 48M was declared first
+  and was over it), `target_file_size_mb: 1024`,
   **needing duckrun ≥ 0.4.44**: 0.4.43's `_delta_core.sql` macro forwarded a fixed key list that
   carried `sort_by` and not the two geometry keys, so run 30955591822 wrote the estimator's 3f/19RG
   despite the config, silently. 0.4.44 forwards them (the notebook installs latest from PyPI) —
