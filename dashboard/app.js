@@ -1567,9 +1567,12 @@ export function renderEncodings(groups, martTable = DEFAULTS.table) {
   const cols = [];
   for (const [, members] of groups || []) {
     let enc = null;
+    // `layout.encodings`, a SIBLING of `layout.stats` — `stats.py` merges its whole document under
+    // `layout`, and this is layout data, so that is where it belongs. (`dbt.<engine>.sort_by` is the
+    // opposite case and merges separately: it is a fact about the dbt run, not about the parquet.)
     // Members arrive oldest-first, so the last one carrying a profile is the newest.
     for (const m of members) {
-      const e = (((m.rec || {}).encodings || {})[(m.rec || {}).engine]) || {};
+      const e = ((((m.rec || {}).layout || {}).encodings || {})[(m.rec || {}).engine]) || {};
       if (Object.keys(e).length) enc = e;
     }
     if (!enc) continue;

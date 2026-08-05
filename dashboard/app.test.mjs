@@ -1857,8 +1857,10 @@ test("column encoding renders per layout, and flags a column with no dictionary"
   const runs = [lay("duckrun", 4, 27, { cfg: { vcores: "64" }, file: "a-1.json" }),
     lay("spark", 10, 10, { vorder: true, cfg: { resource_profile: "readHeavyForPBI" },
       file: "b-2.json" })];
-  runs[0].encodings = { duckrun: enc(false) };
-  runs[1].encodings = { spark: enc(true) };
+  // `layout.encodings`, where stats.py actually merges it — a sibling of `layout.stats`, not a
+  // top-level key. Reading the wrong one renders nothing and looks exactly like "not measured".
+  runs[0].layout.encodings = { duckrun: enc(false) };
+  runs[1].layout.encodings = { spark: enc(true) };
   runs.forEach((r, i) => {
     r.items = { [`S${i}`]: gone("semantic_model", `aemo_${r.engine}`),
       [`O${i}`]: gone("output", `dbt_${r.engine}`) };
