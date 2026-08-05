@@ -79,7 +79,7 @@ on:
         type: boolean
         default: false
       sorted:
-        description: "duckrun writes fct_summary sorted by date, time; declares 48M-row RG / 1 GB files (inert until duckrun > 0.4.43; duckrun only)"
+        description: "duckrun writes fct_summary sorted by date, time in 48M-row row groups / 1 GB files (needs duckrun >= 0.4.44; duckrun only)"
         type: boolean
         default: false
 
@@ -155,8 +155,8 @@ env:
   # Fabric session writes — and therefore NO V-Order, which readHeavyForPBI alone enables.
   SPARK_RESOURCE_PROFILE: ${{ inputs.spark_resource_profile }}
   # DuckDB legs only, off by default: fct_summary renders `sort_by=['date','time']` plus the
-  # declared geometry (48M-row row groups, 1 GB files — inert until a duckrun release forwards the
-  # two keys through _delta_core.sql's config dict; see the model header).
+  # declared geometry (48M-row row groups, 1 GB files — needs duckrun >= 0.4.44, which forwards the
+  # two keys through _delta_core.sql's config dict; 0.4.43 dropped them silently, see model header).
   # Reaches the notebook through fabric_run.py's _FORWARD — a var missing from that tuple is
   # silently inert, which is how a 4GB DUCKDB_MEMORY_LIMIT nobody could dispatch around stood for
   # months — and reaches the `layout` job through this env, which is what puts it in the record and

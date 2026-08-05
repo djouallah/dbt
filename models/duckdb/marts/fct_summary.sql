@@ -37,16 +37,15 @@
 -- byte-identical model code and there is still no `target.name` in this tree. Off they render to
 -- `none`, which is what every run before the input did.
 --
--- ⚠️ THE GEOMETRY KEYS ARE INERT AS OF duckrun 0.4.43, AND THE FAILURE IS SILENT. Measured on run
--- 30955591822 (sorted=true, this config at 48M/1024): 651.1 MB, 3 files, 19 row groups — the
--- adaptive estimator's layout (log: "row-group geometry was sized for ~14,911,911 rows", 8M floor
--- x 18 = the 19 RG), not the declared one. The plugin and engine honor the values fine
--- (_geometry_config -> WriterProperties, no 16M clamp; duckrun's own parquet_layout CI pins the
--- same seam directly and gets 3 RG) — but the dbt materialization macro `_delta_core.sql` builds
--- its plugin config dict as a fixed key list that carries `sort_by` and NOT these two, so they
--- die between the manifest and the plugin. sort_by is unaffected (the 651 MB proves it sorted).
--- They start working when a duckrun release adds the two keys to that dict; the notebook installs
--- duckrun unpinned from PyPI, so no change is needed here — just re-measure after the release.
+-- THE GEOMETRY KEYS NEED duckrun >= 0.4.44, AND ON 0.4.43 THE FAILURE WAS SILENT. Measured on run
+-- 30955591822 (0.4.43, sorted=true, this config at 48M/1024): 651.1 MB, 3 files, 19 row groups —
+-- the adaptive estimator's layout (log: "row-group geometry was sized for ~14,911,911 rows", 8M
+-- floor x 18 = the 19 RG), not the declared one. The plugin and engine honored the values all
+-- along (_geometry_config -> WriterProperties, no 16M clamp); what 0.4.43 was missing is the hop
+-- between them — `_delta_core.sql` forwards model config to the plugin as a fixed key dict, and it
+-- carried `sort_by` but neither geometry key (sort_by is why the 651 MB still came out sorted).
+-- 0.4.44 forwards them and regression-tests the whole class; the notebook installs duckrun
+-- unpinned from PyPI, so dispatches from 2026-08-05 get the declared layout with no change here.
 --
 -- sort_by is honored on this model despite the adapter docs calling it inert on the delta_rs
 -- merge path: the merge here is insert-only, so the engine seam routes it to a DuckDB anti-join
@@ -54,7 +53,7 @@
 -- first-build overwrite, where an explicit row-group size bypasses the adaptive planner.
 --
 -- FOUR MEASURED POINTS, all 64 vCores, all full loads, all 143,980,961 rows. Every row-group
--- count is the adaptive planner's — the 48M cap has never reached a write (see the ⚠️ above):
+-- count is the adaptive planner's — the 48M cap first reaches a write with 0.4.44 (see above):
 --   none                    985.5 MB  4f/27RG  cold 23,491  warm 6,300  hot 5,420  etl 22,624
 --   auto -> `date, time`    777.2 MB  4f/25RG  cold 27,740  warm 3,498  hot 3,056  etl 26,991
 --   ['date','time','DUID']  652.6 MB  3f/26RG  cold 24,523  warm 3,141  hot 3,572  etl 23,465
@@ -86,9 +85,9 @@
 --
 -- The picker question is CLOSED — it never added DUID — and the key is now written down as the
 -- `date, time` it kept choosing, minus the profiling pass that cost +19% ETL. DUID's ~16% of size
--- is deliberately left on the table (the safe pick). What the input measures once the geometry
--- keys actually land (⚠️ above) is the declared layout against the adaptive default: does
--- collapsing ~25 row groups to ~3 move cold/warm/hot the way Direct Lake's segment story says.
+-- is deliberately left on the table (the safe pick). What the input measures now is the declared
+-- layout against the adaptive default: does collapsing ~25 row groups to ~3 move cold/warm/hot
+-- the way Direct Lake's segment story says.
 --
 -- Not the trailing ORDER BY below doing any of this: that reaches no stored table on any engine
 -- (CLAUDE.md, "fairness invariant"), and at 143M rows with spilling it demonstrably did not reach
