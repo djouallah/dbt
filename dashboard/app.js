@@ -1322,7 +1322,12 @@ export function renderSources(cols, entries, ledger, repo, now = null, gen = {})
     // This run's OWN tiers. A dash where it recorded none — a run that was built but not benchmarked
     // is skipped entirely, but a run can still be missing one tier (`runs < 3` yields no hot at all).
     const ms = (times[qid] || {});
+    // The mart row groups THIS run wrote — the shape the analytics numbers on the same row were
+    // measured against, per run rather than as the bar's range. A dash when the run recorded no
+    // layout, same as everywhere else: unmeasured is not zero.
+    const rg = martStats(rec, gen.table).num_row_groups;
     rows.push([col, link, `${started} (${load})`,
+      rg === undefined || rg === null ? DASH : fmt(Math.trunc(Number(rg)), 0),
       cu.etl ? fmt(classTotal(cu, "etl"), 1) : DASH,
       cu.analytics ? fmt(classTotal(cu, "analytics"), 1) : DASH,
       ...tiers.map((l) => (ms[l] ? fmt(ms[l], 0) : DASH)),
@@ -1335,10 +1340,11 @@ export function renderSources(cols, entries, ledger, repo, now = null, gen = {})
   // and the only one a reader arrives at looking for a particular dispatch. Menus on `column` and
   // `state` — the two cells that repeat; `run`, `built` and the CU columns are unique per row, so a
   // dropdown of them would just be the table again.
-  out.push(table(["column", "run", "built", "etl CU", "analytics CU",
+  out.push(table(["column", "run", "built", "RG", "etl CU", "analytics CU",
     ...tiers.map((l) => `${l} ms`), "items", "state"],
-  ["left", "left", "left", "right", "right", ...tiers.map(() => "right"), "right", "left"], rows,
-  { find: "filter runs — engine, run id, date…", menus: [0, 6 + tiers.length] }));
+  ["left", "left", "left", "right", "right", "right", ...tiers.map(() => "right"), "right", "left"],
+  rows,
+  { find: "filter runs — engine, run id, date…", menus: [0, 7 + tiers.length] }));
   out.push(note("**`etl CU` and `analytics CU` are that RUN's own totals** — the same GUID join as " +
     "*Cost by engine*, which quotes each column's newest run. The CHARTS quote neither: each bar is " +
     "the mean over the runs listed here that fed it. The two group differently, so one run can sit in " +

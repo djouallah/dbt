@@ -1075,11 +1075,25 @@ test("the run table is the only filterable one, and renders whole without JS", (
   const { html } = d.compose([full("a-1.json", "spark")], ledger({ OUT: 12.5, SEM: 3.25 }), {});
   const runs = block(html, "Every run on this page");
   assert.ok(runs.includes('class="filtered"'), "the run table is marked for the autofilter");
-  assert.ok(runs.includes('data-menus="0,6"'), "menus on `column` and `state`");
+  assert.ok(runs.includes('data-menus="0,7"'), "menus on `column` and `state`");
   assert.ok(!runs.includes("<select") && !runs.includes("<input"),
     "and it emits no controls — `wireTables` builds them from the rows");
   assert.equal((html.match(/class="filtered"/g) || []).length, 1, "no other table gets one");
   assert.ok(rows(runs).length >= 2, "header and at least one run, filter or no filter");
+});
+
+test("every run carries its own RG count, and a run without one carries a dash", () => {
+  // The shape the row's analytics numbers were measured against, per run — the chart caption can
+  // only say the bar's range. A dash when the run recorded no layout: unmeasured is not zero.
+  const measured = lay("duckrun", 4, 27, { cfg: { vcores: "64" }, file: "a-1.json" });
+  const bare = full("b-2.json", "spark",                        // stats carry no num_row_groups
+    { stats: { spark: { fct_summary: { total_rows: 143980961 } } } });
+  const { html } = d.compose([measured, bare], ledger({ OUT: 1.0, SEM: 2.0 }), {});
+  const body = rows(block(html, "Every run on this page")).slice(1);
+  const cell = (r) => r.split("|").map((c) => c.trim())[4];     // column, run, built, RG
+  assert.ok(rows(block(html, "Every run on this page"))[0].includes("| RG |"));
+  assert.equal(cell(body.find((r) => r.includes("duckrun"))), "27");
+  assert.equal(cell(body.find((r) => r.includes("spark"))), "—");
 });
 
 // ------------------------------------------------------------------------------------- the charts
