@@ -55,12 +55,6 @@ export const DEFAULTS = {
   table: "fct_summary",
   // Render ONE run alone. A substring of the filename, so a run id or a date both work.
   record: "",
-  // Which pass position the per-query table reports. `hot` by default because it is the only tier
-  // EVERY query carries — the selectivity ladder has no `cold_ms` at all, its top DUID being resolved
-  // after pass 1 — and because it is itself a median over passes 3+, so it is the steadiest number
-  // per query. `?tier=cold` is the layout view: cold is the pass that transcodes parquet into
-  // VertiPaq, which is where a layout difference actually lands.
-  tier: "hot",
 };
 
 export const SERVER = "https://github.com";
@@ -1128,79 +1122,6 @@ export function martPoints(groups, times) {
         [lbl, groupMid(ms.map((m) => ((times || {})[m.qid] || {})[lbl]))])),
     };
   });
-}
-
-/**
- * Every query in the suite, one row each, one column per LAYOUT — the detail behind the tier totals.
- *
- * `Cost and speed by layout` sums 25 queries into one number per layout, which answers "which layout
- * is cheaper" and hides "at what". A scalar aggregate over 143M rows and a single-DUID lookup do not
- * respond to file layout the same way, and the totals cannot say so. This is the same measurement
- * without the summing.
- *
- * KEYED ON THE LAYOUT, like the analytics chart and for the same reason: Power BI opens parquet
- * through Direct Lake, so what a query costs belongs to what was written. A group's cell is the
- * MEDIAN over its runs, through `groupMid`, so this table cannot disagree with the bar above it.
- *
- * ONE TIER AT A TIME (`?tier=`), never three columns per layout. Cold, warm and hot answer different
- * questions and the interesting comparison is always across LAYOUTS at one pass position; three
- * sub-columns each would triple the width to let a reader do a comparison the tier totals already
- * make. `hot` is the default because every query has one and it is itself a median over passes 3+;
- * `?tier=cold` is the layout view, and the note says so rather than leaving a reader to guess why
- * four rows are empty there.
- *
- * Rows carry their CATEGORY (`probe`/`composite`/`raw`/`hot_only`) as a column rather than as
- * headings, so the autofilter's dropdown can slice on it — the same reason `Every run` filters on
- * `column` and `state`.
- */
-export function renderQueries(groups, tier = DEFAULTS.tier, table_ = DEFAULTS.table) {
-  const cols = [];
-  for (const [, members] of groups || []) {
-    const label = producers(members);
-    const cap = layoutLabel(members, table_);
-    cols.push({ name: label === cap ? label : `${label} · ${cap}`, members });
-  }
-  if (!cols.length) return "";
-  const field = (TIERS.find(([l]) => l === tier) || TIERS[2])[1];
-  // Straight off each run's own record: `queryTime` reduces the suite to tier TOTALS per entry,
-  // which is what the summary tables want and is exactly the summing this table exists to undo.
-  const per = new Map();
-  for (const c of cols) for (const m of c.members) per.set(m, benchTimings(m.rec));
-  // Every query any layout measured, and the category each reported for it. Unioned rather than
-  // taken from one run: a suite that gains a query mid-history must not silently drop it.
-  const meta = new Map();
-  for (const t of per.values()) {
-    for (const [q, v] of Object.entries(t)) {
-      if (!meta.has(q)) meta.set(q, v && v.tier ? String(v.tier) : "—");
-    }
-  }
-  if (!meta.size) return "";
-  const cell = (c, q) => groupMid(c.members.map((m) => ((per.get(m) || {})[q] || {})[field]));
-  const rows = [...meta.keys()]
-    .map((q) => ({ q, cat: meta.get(q), vals: cols.map((c) => cell(c, q)) }))
-    .filter((r) => r.vals.some((v) => v))
-    // Slowest first: the queries a layout choice can actually move are the expensive ones, and a
-    // table sorted by name buries them among probes that all cost the same 150 ms.
-    .sort((a, b) => Math.max(...b.vals) - Math.max(...a.vals));
-  if (!rows.length) return "";
-  // Truncated in the MIDDLE, never the tail. A layout's name ends in its row-group count, which is
-  // the part that tells two bars with one label apart — three `duckrun sorted` columns all clip to
-  // `duckrun sorted · by date, time · …` if the end is what goes.
-  const short = (n) => n.length <= 34 ? n : `${n.slice(0, 17)}…${n.slice(-15)}`;
-  return [`<h3>Every query <span class="asof">${esc(tier)} ms, per layout</span></h3>`,
-    note(`**The suite query by query**, ${rows.length} of them, at the **${tier}** pass — ` +
-      "the totals in *Cost and speed by layout* are these rows summed. A cell is the median over " +
-      "that layout's runs, the same median the bar quotes. " +
-      TIERS.map(([l]) => l === tier ? `**${l}**` : `[${l}](?tier=${l})`).join(" · ") +
-      (tier === "cold"
-        ? " — the selectivity-ladder queries have no cold sample at all, because the top DUID is " +
-          "resolved after pass 1, so they are absent here rather than zero."
-        : "")),
-    table(["query", "kind", ...cols.map((c) => short(c.name))],
-      ["left", "left", ...cols.map(() => "right")],
-      rows.map((r) => [`\`${r.q}\``, r.cat,
-        ...r.vals.map((v) => (v ? fmt(v, 0) : DASH))]),
-      { find: "filter queries…", menus: [1] })].join("\n");
 }
 
 /**
@@ -2419,8 +2340,6 @@ export function renderPage(cols, runs, ledger, opts = {}) {
   // What each layout cost to query and how long it took, together. `Table layout` is physical layout
   // alone; these are the numbers that used to sit beside it.
   out.push(renderFit(groups, times, TIERS.map(([l]) => l).filter((l) => l in counts)));
-  // ...and the same measurement unsummed, directly under the totals it adds up to.
-  out.push(renderQueries(groups, opts.tier || DEFAULTS.tier, martTable));
 
   out.push("<h3>Cost by engine</h3>");
   const secsCol = Object.fromEntries(cols.map(({ col, rec }) =>
@@ -2595,7 +2514,6 @@ export function optsFromSearch(search) {
     ref: p.get("ref") || DEFAULTS.ref,
     table: p.get("table") || DEFAULTS.table,
     record: p.get("record") || DEFAULTS.record,
-    tier: TIERS.some(([l]) => l === p.get("tier")) ? p.get("tier") : DEFAULTS.tier,
   };
 }
 
