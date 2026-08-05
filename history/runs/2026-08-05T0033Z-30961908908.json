@@ -1,0 +1,63 @@
+{
+ "engine": "duckrun",
+ "full_load": true,
+ "inputs": {
+  "benchmark": "true",
+  "build": "true",
+  "cores": "8",
+  "download_limit": "200",
+  "gap_seconds": "600",
+  "native_execution_engine": "false",
+  "runs": "6",
+  "skip_download": "true",
+  "sorted": "true",
+  "spark_resource_profile": "writeHeavy",
+  "think_seconds": "4"
+ },
+ "items": {
+  "4FBE4130-1717-4FC9-A985-3FB7B4A13067": {
+   "at": "2026-08-05T00:02:07+00:00",
+   "created": false,
+   "kind": "Lakehouse",
+   "name": "dbt_landing",
+   "role": "landing"
+  },
+  "6C23854F-CF0F-460D-8AFB-01D9BEA9A92D": {
+   "at": "2026-08-05T00:33:04+00:00",
+   "created": false,
+   "kind": "Folder",
+   "name": "benchmark",
+   "role": "folder"
+  },
+  "A8CF6202-AE31-45E4-9CC8-7FFE463250C9": {
+   "at": "2026-08-05T00:02:08+00:00",
+   "created": false,
+   "kind": "Warehouse",
+   "name": "dbt_landing",
+   "role": "sql_endpoint"
+  },
+  "C3A00CE9-6D0E-4B2F-BA95-D0B5E400ED1E": {
+   "at": "2026-08-05T00:02:50+00:00",
+   "created": true,
+   "deleted": "2026-08-05T00:33:05+00:00",
+   "kind": "Lakehouse",
+   "name": "dbt_delta",
+   "role": "output"
+  },
+  "F50469D2-8347-4464-9EE8-97C768B4F355": {
+   "at": "2026-08-05T00:33:04+00:00",
+   "created": false,
+   "kind": "Folder",
+   "name": "landing",
+   "role": "folder"
+  }
+ },
+ "run": {
+  "finished": "2026-08-05T00:33:17+00:00",
+  "id": "30961908908",
+  "sha": "54a2a5866da753ce65330c650d78cccabed4a42d",
+  "started": "2026-08-05T00:00:59+00:00",
+  "url": "https://github.com/djouallah/fabric-dbt-benchmark/actions/runs/30961908908"
+ },
+ "schema": 1
+}
