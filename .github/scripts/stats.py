@@ -285,7 +285,11 @@ def detail_tables(per_engine, engines):
     # Per-engine totals now live as the last two rows of the parity table above.
 
 
-_SORT_MODEL = "models/duckdb/marts/fct_summary.sql"
+# Anchored to the REPO ROOT off this file, not to the CWD. CI happens to invoke
+# `python .github/scripts/stats.py` from the root, so a relative path works today — but the failure
+# mode if that ever changes is `{}`, i.e. the key silently stops being recorded, which is the exact
+# class of quiet gap this whole path exists to close.
+_SORT_MODEL = pathlib.Path(__file__).resolve().parents[2] / "models/duckdb/marts/fct_summary.sql"
 _SORT_LITERAL = re.compile(r"sort_by=\(\s*\[([^\]]*)\]")
 
 
@@ -310,7 +314,7 @@ def declared_sort_key():
     renders as "sorted, by something not recorded" rather than guessing.
     """
     try:
-        src = pathlib.Path(_SORT_MODEL).read_text(encoding="utf-8")
+        src = _SORT_MODEL.read_text(encoding="utf-8")
     except OSError:
         return {}
     m = _SORT_LITERAL.search(src)
