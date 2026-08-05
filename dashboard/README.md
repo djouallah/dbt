@@ -195,7 +195,7 @@ without a build, a token or a dispatch.
   layout block, which made one table answer two questions — what the parquet looks like, and what
   querying it cost. *Table layout* is now physical layout alone and this is the other half. It has a
   title and no commentary. Built from the same `martPoints` as the bars and the layout rows, so all
-  three quote the same mean.
+  three quote the same median.
 - **The two charts are keyed on DIFFERENT THINGS, and that is the design.** **Analytics is one bar
   per PARQUET LAYOUT**, because Power BI never sees the engine — it opens parquet through Direct Lake
   and transcodes row groups, so what a query costs belongs to what was written and the writer is
@@ -220,6 +220,14 @@ without a build, a token or a dispatch.
   What forced this: duckrun at 64 cores and at 32 wrote 4 files and 27 row groups either way, so two
   bars 50% apart was not a comparison — it was one layout measured twice, presented as two results.
   Grouping merges them and the range says what the gap really was.
+  **The bar is the MEDIAN of the group's runs, never the mean** — `groupMid`, and the bar, *Cost and
+  speed by layout* and the mart rows all call it, so the three cannot disagree. One dispatch is a
+  sample of a shared capacity and a bad sample is not a property of the layout: run 30966983384 read
+  2,629.3 against 1,331.5/1,577.1/1,586.7 for byte-identical parquet, because its XMLA read billed
+  49s against ~33s and its refresh took 28.4s against ~8s — Fabric being busy, not the parquet being
+  slow. A mean let it lift that bar 11% and dwh's 16%. **It is not a noise fix, and the page should
+  not be read as if it were**: at n=1 and n=2 the median IS the mean, and four of nine bars are that
+  thin. The whiskers stay min/max so the outlier is visible rather than quietly averaged away.
   **Grouping is MEASURED, labelling is DECLARED.** The key is
   `(V-Order, power-of-two band of files, power-of-two band of row groups, sort columns)` read off
   the parquet
@@ -342,13 +350,13 @@ without a build, a token or a dispatch.
   the mart's `total_rows` from the latest record and drops every run that disagrees. The columns are
   different dispatches days apart and nothing else made them comparable: change the AEMO archive and
   an engine nobody has rebuilt keeps its column, with its numbers sitting beside engines built from
-  different data — in the tables, and inside both charts' means.
+  different data — in the tables, and inside the chart's own bars.
   **Newest wins, not the most common value.** Right after a genuine source change the old count is
   still the majority, which is exactly the case this exists for; a mode would keep the stale
   generation and drop the new run.
   It runs **before `columnsFor`**, which matters twice: `columnsFor` takes the latest run per
   (engine, config), so filtering later would let a stale run hold a column, and `spreadFor` walks the
-  whole array for the charts' means, so filtering the array is what stops a mean blending two
+  whole array for the chart's bars, so filtering the array is what stops a bar blending two
   generations.
   **The exclusion is loud on purpose, and must stay that way.** It bought its silence from the
   `row counts DISAGREE` heading, so it pays it back: every dropped run is named with its engine, run
@@ -368,7 +376,7 @@ without a build, a token or a dispatch.
   renders it per dispatch, but a dispatch builds ONE engine, so that report always has a single column
   and a degenerate ranking — composed here, this is the only place the tiers can be read across
   engines at all.
-  **Per LAYOUT** in *Cost and speed by layout*, beside the CU, which is a group's mean over its runs.
+  **Per LAYOUT** in *Cost and speed by layout*, beside the CU, which is a group's median over its runs.
   **Per RUN** in the sources table, which is what actually measured them: one dispatch, against one
   semantic model it had just deployed. They were columns of the mart's layout block and are not any
   more — there they had to be a group mean sitting on a row about parquet, and no single run recorded

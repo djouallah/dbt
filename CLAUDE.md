@@ -1267,6 +1267,18 @@ no data at all. `all.yml`, `dbt.yml` and `cu.yml` are gone.
   there the writer and the compute it was given are the entire subject.
   What forced it: duckrun at 64 cores and at 32 wrote 4 files and 27 row groups either way, so two
   bars 50% apart was not a comparison — it was one layout measured twice, presented as two results.
+  **A GROUP'S NUMBER IS THE MEDIAN OF ITS RUNS, NOT THE MEAN — `groupMid`, and everything that
+  summarises several runs goes through that one function** (the bar, `Cost and speed by layout`, and
+  the mart rows are one measurement shown three times; deriving the middle separately is how a page
+  plots 1,582 above a row reading 1,781). Measured: run 30966983384 read **2,629.3** analytics CU
+  against 1,331.5, 1,577.1 and 1,586.7 for **byte-identical parquet** — 1 file, 9 RG, same sort —
+  because its XMLA read billed 49s against ~33s and its model refresh took **28.4s against ~8s**.
+  Nothing about the parquet makes a refresh 3.5× longer; the capacity was busy. Under a mean that one
+  dispatch lifted its bar 11% and dwh's 16%, i.e. the chart reported Fabric's weather as a property
+  of the layout. **What the median does NOT fix, and must not be sold as fixing: at n=1 and n=2 it IS
+  the mean**, and four of nine bars are that thin — it dampens an outlier once there are three
+  samples, and only more dispatches make one trustworthy. **The whiskers stay MIN/MAX** for exactly
+  that reason: the median is what the bar claims, the full spread is what lets a reader check it.
   **Grouping is MEASURED, labelling is DECLARED — with ONE stated exception.** The key is
   `(V-Order, band(files), band(row groups), sort columns)`, the first three from the parquet as
   `stats.py`
@@ -1361,13 +1373,13 @@ no data at all. `all.yml`, `dbt.yml` and `cu.yml` are gone.
   mart's `total_rows` from the latest record and DROPS every run that disagrees. The columns are
   different dispatches days apart and nothing else made them comparable: if the AEMO archive changes,
   an engine nobody has rebuilt keeps its column and its numbers sit beside engines built from
-  different data, in the tables and inside both charts' means.
+  different data, in the tables and inside the chart's own bars.
   **Newest wins, NOT the most common value**, and that is the point rather than a shortcut — right
   after a genuine source change the old count is still the majority, which is exactly the case this
   handles; a mode would keep the stale generation and drop the new run.
   **It runs BEFORE `columnsFor`, and the order is load-bearing twice.** `columnsFor` takes the latest
   run per (engine, config), so filtering after it would let a stale run hold a column; and
-  `spreadFor` walks the whole `runs` array for the charts' means and ranges, so filtering the array is
+  `spreadFor` walks the whole `runs` array for the chart's bars and ranges, so filtering the array is
   what stops a mean blending two generations. Both come free from filtering at that one point.
   **The exclusion MUST stay loud, and that is what pays for the heading it silenced.** `renderSources`
   names every dropped run — engine, run id, its own count and the delta against current — plus the
@@ -1395,7 +1407,7 @@ no data at all. `all.yml`, `dbt.yml` and `cu.yml` are gone.
   `benchmark.timings.<model>.<query>`, and `benchmark/render_report.py` renders it per dispatch — but
   a dispatch builds ONE engine, so that report always has a single column and its ranking is
   degenerate. The composed page is the only place the three tiers can be read ACROSS engines.
-  **Per LAYOUT** in the `Cost and speed by layout` table, beside the analytics CU — a group's mean
+  **Per LAYOUT** in the `Cost and speed by layout` table, beside the analytics CU — a group's median
   over its runs, cheapest first, with a title and no commentary. **Per RUN** in the sources table,
   which is what actually measured them: one dispatch, against one semantic model it had just
   deployed. They used to be columns of the mart's LAYOUT block and are not any more: that made one

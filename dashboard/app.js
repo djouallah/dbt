@@ -499,7 +499,7 @@ export function martRows(rec, table = DEFAULTS.table) {
  *
  * The page's columns are different dispatches, days apart, and NOTHING made them comparable. If the
  * AEMO archive changes, an engine that has not been rebuilt since keeps its column, and its numbers
- * sit beside engines built from different data — in the same table, and inside both charts' means.
+ * sit beside engines built from different data — in the same table, and inside the chart's bars.
  * The reference is the mart's `total_rows` from the LATEST record, because the source may
  * legitimately change and when it does the newest run is right: everything built before it is a
  * different experiment, not a slower one.
@@ -1044,16 +1044,36 @@ export function spreadFor(runs, ledger, cls, keyOf, key = "items") {
   return out;
 }
 
-const meanOf = (vals) => vals.reduce((a, b) => a + b, 0) / vals.length;
+const median = (vals) => {
+  const a = [...vals].sort((x, y) => x - y);
+  if (!a.length) return 0;
+  const mid = a.length / 2;
+  return a.length % 2 ? a[Math.floor(mid)] : (a[mid - 1] + a[mid]) / 2;
+};
 
-// A group's numbers are its RUNS' mean — the same runs the bar above averaged, so the two cannot
-// disagree. One dispatch is a sample of a shared capacity; a group with several runs has simply been
-// measured that many times, and a run that wrote a different shape is in a different group. A run
-// that measured NOTHING is dropped rather than averaged in as a zero, which would drag the mean
-// toward "free" for a run that was never read.
-const groupMean = (vals) => {
+/**
+ * A group's central value across its RUNS: the MEDIAN, and everything on this page that summarises
+ * several runs goes through here so no two of them can disagree.
+ *
+ * **Median, not mean, because one dispatch is a sample of a SHARED capacity and a bad sample is not
+ * a property of the layout.** Measured: run 30966983384 read 2,629.3 analytics CU against 1,331.5,
+ * 1,577.1 and 1,586.7 for byte-identical parquet — 1 file, 9 row groups, same sort — because its
+ * XMLA read billed 49s against ~33s and its model refresh took 28.4s against ~8s. Nothing about the
+ * parquet makes a refresh take 3.5× longer; the capacity was busy. Under a mean that one run lifted
+ * its bar 11%, and the dwh bar 16%, which is a chart about Fabric's weather rather than about layout.
+ *
+ * What it does NOT fix, and the page must not pretend otherwise: with n=1 or n=2 the median IS the
+ * mean, and four of nine bars are that thin today. It dampens an outlier once there are three
+ * samples; it does not make one dispatch trustworthy. More runs is the only thing that does, which
+ * is why the whiskers stay MIN/MAX — the full spread is still drawn, so a reader sees the bad sample
+ * rather than having it quietly averaged away.
+ *
+ * A run that measured NOTHING is dropped rather than counted as a zero, which would pull the value
+ * toward "free" for a run that was never read.
+ */
+const groupMid = (vals) => {
   const v = (vals || []).filter((x) => x);
-  return v.length ? meanOf(v) : 0;
+  return v.length ? median(v) : 0;
 };
 
 /**
@@ -1085,16 +1105,16 @@ const groupMean = (vals) => {
  *
  * `rec` is the NEWEST member's record: entries arrive oldest-first, and within a group the physical
  * stats agree to the band anyway — 78 files and 80 is one bar — so this only picks which of the two
- * prints. The CU and the tier times are the group's MEAN across its runs, which is what the chart's
+ * prints. The CU and the tier times are the group's MEDIAN across its runs, which is what the chart's
  * bars already quote.
  */
 export function martPoints(groups, times) {
   return (groups || []).map(([, ms]) => {
     const rec = ms[ms.length - 1].rec;
     return {
-      name: producers(ms), rec, cu: groupMean(ms.map((m) => m.cu)),
+      name: producers(ms), rec, cu: groupMid(ms.map((m) => m.cu)),
       ms: Object.fromEntries(TIERS.map(([lbl]) =>
-        [lbl, groupMean(ms.map((m) => ((times || {})[m.qid] || {})[lbl]))])),
+        [lbl, groupMid(ms.map((m) => ((times || {})[m.qid] || {})[lbl]))])),
     };
   });
 }
@@ -1107,7 +1127,7 @@ export function martPoints(groups, times) {
  * layout alone and this is the cost-and-time half, standing on its own between the charts and the
  * cost table.
  *
- * Same `martPoints` as the bars and the layout rows, so all three quote the same mean.
+ * Same `martPoints` as the bars and the layout rows, so all three quote the same median.
  */
 export function renderFit(groups, times, tiers) {
   const pts = martPoints(groups, times).filter((p) => p.cu > 0);
@@ -1130,7 +1150,11 @@ export function groupRows(groups, table = DEFAULTS.table) {
     let caption = layoutLabel(members, table);
     if (caption === label) caption = "";       // nothing was measured, so it would read twice
     if (!vals.length) { out.push([label, 0, 0, 0, caption]); continue; }
-    out.push([label, round1(meanOf(vals)), round1(Math.min(...vals)), round1(Math.max(...vals)),
+    // `groupMid`, the same call `martPoints` makes — the bar and the two tables under it are one
+    // measurement shown three times, and deriving the middle differently here is exactly how a page
+    // ends up plotting 1,582 above a row reading 1,781. The whiskers stay MIN/MAX: the median is
+    // what the bar CLAIMS, the full spread is what the reader gets to check it against.
+    out.push([label, round1(groupMid(vals)), round1(Math.min(...vals)), round1(Math.max(...vals)),
       caption]);
   }
   return out;
@@ -1286,7 +1310,7 @@ export function renderSources(cols, entries, ledger, repo, now = null, gen = {})
       "per dispatch, with its own totals:")];
   // The query tiers belong HERE rather than beside the layout: they were measured by one dispatch
   // against one deployed semantic model, so the run is their natural key. On the layout block they
-  // had to be a group's MEAN, which is a number no single run recorded.
+  // had to be a group's MEDIAN, which is a number no single run recorded.
   const times = (gen.times || {});
   const tiers = TIERS.map(([l]) => l).filter((l) => l in (gen.counts || {}));
   // NEWEST DISPATCH FIRST. Everywhere else on the page the order is the engine order, which is what
@@ -1354,7 +1378,9 @@ export function renderSources(cols, entries, ledger, repo, now = null, gen = {})
   { find: "filter runs — engine, run id, date…", menus: [0, 7 + tiers.length] }));
   out.push(note("**`etl CU` and `analytics CU` are that RUN's own totals** — the same GUID join as " +
     "*Cost by engine*, which quotes each column's newest run. The CHARTS quote neither: each bar is " +
-    "the mean over the runs listed here that fed it. The two group differently, so one run can sit in " +
+    "the MEDIAN over the runs listed here that fed it — a bad sample on a shared capacity is not a "
+    + "property of the layout, so one slow dispatch cannot lift a bar. The two group differently, so "
+    + "one run can sit in " +
     "a bar with different company on each — ETL by column, analytics by the parquet the run " +
     "measured."));
   if (tiers.length) {
@@ -1362,7 +1388,7 @@ export function renderSources(cols, entries, ledger, repo, now = null, gen = {})
     out.push(note("**`cold`, `warm` and `hot` are the DAX suite summed per PASS POSITION** — the " +
       "first visit to a freshly deployed semantic model, the second, then the median of the rest. " +
       "They are on the RUN because that is what measured them: one dispatch, against one model it " +
-      "had just deployed. Beside the layout they had to be a group's mean, which is a number no " +
+      "had just deployed. Beside the layout they had to be a group's median, which is a number no " +
       `single run recorded. Each is summed over the queries EVERY run carries at that tier ` +
       `(${counted}); cold covers fewer, because the selectivity-ladder queries have no first-pass ` +
       "sample at all — the top DUID is resolved after pass 1. **Cold is the tier layout can move**: " +
@@ -1717,19 +1743,12 @@ const OFF = "off";
 
 const hasOwn = (o, k) => Object.prototype.hasOwnProperty.call(o, k);
 
-const median = (vals) => {
-  const a = [...vals].sort((x, y) => x - y);
-  if (!a.length) return 0;
-  const mid = a.length / 2;
-  return a.length % 2 ? a[Math.floor(mid)] : (a[mid - 1] + a[mid]) / 2;
-};
-
 /**
  * `{n, mean, min, max, rel}` over one cell's readings, or `null` when it has none.
  *
  * `rel` is `(max - min) / mean` — the RELATIVE spread, which is the only form comparable between a
  * capacity unit and a millisecond. Zeros are dropped rather than averaged in, the same rule
- * `groupMean` follows: a run that measured nothing is not a run that measured zero.
+ * `groupMid` follows: a run that measured nothing is not a run that measured zero.
  */
 export function spread(vals) {
   const v = (vals || []).filter((x) => x);
@@ -2433,7 +2452,7 @@ export function compose(records, ledgerDoc, opts = {}) {
   }
   // BEFORE `columnsFor`, and the order is load-bearing twice over. `columnsFor` takes the latest run
   // per (engine, config), so filtering afterwards would let a stale-generation run hold a column; and
-  // `spreadFor` walks this whole array to build the charts' means and ranges, so filtering the array
+  // `spreadFor` walks this whole array to build the chart's bars and ranges, so filtering the array
   // is what stops a mean blending two generations. Both come free from filtering here.
   const { runs, dropped, reference } = sameGeneration(whole, opts.table || DEFAULTS.table);
   const cols = columnsFor(runs);

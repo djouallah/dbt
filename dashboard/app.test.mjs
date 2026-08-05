@@ -1123,10 +1123,14 @@ test("every run carries its own RG count, and a run without one carries a dash",
 
 // ------------------------------------------------------------------------------------- the charts
 
-test("the chart shows the mean and the range across runs", () => {
+test("the bar is the MEDIAN across runs, and the whisker is the full range", () => {
   // One dispatch is one sample of a SHARED capacity, so a single number is a reading rather than a
-  // result. The bar is the mean; the range is what tells a reader when two averages are closer
-  // together than either engine's own spread.
+  // result — and a BAD sample is not a property of the layout. Real case: run 30966983384 read
+  // 2,629.3 against 1,331.5/1,577.1/1,586.7 for byte-identical parquet, because its XMLA read billed
+  // 49s against ~33s and its refresh took 28.4s against ~8s. A mean lets that one run lift the bar;
+  // the median does not. The values below are that shape — mean 2,000, median 1,500 — so this test
+  // fails if anyone puts the mean back. The whisker still shows the outlier: the median is what the
+  // bar claims, the range is what the reader checks it against.
   const runs = [full("a-1.json", "spark", { finishedHoursAgo: 72 }),
     full("b-2.json", "spark", { finishedHoursAgo: 48 }),
     full("c-3.json", "spark", { finishedHoursAgo: 24 })];
@@ -1135,20 +1139,41 @@ test("the chart shows the mean and the range across runs", () => {
   });
   const led = ledger({
     S0: { "XMLA Read Operation": 1000.0 }, O0: { "Warehouse Query": 1.0 },
-    S1: { "XMLA Read Operation": 2000.0 }, O1: { "Warehouse Query": 1.0 },
+    S1: { "XMLA Read Operation": 3500.0 }, O1: { "Warehouse Query": 1.0 },
     S2: { "XMLA Read Operation": 1500.0 }, O2: { "Warehouse Query": 1.0 },
   });
   const out = render(runs, led);
   const c = charts(out)[0];
   assert.deepEqual(c.labels, ["spark"], "the analytics bar is NAMED for its writer");
-  // The tip carries the MEAN alone — the spread is the whisker's job, with the exact numbers in
-  // the tooltip rather than doubling the ink beside every bar.
-  assert.equal(c.values[0], "1,500.0");
-  assert.ok(c.svg.includes("range 1,000.0–2,000.0"), "the exact spread rides in the tooltip");
+  assert.equal(c.values[0], "1,500.0", "the median, NOT the 2,000.0 mean");
+  assert.ok(c.svg.includes("range 1,000.0–3,500.0"), "the outlier is still drawn, not averaged away");
   assert.ok(!c.subtitle.includes("mean of"), "no run-count chatter in the subtitle — the whisker shows it");
+  // ...and the two tables under it quote that same 1,500: one measurement shown three times.
+  assert.ok(rows(block(out, "Cost and speed by layout")).some((r) => r.includes("| 1,500 |")),
+    rows(block(out, "Cost and speed by layout")).join(" / "));
 });
 
-test("the chart sorts by the mean", () => {
+test("an even number of runs takes the middle two, and one run is itself", () => {
+  // The honest limit, pinned so nobody reads the median as a noise fix: at n=1 and n=2 it IS the
+  // mean, and four of nine bars on the real page are that thin. It dampens an outlier once there
+  // are three samples; only more dispatches make one trustworthy.
+  const four = [1000, 1500, 1600, 4000];   // middle two -> 1,550, mean would be 2,025
+  const mk = (vals) => {
+    const runs = vals.map((_, i) => full(`${"abcd"[i]}-${i}.json`, "spark",
+      { finishedHoursAgo: 96 - i * 24 }));
+    runs.forEach((r, i) => {
+      r.items = { [`S${i}`]: gone("semantic_model", "aemo_spark"),
+        [`O${i}`]: gone("output", "dbt_spark") };
+    });
+    return charts(render(runs, ledger(Object.fromEntries(vals.flatMap((v, i) =>
+      [[`S${i}`, { "XMLA Read Operation": v }], [`O${i}`, { "Warehouse Query": 1.0 }]])))))[0];
+  };
+  assert.equal(mk(four).values[0], "1,550.0");
+  assert.equal(mk([1000, 3000]).values[0], "2,000.0", "n=2: the median is the mean");
+  assert.equal(mk([2500]).values[0], "2,500.0", "n=1: the reading itself");
+});
+
+test("the chart sorts by the bar value", () => {
   const runs = [full("a-1.json", "spark"), full("b-2.json", "dwh")];
   runs[0].items = { S0: gone("semantic_model", "aemo_spark"), O0: gone("output", "dbt_spark") };
   runs[1].items = { S1: gone("semantic_model", "aemo_dwh"), O1: gone("output", "dbt_dwh") };
