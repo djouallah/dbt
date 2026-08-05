@@ -209,8 +209,16 @@ def stats_for(guid):
             for r in rows}
 
 
-def encodings_for(guid, table=MART):
+def encodings_for(guid, table):
     """`{column: {encodings, type, dict_pages, chunks, mb}}` for one engine's MART parquet.
+
+    `table` MUST BE SCHEMA-QUALIFIED (`mart.fct_summary`). A bare name does not resolve —
+    `get_stats()` with no argument sweeps every attached catalog and keys the result by table name,
+    but `get_stats('fct_summary')` raises `'fct_summary' is neither a known table nor a schema in any
+    attached catalog (['data'])`, because a one-part name is looked up in the CURRENT schema and dbt
+    writes the mart to `mart`. That is what run 31008858454 hit: the layout job was green, the record
+    simply had no `encodings`. The caller passes the schema `stats_for` already read, so the name
+    cannot drift from the one the rest of the document reports.
 
     WHY THIS EXISTS. Every other lever on the layout chart is confounded, and the one hypothesis the
     record could not test was the interesting one: whether the engines differ in what Power BI has to
@@ -521,7 +529,13 @@ def one_engine(item, kind):
     guid = find_guid(kind, item)
     if not guid:
         return guid, {}, {}
-    return guid, stats_for(guid), encodings_for(guid)
+    st = stats_for(guid)
+    # Qualified from the schema `stats_for` just read, never hardcoded: a bare name does not resolve
+    # (see `encodings_for`), and deriving it here means the profiled table is by construction the one
+    # the rest of this document reports on.
+    schema = (st.get(MART) or {}).get("schema")
+    enc = encodings_for(guid, f"{schema}.{MART}") if schema else {}
+    return guid, st, enc
 
 
 def main():

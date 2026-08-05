@@ -135,7 +135,7 @@ def test_encodings_are_aggregated_per_column_not_per_chunk(stats, tmp_path, monk
     p = _sample_parquet(tmp_path)
     rel = duckdb.connect().sql(f"SELECT * FROM parquet_metadata('{p.as_posix()}')")
     _reader_over(stats, monkeypatch, rel)
-    got = stats.encodings_for("guid")
+    got = stats.encodings_for("guid", "mart.fct_summary")
     assert set(got) == {"mw", "duid"}, "one entry per column"
     assert got["duid"]["encodings"] == ["PLAIN_DICTIONARY"]
     assert got["duid"]["dict_pages"] == got["duid"]["chunks"], "every chunk wrote a dictionary"
@@ -147,6 +147,33 @@ def test_encodings_are_aggregated_per_column_not_per_chunk(stats, tmp_path, monk
     assert isinstance(got["mw"]["encodings"], list), "sets do not survive json.dump"
 
 
+def test_the_profiled_table_is_schema_qualified(stats, monkeypatch):
+    """A BARE name does not resolve. `get_stats()` with no argument sweeps every catalog and keys by
+    table name, but `get_stats('fct_summary')` raises — a one-part name is looked up in the CURRENT
+    schema, and dbt writes the mart to `mart`. Run 31008858454 hit exactly this: the layout job went
+    green and the record simply had no `encodings`. The schema comes from `stats_for`, so the
+    profiled table cannot drift from the one the rest of the document describes."""
+    seen = []
+    monkeypatch.setattr(stats, "find_guid", lambda kind, item: "guid-1")
+    monkeypatch.setattr(stats, "stats_for",
+                        lambda guid: {stats.MART: {"schema": "mart", "total_rows": 1}})
+    monkeypatch.setattr(stats, "encodings_for",
+                        lambda guid, table: seen.append(table) or {"mw": {}})
+    guid, st, enc = stats.one_engine("dbt_spark", "lakehouses")
+    assert seen == ["mart.fct_summary"], seen
+    assert enc == {"mw": {}}
+
+
+def test_a_mart_with_no_schema_is_skipped_rather_than_guessed(stats, monkeypatch):
+    """No schema recorded means the aggregate read did not see the table at all. Guessing `mart`
+    would send a name we have no evidence for and log a confusing resolution error."""
+    monkeypatch.setattr(stats, "find_guid", lambda kind, item: "guid-1")
+    monkeypatch.setattr(stats, "stats_for", lambda guid: {})
+    monkeypatch.setattr(stats, "encodings_for",
+                        lambda guid, table: pytest.fail("must not be called"))
+    assert stats.one_engine("dbt_spark", "lakehouses")[2] == {}
+
+
 def test_a_failed_or_empty_profile_is_absent_never_empty(stats, monkeypatch):
     """`{}` per column would read as "no encodings", which parquet cannot be. Absent means the
     layout job could not profile it — the same rule `landing` follows."""
@@ -154,7 +181,7 @@ def test_a_failed_or_empty_profile_is_absent_never_empty(stats, monkeypatch):
         def get_stats(self, table=None, detailed=False):
             raise RuntimeError("OneLake said no")
     monkeypatch.setattr(stats, "reader", lambda guid: Boom())
-    assert stats.encodings_for("guid") == {}
+    assert stats.encodings_for("guid", "mart.fct_summary") == {}
     doc = stats.build_doc({}, ["duckrun"], {}, None, {"duckrun": {}})
     assert "encodings" not in doc, "nothing profiled -> no key at all"
 
@@ -164,7 +191,7 @@ def test_the_encodings_reach_the_document_under_their_engine(stats, tmp_path, mo
     p = _sample_parquet(tmp_path)
     rel = duckdb.connect().sql(f"SELECT * FROM parquet_metadata('{p.as_posix()}')")
     _reader_over(stats, monkeypatch, rel)
-    enc = {"duckrun": stats.encodings_for("g"), "spark": {}}
+    enc = {"duckrun": stats.encodings_for("g", "mart.fct_summary"), "spark": {}}
     doc = stats.build_doc({}, ["duckrun", "spark"], {}, None, enc)
     assert doc["encodings"]["duckrun"]["mw"]["encodings"] == ["PLAIN"]
     assert "spark" not in doc["encodings"], "an engine that profiled nothing adds no column"
