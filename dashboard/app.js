@@ -2292,30 +2292,32 @@ export function renderPage(cols, runs, ledger, opts = {}) {
   }
   const groups = layoutGroups(anaEntries, martTable);
 
-  // ONE BAR PER LAYOUT, not per engine — Power BI never sees the engine. It opens parquet through
-  // Direct Lake and transcodes row groups, so what a query costs belongs to what was written and the
-  // writer is metadata; the caption carries it. The ETL chart is the exact opposite and stays per
-  // column, because there the writer and the compute it was given ARE the subject.
+  // TWO CHARTS, STACKED, AND THEY ARE KEYED ON DIFFERENT THINGS — that is the design, not an
+  // inconsistency to tidy. Analytics is ONE BAR PER LAYOUT, because Power BI never sees the engine:
+  // it opens parquet through Direct Lake and transcodes row groups, so what a query costs belongs to
+  // what was written and the writer is metadata the caption carries. ETL is ONE BAR PER COLUMN,
+  // because there the writer and the compute it was given ARE the subject — duckrun at 32 and at 64
+  // cores wrote identical parquet (one analytics bar) and cost 13,083 against 23,992 CU to do it
+  // (two ETL bars, which is the finding).
   //
-  // ONE CHART, FULL WIDTH, and it is the analytics one. There was a second bar chart beside it
-  // ranking what each column cost to BUILD, and dropping it is this page's own thesis applied to
-  // itself: `About these numbers` says analytics is the half that matters — background CU is
-  // smoothed over 24 hours and nobody waits for it, query CU is interactive and is what throttles —
-  // while the layout gave both equal visual weight and put the half that does not hurt beside it.
-  // The ETL numbers did not go anywhere: `Cost by engine` carries them per bucket on the run that
-  // measured them, and `Analysis` ranks them with a margin and a verdict, which is more than a bar
-  // ever said. What is bought is the prose measure instead of a 53rem flex child — the widest a
-  // chart gets here, since the SVG is drawn at a 660-unit viewBox and a wider box would inflate
-  // every label with it.
-  // The title names the measure and the grouping, and the subtitle says which way is good. It used
-  // to be `Analytics — what querying each LAYOUT cost` over `capacity units, lower is better —
-  // INTERACTIVE CU, and Power BI sees only the parquet`: three qualifications carried because there
-  // was a second chart to be told apart from. With one chart the contrast has nobody to draw, and
-  // both facts it carried are already stated where they can be read properly — `Analytics is the
-  // half that matters` in the methodology explains INTERACTIVE against background CU, and `per
-  // parquet layout` is itself the statement that Power BI sees the parquet and not the engine.
-  out.push(chartSvg("Capacity units per parquet layout", "lower is better",
+  // ANALYTICS FIRST, and the order is the ranking. `About these numbers` says analytics is the half
+  // that matters — interactive CU is what throttles a capacity, while build CU is background, smoothed
+  // over 24 hours, and nobody waits for it. The ETL chart was removed once on that argument alone; it
+  // is back because "less important" is not "not worth plotting", and the build half is where the
+  // sharpest operational result on the page lives. Stacked rather than side by side so neither is
+  // squeezed: the SVG draws at a 660-unit viewBox and a narrower box inflates every label with it.
+  out.push(chartSvg("Capacity units per parquet layout", "querying — lower is better",
     groupRows(groups, martTable)));
+  // Per COLUMN and through `groupMid`, the same median `Cost by engine` and the analytics bars use,
+  // so no two numbers on this page summarise a set of runs differently. `spreadFor` already returns
+  // every run's reading per column, which is what the ETL half has always been built from.
+  const etlRows = Object.entries(spreadFor(runs, ledger, "etl", keyOf))
+    .map(([col, vals]) => [col, round1(groupMid(vals)),
+      round1(Math.min(...vals)), round1(Math.max(...vals)), ""])
+    .filter((r) => r[1]);
+  if (etlRows.length) {
+    out.push(chartSvg("Capacity units per engine build", "building — lower is better", etlRows));
+  }
   // The one place the ADAPTERS are named and linked. The bars stopped captioning them because the
   // column name already implies the adapter — this line is where that implication resolves.
   //

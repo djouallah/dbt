@@ -196,7 +196,15 @@ without a build, a token or a dispatch.
   querying it cost. *Table layout* is now physical layout alone and this is the other half. It has a
   title and no commentary. Built from the same `martPoints` as the bars and the layout rows, so all
   three quote the same median.
-- **The two charts are keyed on DIFFERENT THINGS, and that is the design.** **Analytics is one bar
+- **TWO CHARTS, STACKED, analytics first — and they are keyed on DIFFERENT THINGS, which is the
+  design rather than an inconsistency.** The order is the ranking: interactive CU is what throttles a
+  capacity, build CU is background and smoothed over 24h. The build chart was removed once on that
+  argument and is back, because "less important" is not "not worth plotting" — it is where the
+  sharpest operational result on the page lives (duckrun costs 1.8x at 64 cores for the same wall
+  time, which the analytics chart cannot show because both wrote identical parquet).
+  Stacked, never side by side: the SVG draws at a 660-unit viewBox and a narrower box inflates every
+  label with it.
+  **Analytics is one bar
   per PARQUET LAYOUT**, because Power BI never sees the engine — it opens parquet through Direct Lake
   and transcodes row groups, so what a query costs belongs to what was written and the writer is
   metadata. The bar is **named for its writer and captioned with the shape** — `spark readHeavyForPBI`
@@ -213,10 +221,11 @@ without a build, a token or a dispatch.
   DECLARED (`stats.py`), `dbt.<engine>.sort_by_auto` what duckrun's picker RESOLVED
   (`fabric_run.py`'s log scrape, the only witness for an `'auto'` run). A sorted run that recorded
   neither reads `true` — its own bar, and no `by` bit, because the label already says `sorted`.
-  **ETL is one bar per column**, because there the
-  writer and the compute it
-  was given are the entire subject; its caption states only what the column name does not already
-  say — see the caption note at the end of this file.
+  **The build chart is one bar per COLUMN**, because there the writer and the compute it was given
+  ARE the subject — `duckrun·32c` and `duckrun·64c` are one analytics bar (identical parquet) and two
+  build bars at 13,083 against 23,992 CU, which is exactly the finding the analytics keying cannot
+  express. It goes through the same `groupMid` median as everything else, so no two numbers on the
+  page summarise a set of runs differently.
   What forced this: duckrun at 64 cores and at 32 wrote 4 files and 27 row groups either way, so two
   bars 50% apart was not a comparison — it was one layout measured twice, presented as two results.
   Grouping merges them and the range says what the gap really was.

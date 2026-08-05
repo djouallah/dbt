@@ -522,7 +522,8 @@ test("the page renders end to end with charts and a layout", () => {
     SEM: { "XMLA Read Operation": 2041.0 },
   }));
   const c = charts(out);
-  assert.equal(c.length, 1, "analytics alone — the ETL chart is gone, its numbers are in the tables");
+  assert.equal(c.length, 2, "analytics first, then the build chart");
+  assert.ok(c[1].title.includes("per engine build"), c[1].title);
   const text = plain(out);
   const rr = rows(out);
   assert.ok(rr.some((r) => r.startsWith("| **etl** |")));
@@ -1240,10 +1241,12 @@ test("the same parquet is one bar however many engines wrote it", () => {
   assert.deepEqual(c[0].labels, ["duckrun"], "one layout, one bar");
   assert.equal(c[0].values[0], "1,500.0");
   assert.deepEqual(c[0].captions, ["27 RG"], "the shape it grouped on sits underneath");
-  assert.equal(c.length, 1, "and it is the only chart");
   // ...while the ETL side keeps BOTH columns, because there the writer and the compute it was given
-  // are the entire subject. That asymmetry is the change and it must not be tidied away — it just
-  // reads across a chart and a table now rather than across two charts.
+  // are the entire subject. ONE analytics bar, TWO build bars, from the same two runs — that
+  // asymmetry is the whole point of keying the two charts differently.
+  assert.equal(c.length, 2, "analytics and build");
+  assert.deepEqual([...c[1].labels].sort(), ["duckrun·32c", "duckrun·64c"],
+    "the build chart keeps both (drawn cheapest first, so order follows the CU)");
   assert.deepEqual(rows(block(out, "Cost by engine"))[0],
     "| CU (s) | duckrun·32c | duckrun·64c |");
 });
@@ -1279,9 +1282,10 @@ test("two runs of ONE column that wrote different parquet are two bars", () => {
   assert.ok(body[0].startsWith("| duckrun sorted | 3 | 26 |"), body[0]);
   assert.ok(body[1].startsWith("| duckrun sorted | 4 | 25 |"), body[1]);
   assert.ok(!body[0].includes("1,600"), "no CU column on the layout block");
-  // The ETL half is unmoved and it is now a TABLE rather than a bar: both runs are samples of ONE
-  // column, so `Cost by engine` reports the column once.
-  assert.equal(charts(out).length, 1, "analytics only");
+  // The ETL half groups per COLUMN, and both runs are samples of one column — so two analytics
+  // bars (two layouts) and ONE build bar (one column).
+  assert.equal(charts(out).length, 2, "analytics and build");
+  assert.equal(charts(out)[1].labels.length, 1, "one column, one build bar");
   assert.ok(rows(block(out, "Cost by engine")).some((r) => r.startsWith("| **etl** |")));
 });
 
@@ -1477,7 +1481,7 @@ test("the rate is a row of the engine table, not a section", () => {
   const rr = rows(out);
   assert.ok(rr.some((r) => r === "| **etl** | **900.0** |"));
   assert.ok(rr.some((r) => r === "| `compute CU per second` | 30.0 |"), "under its class");
-  assert.equal(charts(out).length, 1, "and it brought no bar with it");
+  assert.equal(charts(out).length, 2, "the rate row adds no chart of its own");
 });
 
 test("etl carries a duration row and analytics deliberately does not", () => {
@@ -1565,7 +1569,7 @@ test("a class the ledger has not read yet is a dash, not a zero", () => {
 test("a ledger with no seconds renders no rate row", () => {
   const out = render([full("a-1.json", "spark")], ledger({ OUT: 1.0, SEM: 2.0 }));
   assert.ok(!rows(out).some((r) => r.startsWith("| `compute CU per second` |")), "no ROW");
-  assert.equal(charts(out).length, 1, "no seconds, no second chart");
+  assert.equal(charts(out).length, 2, "seconds drive the rate ROW, not a chart");
 });
 
 test("the rate is compute over compute, never total over total", () => {
@@ -1633,7 +1637,7 @@ test("the rate is computed per class", () => {
   assert.ok(rr.some((r) => r === "| `compute CU per second` | 30.0 |"), "900 CU over 30 s");
   assert.ok(rr.some((r) => r === "| **analytics** | **40.0** |"));
   assert.ok(rr.some((r) => r === "| `compute CU per second` | 10.0 |"), "40 CU over 4 s");
-  assert.equal(charts(out).length, 1, "the one CU chart and no second");
+  assert.equal(charts(out).length, 2, "the two CU charts, and the rate adds none");
 });
 
 // ------------------------------------------------------------------------ live loading, new here
@@ -1923,16 +1927,23 @@ test("the layout blocks sit behind a tab strip when more than one table renders"
   assert.ok(plain(out).includes("9 rows on every engine"));
 });
 
-test("ONE chart, full width, and it is the analytics one", () => {
-  // The page's own thesis applied to itself: background CU is smoothed over 24h and nobody waits for
-  // it, query CU is interactive and is what throttles. A second bar chart ranking the build gave the
-  // half that does not hurt equal visual weight.
+test("TWO charts, stacked full width, analytics first", () => {
+  // Analytics leads because it is the half that matters — interactive CU is what throttles, build CU
+  // is background and smoothed over 24h — but "less important" is not "not worth plotting", and the
+  // build half carries the sharpest operational result on the page (duckrun costs 1.8x at 64 cores
+  // for the same wall time). Stacked, never side by side: the SVG draws at a 660-unit viewBox and a
+  // narrower box inflates every label with it.
   const out = render([full("a-1.json", "spark")], ledger({ OUT: 1.0, SEM: 2.0 }));
-  assert.ok(!out.includes('<div class="charts">'), "no side-by-side wrapper to share a row with");
-  assert.equal((out.match(/<figure class="chart"/g) || []).length, 1, "one figure");
+  assert.ok(!out.includes('<div class="charts">'), "no side-by-side wrapper");
+  assert.equal((out.match(/<figure class="chart"/g) || []).length, 2, "two figures");
   assert.ok(!out.includes("data-kind"), "one measure, one hue, nothing to mark");
-  assert.ok(out.includes("Capacity units per parquet layout"));
-  assert.ok(!out.includes("ETL — what building them cost"), "the ETL chart is gone");
+  const c = charts(out);
+  assert.ok(c[0].title.includes("Capacity units per parquet layout"), c[0].title);
+  assert.ok(c[1].title.includes("Capacity units per engine build"), c[1].title);
+  assert.ok(out.indexOf("per parquet layout") < out.indexOf("per engine build"),
+    "analytics is FIRST — the order is the ranking");
+  // Keyed differently on purpose: the analytics bar is a layout, the build bar is a column.
+  assert.deepEqual(c[1].labels, ["spark"]);
   // Gone from the CHART, not from the page.
   assert.ok(rows(block(out, "Cost by engine")).some((r) => r.startsWith("| **etl** |")));
 });

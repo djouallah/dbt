@@ -1242,6 +1242,13 @@ no data at all. `all.yml`, `dbt.yml` and `cu.yml` are gone.
   from `run.finished` being under two hours old — a property of the clock, not a flag written into a
   file that then has to be kept in step.
 - **THE TWO CHARTS ARE KEYED ON DIFFERENT THINGS, AND THAT IS THE DESIGN — do not "unify" them.**
+  They are STACKED, full width, **analytics first**, and that order is the ranking: interactive CU is
+  what throttles a capacity, build CU is background and smoothed over 24 hours. The build chart was
+  deleted once on that argument alone and is back — "less important" is not "not worth plotting", and
+  the build half carries the sharpest operational result on the page: **duckrun costs 1.8× at 64
+  cores for the same wall time** (705s/13,083 CU at 32 against 692s/23,992 at 64), which the analytics
+  chart structurally CANNOT show, because both wrote identical parquet and are therefore one bar
+  there. It goes through the same `groupMid` median as the analytics bars and `Cost by engine`.
   **Analytics is one bar per PARQUET LAYOUT.** Power BI never sees the engine: it opens parquet
   through Direct Lake and transcodes row groups, so what a query costs belongs to what was WRITTEN
   and the writer is metadata. The bar is **named for its writer and captioned with the shape** —
