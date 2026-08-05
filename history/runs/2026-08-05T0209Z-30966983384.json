@@ -630,6 +630,16 @@
    "aemo_duckrun": "KPP_1"
   }
  },
+ "dbt": {
+  "duckrun": {
+   "sort_by": {
+    "fct_summary": [
+     "date",
+     "time"
+    ]
+   }
+  }
+ },
  "engine": "duckrun",
  "full_load": true,
  "inputs": {

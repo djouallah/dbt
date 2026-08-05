@@ -39,6 +39,8 @@ both together.
 """
 import json
 import os
+import pathlib
+import re
 import sys
 import subprocess
 from concurrent.futures import ThreadPoolExecutor
@@ -283,6 +285,41 @@ def detail_tables(per_engine, engines):
     # Per-engine totals now live as the last two rows of the parity table above.
 
 
+_SORT_MODEL = "models/duckdb/marts/fct_summary.sql"
+_SORT_LITERAL = re.compile(r"sort_by=\(\s*\[([^\]]*)\]")
+
+
+def declared_sort_key():
+    """`{table: [cols]}` for the sort the duckrun model DECLARES, or `{}` when it declares none.
+
+    WHY THIS IS RECORDED AT ALL: the key is a property of the COMMIT — the model declared
+    `['date','time','DUID']` for a while and `['date','time']` since — so anything downstream that
+    holds one constant is right only for today's model. The dashboard held exactly that constant and
+    captioned run 30955591822, a DUID sort, `by date, time`. A run that writes its own key down
+    cannot be misread later, and the five records predating this were backfilled from the model at
+    the SHA each ran.
+
+    Read from the checkout rather than from dbt: the build runs in a Fabric notebook, which cannot
+    write to the run record (that is why `fabric_run.py` scrapes duckrun's log for the `'auto'`
+    case), so `target/manifest.json` — the resolved config, and the better source — never reaches
+    here. This is the same derivation the backfill made, at run time instead of after.
+
+    A LITERAL LIST ONLY. `sort_by='auto'` names no columns, and duckrun's own resolution is already
+    scraped into `sort_by_auto`; recording the word `auto` as if it were a key would be the same
+    class of mistake this exists to prevent. No match at all leaves the key ABSENT, which the page
+    renders as "sorted, by something not recorded" rather than guessing.
+    """
+    try:
+        src = pathlib.Path(_SORT_MODEL).read_text(encoding="utf-8")
+    except OSError:
+        return {}
+    m = _SORT_LITERAL.search(src)
+    if not m:
+        return {}
+    cols = [c.strip().strip("'\"") for c in m.group(1).split(",") if c.strip()]
+    return {"fct_summary": cols} if cols else {}
+
+
 def build_doc(per_engine, engines, guids=None, landing=None):
     """The layout document: run stamp, hardware config, per-engine item + GUID, per-table detail.
 
@@ -351,6 +388,15 @@ def write_json(doc, engines):
     is what the page joins against the CU ledger.
     """
     record.merge({"layout": doc})
+    # WHICH columns a sorted duckrun run ordered by, as a SIBLING of the layout doc rather than a
+    # branch of it. It belongs beside `fabric_run.py`'s `sort_by_auto` — `dbt.<engine>` is where a
+    # fact about the dbt run lives — and it must stay out of `layout.config`, whose every entry the
+    # dashboard's `variant()` walks: a key that changes commit to commit would split an engine's
+    # column and its layout bar. Gated on the same env as `config.sorted`, and duckrun-only for the
+    # same reason: iceberg parses the same model and has no `sort_by` config at all.
+    sort_key = declared_sort_key() if os.environ.get("DUCKDB_SORTED") == "true" else {}
+    if sort_key:
+        record.merge({"dbt": {"duckrun": {"sort_by": sort_key}}})
     path = os.environ.get("STATS_JSON", "").strip()
     if not path:
         return

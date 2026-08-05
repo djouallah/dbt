@@ -206,9 +206,14 @@ without a build, a token or a dispatch.
   Lake's transcode and scan cost, and the file count was a second number saying less; the file BAND
   still separates bars, it just is not printed. **A sorted bar names its sort columns** —
   `by date, time · 9 RG` — because `sorted` alone does not say what Power BI is reading in order.
-  The columns come from the record's own `dbt.<engine>.sort_by_auto` when the `sort_by='auto'`-era
-  scrape recorded one, else from `DECLARED_SORT_KEY`, the constant mirroring the one sort the model
-  declares (`models/duckdb/marts/fct_summary.sql`). **ETL is one bar per column**, because there the
+  **The columns come off the RECORD, never a constant here**: the key is a property of the COMMIT,
+  and the model declared `['date','time','DUID']` for a while and `['date','time']` since, so a
+  constant was right for today's model only — it captioned run 30955591822, a DUID sort,
+  `by date, time`. Two spellings are read, both legitimate: `dbt.<engine>.sort_by` is what the run
+  DECLARED (`stats.py`), `dbt.<engine>.sort_by_auto` what duckrun's picker RESOLVED
+  (`fabric_run.py`'s log scrape, the only witness for an `'auto'` run). A sorted run that recorded
+  neither reads `true` — its own bar, and no `by` bit, because the label already says `sorted`.
+  **ETL is one bar per column**, because there the
   writer and the compute it
   was given are the entire subject; its caption states only what the column name does not already
   say — see the caption note at the end of this file.
@@ -220,7 +225,7 @@ without a build, a token or a dispatch.
   the parquet
   as `stats.py` saw it, so two unrelated engines that wrote the same shape *do* share a bar. The caption
   comes from `LAYOUT_CONFIG`, so it does not re-word itself every time a record lands. The sort
-  element is the resolved COLUMN LIST, not a boolean, so two sorts on different keys can never share
+  element is the run's own COLUMN LIST, not a boolean, so two sorts on different keys can never share
   a bar — the `['date','time','DUID']` and `['date','time']` runs split by file band today only by
   luck.
   **It groups RUNS, not columns, and that distinction is load-bearing.** A column is

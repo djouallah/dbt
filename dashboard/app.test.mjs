@@ -374,8 +374,9 @@ test("a sort splits the layout bar even though the bands do not move", () => {
   assert.deepEqual(d.layoutKey(plain).slice(0, 3), d.layoutKey(sorted).slice(0, 3),
     "same V-Order and same bands — the measured half cannot tell them apart");
   assert.notDeepEqual(d.layoutKey(plain), d.layoutKey(sorted));
-  // The key carries the resolved COLUMNS, not a boolean — see the two-sorts test below.
-  assert.equal(d.layoutKey(sorted)[3], "date,time");
+  // This fixture records no key, so it reads `true` — sorted by something unnamed. The COLUMNS case
+  // is the two-sorts test below.
+  assert.equal(d.layoutKey(sorted)[3], true);
 });
 
 test("a record with no sorted key groups with an unsorted run, not alone", () => {
@@ -388,32 +389,56 @@ test("a record with no sorted key groups with an unsorted run, not alone", () =>
   assert.equal(d.layoutKey(old)[3], false);
 });
 
+// A sorted record's own key, in either spelling. `sort_by` is what the run DECLARED (stats.py),
+// `sort_by_auto` what duckrun's picker RESOLVED (fabric_run.py's log scrape).
+const sortedBy = (files, rgs, key, opts = {}) => {
+  const { spelling = "sort_by", ...rest } = opts;
+  const r = lay("duckrun", files, rgs, { cfg: { sorted: "true" }, ...rest });
+  if (key) r.dbt = { duckrun: { [spelling]: { fct_summary: key } } };
+  return r;
+};
+
 test("two sorts on different keys never share a bar, even when the bands agree", () => {
-  // The real pair — `['date','time','DUID']` and `['date','time']` — sits in separate bars today
-  // only because 3 and 4 files cross a band boundary. That is luck, so the key carries the columns:
-  // a `sort_by='auto'`-era record witnesses its own (`dbt.<engine>.sort_by_auto`), a recent record
-  // carries only the boolean and gets the model's declared key.
-  const auto = lay("duckrun", 4, 25, { cfg: { sorted: "true" }, file: "a-1.json" });
-  auto.dbt = { duckrun: { sort_by_auto: { fct_summary: ["date", "time", "DUID"] } } };
-  const declared = lay("duckrun", 4, 25, { cfg: { sorted: "true" }, file: "b-2.json" });
-  assert.equal(d.layoutKey(auto)[3], "date,time,DUID");
-  assert.equal(d.layoutKey(declared)[3], "date,time");
-  assert.deepEqual(d.layoutKey(auto).slice(0, 3), d.layoutKey(declared).slice(0, 3));
-  const groups = d.layoutGroups([{ rec: auto }, { rec: declared }]);
-  assert.equal(groups.length, 2, "identical shape, different sort — two bars");
+  // The real pair — `['date','time','DUID']` (run 30955591822) and `['date','time']` — sits in
+  // separate bars today only because 3 and 4 files cross a band boundary. That is luck, so the key
+  // carries the columns.
+  const duid = sortedBy(4, 25, ["date", "time", "DUID"], { file: "a-1.json" });
+  const dt = sortedBy(4, 25, ["date", "time"], { file: "b-2.json" });
+  assert.equal(d.layoutKey(duid)[3], "date,time,DUID");
+  assert.equal(d.layoutKey(dt)[3], "date,time");
+  assert.deepEqual(d.layoutKey(duid).slice(0, 3), d.layoutKey(dt).slice(0, 3));
+  assert.equal(d.layoutGroups([{ rec: duid }, { rec: dt }]).length, 2,
+    "identical shape, different sort — two bars");
+});
+
+test("the sort key comes off the RECORD, in either spelling, and is never guessed", () => {
+  // THE KEY IS A PROPERTY OF THE COMMIT: the model declared date,time,DUID for a while and date,time
+  // since. A constant in this file was right for today's model only, and captioned run 30955591822 —
+  // a DUID sort — `by date, time`. Both spellings are legitimate: `sort_by` is declared, and
+  // `sort_by_auto` is the only witness for an `'auto'` run, whose declaration names no columns.
+  assert.equal(d.sortKeyOf(sortedBy(4, 25, ["date", "time", "DUID"])), "date,time,DUID");
+  assert.equal(d.sortKeyOf(sortedBy(4, 25, ["date", "time"], { spelling: "sort_by_auto" })),
+    "date,time");
+  // Sorted by SOMETHING the record does not name: `true`, which shares a bar with neither an
+  // unsorted run nor any named sort — the rule `layoutKey` already applies to a missing file count.
+  const unnamed = sortedBy(4, 25, null);
+  assert.equal(d.sortKeyOf(unnamed), true);
+  assert.equal(d.sortKeyOf(lay("duckrun", 4, 27, { cfg: { vcores: "64" } })), false);
+  assert.equal(new Set([{ rec: unnamed }, { rec: sortedBy(4, 25, ["date", "time"]) },
+    { rec: lay("duckrun", 4, 25, { cfg: { vcores: "64" } }) }]
+    .map(({ rec }) => JSON.stringify(d.layoutKey(rec)))).size, 3);
 });
 
 test("the caption says which columns a sorted bar is ordered by, row groups only", () => {
-  // `by date, time, DUID · 25 RG` — the measured key when the record has one, the declared
-  // `date, time` otherwise, nothing for an unsorted bar. Files are not printed at all: segments are
-  // what drive Direct Lake's cost, and the file BAND still separates bars without being said.
-  const auto = lay("duckrun", 4, 25, { cfg: { sorted: "true" } });
-  auto.dbt = { duckrun: { sort_by_auto: { fct_summary: ["date", "time", "DUID"] } } };
-  assert.equal(d.layoutLabel([{ rec: auto }]), "by date, time, DUID · 25 RG");
-  const declared = lay("duckrun", 1, 9, { cfg: { sorted: "true" } });
-  assert.equal(d.layoutLabel([{ rec: declared }]), "by date, time · 9 RG");
-  const plain = lay("duckrun", 4, 27, { cfg: { vcores: "64" } });
-  assert.equal(d.layoutLabel([{ rec: plain }]), "27 RG");
+  // Files are not printed at all: segments are what drive Direct Lake's cost, and the file BAND
+  // still separates bars without being said.
+  assert.equal(d.layoutLabel([{ rec: sortedBy(4, 25, ["date", "time", "DUID"]) }]),
+    "by date, time, DUID · 25 RG");
+  assert.equal(d.layoutLabel([{ rec: sortedBy(1, 9, ["date", "time"]) }]), "by date, time · 9 RG");
+  // Sorted but unnamed adds NOTHING — the label already says `sorted`, and inventing a key here is
+  // the bug this whole path exists to prevent.
+  assert.equal(d.layoutLabel([{ rec: sortedBy(1, 9, null) }]), "9 RG");
+  assert.equal(d.layoutLabel([{ rec: lay("duckrun", 4, 27, { cfg: { vcores: "64" } }) }]), "27 RG");
   const vo = lay("spark", 11, 11, { vorder: true, cfg: { resource_profile: "readHeavyForPBI" } });
   assert.equal(d.layoutLabel([{ rec: vo }]), "V-Order · 11 RG");
 });
@@ -1195,6 +1220,7 @@ test("two runs of ONE column that wrote different parquet are two bars", () => {
     lay("duckrun", 3, 26, { cfg, file: "a-1.json", finishedHoursAgo: 72 }),
     lay("duckrun", 4, 25, { cfg, file: "b-2.json", finishedHoursAgo: 48 }),
   ];
+  runs.forEach((r) => { r.dbt = { duckrun: { sort_by: { fct_summary: ["date", "time"] } } }; });
   runs[0].items = { S0: gone("semantic_model", "aemo_duckrun"), O0: gone("output", "dbt_delta") };
   runs[1].items = { S1: gone("semantic_model", "aemo_duckrun"), O1: gone("output", "dbt_delta") };
   const out = render(runs, ledger({
@@ -1205,7 +1231,6 @@ test("two runs of ONE column that wrote different parquet are two bars", () => {
   assert.deepEqual(c.labels, ["duckrun sorted", "duckrun sorted"], "one label, two layouts");
   assert.deepEqual(c.values, ["1,600.0", "2,400.0"], "each run's OWN CU, never their mean");
   // The caption is the whole reason two bars with one label read: the label answers who wrote it.
-  // Neither fixture carries `sort_by_auto`, so the sort columns are the declared fallback.
   assert.deepEqual(c.captions, ["by date, time · 25 RG", "by date, time · 26 RG"]);
   // ...and the mart block says the same thing, because its rows ARE these groups.
   const body = rows(block(out, "the mart the queries land on")).slice(1);

@@ -570,29 +570,33 @@ export function layoutKey(rec, table = DEFAULTS.table) {
     sortKeyOf(rec, table)];
 }
 
-// The declared sort key of the one sorted model in the project: `models/duckdb/marts/fct_summary.sql`
-// sets `sort_by=['date','time']` behind DUCKDB_SORTED, and the run record carries only the boolean —
-// so this constant is the fallback witness for WHICH columns a sorted run ordered by. Change the
-// model's key and this must move with it.
-export const DECLARED_SORT_KEY = ["date", "time"];
-
 /**
- * The sort key one run wrote under, as a `"date,time"` string, or `false` when it wrote unsorted.
+ * The sort key one run wrote under, as a `"date,time"` string; `false` when it wrote unsorted, and
+ * `true` when it sorted by something the record does not name.
+ *
+ * THE KEY IS A PROPERTY OF THE COMMIT, WHICH IS WHY IT HAS TO COME OFF THE RECORD. The model
+ * declared `['date','time','DUID']` for a while and `['date','time']` since, so a constant here
+ * could only ever be right for today's model — and briefly was not: it captioned run 30955591822,
+ * a DUID sort, `by date, time`. Every sorted record now carries its own key, backfilled from the
+ * model at the SHA it ran.
+ *
+ * Two spellings, both legitimate and neither preferred on principle: `sort_by` is what the run
+ * DECLARED, `sort_by_auto` is what duckrun's picker RESOLVED (`fabric_run.py` scrapes it from the
+ * log, and it is the only witness for an `'auto'` run, whose declaration names no columns).
  *
  * `false` — not `null` — for a record with no `sorted` config at all: every run before the input
  * existed demonstrably wrote unsorted parquet, so absence here is not "unmeasured" (unlike the file
- * counts in `layoutKey`) and must key identically to an explicit unsorted run.
- *
- * A `sort_by='auto'`-era record carries the picker's own answer under
- * `dbt.<engine>.sort_by_auto.<table>`, and that measured value wins; otherwise the declared constant
- * stands in, because the record's boolean is all the recent runs wrote down.
+ * counts in `layoutKey`) and must key identically to an explicit unsorted run. A sorted run with no
+ * key recorded is the opposite case and gets `true`, which shares a bar with neither an unsorted run
+ * nor any named sort — the same rule `layoutKey` applies to a missing file count.
  */
 export function sortKeyOf(rec, table = DEFAULTS.table) {
   const engine = (rec || {}).engine || "?";
   const cfg = (((rec || {}).layout || {}).config || {})[engine] || {};
   if (!cfg.sorted) return false;
-  const auto = ((((rec || {}).dbt || {})[engine] || {}).sort_by_auto || {})[table];
-  return (Array.isArray(auto) && auto.length ? auto : DECLARED_SORT_KEY).join(",");
+  const dbt = ((rec || {}).dbt || {})[engine] || {};
+  const key = (dbt.sort_by || {})[table] || (dbt.sort_by_auto || {})[table];
+  return Array.isArray(key) && key.length ? key.join(",") : true;
 }
 
 /**
@@ -659,7 +663,10 @@ export function layoutLabel(members, table = DEFAULTS.table) {
   if (stats.some((s) => s.vorder)) bits.push("V-Order");
   // One value per bar when grouping came through `layoutKey` (the sort key is IN the key); the
   // dedup only matters for the unmeasured-column fallback, where members are grouped by column.
-  const sorts = [...new Set(members.map(({ rec }) => sortKeyOf(rec, table)).filter(Boolean))];
+  // STRINGS ONLY — `true` means the run sorted by something it did not write down, and the label
+  // already says `sorted`, so there is nothing to add and nothing to invent.
+  const sorts = [...new Set(members.map(({ rec }) => sortKeyOf(rec, table))
+    .filter((s) => typeof s === "string"))];
   if (sorts.length) bits.push(`by ${sorts.join(" / ").split(",").join(", ")}`);
   for (const [field, unit] of [["num_row_groups", "RG"]]) {
     const v = rng(field);

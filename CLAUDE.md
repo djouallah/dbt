@@ -1250,10 +1250,20 @@ no data at all. `all.yml`, `dbt.yml` and `cu.yml` are gone.
   explains why two writers would ever share a bar. **The caption prints ROW GROUPS ONLY** — segments
   are what drive Direct Lake's transcode/scan cost and the file count was a second number saying
   less; the file BAND still separates bars, it just is not printed. **A sorted bar's caption names
-  its sort columns** (`by date, time · 9 RG`): the record's own `dbt.<engine>.sort_by_auto` when the
-  `'auto'`-era scrape recorded one, else `DECLARED_SORT_KEY` in `app.js`, the constant mirroring the
-  one sort the model declares — change `fct_summary.sql`'s `sort_by` and that constant must move
-  with it. **ETL is one bar per column**, unchanged, because
+  its sort columns** (`by date, time · 9 RG`), **and that key comes off the RECORD — never a constant
+  here.** THE KEY IS A PROPERTY OF THE COMMIT: the model declared `['date','time','DUID']` for a
+  while and `['date','time']` since, so a constant in `app.js` is right only for today's model, and
+  briefly was not — it captioned run 30955591822, a DUID sort, `by date, time`, which is the exact
+  class of quiet lie this page is built against. Two spellings, both read, neither preferred:
+  `dbt.<engine>.sort_by` is what the run DECLARED (`stats.py`'s `declared_sort_key()`, a literal-list
+  regex over the model in its own checkout — the notebook cannot write to the record, so the
+  manifest never reaches here), `dbt.<engine>.sort_by_auto` is what duckrun's picker RESOLVED
+  (`fabric_run.py`'s log scrape, and the only witness for an `'auto'` run, whose declaration names no
+  columns). **A sorted run with no key recorded reads `true`** — it shares a bar with neither an
+  unsorted run nor any named sort, and its caption adds nothing, because the label already says
+  `sorted`. The five records predating `declared_sort_key()` were **backfilled** from the model at
+  the SHA each ran; the two `'auto'` ones were deliberately left alone, their scrape being the better
+  source. **ETL is one bar per column**, unchanged, because
   there the writer and the compute it was given are the entire subject.
   What forced it: duckrun at 64 cores and at 32 wrote 4 files and 27 row groups either way, so two
   bars 50% apart was not a comparison — it was one layout measured twice, presented as two results.

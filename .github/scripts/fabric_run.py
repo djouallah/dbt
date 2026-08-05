@@ -89,12 +89,17 @@ def _sort_keys(log):
 
 
 def _record_sort_keys(log, engine):
-    """Write the resolved keys into the run record, under a key NOTHING READS.
+    """Write the resolved keys into the run record, under `dbt.<engine>.sort_by_auto`.
 
-    `dbt.<engine>.sort_by_auto`, deliberately outside `layout.config`: the dashboard's `variant()`
-    walks every entry of that dict, so putting it there would split an engine's column and its
-    layout bar on a key that changes run to run — the picker re-profiles every batch. Here it is
-    inert, and `record.py`'s merge is a recursive dict union so a new branch costs nothing.
+    Deliberately outside `layout.config`: the dashboard's `variant()` walks every entry of that
+    dict, so putting it there would split an engine's column and its layout bar on a key that
+    changes run to run — the picker re-profiles every batch. `record.py`'s merge is a recursive dict
+    union so a new branch costs nothing.
+
+    THE DASHBOARD NOW READS THIS (`sortKeyOf`), which it did not when this was written — it is the
+    only witness for an `'auto'` run's columns, since the declaration names none and `stats.py`'s
+    `declared_sort_key()` records a literal list only. So an empty list is still a real answer, but
+    a WRONG one would now reach a caption rather than sitting inert.
 
     Best-effort, like `_record_notebook`: this also runs on the failure path, where raising would
     REPLACE the build's own exception and lose the real cause.
