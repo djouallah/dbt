@@ -1842,6 +1842,47 @@ test("the dispatch inputs are query params now", () => {
   assert.deepEqual(d.optsFromSearch(""), { ...d.DEFAULTS });
 });
 
+/** The shape `stats.py`'s `encodings_for` writes: one entry per column, per engine. */
+const enc = (dict) => ({
+  date: { encodings: ["PLAIN_DICTIONARY", "RLE"], type: "INT32", dict_pages: 9, chunks: 9, mb: 1.2 },
+  mw: { encodings: dict ? ["PLAIN_DICTIONARY"] : ["PLAIN"], type: "DOUBLE",
+    dict_pages: dict ? 9 : 0, chunks: 9, mb: dict ? 310.5 : 640.2 },
+  price: { encodings: ["PLAIN_DICTIONARY", "PLAIN"], type: "DOUBLE",
+    dict_pages: 4, chunks: 9, mb: 214.9 },
+});
+
+test("column encoding renders per layout, and flags a column with no dictionary", () => {
+  // The question `Table layout` cannot answer: shape does not explain the CU, and what Direct Lake
+  // pays for on a cold pass is transcoding, which depends on what the columns are ENCODED as.
+  const runs = [lay("duckrun", 4, 27, { cfg: { vcores: "64" }, file: "a-1.json" }),
+    lay("spark", 10, 10, { vorder: true, cfg: { resource_profile: "readHeavyForPBI" },
+      file: "b-2.json" })];
+  runs[0].encodings = { duckrun: enc(false) };
+  runs[1].encodings = { spark: enc(true) };
+  runs.forEach((r, i) => {
+    r.items = { [`S${i}`]: gone("semantic_model", `aemo_${r.engine}`),
+      [`O${i}`]: gone("output", `dbt_${r.engine}`) };
+  });
+  const { html } = d.compose(runs, ledger({ S0: { "XMLA Read Operation": 10 }, O0: 1,
+    S1: { "XMLA Read Operation": 20 }, O1: 1 }), {});
+  const body = rows(block(html, "Column encoding")).slice(1);
+  assert.equal(body.length, 3, "one row per column");
+  const mw = body.find((r) => r.startsWith("| `mw`"));
+  assert.ok(mw.includes("⚠️ no dict"), `the PLAIN column is flagged: ${mw}`);
+  assert.ok(mw.includes("640.2 MB") && mw.includes("310.5 MB"), mw);
+  // A column that started dictionary-encoded and gave up partway still LISTS PLAIN_DICTIONARY, so
+  // the list alone would read as "dictionary" for a column that is mostly not.
+  assert.ok(body.find((r) => r.startsWith("| `price`")).includes("dict in 4/9"), body);
+});
+
+test("no record carrying encodings renders NO encoding table", () => {
+  // Every record written before stats.py learned to profile the mart. An empty table would read as
+  // "these engines have no encodings", which is not a state parquet can be in.
+  const { html } = d.compose([full("a-1.json", "spark")], ledger({ OUT: 1.0, SEM: 2.0 }), {});
+  assert.ok(!html.includes("Column encoding"), "absent, not empty");
+  assert.equal(d.renderEncodings([]), "");
+});
+
 test("compose renders one run alone when a record is pinned", () => {
   const runs = [full("a-1.json", "spark"), full("b-2.json", "dwh")];
   const led = ledger({ OUT: 1.0, SEM: 2.0 });

@@ -1541,6 +1541,66 @@ export function renderInput(cols) {
  * a faster first visit. Cold especially: it is the tier that transcodes columns out of parquet, so it
  * is the one layout can move at all.
  */
+/**
+ * `fct_summary`'s per-column PARQUET ENCODING, one row per column, one column per layout.
+ *
+ * The question every other table on this page leaves open. `Table layout` reports SHAPE — files, row
+ * groups, size — and shape turned out not to explain the CU: duckrun writes the densest parquet here
+ * (5.63 bytes/row) and does not win, dwh writes UNCOMPRESSED and beats a SNAPPY spark build, and
+ * spark's two resource profiles sit in the same row-group BAND 2.6x apart. What Power BI actually
+ * pays for on a cold pass is transcoding parquet into VertiPaq segments, and how expensive that is
+ * depends on what the columns are ENCODED as — the one property nothing measured.
+ *
+ * Keyed on the LAYOUT, like the analytics chart, because encoding is a property of what was written.
+ * The newest member of a group that carries a profile wins; members of one group wrote the same
+ * shape, and `stats.py` reads the encodings from the same item it read the shape from.
+ *
+ * `dict_pages < chunks` is flagged: a column the writer gave up dictionary-encoding partway through
+ * still says `PLAIN_DICTIONARY` in its encoding list, so the list alone would read as "dictionary"
+ * for a column that is mostly not.
+ *
+ * Renders NOTHING when no record carries `encodings`, which is every record written before
+ * `stats.py` learned to profile the mart. An empty table would read as "the engines have no
+ * encodings", which is not a state parquet can be in.
+ */
+export function renderEncodings(groups, martTable = DEFAULTS.table) {
+  const cols = [];
+  for (const [, members] of groups || []) {
+    let enc = null;
+    // Members arrive oldest-first, so the last one carrying a profile is the newest.
+    for (const m of members) {
+      const e = (((m.rec || {}).encodings || {})[(m.rec || {}).engine]) || {};
+      if (Object.keys(e).length) enc = e;
+    }
+    if (!enc) continue;
+    const label = producers(members), cap = layoutLabel(members, martTable);
+    cols.push({ name: label === cap ? label : `${label} · ${cap}`, enc });
+  }
+  if (!cols.length) return "";
+  // Truncated in the MIDDLE, never the tail: a layout's name ends in its row-group count, which is
+  // what tells two bars sharing a label apart.
+  const short = (n) => n.length <= 34 ? n : `${n.slice(0, 17)}…${n.slice(-15)}`;
+  const names = [...new Set(cols.flatMap((c) => Object.keys(c.enc)))].sort();
+  const cell = (c, col) => {
+    const v = c.enc[col];
+    if (!v) return DASH;
+    const enc = (v.encodings || []).join("+") || "?";
+    const partial = v.chunks && v.dict_pages && v.dict_pages < v.chunks;
+    return `\`${enc}\`${v.dict_pages ? (partial ? ` ⚠️ dict in ${v.dict_pages}/${v.chunks}` : "")
+      : " ⚠️ no dict"} · ${fmt(v.mb || 0, 1)} MB`;
+  };
+  return [`<h3>Column encoding <span class="asof">\`${esc(martTable)}\`</span></h3>`,
+    note("**What Power BI has to transcode.** Direct Lake converts parquet into VertiPaq segments on " +
+      "first touch, and that conversion is where a cold pass spends its capacity — so what each " +
+      "column is ENCODED as matters in a way its size does not. Read from the parquet footers by " +
+      "`stats.py`, aggregated per column over every row group."),
+    table(["column", "type", ...cols.map((c) => short(c.name))],
+      ["left", "left", ...cols.map(() => "left")],
+      names.map((n) => [`\`${n}\``,
+        `\`${(cols.find((c) => c.enc[n]) || { enc: {} }).enc[n].type || "?"}\``,
+        ...cols.map((c) => cell(c, n))]))].join("\n");
+}
+
 export function renderLayouts(cols, groups, times, counts, martTable = DEFAULTS.table) {
   const stats = {};
   for (const { col, rec } of cols) {
@@ -2346,6 +2406,9 @@ export function renderPage(cols, runs, ledger, opts = {}) {
     [col, runCu(rec, ledger, "seconds").cells]));
   out.push(engineTable(perCol, cols, secsCol));
   out.push(renderLayouts(cols, groups, times, counts, martTable));
+  // Straight after the SHAPE of the parquet: this is the other half of what was written, and the
+  // half that shape could not explain.
+  out.push(renderEncodings(groups, martTable));
 
   // WHAT WENT IN, then the per-run table, then the prose. Every TABLE the page has comes before every
   // paragraph about them: a reader arrives for the numbers, and `About these numbers` sat between the

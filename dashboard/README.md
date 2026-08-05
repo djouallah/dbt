@@ -190,6 +190,16 @@ without a build, a token or a dispatch.
 - **Bar charts first**, analytics then ETL, **cheapest first** because "lower is better" makes the
   ranking the finding. A **zero sorts to the bottom**, never the top: zero means the engine did no
   such work, and at the top under that caption it would read as the winner.
+- **`Column encoding` sits under `Table layout`, and is the half shape could not explain.** One row
+  per `fct_summary` column, one column per layout: what each column is ENCODED as in parquet, read
+  from the footers by `stats.py` and aggregated over every row group. Shape does not predict the
+  CU — duckrun writes the densest parquet here and does not win, dwh writes UNCOMPRESSED and beats
+  a SNAPPY spark build, and spark's two profiles sit in one row-group band 2.6x apart — while what
+  Direct Lake pays for on a cold pass is transcoding parquet into VertiPaq segments, which depends
+  on the encoding. A column whose writer gave up dictionary-encoding partway still LISTS
+  `PLAIN_DICTIONARY`, so `dict_pages < chunks` is flagged separately; no dictionary at all is
+  flagged loudest. **Absent, never empty**, when no record carries `encodings` — which is every
+  record written before `stats.py` learned to profile the mart.
 - **Cost and speed by layout is a TABLE, between the charts and *Cost by engine*.** One row per
   layout, cheapest first: `CU`, `cold ms`, `warm ms`, `hot ms`. These four were columns of the mart's
   layout block, which made one table answer two questions — what the parquet looks like, and what
