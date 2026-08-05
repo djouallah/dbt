@@ -1838,8 +1838,65 @@ test("the dispatch inputs are query params now", () => {
   // `?record=30776174056` is a link to one run's page. It used to be a workflow dispatch.
   assert.deepEqual(d.optsFromSearch("?record=30776174056&ref=topic&table=fct_scada"), {
     repo: d.DEFAULTS.repo, ref: "topic", table: "fct_scada", record: "30776174056",
+    tier: d.DEFAULTS.tier,
   });
   assert.deepEqual(d.optsFromSearch(""), { ...d.DEFAULTS });
+  // `?tier=` picks which pass position `Every query` reports. An unknown value falls back rather
+  // than rendering a table of dashes that looks like "nothing was measured".
+  assert.equal(d.optsFromSearch("?tier=cold").tier, "cold");
+  assert.equal(d.optsFromSearch("?tier=warm").tier, "warm");
+  assert.equal(d.optsFromSearch("?tier=nonsense").tier, d.DEFAULTS.tier);
+});
+
+test("Every query is the tier totals unsummed, one row per query", () => {
+  // `Cost and speed by layout` sums 25 queries into one number per layout, which answers "which
+  // layout is cheaper" and hides "at what". A scalar aggregate over 143M rows and a single-DUID
+  // lookup do not respond to layout the same way.
+  const runs = [full("a-1.json", "duckrun", { timings: timings({ big: [900, 500, 400], small: [30, 20, 10] }) }),
+    full("b-2.json", "spark", { timings: timings({ big: [600, 300, 200], small: [40, 25, 15] }) })];
+  runs.forEach((r, i) => {
+    r.items = { [`S${i}`]: gone("semantic_model", `aemo_${r.engine}`),
+      [`O${i}`]: gone("output", `dbt_${r.engine}`) };
+  });
+  const { html } = d.compose(runs, ledger({ S0: { "XMLA Read Operation": 10 }, O0: 1,
+    S1: { "XMLA Read Operation": 20 }, O1: 1 }), {});
+  const body = rows(block(html, "Every query")).slice(1);
+  assert.equal(body.length, 2, "one row per query, not per run");
+  // Slowest first — the queries a layout choice can move are the expensive ones.
+  assert.ok(body[0].includes("`big`"), body[0]);
+  assert.ok(body[1].includes("`small`"), body[1]);
+});
+
+test("the query table reports ONE tier, switchable, and never invents a missing sample", () => {
+  // Cold, warm and hot answer different questions; three sub-columns per layout would triple the
+  // width for a comparison the tier totals already make. A query with no sample at the chosen tier
+  // is a DASH — the ladder queries genuinely have no cold_ms, the top DUID being resolved after
+  // pass 1, and printing 0 there would read as "instant".
+  const t = timings({ q: [900, 500, 400] });
+  t.ladder = { warm_ms: 50, hot_median_ms: 40, tier: "hot_only" };   // no cold_ms at all
+  const runs = [full("a-1.json", "duckrun", { timings: t })];
+  runs[0].items = { S0: gone("semantic_model", "aemo_duckrun"), O0: gone("output", "dbt_delta") };
+  const led = ledger({ S0: { "XMLA Read Operation": 10 }, O0: 1 });
+  const hot = rows(block(d.compose(runs, led, { tier: "hot" }).html, "Every query")).slice(1);
+  assert.equal(hot.length, 2, "hot covers both");
+  const cold = rows(block(d.compose(runs, led, { tier: "cold" }).html, "Every query")).slice(1);
+  assert.equal(cold.length, 1, "the ladder query is dropped, not zeroed");
+  assert.ok(cold[0].includes("`q`"), cold[0]);
+});
+
+test("a query column header truncates in the MIDDLE, keeping its row groups", () => {
+  // A layout's name ends in its row-group count, which is what tells two bars with one label apart.
+  // Clipping the tail turns three `duckrun sorted` columns into three identical headers.
+  const long = "duckrun sorted · by date, time, DUID · 19 RG";
+  const runs = [lay("duckrun", 3, 19, { cfg: { sorted: "true" }, file: "a-1.json",
+    timings: timings({ q: [9, 5, 4] }) })];
+  runs[0].dbt = { duckrun: { sort_by: { fct_summary: ["date", "time", "DUID"] } } };
+  runs[0].items = { S0: gone("semantic_model", "aemo_duckrun"), O0: gone("output", "dbt_delta") };
+  const head = rows(block(d.compose(runs,
+    ledger({ S0: { "XMLA Read Operation": 10 }, O0: 1 }), {}).html, "Every query"))[0];
+  assert.ok(head.includes("19 RG |"), `the row groups survive truncation: ${head}`);
+  assert.ok(head.includes("duckrun sorted"), head);
+  assert.ok(long.length > 34, "the fixture is long enough to be truncated at all");
 });
 
 test("compose renders one run alone when a record is pinned", () => {

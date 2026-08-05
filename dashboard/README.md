@@ -102,6 +102,7 @@ without a build, a token or a dispatch.
 | `?ref=some-branch` | read `history/` from another branch |
 | `?repo=owner/name` | read another fork's records entirely |
 | `?table=fct_scada` | which table leads the layout section |
+| `?tier=cold` | which pass position *Every query* reports — `cold`, `warm` or `hot` (default) |
 
 `?record=` used to be a workflow dispatch input. A link to one run's page is now a link.
 
@@ -190,6 +191,17 @@ without a build, a token or a dispatch.
 - **Bar charts first**, analytics then ETL, **cheapest first** because "lower is better" makes the
   ranking the finding. A **zero sorts to the bottom**, never the top: zero means the engine did no
   such work, and at the top under that caption it would read as the winner.
+- **`Every query` is that table unsummed** — one row per query, one column per layout, sorted
+  slowest first. The totals above it add 25 queries into one number, which answers "which layout
+  is cheaper" and hides "at what": a scalar aggregate over 143M rows and a single-DUID lookup do
+  not respond to file layout the same way. Cells are the same `groupMid` median the bar quotes.
+  **One tier at a time** (`?tier=`, default `hot`), never three sub-columns per layout — that
+  would triple the width to allow a comparison the tier totals already make. `hot` is the default
+  because every query has one and it is itself a median over passes 3+; `?tier=cold` is the layout
+  view, and there the two selectivity-ladder queries are ABSENT rather than zero, because the top
+  DUID is resolved after pass 1 so they have no cold sample at all. Column headers truncate in the
+  MIDDLE: a layout's name ends in its row-group count, which is what tells two bars sharing a
+  label apart, so clipping the tail would render three `duckrun sorted` columns identical.
 - **Cost and speed by layout is a TABLE, between the charts and *Cost by engine*.** One row per
   layout, cheapest first: `CU`, `cold ms`, `warm ms`, `hot ms`. These four were columns of the mart's
   layout block, which made one table answer two questions — what the parquet looks like, and what
