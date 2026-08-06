@@ -1,0 +1,158 @@
+{
+ "dbt": {
+  "duckrun": {
+   "sort_by": {
+    "fct_summary": [
+     "date",
+     "time",
+     "DUID"
+    ]
+   }
+  }
+ },
+ "engine": "duckrun",
+ "full_load": false,
+ "inputs": {
+  "benchmark": "true",
+  "build": "true",
+  "cores": "64",
+  "download_limit": "200",
+  "gap_seconds": "600",
+  "native_execution_engine": "true",
+  "runs": "6",
+  "skip_download": "true",
+  "sorted": "true",
+  "spark_resource_profile": "writeHeavy",
+  "think_seconds": "4"
+ },
+ "items": {
+  "6C23854F-CF0F-460D-8AFB-01D9BEA9A92D": {
+   "at": "2026-08-06T05:11:32+00:00",
+   "created": false,
+   "kind": "Folder",
+   "name": "benchmark",
+   "role": "folder"
+  },
+  "F50469D2-8347-4464-9EE8-97C768B4F355": {
+   "at": "2026-08-06T05:11:33+00:00",
+   "created": false,
+   "kind": "Folder",
+   "name": "landing",
+   "role": "folder"
+  }
+ },
+ "layout": {
+  "config": {
+   "duckrun": {
+    "file_size_mb": null,
+    "row_group_size": "6000000",
+    "sorted": "true",
+    "vcores": "64"
+   },
+   "iceberg": {
+    "vcores": "64"
+   },
+   "spark": {
+    "native_execution_engine": "true",
+    "resource_profile": "writeHeavy"
+   }
+  },
+  "detail_keys": [
+   "schema",
+   "total_rows",
+   "num_files",
+   "num_row_groups",
+   "avg_row_group",
+   "size_mb",
+   "vorder",
+   "compression"
+  ],
+  "engines": {
+   "duckrun": {
+    "guid": null,
+    "item": "dbt_delta",
+    "kind": "lakehouses",
+    "writer": "delta-rs"
+   },
+   "dwh": {
+    "guid": null,
+    "item": "dbt_dwh",
+    "kind": "warehouses",
+    "writer": "warehouse"
+   },
+   "iceberg": {
+    "guid": null,
+    "item": "dbt_iceberg",
+    "kind": "lakehouses",
+    "writer": "duckdb (iceberg)"
+   },
+   "spark": {
+    "guid": null,
+    "item": "dbt_spark",
+    "kind": "lakehouses",
+    "writer": "spark"
+   }
+  },
+  "landing": {
+   "files": 8367,
+   "folders": {
+    "(root)": {
+     "files": 1,
+     "size_mb": 0.37
+    },
+    "csv_raw/daily": {
+     "files": 3042,
+     "size_mb": 170004.56
+    },
+    "csv_raw/duid": {
+     "files": 4,
+     "size_mb": 0.16
+    },
+    "csv_raw/price_today": {
+     "files": 2550,
+     "size_mb": 381.24
+    },
+    "csv_raw/scada_today": {
+     "files": 2571,
+     "size_mb": 103.76
+    },
+    "duckrun_remote": {
+     "files": 199,
+     "size_mb": 1.67
+    }
+   },
+   "guid": "4fbe4130-1717-4fc9-a985-3fb7b4a13067",
+   "item": "dbt_landing",
+   "size_mb": 170491.76
+  },
+  "run": {
+   "id": "31073309328",
+   "sha": "3e9236f770662cc33a6cb7c7f6342dbbd8aae3c9",
+   "written": "2026-08-06T05:10:59.364107+00:00"
+  },
+  "stats": {
+   "duckrun": {},
+   "dwh": {},
+   "iceberg": {},
+   "spark": {}
+  },
+  "tables": [
+   "stg_csv_archive_log",
+   "dim_calendar",
+   "dim_duid",
+   "fct_price",
+   "fct_scada",
+   "fct_price_today",
+   "fct_scada_today",
+   "fct_summary"
+  ]
+ },
+ "run": {
+  "finished": "2026-08-06T05:11:42+00:00",
+  "id": "31073309328",
+  "sha": "3e9236f770662cc33a6cb7c7f6342dbbd8aae3c9",
+  "started": "2026-08-06T05:09:56+00:00",
+  "url": "https://github.com/djouallah/fabric-dbt-benchmark/actions/runs/31073309328"
+ },
+ "schema": 1
+}
