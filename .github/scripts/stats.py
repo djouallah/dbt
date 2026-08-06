@@ -29,9 +29,16 @@ run wrote 143,980,961 rows and not say from how much. It is read by listing the 
 querying it, because DuckDB's `glob()` returns paths and no sizes and the archive is uncompressed
 CSV whose bytes are the point.
 
+It also reports whether the writer PHYSICALLY REORDERED THE ROWS — `ordering`, see `ordering_for`.
+V-Order is documented as a row-reordering pass and nothing here could tell whether it happened: the
+`vorder` detail key is a table PROPERTY nobody sets, so it reads false for spark whatever the files
+contain. That is measured from the parquet itself now, plus the per-file Delta `VORDER` tag this
+file's own comments have called the honest check for months without anything reading it.
+
 That JSON is a data contract with a consumer outside this file. Its shape is
 `{"run": {...}, "config": {...}, "engines": {...}, "tables": [...], "landing": {...},
-"stats": {engine: {table: {detail}}}}` and the detail keys are DETAIL_KEYS below. `config` is what the build ran ON — vCores,
+"ordering": {engine: {...}}, "stats": {engine: {table: {detail}}}}` and the detail keys are
+DETAIL_KEYS below. `config` is what the build ran ON — vCores,
 Spark resource profile, native execution engine — read from the env the legs were actually given, so
 the page can state the hardware instead of asserting it. Adding a key is safe; renaming or removing one breaks `cu/`'s layout
 table, which degrades to a note rather than an error — so a rename fails QUIETLY over there. Change
@@ -43,6 +50,7 @@ import sys
 import subprocess
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
+from urllib.parse import unquote
 
 import requests
 import duckrun
@@ -82,8 +90,17 @@ ENGINES = [t for t in ALL_ENGINES if not _want or t[0] in _want]
 TABLES = ["stg_csv_archive_log", "dim_calendar", "dim_duid",
           "fct_price", "fct_scada", "fct_price_today", "fct_scada_today", "fct_summary"]
 
-# The one table the query benchmark touches, the layout chart is about, and `encodings_for` reads.
+# The one table the query benchmark touches, the layout chart is about, and `encodings_from` reads.
 MART = "fct_summary"
+
+# How many physical rows `run_lengths` reads from the sample file. A FIXED ROW BUDGET rather than
+# "the first row group", because the engines' row-group sizes differ by two orders of magnitude
+# (duckrun's default ~122K against spark readHeavyForPBI's 16M) and a per-row-group sample would
+# compare a 122K-row window on one engine with a 16M-row window on another — the run count is a
+# fraction OF THE ROWS READ, so the windows have to be the same size for the numbers to be one
+# measurement. 4M is small enough to stay minutes on the slowest item and large enough that a
+# high-cardinality column cannot look clustered by luck.
+ORDERING_SAMPLE_ROWS = 4_000_000
 
 # The get_stats() detail carried per table (see stats_for) and how each column is rendered.
 DETAIL_KEYS = ("schema", "total_rows", "num_files", "num_row_groups",
@@ -197,26 +214,57 @@ def reader(guid):
     return con
 
 
-def stats_for(guid):
+def stats_for(con):
     """{table: {schema, total_rows, num_files, num_row_groups, avg_row_group, size_mb,
-    vorder, compression}} for one item's Tables — the full get_stats() detail, not just rows."""
-    rows = reader(guid).get_stats().fetchall()
+    vorder, compression}} for one item's Tables — the full get_stats() detail, not just rows.
+
+    Takes a CONNECTION, not a guid: `one_engine` now asks this item four questions (aggregate
+    stats, encodings, row ordering, the Delta log) and a guid argument would mean four
+    `duckrun.connect` attaches to the same Tables path per engine.
+    """
+    rows = con.get_stats().fetchall()
     # get_stats() column order: catalog, schema, table, total_rows, num_files, num_row_groups,
     # avg_row_group, size_mb, vorder, compression
     return {r[2]: dict(zip(DETAIL_KEYS, (r[1], r[3], r[4], r[5], r[6], r[7], r[8], r[9])))
             for r in rows}
 
 
-def encodings_for(guid, table):
+def mart_chunks(con, table):
+    """`(name -> index, rows)` of `get_stats(table, detailed=True)` — ONE footer read for everything.
+
+    This is DuckDB's raw `parquet_metadata()` over the mart's live files: one row per (row group,
+    column chunk), carrying the encodings, the physical type, the compressed size, the row group's
+    id and row count, and its per-column min/max statistics. THREE questions are answered from this
+    single fetch — `encodings_from` (what Power BI has to transcode), `rg_ordering` (whether the row
+    groups carve the domain up or all span it) and `run_lengths`'s choice of sample file — because a
+    second `get_stats(detailed=True)` would re-read EVERY parquet footer over OneLake, on an item
+    that already reads at 12m+.
+
+    `(None, [])` on any failure: every consumer treats that as "not measured" and the layout job
+    stays green. `table` MUST BE SCHEMA-QUALIFIED — see `encodings_from`.
+    """
+    try:
+        # `description` and `fetchall` off the SAME relation object — see above.
+        rel = con.get_stats(table, detailed=True)
+        at = {name: i for i, name in enumerate(d[0] for d in rel.description)}
+        return at, rel.fetchall()
+    except Exception as e:                              # noqa: BLE001 — never fail the layout job
+        sys.stderr.write(f"  parquet metadata unavailable for {table} ({type(e).__name__}: {e})\n")
+        return None, []
+
+
+def encodings_from(at, rows):
     """`{column: {encodings, type, dict_pages, chunks, mb}}` for one engine's MART parquet.
 
-    `table` MUST BE SCHEMA-QUALIFIED (`mart.fct_summary`). A bare name does not resolve —
-    `get_stats()` with no argument sweeps every attached catalog and keys the result by table name,
-    but `get_stats('fct_summary')` raises `'fct_summary' is neither a known table nor a schema in any
-    attached catalog (['data'])`, because a one-part name is looked up in the CURRENT schema and dbt
-    writes the mart to `mart`. That is what run 31008858454 hit: the layout job was green, the record
-    simply had no `encodings`. The caller passes the schema `stats_for` already read, so the name
-    cannot drift from the one the rest of the document reports.
+    Pure: it aggregates the rows `mart_chunks` fetched and reads nothing itself.
+
+    The table `mart_chunks` was given MUST BE SCHEMA-QUALIFIED (`mart.fct_summary`). A bare name does
+    not resolve — `get_stats()` with no argument sweeps every attached catalog and keys the result by
+    table name, but `get_stats('fct_summary')` raises `'fct_summary' is neither a known table nor a
+    schema in any attached catalog (['data'])`, because a one-part name is looked up in the CURRENT
+    schema and dbt writes the mart to `mart`. That is what run 31008858454 hit: the layout job was
+    green, the record simply had no `encodings`. `one_engine` passes the schema `stats_for` already
+    read, so the name cannot drift from the one the rest of the document reports.
 
     WHY THIS EXISTS. Every other lever on the layout chart is confounded, and the one hypothesis the
     record could not test was the interesting one: whether the engines differ in what Power BI has to
@@ -246,16 +294,7 @@ def encodings_for(guid, table):
     `encodings`. An absent key reads as "not measured"; `{}` per column would read as "no encodings",
     which is not a thing parquet can be.
     """
-    try:
-        # ONE relation: `description` and `fetchall` off the same object, because a second
-        # `get_stats(detailed=True)` would re-read every parquet footer over OneLake.
-        rel = reader(guid).get_stats(table, detailed=True)
-        at = {name: i for i, name in enumerate(d[0] for d in rel.description)}
-        rows = rel.fetchall()
-    except Exception as e:                              # noqa: BLE001 — never fail the layout job
-        sys.stderr.write(f"  encodings unavailable for {table} ({type(e).__name__}: {e})\n")
-        return {}
-    if not rows:
+    if at is None or not rows:
         return {}
     cols = {}
     # `parquet_metadata()` column order is stable across DuckDB versions but not worth trusting by
@@ -276,6 +315,279 @@ def encodings_for(guid, table):
         c["mb"] += (r[at["total_compressed_size"]] or 0) / 1048576
     return {name: {**c, "encodings": sorted(c["encodings"]), "mb": round(c["mb"], 2)}
             for name, c in sorted(cols.items())}
+
+
+def _stat(v):
+    """A row-group min/max coerced to something SORTABLE, tagged so mixed coercions still compare.
+
+    `parquet_metadata()` renders `stats_min_value`/`stats_max_value` as VARCHAR whatever the physical
+    type is, so comparing them raw is lexicographic — and lexicographic is WRONG for every numeric
+    column: `"9" > "10000"`, which would report a perfectly ascending `time` column as fully
+    overlapping. Numbers are cast; everything else stays a string, which is correct for `date`
+    (rendered ISO, so lexicographic IS chronological) and for `DUID`.
+
+    The leading tag keeps a column that coerces both ways (a NULL-ish rendering among numbers, say)
+    comparable instead of raising TypeError mid-measurement — ordering between the two groups is
+    arbitrary but total, which is all the overlap count needs.
+    """
+    for cast in (int, float):
+        try:
+            return (0, cast(v))
+        except (TypeError, ValueError):
+            pass
+    return (1, str(v))
+
+
+def _file_rows(at, rows):
+    """`{file: rows}` from the chunk metadata — row counts summed over DISTINCT row groups.
+
+    The fetch is one row per (row group, COLUMN CHUNK), so summing `row_group_num_rows` blindly
+    multiplies every file's row count by its column count.
+    """
+    seen, out = set(), {}
+    for r in rows:
+        key = (r[at["file_name"]], r[at["row_group_id"]])
+        if key in seen:
+            continue
+        seen.add(key)
+        out[key[0]] = out.get(key[0], 0) + int(r[at["row_group_num_rows"]] or 0)
+    return out
+
+
+def _columns(at, rows):
+    """The mart's top-level column names, in file order. Nested paths (`a.b`) are skipped — the mart
+    has none, and a leaf of a struct is not a column anyone can reason about here."""
+    out = []
+    for r in rows:
+        c = r[at["path_in_schema"]]
+        if c and "." not in c and c not in out:
+            out.append(c)
+    return out
+
+
+def rg_ordering(at, rows):
+    """`{column: {rg_overlap_pct, rgs, [inexact]}}` — do the row groups CARVE UP the domain or all
+    span it? The free half of the row-ordering question.
+
+    For each column: one `[min, max]` range per row group, sorted by min, then the percentage of
+    CONSECUTIVE PAIRS that overlap. 0% means the row groups partition the column's range — every
+    value lives in essentially one row group, which is what a global sort (or any real clustering
+    pass) produces and what lets Direct Lake and every predicate pushdown skip segments. ~100% means
+    every row group spans the whole domain, i.e. the rows arrived in no order at all.
+
+    THE COMPARISON IS STRICT (`min_i < max_{i-1}`) AND THAT IS NOT A ROUNDING CHOICE. A row group
+    boundary almost never lands on a value boundary, so under a PERFECT sort the last row of one row
+    group and the first row of the next hold the SAME value — `min_i == max_{i-1}` — and a
+    touch-counts-as-overlap rule scores a flawlessly sorted column 100%. Measured on synthetic
+    fct_summary-shaped data before this was strict: `date` sorted, one value straddling each
+    boundary, read 100% overlap on every column of every case, i.e. the metric saturated and said
+    nothing. Strict counts only ranges that genuinely INTERLEAVE, which is the property being asked
+    about; the cost is that a column whose every row group holds one single value cannot be
+    distinguished from a sorted one, which is true and uninteresting.
+
+    Sorted by min rather than left in file order on purpose: file order is an artifact of the writer
+    and would make a descending sort look as unclustered as a shuffle. Sorting first asks "COULD
+    these ranges be laid out disjointly", which is the property that matters and is direction-blind.
+
+    Free: it reads the rows `mart_chunks` already fetched, so it costs no OneLake traffic at all.
+
+    WHAT IT CANNOT SEE, and why `run_lengths` exists beside it: this is a statement about ordering
+    ACROSS row groups. A writer that assigns rows to row groups by range and then shuffles within
+    each one scores 0% here and is not sorted in any sense Power BI benefits from.
+
+    NULL stats are dropped rather than treated as a range (parquet omits stats for an all-NULL
+    chunk); a column left with fewer than two row groups is ABSENT, because "no consecutive pairs"
+    is not 0% overlap. `inexact` appears only when a writer TRUNCATED a string statistic — that can
+    move a boundary either way, so it is surfaced for the reader to discount rather than silently
+    computed over.
+    """
+    need = ("file_name", "row_group_id", "path_in_schema", "stats_min_value", "stats_max_value")
+    if at is None or not rows or any(k not in at for k in need):
+        if rows:
+            sys.stderr.write(f"  parquet_metadata is missing "
+                             f"{[k for k in need if at is None or k not in at]} — no rg ordering\n")
+        return {}
+    per = {}
+    for r in rows:
+        lo, hi = r[at["stats_min_value"]], r[at["stats_max_value"]]
+        if lo is None or hi is None:
+            continue
+        exact = not any(k in at and r[at[k]] is False for k in ("min_is_exact", "max_is_exact"))
+        per.setdefault(r[at["path_in_schema"]], []).append((_stat(lo), _stat(hi), exact))
+    out = {}
+    for col, ent in per.items():
+        if "." in col or len(ent) < 2:
+            continue
+        ent.sort(key=lambda e: (e[0], e[1]))
+        # STRICT: touching at a shared boundary value is what a perfect sort looks like. See above.
+        overlaps = sum(1 for i in range(1, len(ent)) if ent[i][0] < ent[i - 1][1])
+        d = {"rg_overlap_pct": round(100 * overlaps / (len(ent) - 1), 1), "rgs": len(ent)}
+        if not all(e[2] for e in ent):
+            d["inexact"] = True
+        out[col] = d
+    return out
+
+
+def run_lengths(con, at, rows):
+    """`{file, rows, runs: {column: n}}` — adjacent equal-value RUNS in physical row order.
+
+    THIS IS THE QUESTION `rg_ordering` CANNOT ANSWER: whether the writer reordered rows INSIDE a row
+    group. V-Order is documented as a row-reordering pass, and nothing in this repo could tell
+    whether it does anything — the `vorder` detail column is a table property nobody sets. A run is a
+    maximal span of equal adjacent values, so `runs` ≈ `rows` means the column's values are
+    interleaved (nothing reordered them) and `runs` ≪ `rows` means equal values were brought
+    together, which is exactly what makes RLE and dictionary encoding pay and what Power BI
+    transcodes cheaply.
+
+    Read it as a RATIO of the rows sampled, never as an absolute: a near-unique column (`mw`,
+    `price`) is the built-in control — it CANNOT score low unless the file really was reordered, so a
+    run where every column drops together is measuring something real rather than low cardinality.
+
+    ONE FILE, `ORDERING_SAMPLE_ROWS` rows of it — the largest live file, ties broken by name so two
+    dispatches of the same layout sample the same place. The whole mart is 143M rows across up to 80
+    files and this job already runs 10-15 minutes; the ordering of one file's first 4M rows answers
+    the question, and a full pass would answer it four times over on paid capacity.
+
+    ORDERED BY `file_row_number` EXPLICITLY. That is the physical row index within the file, so the
+    count does not depend on DuckDB's scan order, its thread count, or `preserve_insertion_order` —
+    the one way this measurement could have been silently wrong.
+
+    Best-effort: `{}` on any failure, and the record simply carries no runs.
+    """
+    need = ("file_name", "row_group_id", "row_group_num_rows", "path_in_schema")
+    if at is None or not rows or any(k not in at for k in need):
+        return {}
+    try:
+        files = _file_rows(at, rows)
+        cols = _columns(at, rows)
+        if not files or not cols:
+            return {}
+        path = sorted(files, key=lambda f: (-files[f], f))[0]
+        span = min(files[path], ORDERING_SAMPLE_ROWS)
+        # `IS DISTINCT FROM` counts NULL == NULL as one run, and the first row's LAG is NULL and so
+        # opens a run — the sum is exactly the number of maximal equal-value spans.
+        chg = ",\n           ".join(
+            f'CASE WHEN "{c}" IS DISTINCT FROM LAG("{c}") OVER w THEN 1 ELSE 0 END AS chg_{i}'
+            for i, c in enumerate(cols))
+        sel = ", ".join(f"SUM(chg_{i}) AS runs_{i}" for i in range(len(cols)))
+        sql = (f"SELECT COUNT(*) AS n, {sel} FROM (\n"
+               f"    SELECT {chg}\n"
+               f"    FROM read_parquet(['{path.replace(chr(39), chr(39) * 2)}'], "
+               f"file_row_number=true)\n"
+               f"    WHERE file_row_number < {int(span)}\n"
+               f"    WINDOW w AS (ORDER BY file_row_number)\n) t")
+        res = con.con.sql(sql).fetchone()
+        if not res or not res[0]:
+            return {}
+        return {"file": path.rsplit("/", 1)[-1], "rows": int(res[0]),
+                "runs": {c: int(res[i + 1] or 0) for i, c in enumerate(cols)}}
+    except Exception as e:                              # noqa: BLE001 — never fail the layout job
+        sys.stderr.write(f"  run lengths unavailable ({type(e).__name__}: {e})\n")
+        return {}
+
+
+def _vorder_from_log(actions, live_files):
+    """`{tagged, files, unknown}` — how many LIVE parquet files carry Fabric's `VORDER` add tag.
+
+    THE CHECK THIS FILE'S OWN COMMENTS HAVE CALLED THE HONEST ONE and nothing implemented. The
+    `vorder` detail column comes from duckrun's `get_stats`, which reads the TABLE PROPERTY
+    `delta.parquet.vorder.enabled` off the Delta metadata — nothing in this repo or in Fabric's
+    writer sets that property, so it reads false for spark no matter what the files contain. Spark
+    records V-Order per file, as an `add.tags` entry, and delta-rs's `get_add_actions` does not
+    surface tags, which is why this reads the commit JSON itself.
+
+    Pure, so the parsing is testable without a store. Last `add` per path wins (a file re-added by a
+    later commit is described by that commit) and REMOVES ARE NOT REPLAYED — the live set comes from
+    the file list `mart_chunks` already read, which duckrun derived from the Delta log with
+    tombstones excluded. That is the simplification that makes this cheap AND keeps it from
+    disagreeing with the rest of the document about which files exist.
+
+    Matched on BASENAME: `file_name` is a full abfss URI and `add.path` is table-relative and
+    URL-encoded. The names are GUID-bearing, so basename equality is unambiguous.
+
+    `unknown` counts live files no JSON commit describes — their add was folded into a checkpoint.
+    Reported rather than guessed at, and structurally rare here: the teardown means every dispatch
+    builds its tables from nothing, so the log is a handful of commits.
+    """
+    live = {str(f).rsplit("/", 1)[-1] for f in live_files}
+    tags = {}
+    for a in actions:
+        add = (a or {}).get("add")
+        if not isinstance(add, dict) or not add.get("path"):
+            continue
+        tags[unquote(str(add["path"])).rsplit("/", 1)[-1]] = add.get("tags") or {}
+    return {"tagged": sum(1 for f in live
+                          if str((tags.get(f) or {}).get("VORDER", "")).lower() == "true"),
+            "files": len(live),
+            "unknown": sum(1 for f in live if f not in tags)}
+
+
+def vorder_tags(con, guid, schema, table, live_files):
+    """`_vorder_from_log` over the table's `_delta_log/*.json`, read with obstore.
+
+    Same store-building path as `landing_stats` — `objectstore.build_store` plus
+    `secret.refreshed(...)` — so it adds no dependency this job does not already have. The commit
+    files are zero-padded 20-digit, so a lexicographic sort IS commit order.
+
+    Best-effort: `{}` on anything at all, including a Warehouse whose OneLake Delta representation
+    turns out not to lay its log out this way.
+    """
+    try:
+        import obstore
+        from dbt.adapters.duckrun import objectstore, secret
+        base = f"{tables_path(guid)}/{schema}/{table}/_delta_log"
+        store = objectstore.build_store(base, secret.refreshed(con.storage_options))
+        keys = sorted(o["path"].rsplit("/", 1)[-1]
+                      for batch in obstore.list(store) for o in batch
+                      if str(o["path"]).endswith(".json"))
+        actions = []
+        for k in keys:
+            body = bytes(obstore.get(store, k).bytes()).decode("utf-8")
+            actions += [json.loads(line) for line in body.splitlines() if line.strip()]
+        return _vorder_from_log(actions, live_files)
+    except Exception as e:                              # noqa: BLE001 — never fail the layout job
+        sys.stderr.write(f"  vorder tags unavailable for {schema}.{table} "
+                         f"({type(e).__name__}: {e})\n")
+        return {}
+
+
+def ordering_for(con, guid, schema, at, rows):
+    """DID THE WRITER PHYSICALLY REORDER THE ROWS? Three signals over the mart, one document.
+
+    V-Order is documented as a row-reordering plus encoding pass, and until this existed the record
+    could say a run asked for `readHeavyForPBI` and never say whether the parquet came out any
+    different. The three answer different halves and none of them subsumes another:
+
+    - `columns[c].rg_overlap_pct` — ordering ACROSS row groups, free from metadata already fetched.
+    - `columns[c].runs` — ordering WITHIN a file, from a bounded read of one sample file. This is
+      the intra-file reordering V-Order claims and nothing else here can see.
+    - `vorder_files` — whether Fabric TAGGED the files as V-Ordered, read from the Delta log. A
+      measured answer to the question the `vorder` detail column pretends to answer.
+
+    All three land under `layout.ordering.<engine>`, a sibling of `stats` and `encodings` and
+    deliberately NOT in `layout.config` — the dashboard's `variant()` walks every key of that block
+    into a column name, so a measurement that moves run to run would split an engine's column and
+    its layout bar on a difference in what was MEASURED rather than what was configured.
+
+    Each part fails on its own: a missing one is absent, and `{}` when nothing was measured at all —
+    never a zero, which would read as "nothing was reordered".
+    """
+    if at is None or not rows or not schema:
+        return {}
+    doc = {"table": f"{schema}.{MART}"}
+    cols = rg_ordering(at, rows)
+    rl = run_lengths(con, at, rows)
+    if rl:
+        doc["sample"] = {"file": rl["file"], "rows": rl["rows"]}
+        for c, n in rl["runs"].items():
+            cols.setdefault(c, {})["runs"] = n
+    if "file_name" in at:
+        vt = vorder_tags(con, guid, schema, MART, {r[at["file_name"]] for r in rows})
+        if vt:
+            doc["vorder_files"] = vt
+    if cols:
+        doc["columns"] = dict(sorted(cols.items()))
+    return doc if len(doc) > 1 else {}
 
 
 def fmt(v, kind):
@@ -435,7 +747,55 @@ def encoding_table(encodings, engines):
     print()
 
 
-def build_doc(per_engine, engines, guids=None, landing=None, encodings=None):
+def ordering_table(ordering, engines):
+    """`fct_summary`'s physical row order, engines side by side — the V-Order reality check.
+
+    Two blocks. The per-engine one answers "did Fabric tag these files V-Ordered, and what did we
+    sample"; the per-column one puts the two ordering measurements in one cell, because they are one
+    question asked at two scales and reading them apart invites concluding a table is sorted from
+    row-group ranges alone.
+    """
+    have = [e for e in engines if ordering.get(e)]
+    if not have:
+        return
+    print(f"## 🔀 `{MART}` physical row order\n")
+    print("<sub>Is the data actually reordered on disk? <b>RG overlap</b>: consecutive row-group "
+          "[min,max] ranges, sorted by min, that overlap — 0% = the row groups partition the "
+          "column's range, ~100% = every row group spans everything. <b>runs</b>: adjacent "
+          "equal-value spans in the first rows of the largest file, in physical order — runs ≪ rows "
+          "means equal values were brought together, which is the intra-file reordering V-Order "
+          "claims and the row-group ranges cannot see. A near-unique column (`mw`, `price`) is the "
+          "control: it can only drop if the file really was reordered. `*` = a truncated string "
+          "statistic, so that boundary is approximate.</sub>\n")
+    print("| engine | V-Order files | sample |")
+    print("| --- | --- | --- |")
+    for e in have:
+        d = ordering[e]
+        v, s = d.get("vorder_files") or {}, d.get("sample") or {}
+        vc = "—" if not v else (f"{v['tagged']:,}/{v['files']:,}"
+                                + (f" +{v['unknown']:,}?" if v.get("unknown") else ""))
+        sc = "—" if not s else f"`{s['file']}` · {s['rows']:,} rows"
+        print(f"| {e} | {vc} | {sc} |")
+    print()
+    print("| column | " + " | ".join(have) + " |")
+    print("| --- | " + " | ".join("---" for _ in have) + " |")
+    for col in sorted({c for e in have for c in (ordering[e].get("columns") or {})}):
+        cells = []
+        for e in have:
+            c = (ordering[e].get("columns") or {}).get(col)
+            if not c:
+                cells.append("—")
+                continue
+            pct = c.get("rg_overlap_pct")
+            runs = c.get("runs")
+            cells.append(
+                ("—" if pct is None else f"{pct:,.0f}%{'*' if c.get('inexact') else ''} RG overlap")
+                + (f" · {runs:,} runs" if runs is not None else ""))
+        print(f"| `{col}` | " + " | ".join(cells) + " |")
+    print()
+
+
+def build_doc(per_engine, engines, guids=None, landing=None, encodings=None, ordering=None):
     """The layout document: run stamp, hardware config, per-engine item + GUID, per-table detail.
 
     Carries the run stamp too: a consumer reading this out of an artifact needs to know WHICH dbt run
@@ -503,6 +863,12 @@ def build_doc(per_engine, engines, guids=None, landing=None, encodings=None):
         # would read as "no encodings", which is not a state parquet can be in.
         **({"encodings": {e: encodings[e] for e in engines if encodings.get(e)}}
            if any((encodings or {}).get(e) for e in engines) else {}),
+        # Whether the writer physically REORDERED the rows — row-group range overlap, intra-file
+        # run lengths, and the per-file Delta `VORDER` tag. See `ordering_for`. Absent rather than
+        # `{}`, same rule as `encodings` and `landing`: "not measured" and "nothing is ordered" are
+        # different claims and only one of them is ever true here.
+        **({"ordering": {e: ordering[e] for e in engines if ordering.get(e)}}
+           if any((ordering or {}).get(e) for e in engines) else {}),
         # The INPUT side: files and bytes in the landing archive every engine reads. Absent, never
         # empty, when the listing failed — `{}` would read as "an empty archive", which is a
         # different statement from "not measured".
@@ -538,26 +904,31 @@ def write_json(doc, engines):
 
 
 def one_engine(item, kind):
-    """(guid, stats, mart encodings) for one Fabric item; exceptions propagate to the caller.
+    """(guid, stats, mart encodings, mart ordering) for one Fabric item; exceptions propagate.
 
-    The encodings ride along in the SAME worker rather than a second pass: this function already
-    owns a reader for that item, and the pool is sized one thread per engine, so a separate pass
-    would either serialise behind the slowest engine again or double the connections.
+    Everything rides along in the SAME worker rather than a second pass: this function already owns
+    a reader for that item, and the pool is sized one thread per engine, so a separate pass would
+    either serialise behind the slowest engine again or multiply the connections.
+
+    ONE connection, and one `mart_chunks` fetch off it. Four questions are asked of each item now
+    and each of them used to imply its own `duckrun.connect`; more to the point, the encodings and
+    both ordering metrics all read the SAME parquet footers, which is the expensive part.
     """
     guid = find_guid(kind, item)
     if not guid:
-        return guid, {}, {}
-    st = stats_for(guid)
+        return guid, {}, {}, {}
+    con = reader(guid)
+    st = stats_for(con)
     # Qualified from the schema `stats_for` just read, never hardcoded: a bare name does not resolve
-    # (see `encodings_for`), and deriving it here means the profiled table is by construction the one
-    # the rest of this document reports on.
+    # (see `encodings_from`), and deriving it here means the profiled table is by construction the
+    # one the rest of this document reports on.
     schema = (st.get(MART) or {}).get("schema")
-    enc = encodings_for(guid, f"{schema}.{MART}") if schema else {}
-    return guid, st, enc
+    at, chunks = mart_chunks(con, f"{schema}.{MART}") if schema else (None, [])
+    return guid, st, encodings_from(at, chunks), ordering_for(con, guid, schema, at, chunks)
 
 
 def main():
-    per_engine, guids, encodings = {}, {}, {}
+    per_engine, guids, encodings, orderings = {}, {}, {}, {}
     # The items are independent and the iceberg one alone can take >10 minutes to read over
     # OneLake, so fetch them concurrently: wall-clock = slowest engine, not the sum. The landing
     # listing rides along in the same pool — it is a different item and a different question, and
@@ -567,14 +938,19 @@ def main():
         futures = {engine: pool.submit(one_engine, item, kind) for engine, item, kind in ENGINES}
     for engine, item, kind in ENGINES:
         try:
-            guids[engine], per_engine[engine], encodings[engine] = futures[engine].result()
+            (guids[engine], per_engine[engine],
+             encodings[engine], orderings[engine]) = futures[engine].result()
+            v = (orderings[engine].get("vorder_files") or {}) if orderings[engine] else {}
             sys.stderr.write(f"  {engine} ({item} {guids[engine]}): "
                              f"{sum(d.get('total_rows') or 0 for d in per_engine[engine].values()):,}"
                              f" rows total (all tables), "
-                             f"{len(encodings[engine])} {MART} column(s) profiled\n")
+                             f"{len(encodings[engine])} {MART} column(s) profiled"
+                             + (f", {v['tagged']}/{v['files']} V-Ordered file(s)" if v else "")
+                             + "\n")
         except Exception as e:
             per_engine[engine] = {}
             encodings[engine] = {}
+            orderings[engine] = {}
             sys.stderr.write(f"  {engine} ({item}) FAILED: {e}\n")
 
     engines = [e for e, _, _ in ENGINES]
@@ -583,7 +959,8 @@ def main():
     parity_table(per_engine, engines)
     detail_tables(per_engine, engines)
     encoding_table(encodings, engines)
-    write_json(build_doc(per_engine, engines, guids, land, encodings), engines)
+    ordering_table(orderings, engines)
+    write_json(build_doc(per_engine, engines, guids, land, encodings, orderings), engines)
 
 
 if __name__ == "__main__":

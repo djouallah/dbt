@@ -180,21 +180,22 @@ def _sample_parquet(tmp_path):
     return p
 
 
-def _reader_over(stats, monkeypatch, rel):
-    class R:
+def _chunks_over(stats, path):
+    """`mart_chunks`' own output for a local parquet file — the (name->index, rows) every
+    aggregation in stats.py now consumes."""
+    import duckdb
+
+    class C:
         def get_stats(self, table=None, detailed=False):
-            return rel
-    monkeypatch.setattr(stats, "reader", lambda guid: R())
+            return duckdb.connect().sql(f"SELECT * FROM parquet_metadata('{path.as_posix()}')")
+    return stats.mart_chunks(C(), "mart.fct_summary")
 
 
-def test_encodings_are_aggregated_per_column_not_per_chunk(stats, tmp_path, monkeypatch):
+def test_encodings_are_aggregated_per_column_not_per_chunk(stats, tmp_path):
     """The record has to stay small: `parquet_metadata` is one row per column per row group, and
     iceberg's 1,172 row groups would be six figures of rows. One row per COLUMN is the contract."""
-    import duckdb
-    p = _sample_parquet(tmp_path)
-    rel = duckdb.connect().sql(f"SELECT * FROM parquet_metadata('{p.as_posix()}')")
-    _reader_over(stats, monkeypatch, rel)
-    got = stats.encodings_for("guid", "mart.fct_summary")
+    at, rows = _chunks_over(stats, _sample_parquet(tmp_path))
+    got = stats.encodings_from(at, rows)
     assert set(got) == {"mw", "duid"}, "one entry per column"
     assert got["duid"]["encodings"] == ["PLAIN_DICTIONARY"]
     assert got["duid"]["dict_pages"] == got["duid"]["chunks"], "every chunk wrote a dictionary"
@@ -214,11 +215,14 @@ def test_the_profiled_table_is_schema_qualified(stats, monkeypatch):
     profiled table cannot drift from the one the rest of the document describes."""
     seen = []
     monkeypatch.setattr(stats, "find_guid", lambda kind, item: "guid-1")
+    monkeypatch.setattr(stats, "reader", lambda guid: object())
     monkeypatch.setattr(stats, "stats_for",
-                        lambda guid: {stats.MART: {"schema": "mart", "total_rows": 1}})
-    monkeypatch.setattr(stats, "encodings_for",
-                        lambda guid, table: seen.append(table) or {"mw": {}})
-    guid, st, enc = stats.one_engine("dbt_spark", "lakehouses")
+                        lambda con: {stats.MART: {"schema": "mart", "total_rows": 1}})
+    monkeypatch.setattr(stats, "mart_chunks",
+                        lambda con, table: seen.append(table) or ({"path_in_schema": 0}, [("mw",)]))
+    monkeypatch.setattr(stats, "encodings_from", lambda at, rows: {"mw": {}})
+    monkeypatch.setattr(stats, "ordering_for", lambda *a: {})
+    guid, st, enc, order = stats.one_engine("dbt_spark", "lakehouses")
     assert seen == ["mart.fct_summary"], seen
     assert enc == {"mw": {}}
 
@@ -227,30 +231,28 @@ def test_a_mart_with_no_schema_is_skipped_rather_than_guessed(stats, monkeypatch
     """No schema recorded means the aggregate read did not see the table at all. Guessing `mart`
     would send a name we have no evidence for and log a confusing resolution error."""
     monkeypatch.setattr(stats, "find_guid", lambda kind, item: "guid-1")
-    monkeypatch.setattr(stats, "stats_for", lambda guid: {})
-    monkeypatch.setattr(stats, "encodings_for",
-                        lambda guid, table: pytest.fail("must not be called"))
+    monkeypatch.setattr(stats, "reader", lambda guid: object())
+    monkeypatch.setattr(stats, "stats_for", lambda con: {})
+    monkeypatch.setattr(stats, "mart_chunks",
+                        lambda con, table: pytest.fail("must not be called"))
     assert stats.one_engine("dbt_spark", "lakehouses")[2] == {}
 
 
-def test_a_failed_or_empty_profile_is_absent_never_empty(stats, monkeypatch):
+def test_a_failed_or_empty_profile_is_absent_never_empty(stats):
     """`{}` per column would read as "no encodings", which parquet cannot be. Absent means the
     layout job could not profile it — the same rule `landing` follows."""
     class Boom:
         def get_stats(self, table=None, detailed=False):
             raise RuntimeError("OneLake said no")
-    monkeypatch.setattr(stats, "reader", lambda guid: Boom())
-    assert stats.encodings_for("guid", "mart.fct_summary") == {}
+    assert stats.mart_chunks(Boom(), "mart.fct_summary") == (None, [])
+    assert stats.encodings_from(None, []) == {}
     doc = stats.build_doc({}, ["duckrun"], {}, None, {"duckrun": {}})
     assert "encodings" not in doc, "nothing profiled -> no key at all"
 
 
-def test_the_encodings_reach_the_document_under_their_engine(stats, tmp_path, monkeypatch):
-    import duckdb
-    p = _sample_parquet(tmp_path)
-    rel = duckdb.connect().sql(f"SELECT * FROM parquet_metadata('{p.as_posix()}')")
-    _reader_over(stats, monkeypatch, rel)
-    enc = {"duckrun": stats.encodings_for("g", "mart.fct_summary"), "spark": {}}
+def test_the_encodings_reach_the_document_under_their_engine(stats, tmp_path):
+    at, rows = _chunks_over(stats, _sample_parquet(tmp_path))
+    enc = {"duckrun": stats.encodings_from(at, rows), "spark": {}}
     doc = stats.build_doc({}, ["duckrun", "spark"], {}, None, enc)
     assert doc["encodings"]["duckrun"]["mw"]["encodings"] == ["PLAIN"]
     assert "spark" not in doc["encodings"], "an engine that profiled nothing adds no column"

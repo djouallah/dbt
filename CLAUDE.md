@@ -483,8 +483,10 @@ to `provision.py teardown`, which polls for a 404 and goes red if it is still li
   That reading assumed the session key was in force. It was not, so there was never a cutoff to
   explain; the whole thing was one setting that had never taken effect, and the tags on the small
   writes came from something else. Do not go looking for a size threshold — there isn't one.
-  To re-verify after any layout change, read `_delta_log/*.json` for `"VORDER": "true"` in the `add`
-  actions. `stats.py`'s `vorder` column cannot answer it — see the bullet below on why.
+  To re-verify after any layout change, read `layout.ordering.<engine>.vorder_files` in the run
+  record — the `_delta_log` `add.tags` read, which the `layout` job now does every run and prints in
+  its own step-summary section. `stats.py`'s `vorder` column cannot answer it — see the bullet below
+  on why, and on the two parquet metrics recorded beside it that say whether the rows moved.
   **Do not read the Spark UI Environment tab to check any of this.** It renders the SparkContext
   conf captured at application launch and never shows a `spark.sql.*` value applied afterwards to a
   SparkSession, so it cannot distinguish "dropped" from "live but invisible" — it was the instrument
@@ -529,13 +531,53 @@ to `provision.py teardown`, which polls for a 404 and goes red if it is still li
   `dt.metadata().configuration` (`dbt/adapters/duckrun/engine.py:909-913`). Nothing in this repo
   or in Fabric's writer sets that property — spark records V-Order as a **per-file `add.tags`
   entry**, and duckrun's own comment there notes `get_add_actions` does not surface tags. So that
-  column reads `·` for spark whatever the files contain, and it is not evidence either way. The
-  honest check is the Delta log: read `_delta_log/*.json` and look for `"VORDER": "true"` in the
-  `add` actions. Two independent sources also warn the property and the file metadata are
-  unrelated — either can be set without the other. Fixing the column means setting
+  column reads `·` for spark whatever the files contain, and it is not evidence either way. Two
+  independent sources also warn the property and the file metadata are unrelated — either can be set
+  without the other. Fixing the COLUMN itself would still mean setting
   `delta.parquet.vorder.enabled` as a real table property (dbt-fabricspark honours
   `tblproperties`, but only through `create_table_as`, so existing tables need one
   `ALTER TABLE … SET TBLPROPERTIES`) or teaching duckrun's reader to read tags.
+  **The honest check is no longer a by-hand recipe — `layout.ordering` measures it every run.** See
+  the bullet below; `vorder_files` in that document is the `_delta_log` `add.tags` read this file
+  described for months without anything implementing it, and it is what to believe when it and the
+  `vorder` column disagree. The column stays as it is: it reports the table property truthfully, and
+  the property is genuinely unset.
+- **WHETHER THE ROWS WERE ACTUALLY REORDERED IS MEASURED NOW — `layout.ordering` in the run record,
+  and one step-summary section in the `layout` job.** V-Order is documented as a row-reordering plus
+  encoding pass and nothing here could say whether it happened; the record could state that a run
+  asked for `readHeavyForPBI` and never that the parquet came out any different. Three signals over
+  `fct_summary` only, per engine, each independently best-effort (`stats.py`: `rg_ordering`,
+  `run_lengths`, `vorder_tags`, assembled by `ordering_for`):
+  - **`columns[c].rg_overlap_pct`** — of consecutive row-group `[min,max]` ranges sorted by min, the
+    percentage that INTERLEAVE. 0% = the row groups partition that column's range, which is what a
+    global sort produces and what lets a reader skip segments. Free: it reads the `parquet_metadata`
+    rows the encodings pass already fetched, so it costs no OneLake traffic.
+    **The comparison is STRICT and that is load-bearing.** A row-group boundary almost never lands
+    on a value boundary, so under a perfect sort one value straddles each boundary and the ranges
+    TOUCH — counting a touch as an overlap scored every column of every case 100% on synthetic
+    fct_summary-shaped data, sorted and shuffled alike. The metric saturated while looking like a
+    finding. Pinned by `test_a_sorted_low_cardinality_column_reads_zero_not_a_hundred`.
+  - **`columns[c].runs`** — adjacent equal-value runs in physical order over the first
+    `ORDERING_SAMPLE_ROWS` (4M) rows of the largest file, ordered by `file_row_number` explicitly so
+    the count cannot move with DuckDB's scan order or thread count. **This is the intra-file
+    reordering V-Order claims, and the row-group ranges structurally cannot see it.**
+  - **`vorder_files`** — live files whose Delta `add` action carries `tags.VORDER = "true"`, read
+    from `_delta_log/*.json` with obstore. Last add per path wins and removes are NOT replayed: the
+    live set comes from the file list the metadata fetch already holds, so this cannot disagree with
+    the rest of the document about which files exist. A live file no JSON commit describes is
+    `unknown` (checkpointed away), never silently counted untagged.
+  **READ THE TWO PARQUET METRICS TOGETHER — neither alone says "sorted".** A secondary sort key
+  repeats through the table, so its row-group ranges all span the domain (100% overlap) while its
+  values stay perfectly grouped inside each row group (few runs); measured on a `date,time,DUID`
+  sort, `date` reads 0% / 11 runs and `time` reads 100% / 3,106 runs. Sort by `DUID` instead and the
+  two swap. A near-unique column (`mw`, `price`) is the built-in control: it cannot drop below ~100%
+  unless the file really was reordered, so a run where every column falls together is measuring
+  something real rather than low cardinality.
+  It lives under `layout.ordering`, a sibling of `stats`/`encodings` — **never in `layout.config`**,
+  whose every key `variant()` walks into a dashboard column name: a MEASURED value there would split
+  an engine's column and its layout bar every time the parquet moved. The dashboard does not read it
+  at all yet, deliberately — `layoutKey`'s `sorted` element is still the DECLARED flag, and making
+  it measured would re-band every historical run against a value none of them recorded.
 - **V-Order only affects files written after it, so an incremental leg flips over slowly.** There
   is no model-level equivalent and no way to retrofit it in place; `OPTIMIZE … VORDER` or a
   rewrite is what moves parquet already on disk. `benchmark/README.md`'s snapshot table predates
@@ -852,6 +894,10 @@ to `provision.py teardown`, which polls for a 404 and goes red if it is still li
   artifact, and the RUN RECORD, which is what outlives the 90-day retention and what the page reads.
   Renaming a `DETAIL_KEYS` entry makes the layout table disappear on the page with a note, not an
   error, so change both together.
+  It also reports **whether the rows were physically reordered** — `layout.ordering`, see the
+  V-Order bullet in *Facts that are easy to get wrong*. That rides on the footer read the encodings
+  pass already makes, plus one bounded 4M-row scan of a single file per engine and a few small JSON
+  commits, so it adds no second reader of the Delta logs.
   It also reports the INPUT side: `landing` — files and bytes under `dbt_landing/Files`, in total
   and per folder. Everything else in that document describes what came out, so without it a record
   can say a run wrote 143,980,961 rows and not say from how much. Read by LISTING (`obstore.list`,
