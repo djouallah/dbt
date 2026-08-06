@@ -39,8 +39,6 @@ both together.
 """
 import json
 import os
-import pathlib
-import re
 import sys
 import subprocess
 from concurrent.futures import ThreadPoolExecutor
@@ -359,72 +357,39 @@ def detail_tables(per_engine, engines):
     # Per-engine totals now live as the last two rows of the parity table above.
 
 
-# Anchored to the REPO ROOT off this file, not to the CWD. CI happens to invoke
-# `python .github/scripts/stats.py` from the root, so a relative path works today — but the failure
-# mode if that ever changes is `{}`, i.e. the key silently stops being recorded, which is the exact
-# class of quiet gap this whole path exists to close.
-_SORT_MODEL = pathlib.Path(__file__).resolve().parents[2] / "models/duckdb/marts/fct_summary.sql"
-_SORT_LITERAL = re.compile(r"sort_by=\(\s*\[([^\]]*)\]")
+def _nondefault(var, default):
+    """The env value when `sorted` is on AND it is not the default, else `None`.
+
+    Absence is what keeps a default dispatch in the same dashboard column as every run that predates
+    these inputs — the same rule `sorted` itself follows, and for the same reason: the parquet is
+    identical, so splitting the column would claim two layouts where there is one.
+    """
+    if os.environ.get("DUCKDB_SORTED") != "true":
+        return None
+    v = (os.environ.get(var) or "").strip()
+    return v if v and v != default else None
 
 
 def declared_sort_key():
-    """`{table: [cols]}` for the sort the duckrun model DECLARES, or `{}` when it declares none.
+    """`{table: [cols]}` for the sort the duckrun run DECLARED, or `{}` when it declared none.
 
-    WHY THIS IS RECORDED AT ALL: the key is a property of the COMMIT — the model declared
-    `['date','time','DUID']` for a while and `['date','time']` since — so anything downstream that
-    holds one constant is right only for today's model. The dashboard held exactly that constant and
-    captioned run 30955591822, a DUID sort, `by date, time`. A run that writes its own key down
-    cannot be misread later, and the five records predating this were backfilled from the model at
-    the SHA each ran.
+    WHY THIS IS RECORDED AT ALL: the key is a property of the RUN — the model declared
+    `['date','time','DUID']` for a while and `['date','time']` since, and it is now a dispatch input
+    that can be anything — so anything downstream holding one constant is right only by luck. The
+    dashboard held exactly that constant and captioned run 30955591822, a DUID sort, `by date, time`.
 
-    Read from the checkout rather than from dbt: the build runs in a Fabric notebook, which cannot
-    write to the run record (that is why `fabric_run.py` scrapes duckrun's log for the `'auto'`
-    case), so `target/manifest.json` — the resolved config, and the better source — never reaches
-    here. This is the same derivation the backfill made, at run time instead of after.
+    READ FROM THE ENV, not from the model. It used to regex a literal list out of
+    `fct_summary.sql`; the model now renders `sort_by` from `DUCKDB_SORT_BY`, so there is no literal
+    left to match and that regex would silently return `{}` — the same quiet gap this exists to
+    close. The env var is what the model itself reads, so the two cannot disagree.
 
-    A LITERAL LIST ONLY. `sort_by='auto'` names no columns, and duckrun's own resolution is already
-    scraped into `sort_by_auto`; recording the word `auto` as if it were a key would be the same
-    class of mistake this exists to prevent. No match at all leaves the key ABSENT, which the page
-    renders as "sorted, by something not recorded" rather than guessing.
+    Gated on `DUCKDB_SORTED`: an unsorted run declares no key, and recording one would caption an
+    unsorted bar `by date, time`. Absent, never empty.
     """
-    try:
-        src = _SORT_MODEL.read_text(encoding="utf-8")
-    except OSError:
+    if os.environ.get("DUCKDB_SORTED") != "true":
         return {}
-    m = _SORT_LITERAL.search(src)
-    if not m:
-        return {}
-    cols = [c.strip().strip("'\"") for c in m.group(1).split(",") if c.strip()]
-    return {"fct_summary": cols} if cols else {}
-
-
-def encoding_table(encodings, engines):
-    """`fct_summary`'s per-column parquet encoding, engines side by side.
-
-    The question this answers is whether two engines hand Power BI the same thing to transcode. It
-    sits beside the layout table because that one reports SHAPE — files, row groups, size — and shape
-    turned out not to explain the CU: duckrun writes the densest parquet on the page and does not
-    win, and dwh writes UNCOMPRESSED and beats a SNAPPY spark build.
-    """
-    have = [e for e in engines if encodings.get(e)]
-    if not have:
-        return
-    print(f"## 🔤 `{MART}` column encoding\n")
-    print("| column | type | " + " | ".join(have) + " |")
-    print("| --- | --- | " + " | ".join("---" for _ in have) + " |")
-    for col in sorted({c for e in have for c in encodings[e]}):
-        # The type is the PARQUET physical type and the engines can legitimately disagree (a DATE is
-        # INT32 to one writer and INT64 to another), which is itself worth seeing — so it is printed
-        # from whichever engine has it and any disagreement shows up in the cells beside it.
-        typ = next((encodings[e][col]["type"] for e in have if col in encodings[e]), "—")
-        cells = []
-        for e in have:
-            c = encodings[e].get(col)
-            cells.append("—" if not c else
-                         f"`{'+'.join(c['encodings'])}`"
-                         f"{'' if c['dict_pages'] else ' ⚠️ no dict'} · {c['mb']:,.1f} MB")
-        print(f"| `{col}` | `{typ}` | " + " | ".join(cells) + " |")
-    print()
+    cols = [c.strip() for c in os.environ.get("DUCKDB_SORT_BY", "date,time").split(",") if c.strip()]
+    return {MART: cols} if cols else {}
 
 
 def build_doc(per_engine, engines, guids=None, landing=None, encodings=None):
@@ -462,9 +427,16 @@ def build_doc(per_engine, engines, guids=None, landing=None, encodings=None):
         # block, which is what that block is for. And off is the same parquet as never-offered, so
         # an explicit "false" would fragment 13 runs of history for a difference that does not
         # exist — the same reason `variantTag` can read absence as off here but not for NEE.
+        # The geometry keys follow `sorted`'s rule exactly: recorded ONLY when they are in force AND
+        # differ from the default, because a default dispatch writes the parquet every earlier run
+        # wrote and must key to the same dashboard column. `variant()` skips null, so a `None` here
+        # costs nothing; a value SPLITS the column, which is what a different geometry deserves.
+        # They only bite while `sorted` is on — that is where the model declares geometry at all.
         "config": {e: cfg for e, cfg in (
             ("duckrun", {"vcores": os.environ.get("FABRIC_CORES") or None,
-                         "sorted": "true" if os.environ.get("DUCKDB_SORTED") == "true" else None}),
+                         "sorted": "true" if os.environ.get("DUCKDB_SORTED") == "true" else None,
+                         "row_group_size": _nondefault("DUCKDB_ROW_GROUP_SIZE", "16000000"),
+                         "file_size_mb": _nondefault("DUCKDB_FILE_SIZE_MB", "1024")}),
             ("iceberg", {"vcores": os.environ.get("FABRIC_CORES") or None}),
             ("spark", {"resource_profile": os.environ.get("SPARK_RESOURCE_PROFILE") or None,
                        "native_execution_engine": os.environ.get("SPARK_NATIVE_ENABLED") or None}),

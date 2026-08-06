@@ -43,53 +43,44 @@ def stats():
     return mod
 
 
-def test_the_declared_key_is_read_from_the_real_model(stats):
-    """The one that would go stale: this asserts against the model in the tree, not a fixture."""
+def test_the_declared_key_comes_from_the_env_the_model_reads(stats, monkeypatch):
+    """It used to regex a literal list out of `fct_summary.sql`. The model now renders `sort_by` from
+    `DUCKDB_SORT_BY`, so there is no literal left to match and that regex would silently return {} —
+    the same quiet gap this whole path exists to close. Reading the SAME env the model reads means
+    the two cannot disagree."""
+    monkeypatch.setenv("DUCKDB_SORTED", "true")
+    monkeypatch.setenv("DUCKDB_SORT_BY", "date,time")
     assert stats.declared_sort_key() == {"fct_summary": ["date", "time"]}
+    monkeypatch.setenv("DUCKDB_SORT_BY", "date, time, DUID")     # spaces are the dispatch's problem
+    assert stats.declared_sort_key() == {"fct_summary": ["date", "time", "DUID"]}
+    monkeypatch.delenv("DUCKDB_SORT_BY")
+    assert stats.declared_sort_key() == {"fct_summary": ["date", "time"]}, "the model's own default"
 
 
-def test_the_model_path_does_not_depend_on_the_cwd(stats, tmp_path, monkeypatch):
-    """CI runs `python .github/scripts/stats.py` from the root today. If that ever changes, a
-    CWD-relative path returns {} and the key silently stops being recorded."""
-    monkeypatch.chdir(tmp_path)
-    assert stats.declared_sort_key() == {"fct_summary": ["date", "time"]}
-
-
-@pytest.mark.parametrize("sha,expected", [
-    ("81a6c26", ["date", "time", "DUID"]),   # the manual DUID sort — run 30955591822
-    ("950a92b", ["date", "time"]),
-])
-def test_it_reads_the_key_each_historical_commit_declared(stats, sha, expected, monkeypatch):
-    """The key changed under this repo's feet twice. Parse what each commit actually said."""
-    src = subprocess.run(["git", "show", f"{sha}:models/duckdb/marts/fct_summary.sql"],
-                         cwd=ROOT, capture_output=True, text=True)
-    if src.returncode:
-        pytest.skip(f"{sha} not in this clone")
-    m = stats._SORT_LITERAL.search(src.stdout)
-    assert m, f"{sha} declares a literal key and the regex missed it"
-    assert [c.strip().strip("'\"") for c in m.group(1).split(",") if c.strip()] == expected
-
-
-def test_auto_is_left_to_the_log_scrape(stats):
-    """`sort_by='auto'` names no columns. Recording the word `auto` as if it were a key is the same
-    class of mistake as the constant was — `fabric_run.py` scrapes duckrun's resolved answer."""
-    auto = subprocess.run(["git", "show", "a83767d:models/duckdb/marts/fct_summary.sql"],
-                          cwd=ROOT, capture_output=True, text=True)
-    if auto.returncode:
-        pytest.skip("a83767d not in this clone")
-    assert stats._SORT_LITERAL.search(auto.stdout) is None
-
-
-def test_a_respelt_config_records_nothing_rather_than_something_wrong(stats, monkeypatch, tmp_path):
-    """A model that stops matching must yield {} — absent reads as "not recorded" on the page, which
-    is honest. A partial match that invented a key would not be."""
-    model = tmp_path / "fct_summary.sql"
-    model.write_text("{{ config(materialized='incremental', sort_by=SOMETHING_ELSE) }}\nselect 1",
-                     encoding="utf-8")
-    monkeypatch.setattr(stats, "_SORT_MODEL", model)
+def test_an_unsorted_run_declares_no_key(stats, monkeypatch):
+    """Recording one would caption an unsorted bar `by date, time`."""
+    monkeypatch.setenv("DUCKDB_SORT_BY", "date,time")
+    monkeypatch.delenv("DUCKDB_SORTED", raising=False)
     assert stats.declared_sort_key() == {}
-    monkeypatch.setattr(stats, "_SORT_MODEL", tmp_path / "gone.sql")
+    monkeypatch.setenv("DUCKDB_SORTED", "false")
     assert stats.declared_sort_key() == {}
+
+
+def test_geometry_is_recorded_only_when_it_differs_from_the_default(stats, monkeypatch):
+    """A default dispatch writes the parquet every earlier run wrote, so it must key to the SAME
+    dashboard column. `variant()` skips null, so absence keeps the column; a value splits it."""
+    monkeypatch.setenv("DUCKDB_SORTED", "true")
+    monkeypatch.setenv("DUCKDB_ROW_GROUP_SIZE", "16000000")
+    monkeypatch.setenv("DUCKDB_FILE_SIZE_MB", "1024")
+    assert stats._nondefault("DUCKDB_ROW_GROUP_SIZE", "16000000") is None
+    assert stats._nondefault("DUCKDB_FILE_SIZE_MB", "1024") is None
+    monkeypatch.setenv("DUCKDB_ROW_GROUP_SIZE", "4000000")
+    monkeypatch.setenv("DUCKDB_FILE_SIZE_MB", "128")
+    assert stats._nondefault("DUCKDB_ROW_GROUP_SIZE", "16000000") == "4000000"
+    assert stats._nondefault("DUCKDB_FILE_SIZE_MB", "1024") == "128"
+    # ...and neither is in force while the model declares no geometry at all.
+    monkeypatch.setenv("DUCKDB_SORTED", "false")
+    assert stats._nondefault("DUCKDB_ROW_GROUP_SIZE", "16000000") is None
 
 
 def test_the_key_lands_at_the_top_LEVEL_dbt_branch_not_under_layout(stats, tmp_path, monkeypatch):

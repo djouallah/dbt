@@ -443,6 +443,29 @@ test("the caption says which columns a sorted bar is ordered by, row groups only
   assert.equal(d.layoutLabel([{ rec: vo }]), "V-Order · 11 RG");
 });
 
+test("a non-default write geometry gets its own column, and the tag says so", () => {
+  // stats.py records these ONLY when they differ from the default, so a run carrying one has
+  // genuinely written different parquet and `variant()` has already split its column. If the tag
+  // stayed silent that column would land under a header identical to the default one's — two
+  // identical headers, which is unreadable and says nothing about why.
+  assert.equal(d.variantTag([["sorted", "true"], ["vcores", "64"]]), "64c+sorted");
+  assert.equal(d.variantTag([["row_group_size", "4000000"], ["sorted", "true"], ["vcores", "64"]]),
+    "64c+sorted+4.0Mrg");
+  assert.equal(d.variantTag([["file_size_mb", "128"], ["sorted", "true"], ["vcores", "64"]]),
+    "64c+sorted+128MB");
+  // Two sorted duckrun runs at one core count, one at a smaller row group: two distinct columns.
+  const cols = d.columnsFor([
+    lay("duckrun", 1, 9, { cfg: { vcores: "64", sorted: "true" }, file: "a-1.json" }),
+    lay("duckrun", 4, 36, { cfg: { vcores: "64", sorted: "true", row_group_size: "4000000" },
+      file: "b-2.json" }),
+  ]).map((c) => c.col);
+  assert.equal(new Set(cols).size, 2, cols);
+  assert.ok(cols.some((c) => c.endsWith("4.0Mrg")), cols);
+  // ...and the tag still never carries the column separator.
+  assert.ok(!d.variantTag([["row_group_size", "4000000"], ["file_size_mb", "128"]])
+    .includes(d.COL_SEP));
+});
+
 test("a column header calls a profile by its own name", () => {
   // The dispatch is given `readHeavyForPBI` and every doc and log line says `readHeavyForPBI`, so the
   // page does too — a reader matching this against a run's inputs should not have to translate. The

@@ -445,6 +445,13 @@ export function variantTag(sig, terse = true) {
   // state rather than two that merely look alike, and there is nothing for the terse fallback to
   // disambiguate.
   if (d.sorted) bits.push("sorted");
+  // The write geometry, and it MUST be rendered rather than left implicit. `stats.py` records these
+  // only when they differ from the default, so a run that carries one has genuinely written
+  // different parquet and `variant()` has already split it into its own column — if the tag stayed
+  // silent, that column would land under a header identical to the default one's. `16000000` reads
+  // as `16Mrg`, because a raw eight-digit number in a table head is most of a column's width.
+  if (d.row_group_size) bits.push(`${compact(d.row_group_size)}rg`);
+  if (d.file_size_mb) bits.push(`${d.file_size_mb}MB`);
   // `+`, never COL_SEP — baseEngine splits on that, and a tag containing one would make
   // `spark·readHeavyForPBI+NEE` unparseable back to `spark`.
   return bits.join("+") || "unrecorded";

@@ -612,11 +612,25 @@ to `provision.py teardown`, which polls for a 404 and goes red if it is still li
   limit** (`set_merge_memory_limit`), so the routed anti-join now gets 0.3 × default instead of
   0.3 × 4GB. Spill is unaffected — `temp_directory` is still set for both.
   **The `sorted` dispatch input is a KNOWING exception, and the only one.** With it on, duckrun
-  writes `fct_summary` sorted by the declared key `['date','time']` (the key the retired `'auto'`
+  writes `fct_summary` sorted and declares geometry, and **all three values are now dispatch inputs
+  rather than literals in the model**: `sort_by` (default `date,time` — the key the retired `'auto'`
   picker kept choosing, without its +19% profiling pass; DUID's ~16% of size deliberately left on
-  the table) and declares geometry — `max_row_group_size: 16000000` (spark readHeavyForPBI's
-  measured segment size, 9×16.0M on this table, and VertiPaq's ceiling — 48M was declared first
-  and was over it), `target_file_size_mb: 1024`,
+  the table), `row_group_size` (default `16000000` — spark readHeavyForPBI's measured segment size,
+  9×16.0M on this table, and VertiPaq's ceiling; 48M was declared first and was over it) and
+  `file_size_mb` (default `1024`; choice of 1024/512/128). A default dispatch renders exactly the
+  literals that were there before, so nothing about the recorded history moves.
+  Three consequences worth holding. **`row_group_size` and `sort_by` are FREE TEXT**, so the `plan`
+  job validates them — a positive integer, and comma-separated plain identifiers — because `plan` is
+  free and runs before any leg spends capacity, whereas a typo reaching duckrun dies mid-write with
+  the money already gone. A well-formed name that is not a column of the model still fails in the
+  leg; catching that needs the manifest, which only exists in the notebook.
+  **`stats.py`'s `declared_sort_key()` reads `DUCKDB_SORT_BY`, NOT the model** — it used to regex a
+  literal list out of `fct_summary.sql`, and there is no literal left to match, so that regex would
+  have returned `{}` and the page would have silently lost every sort caption.
+  **The geometry is recorded only when it differs from the default**, exactly as `sorted` is recorded
+  only when on: `variant()` skips null, so a default run keys to the same dashboard column as all the
+  history, and a non-default one splits into its own — which `variantTag` then has to spell
+  (`64c+sorted+4.0Mrg`), or two split columns would print one header.
   **needing duckrun ≥ 0.4.44**: 0.4.43's `_delta_core.sql` macro forwarded a fixed key list that
   carried `sort_by` and not the two geometry keys, so run 30955591822 wrote the estimator's 3f/19RG
   despite the config, silently. 0.4.44 forwards them (the notebook installs latest from PyPI) —

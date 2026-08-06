@@ -79,9 +79,22 @@ on:
         type: boolean
         default: true
       sorted:
-        description: "duckrun writes fct_summary sorted by date, time in 16M-row row groups / 1 GB files — spark readHeavyForPBI's segment size (needs duckrun >= 0.4.44; duckrun only)"
+        description: "duckrun writes fct_summary sorted by date, time in 1 GB files, row groups sized by `row_group_size` (needs duckrun >= 0.4.44; duckrun only)"
         type: boolean
         default: false
+      row_group_size:
+        description: "rows per row group when `sorted` is on — any positive integer; 16000000 is spark readHeavyForPBI's measured segment size and VertiPaq's ceiling (duckrun only)"
+        type: string
+        default: "16000000"
+      file_size_mb:
+        description: "target parquet file size when `sorted` is on (duckrun only)"
+        type: choice
+        options: ["1024", "512", "128"]
+        default: "1024"
+      sort_by:
+        description: "columns to sort fct_summary by when `sorted` is on — comma separated, e.g. `date,time` or `date,time,DUID` (duckrun only)"
+        type: string
+        default: "date,time"
 
       # ---- rarely touched ----------------------------------------------------------------------
       build:
@@ -170,6 +183,16 @@ env:
   # therefore in the dashboard's column and bar keys. iceberg parses the same model and has no such
   # config, so only duckrun's parquet moves; see the model header for what that costs.
   DUCKDB_SORTED: ${{ inputs.sorted && 'true' || 'false' }}
+  # Rows per row group, read by the same model config and forwarded by the same `_FORWARD` tuple.
+  # Only bites while `sorted` is on — that is where the geometry is declared at all — so a default
+  # dispatch writes exactly what it wrote before this input existed. VALIDATED IN `plan`, not here:
+  # a non-integer would otherwise reach duckrun as a string and fail mid-write, after the legs have
+  # already spent capacity.
+  DUCKDB_ROW_GROUP_SIZE: ${{ inputs.row_group_size }}
+  DUCKDB_FILE_SIZE_MB: ${{ inputs.file_size_mb }}
+  # The sort KEY, not just on/off. `stats.py`'s `declared_sort_key()` reads THIS rather than
+  # regexing the model, because the model no longer holds a literal list to regex.
+  DUCKDB_SORT_BY: ${{ inputs.sort_by }}
   BENCH_ENGINES: ${{ inputs.engines }}
   BENCH_RUNS: ${{ inputs.runs }}
   BENCH_THINK_SECONDS: ${{ inputs.think_seconds }}
@@ -259,9 +282,25 @@ jobs:
       - id: p
         env:
           ENGINES: ${{ inputs.engines }}
+          ROW_GROUP_SIZE: ${{ inputs.row_group_size }}
+          SORT_BY: ${{ inputs.sort_by }}
         run: |
           python3 - >> "$GITHUB_OUTPUT" <<'EOF'
-          import json, os, sys
+          import json, os, re, sys
+          # `row_group_size` and `sort_by` are FREE TEXT, so this is the only thing standing between a
+          # typo and a leg that dies mid-write with capacity already spent. `plan` is free and runs
+          # before every paid job, which is why the check lives here rather than in the model.
+          rg = (os.environ.get("ROW_GROUP_SIZE") or "").strip()
+          if not rg.isdigit() or int(rg) < 1:
+              sys.exit(f"row_group_size must be a positive integer, got {rg!r}")
+          # Shape only — plain identifiers, comma separated. A name that is well-formed but not a
+          # column of the model still fails in the leg; that needs the manifest, which lives in the
+          # notebook. This catches the typo class (`date;time`, `date, `, quoting, injection).
+          cols = [c.strip() for c in (os.environ.get("SORT_BY") or "").split(",") if c.strip()]
+          if not cols or not all(re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", c) for c in cols):
+              sys.exit(f"sort_by must be comma-separated column names, got "
+                       f"{os.environ.get('SORT_BY')!r}")
+          sys.stderr.write(f"row_group_size={int(rg):,} rows, sort_by={cols}\n")
           LEGS = {
               "duckrun": ("fabric", {"engine": "duckrun", "label": "delta_rs"}),
               "iceberg": ("fabric", {"engine": "iceberg", "label": "iceberg"}),

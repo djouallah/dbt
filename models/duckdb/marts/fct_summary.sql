@@ -118,9 +118,12 @@
     incremental_strategy='merge',
     unique_key=['date', 'time', 'DUID'],
     merge_clauses={'when_matched': [{'action': 'do_nothing'}]},
-    sort_by=(['date', 'time'] if env_var('DUCKDB_SORTED', 'false') == 'true' else none),
-    max_row_group_size=(16000000 if env_var('DUCKDB_SORTED', 'false') == 'true' else none),
-    target_file_size_mb=(1024 if env_var('DUCKDB_SORTED', 'false') == 'true' else none),
+    sort_by=(env_var('DUCKDB_SORT_BY', 'date,time').split(',')
+             if env_var('DUCKDB_SORTED', 'false') == 'true' else none),
+    max_row_group_size=(env_var('DUCKDB_ROW_GROUP_SIZE', '16000000') | int
+                        if env_var('DUCKDB_SORTED', 'false') == 'true' else none),
+    target_file_size_mb=(env_var('DUCKDB_FILE_SIZE_MB', '1024') | int
+                         if env_var('DUCKDB_SORTED', 'false') == 'true' else none),
     schema='mart'
 ) }}
 
