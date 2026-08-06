@@ -43,6 +43,38 @@ def stats():
     return mod
 
 
+def test_every_name_stats_py_calls_is_defined(stats):
+    """The one that would have saved run 31067443454.
+
+    A rewrite of `declared_sort_key` replaced a text RANGE that `encoding_table` happened to sit
+    inside, deleting it. Nothing here caught it: the function only prints to the step summary, so no
+    test calls it, and `main()` is the only caller — which no offline test reaches either. The layout
+    job then died on `NameError: name 'encoding_table' is not defined`, ten minutes into a paid run,
+    after the build had already been paid for.
+
+    This walks the AST and checks every bare-name call resolves to something: a def in this module,
+    an import, a module-level binding, or a builtin. It costs milliseconds and catches the entire
+    class — a deleted function, a typo'd call, an import dropped as "unused" that was not.
+    """
+    import ast
+    import builtins
+    src = open(os.path.join(HERE, "stats.py"), encoding="utf-8").read()
+    tree = ast.parse(src)
+    bound = set(dir(builtins))
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            bound.add(node.name)
+        elif isinstance(node, (ast.Import, ast.ImportFrom)):
+            bound.update((a.asname or a.name).split(".")[0] for a in node.names)
+        elif isinstance(node, ast.Name) and isinstance(node.ctx, ast.Store):
+            bound.add(node.id)
+        elif isinstance(node, ast.arg):
+            bound.add(node.arg)
+    called = {n.func.id for n in ast.walk(tree)
+              if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)}
+    assert not (called - bound), f"stats.py calls undefined name(s): {sorted(called - bound)}"
+
+
 def test_the_declared_key_comes_from_the_env_the_model_reads(stats, monkeypatch):
     """It used to regex a literal list out of `fct_summary.sql`. The model now renders `sort_by` from
     `DUCKDB_SORT_BY`, so there is no literal left to match and that regex would silently return {} —

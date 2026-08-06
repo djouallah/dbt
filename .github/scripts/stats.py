@@ -392,6 +392,35 @@ def declared_sort_key():
     return {MART: cols} if cols else {}
 
 
+def encoding_table(encodings, engines):
+    """`fct_summary`'s per-column parquet encoding, engines side by side.
+
+    The question this answers is whether two engines hand Power BI the same thing to transcode. It
+    sits beside the layout table because that one reports SHAPE — files, row groups, size — and shape
+    turned out not to explain the CU: duckrun writes the densest parquet on the page and does not
+    win, and dwh writes UNCOMPRESSED and beats a SNAPPY spark build.
+    """
+    have = [e for e in engines if encodings.get(e)]
+    if not have:
+        return
+    print(f"## 🔤 `{MART}` column encoding\n")
+    print("| column | type | " + " | ".join(have) + " |")
+    print("| --- | --- | " + " | ".join("---" for _ in have) + " |")
+    for col in sorted({c for e in have for c in encodings[e]}):
+        # The type is the PARQUET physical type and the engines can legitimately disagree (a DATE is
+        # INT32 to one writer and INT64 to another), which is itself worth seeing — so it is printed
+        # from whichever engine has it and any disagreement shows up in the cells beside it.
+        typ = next((encodings[e][col]["type"] for e in have if col in encodings[e]), "—")
+        cells = []
+        for e in have:
+            c = encodings[e].get(col)
+            cells.append("—" if not c else
+                         f"`{'+'.join(c['encodings'])}`"
+                         f"{'' if c['dict_pages'] else ' ⚠️ no dict'} · {c['mb']:,.1f} MB")
+        print(f"| `{col}` | `{typ}` | " + " | ".join(cells) + " |")
+    print()
+
+
 def build_doc(per_engine, engines, guids=None, landing=None, encodings=None):
     """The layout document: run stamp, hardware config, per-engine item + GUID, per-table detail.
 
