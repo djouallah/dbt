@@ -24,15 +24,42 @@
 -- universes"; CLAUDE.md, "fct_summary must be a pure function of its inputs".
 --
 -- sort_by is the `sorted` DISPATCH INPUT, off by default, and it now DECLARES the write layout
--- rather than delegating it: the named key ['date','time'] plus explicit geometry —
--- max_row_group_size 16000000 and target_file_size_mb 1024. The three values are AIMED AT
--- V-ORDER'S ANALYTICS CU (spark readHeavyForPBI, 4 measured runs: 1,149-1,514, mean ~1,362,
--- always 9-11 files = 9-11 row groups of ~16.0M rows). Segment shape is V-Order's only
--- STRUCTURAL edge — every duckrun run so far wrote 19-27 ragged 5.5-8M-row segments — so 16M
--- (also VertiPaq's ceiling; the 48M declared first was over it) buys segment parity:
--- 143,980,961 rows = 8 x 16M + 15.98M, exactly 9 full segments. The sort key owns the best
--- warm/hot in the whole history (2,783/2,624 ms, run 30809945203 — better than every V-Order
--- warm), so the bet is 9 clean segments + that key lands in V-Order's CU band without V-Order.
+-- rather than delegating it: the named key ['date','DUID','time'] plus explicit geometry —
+-- max_row_group_size 6000000 and target_file_size_mb 1024. ALL THREE DEFAULTS WERE MEASURED, and
+-- the first two REPLACE an earlier bet that the data killed. Read the retraction before changing
+-- them back.
+--
+-- 16M was chosen to copy V-Order's segment shape (spark readHeavyForPBI writes 9-11 row groups of
+-- ~16.0M rows; 143,980,961 = 8 x 16M + 15.98M, exactly 9 full segments) on the theory that segment
+-- parity was V-Order's structural edge. IT IS THE WORST GEOMETRY MEASURED. Sorted `date,time`,
+-- warm ms by segment count: 8 RG 5,793 (n=1) · 9 RG 4,141-6,311 (n=6, median 5,425) · 19 RG 5,725
+-- (n=1) · 24 RG 3,221 (n=1) · 25 RG 2,783 (n=1) · 72 RG 2,655 (n=1). A step between 19 and 24, not
+-- a curve, and 72 buys nothing over 24 while costing 4.5% more bytes. 6M = 24 segments sits at the
+-- knee. The 9-RG arm is the only well-sampled point and it anchors the SLOW side, so this is not a
+-- noise artefact — but where exactly the knee falls between 19 and 24 is unresolved (three n=1
+-- points).
+-- Also dead: a "wave model" predicting cost ~ ceil(segments/threads), which fit 9 RG at N=8 to
+-- within 2%. Run 31077710594 wrote EXACTLY 8 segments (avg_row_group 17,997,620) to test it and
+-- landed at warm 5,793 — inside the 9-RG range, upper half. One pool-of-8 wave is not faster than
+-- two. Do not re-derive it from the 9-RG number alone; that fit was a coincidence on one point.
+--
+-- ['date','DUID','time'] over ['date','time'] is a SIZE decision, not a speed one, and it is the
+-- one thing in this whole experiment that separated. n=4 per arm at 6M, interleaved so capacity
+-- weather hits both: size 543.03 MB vs 778.3 (-30%, and 543.03 on ALL FOUR runs — zero variance);
+-- cold 26,364 vs 25,973 (p=0.57), warm 4,559 vs 4,584 (p=0.83), hot 3,728 vs 4,401 (p=0.74), ETL
+-- CU 24,681 vs 24,051 with overlapping ranges. So: latency and ETL are INDISTINGUISHABLE and the
+-- bytes are free. It is NOT faster — that is the fourth demonstration here that a smaller file does
+-- not buy query time. Anyone reading -30% as a speed claim has it backwards.
+-- Where the bytes go, per column, MB (`date,time` -> `date,DUID,time`): price 207.6 -> 125.8,
+-- DUID 150.2 -> 1.9, time 3.3 -> 22.1, mw 417.3 -> 393.2. DUID collapses because a unit's whole
+-- day becomes contiguous; `time` pays for it and the trade is worth ~148 MB.
+-- price is a PER-REGION series, so it also compresses under `date,time,price` — 207.6 -> 25.0,
+-- measured on run 31081276252 — but the two wins are MUTUALLY EXCLUSIVE and no fourth key gets
+-- both: cheap DUID needs DUID-major (one unit's whole day contiguous), cheap price needs time-major
+-- (one instant's whole region contiguous), and a table has one order. `date,price,DUID,time` just
+-- reproduces `date,time,price`, since fixing price also fixes the interval. 543 MB is the frontier.
+-- `mw` is the wall: 393-417 MB across every sort tried (a 6% range) and 72% of the best total. The
+-- next size lever is its encoding or type, not row order.
 -- THE 1 GB FILE CAP IS LOAD-BEARING, NOT A MIRROR OF binSize: delta-rs rolls files on in-flight
 -- buffered bytes and TRUNCATES the current row group at the cap (measured: a cap of 1.15x one
 -- RG's bytes wrote groups at 0.43x the declared rows), so chasing spark's 9 FILES with a small
@@ -41,9 +68,13 @@
 -- iceberg 357); segments did.
 -- It spent one era as 'auto' so the input measured what the adapter's picker does out of the
 -- box; the picker kept choosing `date, time` and paid +19% ETL CU for the profiling pass against
--- a named key's +3.7%, so the key it picked is now simply written down. DUID was measured worth
--- ~16% of size (652.6 vs 777.2 MB below) and deliberately NOT taken: its run posted the worst
--- duckrun CU (2,247.8) and warm (8,071 ms) in the table.
+-- a named key's +3.7%, so a NAMED key is written down rather than 'auto'. Which named key is a
+-- separate question and the picker never answered it — it only ever offered `date, time`.
+-- DUID was refused once on n=1 evidence: run 30955591822 (`date,time,DUID`, 19 RG) posted the
+-- worst duckrun CU (2,247.8) and warm (8,071 ms) in the table, and this comment used to cite that
+-- as the reason its ~16% of size was "deliberately left on the table". n=4 per arm retired that —
+-- one draw from a distribution whose within-config spread runs 25-100%. Note the retired run is
+-- also a DIFFERENT KEY: DUID trailing (648.1 MB) is not DUID in the middle (543.0 MB).
 -- DUCKRUN-ONLY without breaking the one-config-for-both rule, for the same reason partition_by
 -- was: `sort_by` and the geometry keys occur ZERO times in dbt-duckdb's adapter and macro package,
 -- so on iceberg they are parsed into the manifest and read by nobody. Both targets still run
@@ -118,9 +149,9 @@
     incremental_strategy='merge',
     unique_key=['date', 'time', 'DUID'],
     merge_clauses={'when_matched': [{'action': 'do_nothing'}]},
-    sort_by=(env_var('DUCKDB_SORT_BY', 'date,time').split(',')
+    sort_by=(env_var('DUCKDB_SORT_BY', 'date,DUID,time').split(',')
              if env_var('DUCKDB_SORTED', 'false') == 'true' else none),
-    max_row_group_size=(env_var('DUCKDB_ROW_GROUP_SIZE', '16000000') | int
+    max_row_group_size=(env_var('DUCKDB_ROW_GROUP_SIZE', '6000000') | int
                         if env_var('DUCKDB_SORTED', 'false') == 'true' else none),
     target_file_size_mb=(env_var('DUCKDB_FILE_SIZE_MB', '1024') | int
                          if env_var('DUCKDB_SORTED', 'false') == 'true' else none),

@@ -13,6 +13,7 @@ if it named columns, and the merge landing under `layout` where the page does no
     python -m pytest .github/scripts/test_sort_key.py -q
 """
 import json
+import pathlib
 import os
 import subprocess
 import sys
@@ -100,7 +101,8 @@ def test_the_declared_key_comes_from_the_env_the_model_reads(stats, monkeypatch)
     monkeypatch.setenv("DUCKDB_SORT_BY", "date, time, DUID")     # spaces are the dispatch's problem
     assert stats.declared_sort_key() == {"fct_summary": ["date", "time", "DUID"]}
     monkeypatch.delenv("DUCKDB_SORT_BY")
-    assert stats.declared_sort_key() == {"fct_summary": ["date", "time"]}, "the model's own default"
+    assert stats.declared_sort_key() == {"fct_summary": ["date", "DUID", "time"]}, (
+        "must equal the model's own env_var default, or a hand run records a key it did not write")
 
 
 def test_an_unsorted_run_declares_no_key(stats, monkeypatch):
@@ -112,21 +114,40 @@ def test_an_unsorted_run_declares_no_key(stats, monkeypatch):
     assert stats.declared_sort_key() == {}
 
 
-def test_geometry_is_recorded_only_when_it_differs_from_the_default(stats, monkeypatch):
-    """A default dispatch writes the parquet every earlier run wrote, so it must key to the SAME
-    dashboard column. `variant()` skips null, so absence keeps the column; a value splits it."""
+def test_geometry_is_recorded_only_when_it_differs_from_the_baseline(stats, monkeypatch):
+    """A run that wrote the parquet the history wrote must key to the SAME dashboard column.
+    `variant()` skips null, so absence keeps the column; a value splits it."""
     monkeypatch.setenv("DUCKDB_SORTED", "true")
     monkeypatch.setenv("DUCKDB_ROW_GROUP_SIZE", "16000000")
     monkeypatch.setenv("DUCKDB_FILE_SIZE_MB", "1024")
-    assert stats._nondefault("DUCKDB_ROW_GROUP_SIZE", "16000000") is None
-    assert stats._nondefault("DUCKDB_FILE_SIZE_MB", "1024") is None
+    assert stats._nonbaseline("DUCKDB_ROW_GROUP_SIZE", "16000000") is None
+    assert stats._nonbaseline("DUCKDB_FILE_SIZE_MB", "1024") is None
     monkeypatch.setenv("DUCKDB_ROW_GROUP_SIZE", "4000000")
     monkeypatch.setenv("DUCKDB_FILE_SIZE_MB", "128")
-    assert stats._nondefault("DUCKDB_ROW_GROUP_SIZE", "16000000") == "4000000"
-    assert stats._nondefault("DUCKDB_FILE_SIZE_MB", "1024") == "128"
+    assert stats._nonbaseline("DUCKDB_ROW_GROUP_SIZE", "16000000") == "4000000"
+    assert stats._nonbaseline("DUCKDB_FILE_SIZE_MB", "1024") == "128"
     # ...and neither is in force while the model declares no geometry at all.
     monkeypatch.setenv("DUCKDB_SORTED", "false")
-    assert stats._nondefault("DUCKDB_ROW_GROUP_SIZE", "16000000") is None
+    assert stats._nonbaseline("DUCKDB_ROW_GROUP_SIZE", "16000000") is None
+
+
+def test_the_baseline_is_history_not_the_current_dispatch_default(stats, monkeypatch):
+    """THE TRAP THIS PINS: the baseline is the geometry `history/` was written under, and it must NOT
+    follow the dispatch default when that moves. It already has — `row_group_size` defaulted to
+    16000000 for the 13+ recorded runs and defaults to 6000000 since the knee was measured.
+
+    Were the baseline the live default, a 6M run would record `None`, share an `(engine, config)`
+    column with the 16M history, and `columnsFor` — latest run per column — would hide six runs of
+    9-RG history behind one 24-RG run. The BARS would still separate (`layoutKey` bands the measured
+    counts), so nothing looks broken; the CU and sources tables just report the wrong geometry.
+    """
+    monkeypatch.setenv("DUCKDB_SORTED", "true")
+    monkeypatch.setenv("DUCKDB_ROW_GROUP_SIZE", "6000000")   # today's default
+    assert stats._nonbaseline("DUCKDB_ROW_GROUP_SIZE", "16000000") == "6000000",         "a run at today's default must still record its geometry — history wrote 16M"
+
+    src = pathlib.Path(stats.__file__).read_text(encoding="utf-8")
+    assert '_nonbaseline("DUCKDB_ROW_GROUP_SIZE", "16000000")' in src,         "the call site's baseline was moved off what history holds"
+    assert '_nonbaseline("DUCKDB_FILE_SIZE_MB", "1024")' in src
 
 
 def test_the_key_lands_at_the_top_LEVEL_dbt_branch_not_under_layout(stats, tmp_path, monkeypatch):

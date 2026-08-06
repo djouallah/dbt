@@ -357,17 +357,28 @@ def detail_tables(per_engine, engines):
     # Per-engine totals now live as the last two rows of the parity table above.
 
 
-def _nondefault(var, default):
-    """The env value when `sorted` is on AND it is not the default, else `None`.
+def _nonbaseline(var, baseline):
+    """The env value when `sorted` is on AND it differs from `baseline`, else `None`.
 
-    Absence is what keeps a default dispatch in the same dashboard column as every run that predates
-    these inputs — the same rule `sorted` itself follows, and for the same reason: the parquet is
-    identical, so splitting the column would claim two layouts where there is one.
+    Absence is what keeps a run in the same dashboard column as the history that wrote the same
+    parquet — the same rule `sorted` itself follows, and for the same reason: identical parquet, so
+    splitting the column would claim two layouts where there is one.
+
+    THE BASELINE IS THE GEOMETRY THE RECORDED HISTORY WAS WRITTEN UNDER, NOT THE DISPATCH'S CURRENT
+    DEFAULT, and the two have already diverged — `row_group_size` defaulted to 16000000 for the 13+
+    runs now in `history/`, and defaults to 6000000 since the knee was measured. This was called
+    `_nondefault` and read the live default, which is a trap that fires the moment a default moves:
+    a 6M run would record `None`, land in the same `(engine, config)` column as the 16M history, and
+    `columnsFor` — which takes the LATEST run per column — would HIDE six runs of 9-RG history
+    behind one 24-RG run. The bars would still separate (`layoutKey` bands the MEASURED file and row
+    group counts), so nothing would look broken; the CU and sources tables would just quietly report
+    the wrong geometry's numbers. Pin the baseline to what history holds and let every new default
+    record itself explicitly.
     """
     if os.environ.get("DUCKDB_SORTED") != "true":
         return None
     v = (os.environ.get(var) or "").strip()
-    return v if v and v != default else None
+    return v if v and v != baseline else None
 
 
 def declared_sort_key():
@@ -388,7 +399,10 @@ def declared_sort_key():
     """
     if os.environ.get("DUCKDB_SORTED") != "true":
         return {}
-    cols = [c.strip() for c in os.environ.get("DUCKDB_SORT_BY", "date,time").split(",") if c.strip()]
+    # Fallback MUST match the model's own `env_var('DUCKDB_SORT_BY', ...)` default, or a hand run
+    # with the var unset records a key it did not write. CI always sets it from the input.
+    cols = [c.strip()
+            for c in os.environ.get("DUCKDB_SORT_BY", "date,DUID,time").split(",") if c.strip()]
     return {MART: cols} if cols else {}
 
 
@@ -464,8 +478,11 @@ def build_doc(per_engine, engines, guids=None, landing=None, encodings=None):
         "config": {e: cfg for e, cfg in (
             ("duckrun", {"vcores": os.environ.get("FABRIC_CORES") or None,
                          "sorted": "true" if os.environ.get("DUCKDB_SORTED") == "true" else None,
-                         "row_group_size": _nondefault("DUCKDB_ROW_GROUP_SIZE", "16000000"),
-                         "file_size_mb": _nondefault("DUCKDB_FILE_SIZE_MB", "1024")}),
+                         # 16000000 / 1024 are what `history/` was written under, NOT today's
+                         # dispatch defaults — see `_nonbaseline`. Moving these moves 13+ runs
+                         # into the wrong column, silently.
+                         "row_group_size": _nonbaseline("DUCKDB_ROW_GROUP_SIZE", "16000000"),
+                         "file_size_mb": _nonbaseline("DUCKDB_FILE_SIZE_MB", "1024")}),
             ("iceberg", {"vcores": os.environ.get("FABRIC_CORES") or None}),
             ("spark", {"resource_profile": os.environ.get("SPARK_RESOURCE_PROFILE") or None,
                        "native_execution_engine": os.environ.get("SPARK_NATIVE_ENABLED") or None}),

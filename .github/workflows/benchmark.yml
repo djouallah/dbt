@@ -79,22 +79,22 @@ on:
         type: boolean
         default: true
       sorted:
-        description: "duckrun writes fct_summary sorted by date, time in 1 GB files, row groups sized by `row_group_size` (needs duckrun >= 0.4.44; duckrun only)"
+        description: "duckrun writes fct_summary sorted by `sort_by` in 1 GB files, row groups sized by `row_group_size` (needs duckrun >= 0.4.44; duckrun only)"
         type: boolean
         default: false
       row_group_size:
-        description: "rows per row group when `sorted` is on — any positive integer; 16000000 is spark readHeavyForPBI's measured segment size and VertiPaq's ceiling (duckrun only)"
+        description: "rows per row group when `sorted` is on — any positive integer; 6000000 = 24 segments, the measured knee (8/9/19 RG all sit ~5.4-5.8s warm, 24/25/72 all ~2.7-3.2s) (duckrun only)"
         type: string
-        default: "16000000"
+        default: "6000000"
       file_size_mb:
         description: "target parquet file size when `sorted` is on (duckrun only)"
         type: choice
         options: ["1024", "512", "128"]
         default: "1024"
       sort_by:
-        description: "columns to sort fct_summary by when `sorted` is on — comma separated, e.g. `date,time` or `date,time,DUID` (duckrun only)"
+        description: "columns to sort fct_summary by when `sorted` is on — comma separated; `date,DUID,time` is 30% smaller than `date,time` at indistinguishable latency and ETL (n=4/arm) (duckrun only)"
         type: string
-        default: "date,time"
+        default: "date,DUID,time"
 
       # ---- rarely touched ----------------------------------------------------------------------
       build:
