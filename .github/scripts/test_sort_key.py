@@ -25,6 +25,20 @@ ROOT = os.path.dirname(os.path.dirname(HERE))
 sys.path.insert(0, HERE)
 
 
+@pytest.fixture(autouse=True)
+def _no_ambient_duckdb_env(monkeypatch):
+    """Clear every DUCKDB_* var before each test.
+
+    THE GATE MUST NOT BE A FUNCTION OF THE DISPATCH IT IS GATING. `benchmark.yml` puts
+    `DUCKDB_SORTED` / `DUCKDB_SORT_BY` / the geometry into the job env, so a test that reads one
+    without setting it asserts against whatever the human happened to type into the dispatch form.
+    That is exactly what killed run 31073309328: a `sort_by=date,time,DUID` dispatch failed the free
+    checks on a test that hardcoded `date,time`, and the run never reached a paid leg.
+    """
+    for k in ("DUCKDB_SORTED", "DUCKDB_SORT_BY", "DUCKDB_ROW_GROUP_SIZE", "DUCKDB_FILE_SIZE_MB"):
+        monkeypatch.delenv(k, raising=False)
+
+
 @pytest.fixture(scope="module")
 def stats():
     """`stats.py` with its Fabric-facing imports stubbed.
@@ -123,6 +137,7 @@ def test_the_key_lands_at_the_top_LEVEL_dbt_branch_not_under_layout(stats, tmp_p
     rec = tmp_path / "run.json"
     monkeypatch.setenv("RUN_RECORD", str(rec))
     monkeypatch.setenv("DUCKDB_SORTED", "true")
+    monkeypatch.setenv("DUCKDB_SORT_BY", "date,time")   # PINNED — never the dispatch's own value
     monkeypatch.setattr(stats, "build_doc", lambda *a, **k: {"stats": {}})
     stats.write_json({"stats": {"duckrun": {}}}, ["duckrun"])
     doc = json.loads(rec.read_text(encoding="utf-8"))
