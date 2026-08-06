@@ -1,0 +1,332 @@
+{
+ "engine": "spark",
+ "full_load": true,
+ "inputs": {
+  "benchmark": "false",
+  "build": "true",
+  "cores": "64",
+  "download_limit": "200",
+  "gap_seconds": "600",
+  "native_execution_engine": "true",
+  "runs": "6",
+  "skip_download": "true",
+  "sorted": "false",
+  "spark_resource_profile": "writeHeavy",
+  "think_seconds": "4"
+ },
+ "items": {
+  "4FBE4130-1717-4FC9-A985-3FB7B4A13067": {
+   "at": "2026-08-06T23:37:20+00:00",
+   "created": false,
+   "kind": "Lakehouse",
+   "name": "dbt_landing",
+   "role": "landing"
+  },
+  "6C23854F-CF0F-460D-8AFB-01D9BEA9A92D": {
+   "at": "2026-08-06T23:54:23+00:00",
+   "created": false,
+   "kind": "Folder",
+   "name": "benchmark",
+   "role": "folder"
+  },
+  "A8CF6202-AE31-45E4-9CC8-7FFE463250C9": {
+   "at": "2026-08-06T23:37:22+00:00",
+   "created": false,
+   "kind": "Warehouse",
+   "name": "dbt_landing",
+   "role": "sql_endpoint"
+  },
+  "C2E9BDD4-F6DA-4441-A614-CF0797BB5240": {
+   "at": "2026-08-06T23:38:06+00:00",
+   "created": true,
+   "deleted": "2026-08-06T23:54:25+00:00",
+   "kind": "Lakehouse",
+   "name": "dbt_spark",
+   "role": "output"
+  },
+  "F50469D2-8347-4464-9EE8-97C768B4F355": {
+   "at": "2026-08-06T23:54:24+00:00",
+   "created": false,
+   "kind": "Folder",
+   "name": "landing",
+   "role": "folder"
+  }
+ },
+ "layout": {
+  "config": {
+   "spark": {
+    "native_execution_engine": "true",
+    "resource_profile": "writeHeavy"
+   }
+  },
+  "detail_keys": [
+   "schema",
+   "total_rows",
+   "num_files",
+   "num_row_groups",
+   "avg_row_group",
+   "size_mb",
+   "vorder",
+   "compression"
+  ],
+  "encodings": {
+   "spark": {
+    "DUID": {
+     "chunks": 13,
+     "dict_pages": 13,
+     "encodings": [
+      "PLAIN_DICTIONARY",
+      "RLE"
+     ],
+     "mb": 153.9,
+     "type": "BYTE_ARRAY"
+    },
+    "cutoff": {
+     "chunks": 13,
+     "dict_pages": 13,
+     "encodings": [
+      "PLAIN_DICTIONARY",
+      "RLE"
+     ],
+     "mb": 0.0,
+     "type": "INT64"
+    },
+    "date": {
+     "chunks": 13,
+     "dict_pages": 13,
+     "encodings": [
+      "PLAIN_DICTIONARY",
+      "RLE"
+     ],
+     "mb": 0.03,
+     "type": "INT32"
+    },
+    "mw": {
+     "chunks": 13,
+     "dict_pages": 13,
+     "encodings": [
+      "PLAIN",
+      "PLAIN_DICTIONARY",
+      "RLE"
+     ],
+     "mb": 618.59,
+     "type": "INT64"
+    },
+    "price": {
+     "chunks": 13,
+     "dict_pages": 13,
+     "encodings": [
+      "PLAIN",
+      "PLAIN_DICTIONARY",
+      "RLE"
+     ],
+     "mb": 332.88,
+     "type": "INT64"
+    },
+    "time": {
+     "chunks": 13,
+     "dict_pages": 13,
+     "encodings": [
+      "PLAIN_DICTIONARY",
+      "RLE"
+     ],
+     "mb": 154.78,
+     "type": "INT32"
+    }
+   }
+  },
+  "engines": {
+   "spark": {
+    "guid": "c2e9bdd4-f6da-4441-a614-cf0797bb5240",
+    "item": "dbt_spark",
+    "kind": "lakehouses",
+    "writer": "spark"
+   }
+  },
+  "landing": {
+   "files": 8377,
+   "folders": {
+    "(root)": {
+     "files": 1,
+     "size_mb": 0.37
+    },
+    "csv_raw/daily": {
+     "files": 3042,
+     "size_mb": 170004.56
+    },
+    "csv_raw/duid": {
+     "files": 4,
+     "size_mb": 0.16
+    },
+    "csv_raw/price_today": {
+     "files": 2550,
+     "size_mb": 381.24
+    },
+    "csv_raw/scada_today": {
+     "files": 2571,
+     "size_mb": 103.76
+    },
+    "duckrun_remote": {
+     "files": 209,
+     "size_mb": 1.79
+    }
+   },
+   "guid": "4fbe4130-1717-4fc9-a985-3fb7b4a13067",
+   "item": "dbt_landing",
+   "size_mb": 170491.88
+  },
+  "ordering": {
+   "spark": {
+    "columns": {
+     "DUID": {
+      "rg_overlap_pct": 100.0,
+      "rgs": 13,
+      "runs": 3978804
+     },
+     "cutoff": {
+      "rg_overlap_pct": 0.0,
+      "rgs": 13,
+      "runs": 1
+     },
+     "date": {
+      "rg_overlap_pct": 75.0,
+      "rgs": 13,
+      "runs": 77
+     },
+     "mw": {
+      "rg_overlap_pct": 100.0,
+      "rgs": 13,
+      "runs": 3996712
+     },
+     "price": {
+      "rg_overlap_pct": 100.0,
+      "rgs": 13,
+      "runs": 3546547
+     },
+     "time": {
+      "rg_overlap_pct": 100.0,
+      "rgs": 13,
+      "runs": 3558608
+     }
+    },
+    "sample": {
+     "file": "part-00000-e59a9eb9-0db0-4c22-a624-8177259dd3b2-c000.snappy.parquet",
+     "rows": 4000000
+    },
+    "table": "mart.fct_summary",
+    "vorder_files": {
+     "files": 13,
+     "tagged": 0,
+     "unknown": 0
+    }
+   }
+  },
+  "run": {
+   "id": "31131727297",
+   "sha": "8495249e99de6d8094d7255075e1eae2d17222d1",
+   "written": "2026-08-06T23:53:46.432308+00:00"
+  },
+  "stats": {
+   "spark": {
+    "dim_calendar": {
+     "avg_row_group": 3197.0,
+     "compression": "SNAPPY",
+     "num_files": 1,
+     "num_row_groups": 1,
+     "schema": "mart",
+     "size_mb": 0.02,
+     "total_rows": 3197,
+     "vorder": false
+    },
+    "dim_duid": {
+     "avg_row_group": 689.0,
+     "compression": "SNAPPY",
+     "num_files": 1,
+     "num_row_groups": 1,
+     "schema": "mart",
+     "size_mb": 0.02,
+     "total_rows": 689,
+     "vorder": false
+    },
+    "fct_price": {
+     "avg_row_group": 766650.0,
+     "compression": "SNAPPY",
+     "num_files": 6,
+     "num_row_groups": 6,
+     "schema": "landing",
+     "size_mb": 590.06,
+     "total_rows": 4599900,
+     "vorder": false
+    },
+    "fct_price_today": {
+     "avg_row_group": 12750.0,
+     "compression": "SNAPPY",
+     "num_files": 1,
+     "num_row_groups": 1,
+     "schema": "landing",
+     "size_mb": 0.92,
+     "total_rows": 12750,
+     "vorder": false
+    },
+    "fct_scada": {
+     "avg_row_group": 8605151.2,
+     "compression": "SNAPPY",
+     "num_files": 43,
+     "num_row_groups": 43,
+     "schema": "landing",
+     "size_mb": 3891.9,
+     "total_rows": 370021502,
+     "vorder": false
+    },
+    "fct_scada_today": {
+     "avg_row_group": 750153.0,
+     "compression": "SNAPPY",
+     "num_files": 1,
+     "num_row_groups": 1,
+     "schema": "landing",
+     "size_mb": 4.39,
+     "total_rows": 750153,
+     "vorder": false
+    },
+    "fct_summary": {
+     "avg_row_group": 11075458.5,
+     "compression": "SNAPPY",
+     "num_files": 13,
+     "num_row_groups": 13,
+     "schema": "mart",
+     "size_mb": 1260.3,
+     "total_rows": 143980961,
+     "vorder": false
+    },
+    "stg_csv_archive_log": {
+     "avg_row_group": 8167.0,
+     "compression": "SNAPPY",
+     "num_files": 1,
+     "num_row_groups": 1,
+     "schema": "landing",
+     "size_mb": 0.43,
+     "total_rows": 8167,
+     "vorder": false
+    }
+   }
+  },
+  "tables": [
+   "stg_csv_archive_log",
+   "dim_calendar",
+   "dim_duid",
+   "fct_price",
+   "fct_scada",
+   "fct_price_today",
+   "fct_scada_today",
+   "fct_summary"
+  ]
+ },
+ "run": {
+  "finished": "2026-08-06T23:54:33+00:00",
+  "id": "31131727297",
+  "sha": "8495249e99de6d8094d7255075e1eae2d17222d1",
+  "started": "2026-08-06T23:36:29+00:00",
+  "url": "https://github.com/djouallah/fabric-dbt-benchmark/actions/runs/31131727297"
+ },
+ "schema": 1
+}
