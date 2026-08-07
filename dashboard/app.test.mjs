@@ -2301,7 +2301,11 @@ const twice = (engine, opts = {}) => [
 /** …and a second column, because one column is not a ranking and renders nothing at all. */
 const rival = () => own(lay("dwh", 78, 78, { file: "dwh-1.json" }), "dwh");
 const repeated = () => [...twice("duckrun"), rival()];
-const REPEAT = ledger({ Oduckrun1: 100, Oduckrun2: 120, Odwh: 300 });
+// Both halves, because the section needs a RANKING to exist at all and only analytics is ranked now
+// — `cheapest to build` is gone, so an etl-only ledger renders no Analysis section whatever its
+// repeats say. The etl figures stay 100/120 so the measured floor is still 20/110 = 18.2%.
+const REPEAT = ledger({ Oduckrun1: 100, Oduckrun2: 120, Odwh: 300,
+  Sduckrun1: 40, Sduckrun2: 44, Sdwh: 90 });
 
 test("the noise floor is MEASURED from the repeats, not assumed", () => {
   // Two runs of one column at 100 and 120 CU: the spread is 20/110 = 18.2%, and the page prints that
@@ -2413,11 +2417,13 @@ test("Part A quotes the CHARTS' numbers, not a second derivation", () => {
     own(lay("spark", 11, 11, { file: "s-1.json", vorder: true }), "s")];
   const out = render(runs, ledger({ Od: 100, Sd: 40, Os: 300, Ss: 90 }));
   const find = (what) => rows(block(out, "Where the rankings hold")).find((r) => r.includes(what));
-  assert.ok(find("cheapest to build").includes("| 100.0 |"), find("cheapest to build"));
-  assert.ok(rows(block(out, "Cost by engine")).some((r) => r.includes("| **100.0** |")),
-    "which is what `Cost by engine` reports for that column");
   assert.ok(find("cheapest to query").includes("| 40.0 |"), find("cheapest to query"));
   assert.ok(charts(out)[0].values.includes("40.0"), "which is the cheapest analytics bar");
+  // Build CU is still reported, just not RANKED — it belongs to the engine and the compute it was
+  // given, not to the parquet, so it has no place in a table whose every other row ranks layouts.
+  assert.ok(rows(block(out, "Cost by engine")).some((r) => r.includes("| **100.0** |")),
+    "`Cost by engine` is where build CU lives");
+  assert.ok(!plain(analysis(out)).includes("cheapest to build"), "and it is not a finding");
 });
 
 test("nothing to compare renders NOTHING, not an empty heading", () => {
@@ -2430,7 +2436,7 @@ test("a tier nothing recorded produces no finding row", () => {
   const runs = [own(lay("duckrun", 4, 4, { file: "d-1.json" }), "d"),
     own(lay("spark", 11, 11, { file: "s-1.json", vorder: true }), "s")];
   const text = plain(analysis(render(runs, ledger({ Od: 100, Sd: 40, Os: 300, Ss: 90 }))));
-  assert.ok(text.includes("cheapest to build"));
+  assert.ok(text.includes("cheapest to query"), "the analytics ranking still stands");
   assert.ok(!text.includes("fastest cold"), "no timings, no tier ranking");
 });
 

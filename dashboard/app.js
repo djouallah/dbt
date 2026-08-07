@@ -1923,13 +1923,20 @@ export function verdictOf(rel, floor, a = null, b = null) {
  *
  * **NOTHING IS DERIVED A SECOND TIME.** The analytics and tier means come from `martPoints` — the
  * same object the chart's bars and `Cost and speed by layout` quote — so this table cannot print
- * 1,916 under a bar showing 1,960. The ETL means come through `spreadFor`, which is what `Cost by
- * engine` reads for the same columns.
+ * 1,916 under a bar showing 1,960.
  *
- * ETL ranks COLUMNS and everything else ranks LAYOUT GROUPS, matching the chart exactly: Power BI
- * never sees the engine, so what a query cost belongs to what was written.
+ * **EVERY ROW RANKS A LAYOUT GROUP**, matching the chart exactly: Power BI never sees the engine, so
+ * what a query cost belongs to what was written.
+ *
+ * There was a `cheapest to build` row and it is deliberately gone. Build CU is a property of the
+ * ENGINE and the compute the dispatch handed it, not of the parquet — so it ranked COLUMNS while
+ * every other row ranked layouts, and one table answering two different questions under one
+ * `winner` header invites reading them as one ranking. It also had nothing to say: the columns it
+ * compared sit at one run each, so its verdict was `within spread` by construction while printing a
+ * winner and a margin. `Cost by engine` still reports build CU per column, which is where a fact
+ * about an engine belongs.
  */
-export function findings(cols, samples, groups, times, floors) {
+export function findings(groups, times, floors) {
   const rows = [];
   const rank = (label, unit, cands, floor) => {
     const ok = cands.filter((c) => c.s && c.value > 0);
@@ -1941,11 +1948,6 @@ export function findings(cols, samples, groups, times, floors) {
     rows.push({ label, unit, winner: a.name, value: a.value, runnerUp: b.name, margin,
       a: a.s, b: b.s, verdict: verdictOf(margin, floor, a.s, b.s) });
   };
-  rank("cheapest to build", "CU", (cols || []).map(({ col }) => {
-    const s = spread(((samples || {})[col] || {}).etl);
-    return { name: col, s, value: s ? s.mean : 0 };
-  }), (floors || {}).etl);
-
   // `martPoints` and `groups` are both in group order — the former `.map`s over the latter — so index
   // is a safe join and the printed mean stays the one the bar drew.
   const pts = martPoints(groups || [], times);
@@ -2026,7 +2028,7 @@ export function renderAnalysis(cols, entries, groups, times, ctx = {}) {
     reference = null } = ctx;
   const samples = columnSamples(runs, ledger, keyOf, entries, times);
   const floors = noiseFloor(samples);
-  const rows = findings(cols, samples, groups, times, floors);
+  const rows = findings(groups, times, floors);
   const pairs = variantPairs(cols);
 
   // Which columns wrote which layouts — the single most interpretive fact in the knob table. Two
