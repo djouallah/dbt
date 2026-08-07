@@ -98,6 +98,18 @@ export const COL_SEP = "·";
 // It names the COLUMN as well as the layout row, so the page calls it one thing throughout;
 // `baseEngine` reverses it, which is why every lookup downstream still resolves to `iceberg`.
 export const ENGINE_LABEL = { iceberg: "duckdb iceberg" };
+
+// WHO WROTE THE PARQUET, which is not always the dbt target that asked for it — `producer()` only,
+// never a column id. `duckrun` is an ADAPTER; its files are written by delta-rs (arrow-rs
+// underneath), which is why they carry parquet's v2 dictionary spelling while spark's carry v1, a
+// difference `dictCell` has to reason about. `stats.py` has said the same in its own `WRITER` map
+// since before this page existed.
+//
+// SEPARATE FROM `ENGINE_LABEL` on purpose: that one also names COLUMNS (`duckrun·64c`) and
+// `baseEngine` reverses it to reach `STACK` and the (engine, variant) join, so renaming an engine
+// there renames it in the ETL chart, the CU table and the sources table too. The writer is a fact
+// about the parquet and belongs only where the parquet is the subject.
+export const WRITER_LABEL = { duckrun: "delta_rs" };
 const ENGINE_OF_LABEL = Object.fromEntries(
   Object.entries(ENGINE_LABEL).map(([k, v]) => [v, k]));
 
@@ -169,7 +181,12 @@ export const CONFIG_LABEL = { "sorted=true": "sorted" };
 // measures: the one sorted run wrote 4 files either way, changing size (985 -> 777 MB) and row
 // groups (27 -> 25) but not the BANDS those fall in. That is exactly why it has to be carried as
 // config — see `layoutKey`.
-export const LAYOUT_CONFIG = ["resource_profile", "sorted"];
+// `sorted` is deliberately NOT here. It is a property of the row ORDER, which `keyCells` now prints
+// in full (the resolved column list, not a flag), so appending it to the writer's name said the same
+// thing twice and said it less precisely — `delta_rs sorted` beside an `ordering` cell reading
+// `date, DUID, time`. It still SPLITS the bars: `layoutKey` carries the sort key independently of
+// this list, which is only about what a writer is CALLED.
+export const LAYOUT_CONFIG = ["resource_profile"];
 
 // Pass POSITION, which is what cold/warm/hot mean here — the first visit to a freshly deployed
 // semantic model, the second, then the median of the rest. NOT the record's own `tier` field, which is
@@ -712,7 +729,7 @@ export function layoutLabel(members, table = DEFAULTS.table) {
 export function producer(rec) {
   const engine = (rec || {}).engine || "?";
   const c = (((rec || {}).layout || {}).config || {})[engine] || {};
-  const bits = [ENGINE_LABEL[engine] || engine];
+  const bits = [WRITER_LABEL[engine] || ENGINE_LABEL[engine] || engine];
   for (const k of LAYOUT_CONFIG) {
     if (!c[k]) continue;
     const v = String(c[k]);

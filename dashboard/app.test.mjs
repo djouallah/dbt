@@ -356,11 +356,12 @@ test("a sorted write gets its own column, and absence reads as unsorted", () => 
   assert.ok(cols.some((c) => c.endsWith("sorted")), cols);
 });
 
-test("the layout LABEL names the sort without listing its columns", () => {
-  // `duckrun sorted`, beside `spark V-Order` — which does not spell out what V-Order does either.
-  // The columns live in the CAPTION now (`layoutLabel`), where the shape already sits.
-  assert.equal(d.producer(lay("duckrun", 4, 25, { cfg: { sorted: "true" } })), "duckrun sorted");
-  assert.equal(d.producer(lay("duckrun", 4, 27, { cfg: { vcores: "64" } })), "duckrun",
+test("the writer name carries no ordering — that is a column of its own", () => {
+  // `sorted` left LAYOUT_CONFIG: `keyCells` prints the resolved column list, so appending the flag to
+  // the writer said the same thing twice and less precisely. It still SPLITS bars — `layoutKey`
+  // carries the sort key independently of what a writer is CALLED.
+  assert.equal(d.producer(lay("duckrun", 4, 25, { cfg: { sorted: "true" } })), "delta_rs");
+  assert.equal(d.producer(lay("duckrun", 4, 27, { cfg: { vcores: "64" } })), "delta_rs",
     "vcores still never reaches a caption about parquet");
 });
 
@@ -569,7 +570,7 @@ test("the page renders end to end with charts and a layout", () => {
   // never sees the engine.
   assert.ok(c[0].title.includes("Capacity units per parquet layout"));
   assert.ok(c[0].subtitle.includes("lower is better"));
-  assert.deepEqual(c[0].labels, ["duckrun"]);
+  assert.deepEqual(c[0].labels, ["delta_rs"]);
   assert.deepEqual(c[0].captions, ["79 RG"], "the shape is the sub-label, row groups only");
   assert.ok(c[0].values[0].startsWith("2,041.0"));
   // The ETL total is still on the page, in the table that reports it per bucket.
@@ -1283,7 +1284,7 @@ test("the same parquet is one bar however many engines wrote it", () => {
     S1: { "XMLA Read Operation": 2000.0 }, O1: 1.0,
   }));
   const c = charts(out);
-  assert.deepEqual(c[0].labels, ["duckrun"], "one layout, one bar");
+  assert.deepEqual(c[0].labels, ["delta_rs"], "one layout, one bar");
   assert.equal(c[0].values[0], "1,500.0");
   assert.deepEqual(c[0].captions, ["27 RG"], "the shape it grouped on sits underneath");
   // ...while the ETL side keeps BOTH columns, because there the writer and the compute it was given
@@ -1315,7 +1316,7 @@ test("two runs of ONE column that wrote different parquet are two bars", () => {
     S1: { "XMLA Read Operation": 1600.0 }, O1: 1.0,
   }));
   const c = charts(out)[0];
-  assert.deepEqual(c.labels, ["duckrun sorted", "duckrun sorted"], "one label, two layouts");
+  assert.deepEqual(c.labels, ["delta_rs", "delta_rs"], "one label, two layouts");
   assert.deepEqual(c.values, ["1,600.0", "2,400.0"], "each run's OWN CU, never their mean");
   // The caption is the whole reason two bars with one label read: the label answers who wrote it.
   assert.deepEqual(c.captions, ["by date, time · 25 RG", "by date, time · 9 RG"]);
@@ -1324,8 +1325,8 @@ test("two runs of ONE column that wrote different parquet are two bars", () => {
   assert.equal(body.length, 2, "one mart row per bar, not one per writer");
   // Fewest files first, and the block carries LAYOUT ONLY — the CU that used to sit here is in the
   // charts and in `Cost by engine`, on the run that measured it.
-  assert.ok(body[0].startsWith("| duckrun sorted | 3 | 9 |"), body[0]);
-  assert.ok(body[1].startsWith("| duckrun sorted | 4 | 25 |"), body[1]);
+  assert.ok(body[0].startsWith("| delta_rs | 3 | 9 |"), body[0]);
+  assert.ok(body[1].startsWith("| delta_rs | 4 | 25 |"), body[1]);
   assert.ok(!body[0].includes("1,600"), "no CU column on the layout block");
   // The ETL half groups per COLUMN, and both runs are samples of one column — so two analytics
   // bars (two layouts) and ONE build bar (one column).
@@ -1350,9 +1351,15 @@ test("a column whose runs recorded no layout stays ONE bar", () => {
   assert.equal(c.values[0], "1,500.0", "the mean of all three, as before");
 });
 
-test("an engine is named for who writes when the target name misleads", () => {
+test("an engine is named for who WRITES, not for the dbt target that asked", () => {
+  // The column is headed `parquet writer`. `duckrun` is an adapter; delta-rs writes its files, which
+  // is why they carry parquet's v2 dictionary spelling and spark's carry v1.
   assert.equal(d.producer(lay("iceberg", 357, 1172)), "duckdb iceberg");
-  assert.equal(d.producer(lay("duckrun", 4, 27)), "duckrun", "only where the name misleads");
+  assert.equal(d.producer(lay("duckrun", 4, 27)), "delta_rs");
+  // WRITER_LABEL is producer-only: the COLUMN id keeps the target name, because `baseEngine`
+  // reverses it to reach STACK and the (engine, variant) join.
+  assert.ok(d.columnsFor([lay("duckrun", 4, 27, { cfg: { vcores: "64" } })])[0].col
+    .startsWith("duckrun"), "the column is still the target");
 });
 
 test("V-Order never merges with anything", () => {
@@ -1389,7 +1396,7 @@ test("the producer name drops what never reached the parquet", () => {
   assert.equal(d.producer(lay("spark", 14, 14, {
     cfg: { resource_profile: "writeHeavy", native_execution_engine: "false" },
   })), "spark writeHeavy");
-  assert.equal(d.producer(lay("duckrun", 4, 27, { cfg: { vcores: "64" } })), "duckrun");
+  assert.equal(d.producer(lay("duckrun", 4, 27, { cfg: { vcores: "64" } })), "delta_rs");
   // An unmapped profile keeps its own name — `readHeavyForSpark` reads like it enables V-Order and
   // sets no vorder at all.
   assert.equal(d.producer(lay("spark", 4, 4, { cfg: { resource_profile: "readHeavyForSpark" } })),
@@ -1402,7 +1409,7 @@ test("a group of genuinely different writers names both", () => {
     { col: "duckrun·32c", rec: lay("duckrun", 4, 27, { cfg: { vcores: "32" } }) },
     { col: "spark·writeHeavy", rec: lay("spark", 4, 27, { cfg: { resource_profile: "writeHeavy" } }) },
   ];
-  assert.equal(d.producers(members), "duckrun, spark writeHeavy", "deduplicated, and both kept");
+  assert.equal(d.producers(members), "delta_rs, spark writeHeavy", "deduplicated, and both kept");
 });
 
 test("the layout table is one row per writer and agrees with the chart", () => {
@@ -1419,8 +1426,8 @@ test("the layout table is one row per writer and agrees with the chart", () => {
     S1: { "XMLA Read Operation": 2000.0 }, O1: 1.0,
   }));
   const body = rows(block(out, "the mart the queries land on"));
-  assert.equal(body.length, 2, "a header and ONE row — duckrun, not duckrun twice");
-  assert.ok(body[1].startsWith("| duckrun | 4 | 27 |"), body[1]);
+  assert.equal(body.length, 2, "a header and ONE row — one writer, not one per run");
+  assert.ok(body[1].startsWith("| delta_rs | 4 | 27 |"), body[1]);
   assert.equal(charts(out)[0].values[0].split(" ")[0], "1,500.0", "the chart still carries the CU");
   assert.ok(!body[1].includes("1,500"), "but the layout block does not");
   assert.ok(!body[0].includes("| writer |"), "the row label IS the writer now");
@@ -2286,7 +2293,7 @@ test("every run a chart drew from has a row of its own", () => {
   }), {});
   const body = rows(block(html, "Every run on this page")).slice(1);
   assert.equal(body.length, 2, "both runs, not just the one holding the column");
-  assert.ok(body[0].startsWith("| duckrun |"), body[0]);
+  assert.ok(body[0].startsWith("| duckrun |"), body[0]);   // the COLUMN id, not the writer
   assert.ok(body[0].includes("| 1,600.0 |"), body[0]);
   // ...and the superseded one is a row like any other: the RUN is the key, and which one is newest is
   // already what the sort order and the `built` column say.
