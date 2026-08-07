@@ -2552,13 +2552,12 @@ export function renderPage(cols, runs, ledger, opts = {}) {
   const perCol = {};
   for (const { col, rec } of cols) perCol[col] = runCu(rec, ledger).cells;
 
-  const newest = cols.map(({ rec }) => (rec.run || {}).started || "").sort().pop() || "";
-  const asOf = String(ledger.updated || newest || "?").slice(0, 16).replace("T", " ");
-  // FIRST — the scale of the thing, under the `<h1>` the shell carries. `Capacity units` names the
-  // measure and stays where it is, now heading the section it always described rather than the page.
-  const out = [pageLede(cols, { table: martTable }),
-    `<h2>Capacity units <span class="asof">the latest run per engine, as of ` +
-    `${esc(asOf)}</span></h2>`];
+  // NO `Capacity units` HEADING. The shell's `<h1>` already names the page, the lede below says what
+  // it measures, and the `as of` stamp restated a date the `built` column carries per run — a line
+  // of furniture between the reader and the first table. The `<h3>` sections now hang off that
+  // `<h1>`, which skips a heading level; the alternative is promoting eight `<h3>`s to `<h2>` to
+  // reinstate a level nothing needs.
+  const out = [pageLede(cols, { table: martTable })];
 
   // EVERY run maps to its column, not just the one the column was named after: the chart's mean is
   // over an engine's whole history at that configuration, and matching on the chosen record's filename

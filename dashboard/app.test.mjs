@@ -658,7 +658,7 @@ test("EVERY table comes before the methodology, and the methodology is last", ()
   // `Analysis` renders here on two ties — two ETL candidates at identical CU and two layout groups
   // ditto. That depends on a tie being REPORTED rather than dropped, which is the design: two
   // indistinguishable numbers is a finding, not a missing one.
-  const order = ["<h2>Capacity units", "<h3>Cost and speed by parquet layout", "<h3>Cost by engine",
+  const order = ["<h3>Cost and speed by parquet layout", "<h3>Cost by engine",
     "<h3>Table layout", "<h3>Input archive", "<h3>Every run", "<h3>Analysis",
     "<h3>About these numbers"];
   const at = order.map((h) => out.indexOf(h));
@@ -696,9 +696,13 @@ test("the lede states the scale of the thing, and leads the page", () => {
   assert.ok(said.includes(
     "1 fact (144.0M), 2 dimensions (3.9K), 4 staging (375.4M) and a log (8.2K)"));
   assert.ok(said.includes("totalling **519,377,319 rows**"));
-  // FIRST — above the section heading that used to lead, which is above the first chart.
+  // FIRST, and now the only thing above the first table — the `Capacity units` heading that used
+  // to sit between them is gone: the shell's `<h1>` names the page and the `as of` stamp restated
+  // a date the `built` column carries per run.
   assert.ok(out.indexOf('<p class="lede">') >= 0);
-  assert.ok(out.indexOf('<p class="lede">') < out.indexOf("<h2>Capacity units"));
+  assert.ok(!out.includes("<h2>Capacity units"), "no section heading, and no as-of stamp");
+  assert.ok(out.indexOf('<p class="lede">')
+    < out.indexOf("<h3>Cost and speed by parquet layout"));
 });
 
 test("the lede counts engines, not columns", () => {
