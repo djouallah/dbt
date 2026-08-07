@@ -2793,3 +2793,30 @@ test("one row-group size everywhere draws dots but no ramp legend", () => {
   assert.equal([...svg.matchAll(/class="swatch/g)].length, 0);
   assert.equal([...svg.matchAll(/class="dot s3"/g)].length, 2, "all dots take the middle step");
 });
+
+test("iceberg is off the scatter, and the subtitle says so", () => {
+  // A ~4x outlier on BOTH axes set the scale for everyone else: 12 of 78 dot pairs overlapped with
+  // it in, 1 of 66 without. Dropped by a NAMED constant, never a computed "more than Nx the median"
+  // rule — an automatic filter silently changes which point it removes as records land, and a
+  // dropped run on this page is always a named run.
+  const p = (engine, name, cold, cu) => ({
+    name, cu, n: 1, ms: { cold }, members: [{ rec: lay(engine, 4, 24, { file: `${name}.json` }) }],
+  });
+  const svg = d.scatterFit([p("duckrun", "delta_rs", 25000, 1800),
+    p("spark", "spark writeHeavy", 45000, 3700),
+    p("iceberg", "duckdb iceberg", 100394, 8641)]);
+  assert.equal([...svg.matchAll(/<circle class="dot/g)].length, 2, "two dots, not three");
+  assert.equal([...svg.matchAll(/<title>([^<]+)/g)].filter((m) => /iceberg/.test(m[1])).length, 0);
+  const sub = /<span class="chart-sub">([^<]+)</.exec(svg)[1];
+  assert.ok(sub.includes("iceberg left out"), `the exclusion is stated: ${sub}`);
+  assert.ok(sub.includes("off the scale on both axes"), sub);
+});
+
+test("with nothing to exclude the subtitle claims no exclusion", () => {
+  const p = (engine, name, cold, cu) => ({
+    name, cu, n: 1, ms: { cold }, members: [{ rec: lay(engine, 4, 24, { file: `${name}.json` }) }],
+  });
+  const svg = d.scatterFit([p("duckrun", "delta_rs", 25000, 1800),
+    p("spark", "spark writeHeavy", 45000, 3700)]);
+  assert.ok(!/left out/.test(svg), "no caveat where nothing was cut");
+});

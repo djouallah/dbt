@@ -1394,6 +1394,42 @@ function spanM(values) {
       : `${fmt(vals[0], 1)}–${fmt(vals[vals.length - 1], 1)}M`;
 }
 
+/**
+ * The engine kept OFF the scatter, and it is named here rather than detected.
+ *
+ * `iceberg` is a ~4x outlier on BOTH axes — 100,394 ms cold against 22,823-45,010, and 8,641 CU
+ * against 1,514-3,769 — so including it sets the scale for twelve points that then pile into one
+ * corner: 12 of 78 dot pairs overlapped with it in, against 2 without. It is not dropped for being
+ * inconvenient; 1,172 row groups is a layout nothing else on the page is near, and its cost is
+ * already the top row of the table directly above.
+ *
+ * A CONSTANT, never a computed "more than Nx the median" rule: an automatic outlier filter changes
+ * which point it silently removes as records land, and this page's whole discipline is that a
+ * dropped run is a NAMED run. The subtitle says what was left out, every time it leaves anything out.
+ */
+const SCATTER_OMIT = "iceberg";
+
+/**
+ * The scatter under the layout table, with its exclusion stated in its own subtitle.
+ *
+ * Split out of `renderFit` so the omission is one named thing rather than a filter buried in a call
+ * argument — the caption and the filter cannot drift apart if they are three lines from each other.
+ */
+export function scatterFit(pts) {
+  const withCold = (pts || []).filter((p) => p.ms && p.ms.cold);
+  const shown = withCold.filter((p) =>
+    !(p.members || []).some(({ rec }) => (rec || {}).engine === SCATTER_OMIT));
+  const cut = withCold.length - shown.length;
+  return scatterSvg("CU against cold query time",
+    "one dot per layout — cold ms across, CU up, shaded by row group size" +
+    (cut ? ` · ${SCATTER_OMIT} left out, ${cut > 1 ? `${cut} layouts, ` : ""}` +
+      "off the scale on both axes" : ""),
+    shown.map((p) => ({
+      x: p.ms.cold, y: p.cu, label: p.name, n: p.n,
+      sub: keyCells(p.members).rgSize, c: martSize(p.members),
+    })), "cold ms", "row group size", (v) => `${fmt(v / 1e6, 1)}M`);
+}
+
 /** A group's rows-per-row-group as a NUMBER — the median across its members, for the colour ramp. */
 function martSize(members, table = DEFAULTS.table) {
   const vals = (members || []).map(({ rec }) => {
@@ -1468,12 +1504,7 @@ export function renderFit(groups, times, tiers) {
     // invite. COLD, not hot: the cold pass is the transcode — parquet into VertiPaq segments — which
     // is what CU is mostly buying, so it is the tier with a mechanism connecting it to the y axis.
     // Row-group size rides along as the colour, since it is the shape most likely to explain both.
-    scatterSvg("CU against cold query time",
-      "one dot per layout — cold ms across, CU up, shaded by row group size",
-      pts.filter((p) => p.ms.cold).map((p) => ({
-        x: p.ms.cold, y: p.cu, label: p.name, n: p.n,
-        sub: keyCells(p.members).rgSize, c: martSize(p.members),
-      })), "cold ms", "row group size", (v) => `${fmt(v / 1e6, 1)}M`),
+    scatterFit(pts),
   ].filter(Boolean).join("\n");
 }
 
