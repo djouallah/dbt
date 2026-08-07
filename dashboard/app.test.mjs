@@ -656,7 +656,7 @@ test("EVERY table comes before the methodology, and the methodology is last", ()
   // `Analysis` renders here on two ties — two ETL candidates at identical CU and two layout groups
   // ditto. That depends on a tie being REPORTED rather than dropped, which is the design: two
   // indistinguishable numbers is a finding, not a missing one.
-  const order = ["<h2>Capacity units", "<h3>Cost and speed by layout", "<h3>Cost by engine",
+  const order = ["<h2>Capacity units", "<h3>Cost and speed by parquet layout", "<h3>Cost by engine",
     "<h3>Table layout", "<h3>Input archive", "<h3>Every run", "<h3>Analysis",
     "<h3>About these numbers"];
   const at = order.map((h) => out.indexOf(h));
@@ -1196,8 +1196,8 @@ test("the bar is the MEDIAN across runs", () => {
   assert.ok(c.svg.includes("range 1,000.0–3,500.0"), "the outlier is still drawn, not averaged away");
   assert.ok(!c.subtitle.includes("mean of"), "no run-count chatter in the subtitle");
   // ...and the two tables under it quote that same 1,500: one measurement shown three times.
-  assert.ok(rows(block(out, "Cost and speed by layout")).some((r) => r.includes("| 1,500 |")),
-    rows(block(out, "Cost and speed by layout")).join(" / "));
+  assert.ok(rows(block(out, "Cost and speed by parquet layout")).some((r) => r.includes("| 1,500 |")),
+    rows(block(out, "Cost and speed by parquet layout")).join(" / "));
 });
 
 test("an even number of runs takes the middle two, and one run is itself", () => {
@@ -1482,7 +1482,8 @@ test("the three tiers are columns of the PER-RUN table, not of the layout block"
   const heads = rows(out).filter((r) => r.includes("cold ms"));
   assert.equal(heads.length, 2, `two headers carry the tiers: ${heads}`);
   assert.ok(heads.some((h) =>
-    h.startsWith("| parquet writer | ordering | dictionary | RG | runs | CU | cold ms | warm ms | hot ms |")),
+    h.startsWith("| parquet writer | ordering | dictionary | RG | MB | runs | CU "
+      + "| cold ms | warm ms | hot ms |")),
   heads[0]);
   assert.ok(heads.some((h) =>
     h.includes("| etl CU | analytics CU | cold ms | warm ms | hot ms | items |")), heads[1]);
@@ -2095,7 +2096,7 @@ test("cost and speed is one table, cheapest first, with a title and nothing else
     ["spark", 20000, 4000, 3000], ["duckrun", 40000, 5000, 4000],
     ["dwh", 80000, 3000, 5000],
   ]), ledger({ OUT: 1.0, SEM: 2.0 }));
-  const at = out.indexOf("<h3>Cost and speed by layout</h3>");
+  const at = out.indexOf("<h3>Cost and speed by parquet layout</h3>");
   assert.ok(at > 0, "the table is on the page");
   // FIRST, above the charts. It carries what a bar does — the same median from the same
   // `martPoints` — plus the grouping key, the sample size and the tiers, as numbers rather than bar
@@ -2109,8 +2110,11 @@ test("cost and speed is one table, cheapest first, with a title and nothing else
   // `duckrun sorted` with nothing to tell them apart is a table hiding what it grouped on.
   // V-Order and the sort key share ONE cell: same kind of fact (a write-time row arrangement), and
   // as two columns each was a dash on every row the other was not.
-  const head = rows(out).find((r) => r.startsWith("| parquet writer | ordering | dictionary | RG | runs | CU |"));
-  assert.ok(head, "layout, the key, the sample size, CU, then the tiers");
+  // `MB` sits beside `RG` and is NOT part of `layoutKey` — printed so a reader can see where the key
+  // is coarser than the parquet, since a group merged on RG band can still hold two file sizes.
+  const head = rows(out).find((r) =>
+    r.startsWith("| parquet writer | ordering | dictionary | RG | MB | runs | CU |"));
+  assert.ok(head, "layout, the key, the size, the sample size, CU, then the tiers");
   assert.ok(head.includes("| cold ms | warm ms | hot ms |"), head);
   // A TITLE AND NOTHING ELSE — no verdict, no correlation, no reading of the numbers.
   const said = plain(out);

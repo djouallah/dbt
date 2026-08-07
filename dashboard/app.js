@@ -1165,7 +1165,7 @@ export function martPoints(groups, times) {
 }
 
 /**
- * The key elements as text, for a table that has to say what it grouped on: `{ordering, rg}`.
+ * The key elements as text, for a table that has to say what it grouped on: `{ordering, dict, rg, mb}`.
  *
  * **V-ORDER AND THE SORT KEY SHARE ONE CELL, and that is the honest shape.** They were two columns,
  * one of which was a dash on every row but spark's and the other a dash on every row but duckrun's —
@@ -1222,11 +1222,24 @@ export function dictCell(members) {
   return plain.length ? `no (${plain.sort().join(", ")})` : "yes";
 }
 
+/**
+ * One numeric field across a group's members, as a cell: `19`, `19–27`, or a dash.
+ *
+ * Rounded to whole units before the de-dup, so two runs 0.06 MB apart read as one value rather than
+ * as a range implying a difference nobody can act on. A dash is "no member recorded it" — never `0`,
+ * which would claim an empty table.
+ */
+function span(values) {
+  const vals = [...new Set((values || [])
+    .map((v) => (v === undefined || v === null || v === "" ? NaN : Math.round(Number(v))))
+    .filter((v) => Number.isFinite(v)))].sort((a, b) => a - b);
+  return !vals.length ? DASH
+    : vals.length === 1 ? fmt(vals[0], 0)
+      : `${fmt(vals[0], 0)}–${fmt(vals[vals.length - 1], 0)}`;
+}
+
 export function keyCells(members, table = DEFAULTS.table) {
   const stats = (members || []).map(({ rec }) => martStats(rec, table));
-  const vals = [...new Set(stats.map((s) => s.num_row_groups)
-    .filter((v) => v !== undefined && v !== null).map((v) => Math.trunc(Number(v))))]
-    .sort((a, b) => a - b);
   const sorts = [...new Set((members || []).map(({ rec }) => sortKeyOf(rec, table))
     .filter((s) => typeof s === "string"))];
   const bits = [];
@@ -1237,9 +1250,12 @@ export function keyCells(members, table = DEFAULTS.table) {
   return {
     ordering: bits.join(" · ") || DASH,
     dict: dictCell(members),
-    rg: !vals.length ? DASH
-      : vals.length === 1 ? fmt(vals[0], 0)
-        : `${fmt(vals[0], 0)}–${fmt(vals[vals.length - 1], 0)}`,
+    rg: span(stats.map((s) => s.num_row_groups)),
+    // NOT a key element — `layoutKey` has no size term, deliberately, and this is the column that
+    // exposes what that costs: a group whose MB cell reads as a wide range is one the page merged on
+    // (V-Order, RG band, sort key, engine) while the files themselves differ in size. Printed rather
+    // than grouped on, because banding size would split runs of one column on incremental drift.
+    mb: span(stats.map((s) => s.size_mb)),
   };
 }
 
@@ -1258,17 +1274,20 @@ export function renderFit(groups, times, tiers) {
   if (!pts.length) return "";
   const cols = (tiers || []).filter((l) => pts.some((p) => p.ms[l]));
   pts.sort((a, b) => a.cu - b.cu);
-  return ["<h3>Cost and speed by layout</h3>",
+  return ["<h3>Cost and speed by parquet layout</h3>",
     // THE KEY IS PRINTED, not just grouped on. Six rows reading `duckrun sorted` with nothing to
-    // tell them apart is a table asking the reader to trust a grouping it will not show; these three
-    // columns ARE `layoutKey` (the engine is already in the label) plus the sample size behind each
-    // median, which is what says whether a row is one dispatch or seven.
-    table(["parquet writer", "ordering", "dictionary", "RG", "runs", "CU",
+    // tell them apart is a table asking the reader to trust a grouping it will not show. `ordering`
+    // and `RG` ARE `layoutKey` (the engine is already in the label); `dictionary` and `MB` are
+    // MEASURED BUT NOT GROUPED ON, and printing them is how a reader sees where the key is coarser
+    // than the parquet — a wide `MB` range or a `dictionary` cell that had to name columns is a row
+    // holding more than one physical shape. `runs` is the sample size behind each median, which is
+    // what says whether a row is one dispatch or seven.
+    table(["parquet writer", "ordering", "dictionary", "RG", "MB", "runs", "CU",
       ...cols.map((l) => `${l} ms`)],
-      ["left", "left", "left", "right", "right", "right", ...cols.map(() => "right")],
+      ["left", "left", "left", "right", "right", "right", "right", ...cols.map(() => "right")],
       pts.map((p) => {
         const k = keyCells(p.members);
-        return [p.name, k.ordering, k.dict, k.rg, String(p.n), fmt(p.cu, 0),
+        return [p.name, k.ordering, k.dict, k.rg, k.mb, String(p.n), fmt(p.cu, 0),
           ...cols.map((l) => (p.ms[l] ? fmt(p.ms[l], 0) : DASH))];
       }),
       { sort: true }),
@@ -1928,7 +1947,7 @@ export function queryTime(cols) {
 
 // ---------------------------------------------------------------------------------- the analysis
 //
-// The page RANKS — cheapest bar first, `Cost and speed by layout` sorted by CU — and never says
+// The page RANKS — cheapest bar first, `Cost and speed by parquet layout` sorted by CU — and never says
 // whether a ranking is a result or a coin toss. A reader sees `spark readHeavyForPBI` at 1,381 CU
 // above `duckrun` at 1,794 with no way to learn that the gap is the size of either one's own
 // run-to-run wobble. This section attaches a margin, a sample size and a verdict to the findings the
@@ -2043,7 +2062,7 @@ export function verdictOf(rel, floor, a = null, b = null) {
  * the ranking holds.
  *
  * **NOTHING IS DERIVED A SECOND TIME.** The analytics and tier means come from `martPoints` — the
- * same object the chart's bars and `Cost and speed by layout` quote — so this table cannot print
+ * same object the chart's bars and `Cost and speed by parquet layout` quote — so this table cannot print
  * 1,916 under a bar showing 1,960.
  *
  * **EVERY ROW RANKS A LAYOUT GROUP**, matching the chart exactly: Power BI never sees the engine, so
