@@ -1474,7 +1474,9 @@ test("the three tiers are columns of the PER-RUN table, not of the layout block"
   // per layout, and the run table, one row per dispatch.
   const heads = rows(out).filter((r) => r.includes("cold ms"));
   assert.equal(heads.length, 2, `two headers carry the tiers: ${heads}`);
-  assert.ok(heads.some((h) => h.startsWith("| layout | CU | cold ms | warm ms | hot ms |")), heads[0]);
+  assert.ok(heads.some((h) =>
+    h.startsWith("| layout | V-Order | sorted by | RG | runs | CU | cold ms | warm ms | hot ms |")),
+  heads[0]);
   assert.ok(heads.some((h) =>
     h.includes("| etl CU | analytics CU | cold ms | warm ms | hot ms | items |")), heads[1]);
   assert.ok(rows(out).some((r) => r.includes("| 30 | 11 | 9 |")), "the run's own tiers");
@@ -2090,8 +2092,10 @@ test("cost and speed is one table, cheapest first, with a title and nothing else
   assert.ok(at > 0, "the table is on the page");
   assert.ok(out.indexOf('<div class="charts">') < at, "after the two bar charts");
   assert.ok(at < out.indexOf("<h3>Cost by engine</h3>"), "before the cost table");
-  const head = rows(out).find((r) => r.startsWith("| layout | CU |"));
-  assert.ok(head, "layout, CU, then the tiers");
+  // The GROUPING KEY is printed between the label and the numbers — six rows reading
+  // `duckrun sorted` with nothing to tell them apart is a table hiding what it grouped on.
+  const head = rows(out).find((r) => r.startsWith("| layout | V-Order | sorted by | RG | runs | CU |"));
+  assert.ok(head, "layout, the key, the sample size, CU, then the tiers");
   assert.ok(head.includes("| cold ms | warm ms | hot ms |"), head);
   // A TITLE AND NOTHING ELSE — no verdict, no correlation, no reading of the numbers.
   const said = plain(out);

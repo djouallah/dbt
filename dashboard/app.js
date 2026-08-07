@@ -1136,11 +1136,33 @@ export function martPoints(groups, times) {
   return (groups || []).map(([, ms]) => {
     const rec = ms[ms.length - 1].rec;
     return {
-      name: producers(ms), rec, cu: groupMid(ms.map((m) => m.cu)),
+      // `members` and `n` ride along so a renderer can spell out WHY these runs are one row without
+      // re-grouping them. Six rows reading `duckrun sorted` and nothing else is the failure this
+      // prevents: the label answers who wrote it, and the key answers what makes it its own row.
+      name: producers(ms), rec, members: ms, n: ms.length,
+      cu: groupMid(ms.map((m) => m.cu)),
       ms: Object.fromEntries(TIERS.map(([lbl]) =>
         [lbl, groupMid(ms.map((m) => ((times || {})[m.qid] || {})[lbl]))])),
     };
   });
+}
+
+/** The key elements as text, for a table that has to say what it grouped on: `{vorder, sort, rg}`. */
+export function keyCells(members, table = DEFAULTS.table) {
+  const stats = (members || []).map(({ rec }) => martStats(rec, table));
+  const vals = [...new Set(stats.map((s) => s.num_row_groups)
+    .filter((v) => v !== undefined && v !== null).map((v) => Math.trunc(Number(v))))]
+    .sort((a, b) => a - b);
+  const sorts = [...new Set((members || []).map(({ rec }) => sortKeyOf(rec, table))
+    .filter((s) => typeof s === "string"))];
+  return {
+    vorder: stats.some((s) => s.vorder) ? "yes" : DASH,
+    sort: sorts.length ? sorts.join(" / ").split(",").join(", ")
+      : ((members || []).some(({ rec }) => sortKeyOf(rec, table) === true) ? "unnamed" : DASH),
+    rg: !vals.length ? DASH
+      : vals.length === 1 ? fmt(vals[0], 0)
+        : `${fmt(vals[0], 0)}–${fmt(vals[vals.length - 1], 0)}`,
+  };
 }
 
 /**
@@ -1159,9 +1181,17 @@ export function renderFit(groups, times, tiers) {
   const cols = (tiers || []).filter((l) => pts.some((p) => p.ms[l]));
   pts.sort((a, b) => a.cu - b.cu);
   return ["<h3>Cost and speed by layout</h3>",
-    table(["layout", "CU", ...cols.map((l) => `${l} ms`)],
-      ["left", "right", ...cols.map(() => "right")],
-      pts.map((p) => [p.name, fmt(p.cu, 0), ...cols.map((l) => (p.ms[l] ? fmt(p.ms[l], 0) : DASH))]),
+    // THE KEY IS PRINTED, not just grouped on. Six rows reading `duckrun sorted` with nothing to
+    // tell them apart is a table asking the reader to trust a grouping it will not show; these three
+    // columns ARE `layoutKey` (the engine is already in the label) plus the sample size behind each
+    // median, which is what says whether a row is one dispatch or seven.
+    table(["layout", "V-Order", "sorted by", "RG", "runs", "CU", ...cols.map((l) => `${l} ms`)],
+      ["left", "left", "left", "right", "right", "right", ...cols.map(() => "right")],
+      pts.map((p) => {
+        const k = keyCells(p.members);
+        return [p.name, k.vorder, k.sort, k.rg, String(p.n), fmt(p.cu, 0),
+          ...cols.map((l) => (p.ms[l] ? fmt(p.ms[l], 0) : DASH))];
+      }),
       { sort: true }),
   ].join("\n");
 }
