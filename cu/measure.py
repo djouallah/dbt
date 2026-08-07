@@ -92,6 +92,9 @@ CAPACITY = os.environ.get("CU_CAPACITY_ID", "").strip()
 WS_FILTER = os.environ.get("CU_WORKSPACE_FILTER", "").strip().upper()
 
 RUNS_DIR = os.environ.get("CU_RUNS_DIR", "history/runs").strip()
+# Written by `.github/scripts/record.py` beside the records; the dashboard reads it as the directory
+# listing. Not a record, and every reader of RUNS_DIR has to skip it.
+INDEX_FILE = "index.json"
 LEDGER = os.environ.get("CU_LEDGER", "history/cu.json").strip()
 
 # The metrics model stamps its timestamps in the offset configured IN THE APP, not in UTC. A wrong
@@ -328,13 +331,23 @@ def load_runs(directory=None):
     except OSError:
         return out
     for n in names:
-        if not n.endswith(".json"):
+        # `index.json` is the page's DIRECTORY LISTING, not a record — a JSON array of the record
+        # filenames, written by `record.py` so the dashboard can list this directory over raw
+        # instead of the rate-limited GitHub contents API. It lives here because it has to sit
+        # beside the files it names.
+        if not n.endswith(".json") or n == INDEX_FILE:
             continue
         try:
             with open(os.path.join(directory, n), encoding="utf-8") as f:
                 rec = json.load(f)
         except Exception as ex:                       # noqa: BLE001
             log(f"  skipping {n}: unreadable ({type(ex).__name__})")
+            continue
+        # Shape, not just the name: anything that is not a JSON OBJECT cannot be a record, and
+        # `rec["_file"] = n` on a list raises `TypeError: list indices must be integers` — which is
+        # exactly how the index took this job down on run 31143468245.
+        if not isinstance(rec, dict):
+            log(f"  skipping {n}: not a record ({type(rec).__name__})")
             continue
         rec["_file"] = n
         out.append(rec)

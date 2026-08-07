@@ -53,8 +53,17 @@ function snapshot() {
       .filter((e) => e.isFile() && e.name.endsWith(".json")).map((e) => e.name).sort();
   } catch { names = []; }
   for (const n of names) {
+    // `index.json` is the page's directory listing — a JSON ARRAY of record filenames, written by
+    // record.py so the live page can list this directory over raw instead of the rate-limited
+    // contents API. Skipped by name AND by shape: assigning `_file` to an array is legal in JS, so
+    // without the shape check a phantom "record" would reach the snapshot silently.
+    if (n === "index.json") continue;
     try {
       const rec = JSON.parse(readFileSync(join(runsDir, n), "utf8"));
+      if (!rec || typeof rec !== "object" || Array.isArray(rec)) {
+        process.stderr.write(`  skipping ${n}: not a record\n`);
+        continue;
+      }
       rec._file = n;
       records.push(rec);
     } catch (ex) {

@@ -244,3 +244,19 @@ def test_a_ledger_written_before_operations_is_dropped_not_guessed(tmp_path):
                  encoding="utf-8")
     led = measure.load_ledger(str(p))
     assert led["items"] == {"NEW": {"Query": 5.0}}
+
+
+def test_the_directory_index_is_not_read_as_a_run(tmp_path):
+    """`history/runs/index.json` is the page's directory LISTING — a JSON array of record filenames,
+    written by record.py so the dashboard can list the directory over raw instead of the GitHub
+    contents API, which 403s at 60 requests/hour/IP.
+
+    It sits in RUNS_DIR because it has to name the files beside it, and it took this job down on run
+    31143468245: `rec["_file"] = n` against a list raises `TypeError: list indices must be integers`.
+    Skipped by NAME and by SHAPE — the shape check is what catches any future non-record file.
+    """
+    (tmp_path / "index.json").write_text(json.dumps(["a.json"]), encoding="utf-8")
+    (tmp_path / "a.json").write_text(json.dumps({"run": {"id": "1"}}), encoding="utf-8")
+    (tmp_path / "b.json").write_text(json.dumps(["not", "a", "record"]), encoding="utf-8")
+    got = measure.load_runs(str(tmp_path))
+    assert [r["_file"] for r in got] == ["a.json"]
