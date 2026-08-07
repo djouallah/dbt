@@ -2791,7 +2791,7 @@ test("iceberg is off the scatter, and the subtitle says so", () => {
   assert.equal([...svg.matchAll(/<title>([^<]+)/g)].filter((m) => /iceberg/.test(m[1])).length, 0);
   const sub = /<span class="chart-sub">([^<]+)</.exec(svg)[1];
   assert.ok(sub.includes("iceberg left out"), `the exclusion is stated: ${sub}`);
-  assert.ok(sub.includes("off the scale on both axes"), sub);
+  assert.ok(sub.includes("its cold pass 2x the slowest of these"), sub);
 });
 
 test("with nothing to exclude the subtitle claims no exclusion", () => {
@@ -2839,25 +2839,22 @@ test("every point is named and no two names collide", () => {
   }
 });
 
-test("the warm/hot scatter keeps iceberg — the exclusion is per chart, per reason", () => {
-  // It is cut from the CU/cold chart because it is a ~4x outlier on BOTH of those axes. On warm and
-  // hot it sits inside the pack, so the reason does not apply and a standing blacklist would be
-  // dropping data for a cause that is not present.
-  const p = (engine, name, warm, hot) => ({
-    name, n: 1, ms: { warm, hot, cold: 30000 }, cu: 2000,
+test("the second scatter is cold against warm, and drops iceberg for the same reason", () => {
+  // COLD IS AN AXIS ON BOTH CHARTS now, so the exclusion is one reason shared rather than two
+  // reasons that happened to agree — `plotted()` and `cutNote()` are the single copy of it.
+  const p = (engine, name, cold, warm) => ({
+    name, n: 1, cu: 2000, ms: { cold, warm, hot: warm - 300 },
     members: [{ rec: lay(engine, 4, 24, { file: `${name}.json` }) }],
   });
-  const pts = [p("duckrun", "delta_rs", 4500, 4300), p("dwh", "dwh", 4330, 3661),
-    p("iceberg", "duckdb iceberg", 3646, 3037)];
-  const warmHot = d.scatterTiers(pts);
-  assert.equal([...warmHot.matchAll(/<circle class="dot c\d"/g)].length, 3, "all three plotted");
-  assert.ok(/<title>duckdb iceberg/.test(warmHot));
-  // ...and it is still cut from the cost chart, where the reason does hold.
-  assert.equal([...d.scatterFit(pts).matchAll(/<circle class="dot c\d"/g)].length, 2);
-  // Both axes are times here, so neither is labelled CU.
-  const axes = [...warmHot.matchAll(/<text class="bar-caption"[^>]*>((?:warm|hot) ms|CU)</g)]
-    .map((m) => m[1]);
-  assert.deepEqual(axes.sort(), ["hot ms", "warm ms"], `no CU axis on a time-vs-time plot: ${axes}`);
+  const pts = [p("duckrun", "delta_rs", 25000, 4500), p("dwh", "dwh", 33767, 4330),
+    p("iceberg", "duckdb iceberg", 100394, 3646)];
+  const svg = d.scatterTiers(pts);
+  assert.equal([...svg.matchAll(/<circle class="dot c\d"/g)].length, 2, "iceberg is off it too");
+  assert.ok(/its cold pass 2x the slowest of these/.test(svg), "and the subtitle says so");
+  // Both axes are TIMES here, so neither is CU — the first chart is the one that costs.
+  const axes = [...svg.matchAll(/<text class="bar-caption"[^>]*>((?:cold|warm|hot) ms|CU)</g)]
+    .map((m2) => m2[1]).sort();
+  assert.deepEqual(axes, ["cold ms", "warm ms"], `no CU axis on a time-vs-time plot: ${axes}`);
 });
 
 test("slot 6 is the neutral Other, not a sixth hue", () => {

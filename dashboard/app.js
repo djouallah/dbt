@@ -1119,8 +1119,9 @@ function niceScale(min, max, want = 4) {
 export const WRITER_HUE = {
   delta_rs: 1, dwh: 2, "spark readHeavyForPBI": 3, "spark writeHeavy": 4,
   "spark readHeavyForSpark": 5,
-  // NOT a sixth hue — the neutral "Other" slot. See `.dot.c6`: five is the ceiling the validator
-  // allows on both surfaces, and this writer is directly labelled, so nothing rests on its colour.
+  // The neutral "Other" slot, NOT a sixth hue — five is the ceiling the validator allows on both
+  // surfaces. No chart plots this writer today (`SCATTER_OMIT`), and the entry exists anyway so
+  // that if one ever does it cannot fall through `|| 1` and silently wear `delta_rs`'s blue.
   "duckdb iceberg": 6,
 };
 
@@ -1483,17 +1484,18 @@ function spanM(values) {
 }
 
 /**
- * The engine kept OFF the scatter, and it is named here rather than detected.
+ * The engine kept off BOTH scatters, and it is named here rather than detected.
  *
- * `iceberg` is a ~4x outlier on BOTH axes — 100,394 ms cold against 22,823-45,010, and 8,641 CU
- * against 1,514-3,769 — so including it sets the scale for twelve points that then pile into one
- * corner: 12 of 78 dot pairs overlapped with it in, against 2 without. It is not dropped for being
+ * Cold is an axis on both charts, and `iceberg`'s cold pass is 100,394 ms against 22,823-45,010 for
+ * everything else — so including it sets the scale and the other twelve pile into one corner: 12 of
+ * 78 dot pairs overlapped with it in, against 1 of 66 without. It is not dropped for being
  * inconvenient; 1,172 row groups is a layout nothing else on the page is near, and its cost is
  * already the top row of the table directly above.
  *
  * A CONSTANT, never a computed "more than Nx the median" rule: an automatic outlier filter changes
  * which point it silently removes as records land, and this page's whole discipline is that a
- * dropped run is a NAMED run. The subtitle says what was left out, every time it leaves anything out.
+ * dropped run is a NAMED run. Each subtitle says what was left out, and says nothing when nothing
+ * was.
  */
 const SCATTER_OMIT = "iceberg";
 
@@ -1503,49 +1505,62 @@ const SCATTER_OMIT = "iceberg";
  * Split out of `renderFit` so the omission is one named thing rather than a filter buried in a call
  * argument — the caption and the filter cannot drift apart if they are three lines from each other.
  */
-export function scatterFit(pts) {
-  const withCold = (pts || []).filter((p) => p.ms && p.ms.cold);
-  const shown = withCold.filter((p) =>
+/** The points a scatter may plot: those carrying the measures it needs, minus `SCATTER_OMIT`. */
+function plotted(pts, has) {
+  const usable = (pts || []).filter(has);
+  const rows = usable.filter((p) =>
     !(p.members || []).some(({ rec }) => (rec || {}).engine === SCATTER_OMIT));
-  const cut = withCold.length - shown.length;
-  return scatterSvg("CU against cold query time",
-    "one dot per layout — cold ms across, CU up, shaded by row group size" +
-    (cut ? ` · ${SCATTER_OMIT} left out, ${cut > 1 ? `${cut} layouts, ` : ""}` +
-      "off the scale on both axes" : ""),
-    shown.map((p) => {
-      const k = keyCells(p.members);
-      // LABELLED ONLY WHERE THE WRITER NAME IS UNIQUE on the plot — `dwh` and the three spark
-      // profiles. `delta_rs` is seven of the twelve dots, so labelling it would print one word seven
-      // times and separate nothing; those seven are told apart by the LEGEND's colour, and their
-      // ordering and size are one hover away. No sort key appears on the chart at all: it was the
-      // only thing making the labels long, and it is a column of the table three lines above.
-      const unique = shown.filter((q) => q.name === p.name).length === 1;
-      return { x: p.ms.cold, y: p.cu, label: p.name, id: unique ? p.name : "", n: p.n,
-        sub: k.rgSize, hue: WRITER_HUE[p.name] || 1, c: martSize(p.members) };
-    }), "cold ms", "row group size", (v) => `${fmt(v / 1e6, 1)}M`);
+  return { rows, cut: usable.length - rows.length };
+}
+
+/** The exclusion, said in the subtitle — and said nowhere when nothing was excluded. */
+function cutNote(cut) {
+  return cut ? ` · ${SCATTER_OMIT} left out, ${cut > 1 ? `${cut} layouts, ` : ""}` +
+    "its cold pass 2x the slowest of these" : "";
 }
 
 /**
- * The second scatter: WARM against HOT, every writer on it.
+ * LABELLED ONLY WHERE THE WRITER NAME IS UNIQUE on the plot — `dwh` and the three spark profiles.
+ * `delta_rs` is seven of the twelve dots, so labelling it would print one word seven times and
+ * separate nothing; those seven are told apart by the LEGEND's colour, and their ordering and size
+ * are one hover away. No sort key appears on either chart: it was the only thing making the labels
+ * long, and it is a column of the table three lines above.
+ */
+function uniqueName(rows, p) {
+  return rows.filter((q) => q.name === p.name).length === 1 ? p.name : "";
+}
+
+export function scatterFit(pts) {
+  const { rows, cut } = plotted(pts, (p) => p.ms && p.ms.cold);
+  return scatterSvg("CU against cold query time",
+    "one dot per layout — cold ms across, CU up, sized by row group size" + cutNote(cut),
+    rows.map((p) => ({
+      x: p.ms.cold, y: p.cu, label: p.name, id: uniqueName(rows, p), n: p.n,
+      sub: keyCells(p.members).rgSize, hue: WRITER_HUE[p.name] || 1, c: martSize(p.members),
+    })), "cold ms", "row group size", (v) => `${fmt(v / 1e6, 1)}M`);
+}
+
+/**
+ * The second scatter: COLD against WARM, the same twelve layouts.
  *
  * A different question from the chart above. That one asks whether cost tracks the transcode; this
- * one asks whether the second visit already IS the steady state — if warm and hot fall on a line,
- * two of the three tier columns are one measurement and the page is printing it twice.
+ * one asks what the transcode BUYS — a slow cold pass is the price of a first visit, and the useful
+ * thing to know is whether paying it leaves you better off on the second. Cold on x because it
+ * happens first and reads left to right, and because it is the larger quantity by an order of
+ * magnitude.
  *
- * ICEBERG IS ON THIS ONE. It is excluded above because it is a ~4x outlier on both of those axes;
- * on warm and hot it sits inside the pack (3,646 and 3,037 against 2,655-7,455 and 2,624-5,510), so
- * the reason for cutting it simply does not apply here. The exclusion is per chart and per stated
- * reason, never a standing blacklist.
+ * `iceberg` is off this one for the SAME reason it is off the first, which is why both go through
+ * `plotted()`: cold is an axis on both charts and its cold pass is 100,394 ms against 22,823-45,010
+ * for everything else. One exclusion, one reason, stated in both subtitles.
  */
 export function scatterTiers(pts) {
-  const rows = (pts || []).filter((p) => p.ms && p.ms.warm && p.ms.hot);
-  return scatterSvg("Warm against hot",
-    "one dot per layout — warm ms across, hot ms up, sized by row group size",
-    rows.map((p) => {
-      const unique = rows.filter((q) => q.name === p.name).length === 1;
-      return { x: p.ms.warm, y: p.ms.hot, label: p.name, id: unique ? p.name : "", n: p.n,
-        sub: keyCells(p.members).rgSize, hue: WRITER_HUE[p.name] || 1, c: martSize(p.members) };
-    }), "warm ms", "row group size", (v) => `${fmt(v / 1e6, 1)}M`, "hot ms");
+  const { rows, cut } = plotted(pts, (p) => p.ms && p.ms.cold && p.ms.warm);
+  return scatterSvg("Cold against warm",
+    "one dot per layout — cold ms across, warm ms up, sized by row group size" + cutNote(cut),
+    rows.map((p) => ({
+      x: p.ms.cold, y: p.ms.warm, label: p.name, id: uniqueName(rows, p), n: p.n,
+      sub: keyCells(p.members).rgSize, hue: WRITER_HUE[p.name] || 1, c: martSize(p.members),
+    })), "cold ms", "row group size", (v) => `${fmt(v / 1e6, 1)}M`, "warm ms");
 }
 
 /** A group's rows-per-row-group as a NUMBER — the median across its members, for the colour ramp. */
@@ -1628,9 +1643,8 @@ export function renderFit(groups, times, tiers, counts = {}) {
     // is what CU is mostly buying, so it is the tier with a mechanism connecting it to the y axis.
     // Row-group size rides along as the SIZE, since it is the shape most likely to explain both.
     scatterFit(pts),
-    // ...and the other two tiers against each other, which asks a different question: is the second
-    // visit already the steady state? If warm and hot fall on a line, two of the three tier columns
-    // are one measurement printed twice.
+    // ...and cold against warm, which asks what the transcode BUYS: a slow cold pass is the price of
+    // a first visit, and the useful thing is whether paying it leaves you better off on the second.
     scatterTiers(pts),
   ].filter(Boolean).join("\n");
 }
