@@ -1112,7 +1112,12 @@ export function scatterSvg(title, subtitle, pts, xLabel = "cold ms", legend = ""
   // bar charts in the same 62rem column; height is the only axis free to grow, and a scatter needs
   // vertical room the way a bar list does not — thirteen dots in a 300-tall box sat on top of one
   // another. `LEG` is the strip the sequential legend gets under the plot.
-  const W = WIDTH, H = 470, L = 58, R = 14, T = 18, B = 46, LEG = 34;
+  // WIDER THAN THE BAR CHARTS, and the viewBox grows WITH its CSS box so nothing inflates. The
+  // bars are capped at the 62rem prose measure because their row labels would scale up with the
+  // panel; a scatter carries no row labels, only axis ticks, so giving it `main` room buys plot
+  // area at an unchanged text size — 920 units into ~86rem is the same 1.5x scale 660 into 62rem
+  // was. Twelve dots in a dense cluster is exactly the case that wants the area.
+  const W = 920, H = 560, L = 62, R = 16, T = 20, B = 48, LEG = 36;
   const xs = rows.map((p) => Number(p.x)), ys = rows.map((p) => Number(p.y));
   // 4% padding, so a dot on the extreme does not sit half-outside the axis line.
   const pad = (v, k) => (v[1] - v[0]) * 0.04 * k;
@@ -1127,7 +1132,7 @@ export function scatterSvg(title, subtitle, pts, xLabel = "cold ms", legend = ""
   const PH = H - T - B - LEG;                      // plot height, above the legend strip
   const py = (v) => T + PH * (1 - (Number(v) - Y.lo) / ((Y.hi - Y.lo) || 1));
   const out = [
-    '<figure class="chart">' +
+    '<figure class="chart wide">' +
     `<figcaption><span class="chart-title">${esc(title)}</span>` +
     `<span class="chart-sub">${esc(subtitle)}</span></figcaption>`,
     `<svg viewBox="0 0 ${W} ${H}" width="100%" height="${H}" role="img" ` +
@@ -1174,7 +1179,7 @@ export function scatterSvg(title, subtitle, pts, xLabel = "cold ms", legend = ""
     out.push(`<g><title>${esc(p.label)}${p.sub ? ` (${esc(p.sub)})` : ""}: ` +
       `${fmt(p.y, 0)} CU, ${fmt(p.x, 0)} ms ${esc(xLabel.replace(/ ms$/, ""))}` +
       `${p.n ? `, ${p.n} run(s)` : ""}</title>` +
-      `<circle class="dot s${bin(p.c)}" cx="${cx.toFixed(1)}" cy="${cy.toFixed(1)}" r="6"/>` +
+      `<circle class="dot s${bin(p.c)}" cx="${cx.toFixed(1)}" cy="${cy.toFixed(1)}" r="7"/>` +
       (named.has(p) ? `<text class="bar-caption" x="${(cx + (flip ? -9 : 9)).toFixed(1)}" ` +
         `y="${(cy + 4).toFixed(1)}"${flip ? ' text-anchor="end"' : ""}>${esc(p.label)}</text>`
         : "") + "</g>");

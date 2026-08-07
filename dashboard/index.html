@@ -56,6 +56,13 @@ h1, h2, h3, h4, p, footer { max-width: 62rem; }
    value ~2.7x — wider would be less legible, not more. It had a second chart beside it in a flex
    row capped at 53rem each; alone it gets the whole 62rem. */
 figure.chart { max-width: 62rem; }
+/* THE SCATTER IS THE EXCEPTION, and the reason is what each chart's text is attached to. A bar chart's
+   labels are ROW labels — one per bar — so a wider panel scales them up with it and the cap above is
+   what keeps them legible. A scatter carries only axis ticks and three point labels, and it is drawn
+   at a proportionally wider viewBox (920 against 660), so the scale factor into its box is the SAME
+   1.5x: the text renders identically and every extra rem goes to plot area. Twelve dots in a dense
+   cluster is the one figure on this page that gains from it. */
+figure.chart.wide { max-width: 86rem; }
 /* A bounded card, so the chart reads as a designed panel and its trailing whitespace ends at its own
    border instead of mid-page. */
 figure.chart { border:1px solid var(--line); border-radius:12px; padding:1rem 1.15rem .65rem; }

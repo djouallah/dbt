@@ -2730,7 +2730,9 @@ test("the scatter brackets the data on round ticks, not on a snapped bound", () 
   const svg = d.scatterSvg("t", "s", [pt("a", 2773, 1514), pt("b", 5237, 8641)]);
   const xs = [...svg.matchAll(/<circle class="dot s\d" cx="([\d.]+)"/g)].map((m) => +m[1]);
   const span = Math.max(...xs) - Math.min(...xs);
-  assert.ok(span > (646 - 58) * 0.5, `the cloud fills the plot, not a corner: ${span.toFixed(0)}px`);
+  // Measured against the figure's OWN viewBox, so enlarging the chart cannot quietly weaken this.
+  const vb = +/viewBox="0 0 (\d+)/.exec(svg)[1];
+  assert.ok(span > vb * 0.4, `the cloud fills the plot, not a corner: ${span.toFixed(0)} of ${vb}`);
   assert.ok(!/NaN|Infinity/.test(svg), "no degenerate geometry");
 });
 
@@ -2755,7 +2757,8 @@ test("a label that would overrun the plot flips to the left of its dot", () => {
   assert.ok(svg.includes('text-anchor="end"'), "flipped rather than allowed to overflow");
   for (const m of svg.matchAll(/<text class="bar-caption" x="([\d.]+)"[^>]*>([^<]+)</g)) {
     if (m[2] === "hot ms" || m[2] === "CU") continue;
-    assert.ok(+m[1] <= 660, `label starts inside the viewBox: ${m[2]} at ${m[1]}`);
+    assert.ok(+m[1] <= +/viewBox="0 0 (\d+)/.exec(svg)[1],
+      `label starts inside the viewBox: ${m[2]} at ${m[1]}`);
   }
 });
 
