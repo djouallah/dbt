@@ -494,6 +494,21 @@ export function compact(n) {
   return fmt(v, 0);
 }
 
+/**
+ * The power-of-two band a count falls in. `-1` for missing or zero.
+ *
+ * Banded, not exact. Exact equality splits dwh's own two runs from each other — 78 files and 80, same
+ * writer, same settings, incremental drift — and splits duckrun on 1.1 MB of size. The accepted cost
+ * is the boundary: 15 row groups and 17 land in different bands despite being close. That edge is
+ * visible in the mart block, and no tolerance rule avoids it without chaining groups together through
+ * their neighbours.
+ */
+export function layoutBand(n) {
+  const v = Number(n || 0);
+  if (!Number.isFinite(v) || v < 1) return -1;
+  return Math.floor(Math.log2(v));
+}
+
 const martStats = (rec, table) =>
   ((((rec || {}).layout || {}).stats || {})[(rec || {}).engine] || {})[table] || {};
 
@@ -549,8 +564,7 @@ export function sameGeneration(runs, table = DEFAULTS.table) {
  * mart.
  *
  * `avg RG rows` is `total_rows ÷ row groups` and every engine writes the same 143,980,961 rows, so it
- * carries nothing the row-group count does not. `size MB` is excluded deliberately — two runs of one config drift by
- * a megabyte, and the row-group count already carries the shape.
+ * carries nothing the row-group count does not. `size MB` is excluded deliberately — see `layoutBand`.
  *
  * `null` when neither metric was recorded, which keeps that column a bar of its OWN rather than filing
  * it into a group it was never measured into. That distinction is the whole point: two records
@@ -589,19 +603,7 @@ export function sameGeneration(runs, table = DEFAULTS.table) {
 export function layoutKey(rec, table = DEFAULTS.table) {
   const d = martStats(rec, table);
   if (d.num_row_groups === undefined || d.num_row_groups === null) return null;
-  // EXACT, not banded. `layoutBand` grouped counts into powers of two so a writer's own drift —
-  // dwh's 77/78/78/80 across four runs of one config — would not scatter into four rows. The cost
-  // was that it also merged DELIBERATE choices: run 31077710594 asked for `row_group_size:
-  // 18000000` and wrote 8 groups, seven sibling runs on the same sort key asked for nothing and
-  // wrote 9, and the band put all eight under one median captioned `16.0–18.0M`. Two requested
-  // geometries, one row, and no way to see either.
-  //
-  // So the count is the key now, and every distinct row-group count is its own row. That is the
-  // trade, stated plainly: nothing is merged that was not identically shaped, and a writer's drift
-  // now DOES scatter — dwh becomes three rows and `spark readHeavyForPBI`'s eight runs become four.
-  // Several rows drop to n=1, where `groupMid` is just the sample, so read `runs` before believing
-  // any of them.
-  return [Boolean(d.vorder), Math.trunc(Number(d.num_row_groups)), sortKeyOf(rec, table), rec.engine];
+  return [Boolean(d.vorder), layoutBand(d.num_row_groups), sortKeyOf(rec, table), rec.engine];
 }
 
 /**

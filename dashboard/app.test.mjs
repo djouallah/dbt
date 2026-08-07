@@ -367,14 +367,15 @@ test("the writer name carries no ordering — that is a column of its own", () =
     "vcores still never reaches a caption about parquet");
 });
 
-test("a sort splits the layout row even when the shape is identical", () => {
-  // THE reason `sorted` is in layoutKey. Both runs are given the SAME row-group count, so the
-  // measured half cannot tell them apart at all — without the config in the key they would share a
-  // row and their CU would be averaged, which is the comparison the flag exists to make.
+test("a sort splits the layout bar even though the bands do not move", () => {
+  // THE reason `sorted` is in layoutKey. The one measured sorted run wrote 4 files either way and
+  // 27 -> 25 row groups, which fall in the SAME bands — so without the config in the key these two
+  // share a bar and their cold/warm/hot means are averaged, which is the comparison the flag exists
+  // to make.
   const plain = lay("duckrun", 4, 27, { cfg: { vcores: "64" } });
-  const sorted = lay("duckrun", 4, 27, { cfg: { vcores: "64", sorted: "true" }, file: "y.json" });
+  const sorted = lay("duckrun", 4, 25, { cfg: { vcores: "64", sorted: "true" } });
   assert.deepEqual(d.layoutKey(plain).slice(0, 2), d.layoutKey(sorted).slice(0, 2),
-    "same V-Order and same row-group count — the measured half cannot tell them apart");
+    "same V-Order and same band — the measured half cannot tell them apart");
   assert.notDeepEqual(d.layoutKey(plain), d.layoutKey(sorted));
   // This fixture records no key, so it reads `true` — sorted by something unnamed. The COLUMNS case
   // is the two-sorts test below.
@@ -391,9 +392,7 @@ test("a record with no sorted key groups with an unsorted run, not alone", () =>
   // `stats.py` records the flag when it is on and not otherwise. (`sorted: "false"` would not be
   // that case: it is a truthy STRING, so `sortKeyOf` reads it as sorted-but-unnamed.)
   const old = lay("duckrun", 4, 27, { cfg: { vcores: "64" } });          // no `sorted` key at all
-  // SAME row-group count on both sides: the key is exact now, so a differing count would split
-  // them for a reason that has nothing to do with the sort flag under test.
-  const off = lay("duckrun", 4, 27, { cfg: { vcores: "64" }, file: "y.json" });
+  const off = lay("duckrun", 4, 25, { cfg: { vcores: "64" }, file: "y.json" });
   assert.deepEqual(d.layoutKey(old), d.layoutKey(off));
   assert.equal(d.layoutKey(old)[2], false);
 });
@@ -1372,11 +1371,20 @@ test("an engine is named for who WRITES, not for the dbt target that asked", () 
 test("V-Order never merges with anything", () => {
   // The sharpest experiment on the page: the same file band with V-Order on and off.
   const a = lay("spark", 11, 11, { vorder: true, cfg: { resource_profile: "readHeavyForPBI" } });
-  const b = lay("spark", 14, 11, { vorder: false, cfg: { resource_profile: "writeHeavy" },
-    file: "y.json" });
+  const b = lay("spark", 14, 14, { vorder: false, cfg: { resource_profile: "writeHeavy" } });
   assert.notDeepEqual(d.layoutKey(a), d.layoutKey(b));
-  assert.equal(d.layoutKey(a)[1], d.layoutKey(b)[1],
-    "identical row-group count, on purpose — V-Order alone is what splits them");
+  assert.equal(d.layoutKey(a)[1], d.layoutKey(b)[1], "same file band, on purpose");
+});
+
+test("a band absorbs drift but not a real difference", () => {
+  // 78 files and 80 are the same writer with the same settings and one more incremental run.
+  assert.equal(d.layoutBand(78), d.layoutBand(80));
+  assert.equal(d.layoutBand(10), d.layoutBand(11));
+  assert.equal(d.layoutBand(11), d.layoutBand(14));
+  assert.notEqual(d.layoutBand(27), d.layoutBand(1172));
+  assert.notEqual(d.layoutBand(1172), d.layoutBand(4));
+  assert.equal(d.layoutBand(0), -1);
+  assert.equal(d.layoutBand(null), -1);
 });
 
 test("an unmeasured layout is never grouped with another one", () => {
