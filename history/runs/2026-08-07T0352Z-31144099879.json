@@ -659,6 +659,7 @@
   "2ABA6100-EC55-48BD-85D2-7C329B89DF08": {
    "at": "2026-08-07T03:37:29+00:00",
    "created": true,
+   "deleted": "2026-08-07T03:55:24+00:00",
    "engine": "duckrun",
    "kind": "Notebook",
    "name": "dbt-duckrun-37b8623a",
@@ -666,6 +667,7 @@
   },
   "2C6BD93B-1F14-406E-BC2F-6BC351818833": {
    "created": true,
+   "deleted": "2026-08-07T03:55:28+00:00",
    "engine": "duckrun",
    "kind": "SemanticModel",
    "name": "aemo_duckrun",
@@ -680,7 +682,7 @@
    "role": "landing"
   },
   "6C23854F-CF0F-460D-8AFB-01D9BEA9A92D": {
-   "at": "2026-08-07T03:22:53+00:00",
+   "at": "2026-08-07T03:55:22+00:00",
    "created": false,
    "kind": "Folder",
    "name": "benchmark",
@@ -696,12 +698,13 @@
   "BA231EA4-C161-405B-A4CE-B8C2E74DF6B9": {
    "at": "2026-08-07T03:23:03+00:00",
    "created": true,
+   "deleted": "2026-08-07T03:55:25+00:00",
    "kind": "Lakehouse",
    "name": "dbt_delta",
    "role": "output"
   },
   "F50469D2-8347-4464-9EE8-97C768B4F355": {
-   "at": "2026-08-07T03:22:54+00:00",
+   "at": "2026-08-07T03:55:22+00:00",
    "created": false,
    "kind": "Folder",
    "name": "landing",
