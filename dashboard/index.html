@@ -266,6 +266,13 @@ figure.chart svg { max-width:100%; height:auto; display:block; overflow:visible;
 .dot { fill:var(--cat1); stroke:var(--bg); stroke-width:2; }
 .dot.c1 { fill:var(--cat1); } .dot.c2 { fill:var(--cat2); } .dot.c3 { fill:var(--cat3); }
 .dot.c4 { fill:var(--cat4); } .dot.c5 { fill:var(--cat5); }
+/* SLOT 6 IS NOT A SIXTH HUE — it is the neutral "Other" the palette ceiling forces. Five is the
+   real ceiling on BOTH surfaces: every candidate sixth either collapsed against slot 1 (protan
+   dE 3.1) or, once lightened enough to clear 3:1 on the dark surface, against slot 4 (normal dE
+   9-13). Gray is exempt from the chroma floor precisely because it is reserved for non-series
+   roles, and it is safe here for a reason specific to this chart: the one writer in slot 6 has a
+   unique name, so it carries a DIRECT LABEL and its identity never rested on colour. */
+.dot.c6 { fill:var(--dim); }
 /* The size key's circles carry no hue — they encode the size channel alone, so giving them a
    writer colour would say a size belongs to a writer. */
 .swatch.c0 { fill:var(--dim); opacity:.55; stroke:none; }

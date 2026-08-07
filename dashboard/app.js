@@ -1119,6 +1119,9 @@ function niceScale(min, max, want = 4) {
 export const WRITER_HUE = {
   delta_rs: 1, dwh: 2, "spark readHeavyForPBI": 3, "spark writeHeavy": 4,
   "spark readHeavyForSpark": 5,
+  // NOT a sixth hue — the neutral "Other" slot. See `.dot.c6`: five is the ceiling the validator
+  // allows on both surfaces, and this writer is directly labelled, so nothing rests on its colour.
+  "duckdb iceberg": 6,
 };
 
 /** `[{name, hue}]` for the writers actually plotted, in slot order — the legend's own source. */
@@ -1132,7 +1135,7 @@ function legendOf(rows) {
 }
 
 export function scatterSvg(title, subtitle, pts, xLabel = "cold ms", legend = "",
-  fmtC = (v) => fmt(v, 1)) {
+  fmtC = (v) => fmt(v, 1), yLabel = "CU") {
   const rows = (pts || []).filter((p) => Number.isFinite(Number(p.x)) && Number(p.x) > 0
     && Number.isFinite(Number(p.y)) && Number(p.y) > 0);
   if (rows.length < 2) return "";
@@ -1179,7 +1182,8 @@ export function scatterSvg(title, subtitle, pts, xLabel = "cold ms", legend = ""
   out.push(`<text class="bar-caption" x="${(L + (W - L - R) / 2).toFixed(0)}" ` +
     `y="${(T + PH + 36).toFixed(0)}" text-anchor="middle">${esc(xLabel)}</text>`,
   `<text class="bar-caption" x="14" y="${(T + PH / 2).toFixed(0)}" ` +
-    `text-anchor="middle" transform="rotate(-90 14 ${(T + PH / 2).toFixed(0)})">CU</text>`);
+    `text-anchor="middle" transform="rotate(-90 14 ${(T + PH / 2).toFixed(0)})">` +
+    `${esc(yLabel)}</text>`);
   // EVERY DOT IS NAMED. It labelled three — the cheapest, the fastest and the dearest — and the
   // other nine were anonymous blobs a reader could only identify by hovering. Worse, the label was
   // the WRITER, and seven of twelve points are `delta_rs`: naming them all would have printed one
@@ -1242,7 +1246,7 @@ export function scatterSvg(title, subtitle, pts, xLabel = "cold ms", legend = ""
     const cx = px(p.x), cy = py(p.y);
     const at = p.id ? label(p) : { x: 0, y: 0, anchor: "start" };
     out.push(`<g><title>${esc(p.label)}${p.sub ? ` (${esc(p.sub)})` : ""}: ` +
-      `${fmt(p.y, 0)} CU, ${fmt(p.x, 0)} ms ${esc(xLabel.replace(/ ms$/, ""))}` +
+      `${fmt(p.y, 0)} ${esc(yLabel)}, ${fmt(p.x, 0)} ms ${esc(xLabel.replace(/ ms$/, ""))}` +
       `${p.n ? `, ${p.n} run(s)` : ""}</title>` +
       `<circle class="dot c${p.hue || 1}" cx="${cx.toFixed(1)}" cy="${cy.toFixed(1)}" ` +
       `r="${rad(p.c).toFixed(1)}"/>` +
@@ -1521,6 +1525,29 @@ export function scatterFit(pts) {
     }), "cold ms", "row group size", (v) => `${fmt(v / 1e6, 1)}M`);
 }
 
+/**
+ * The second scatter: WARM against HOT, every writer on it.
+ *
+ * A different question from the chart above. That one asks whether cost tracks the transcode; this
+ * one asks whether the second visit already IS the steady state — if warm and hot fall on a line,
+ * two of the three tier columns are one measurement and the page is printing it twice.
+ *
+ * ICEBERG IS ON THIS ONE. It is excluded above because it is a ~4x outlier on both of those axes;
+ * on warm and hot it sits inside the pack (3,646 and 3,037 against 2,655-7,455 and 2,624-5,510), so
+ * the reason for cutting it simply does not apply here. The exclusion is per chart and per stated
+ * reason, never a standing blacklist.
+ */
+export function scatterTiers(pts) {
+  const rows = (pts || []).filter((p) => p.ms && p.ms.warm && p.ms.hot);
+  return scatterSvg("Warm against hot",
+    "one dot per layout — warm ms across, hot ms up, sized by row group size",
+    rows.map((p) => {
+      const unique = rows.filter((q) => q.name === p.name).length === 1;
+      return { x: p.ms.warm, y: p.ms.hot, label: p.name, id: unique ? p.name : "", n: p.n,
+        sub: keyCells(p.members).rgSize, hue: WRITER_HUE[p.name] || 1, c: martSize(p.members) };
+    }), "warm ms", "row group size", (v) => `${fmt(v / 1e6, 1)}M`, "hot ms");
+}
+
 /** A group's rows-per-row-group as a NUMBER — the median across its members, for the colour ramp. */
 function martSize(members, table = DEFAULTS.table) {
   const vals = (members || []).map(({ rec }) => {
@@ -1566,7 +1593,7 @@ export function keyCells(members, table = DEFAULTS.table) {
  *
  * Same `martPoints` as the bars and the layout rows, so all three quote the same median.
  */
-export function renderFit(groups, times, tiers) {
+export function renderFit(groups, times, tiers, counts = {}) {
   const pts = martPoints(groups, times).filter((p) => p.cu > 0);
   if (!pts.length) return "";
   const cols = (tiers || []).filter((l) => pts.some((p) => p.ms[l]));
@@ -1581,8 +1608,13 @@ export function renderFit(groups, times, tiers) {
     // where the key is coarser than the parquet — a wide `MB` range, or a `dictionary` cell that had
     // to name columns, is a row holding more than one physical shape. `runs` is the sample size
     // behind each median, which is what says whether a row is one dispatch or seven.
+    // THE QUERY COUNT IS IN THE HEADER, not only in the note four rows below. Each tier cell is a
+    // SUM over the suite -- 23 queries at cold, 25 at warm and hot -- and `28,518` reads exactly
+    // like one query's time to anyone who has not reached the note. On one real run the sum is
+    // 29,906 while the median query is 736, so the misreading is off by 40x. The header is where a
+    // reader is when they form the wrong idea.
     table(["parquet writer", "ordering", "dictionary", "row group size", "MB", "runs", "CU",
-      ...cols.map((l) => `${l} ms`)],
+      ...cols.map((l) => (counts[l] ? `${l} ms (${counts[l]} q)` : `${l} ms`))],
       ["left", "left", "left", "right", "right", "right", "right", ...cols.map(() => "right")],
       pts.map((p) => {
         const k = keyCells(p.members);
@@ -1594,8 +1626,12 @@ export function renderFit(groups, times, tiers) {
     // two measures move TOGETHER, which is the one question `CU` and a time column side by side
     // invite. COLD, not hot: the cold pass is the transcode — parquet into VertiPaq segments — which
     // is what CU is mostly buying, so it is the tier with a mechanism connecting it to the y axis.
-    // Row-group size rides along as the colour, since it is the shape most likely to explain both.
+    // Row-group size rides along as the SIZE, since it is the shape most likely to explain both.
     scatterFit(pts),
+    // ...and the other two tiers against each other, which asks a different question: is the second
+    // visit already the steady state? If warm and hot fall on a line, two of the three tier columns
+    // are one measurement printed twice.
+    scatterTiers(pts),
   ].filter(Boolean).join("\n");
 }
 
@@ -2872,7 +2908,7 @@ export function renderPage(cols, runs, ledger, opts = {}) {
   // `martPoints` — plus the grouping key, the sample size and the three query tiers, as numbers
   // rather than as bar lengths. A reader who wants one thing from this page wants this table; the
   // charts are the same content made scannable, so they follow it rather than introduce it.
-  out.push(renderFit(groups, times, TIERS.map(([l]) => l).filter((l) => l in counts)));
+  out.push(renderFit(groups, times, TIERS.map(([l]) => l).filter((l) => l in counts), counts));
 
   // TWO CHARTS, STACKED, AND THEY ARE KEYED ON DIFFERENT THINGS — that is the design, not an
   // inconsistency to tidy. Analytics is ONE BAR PER LAYOUT, because Power BI never sees the engine:

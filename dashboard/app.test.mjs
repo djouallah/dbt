@@ -1492,9 +1492,8 @@ test("the three tiers are columns of the PER-RUN table, not of the layout block"
   const heads = rows(out).filter((r) => r.includes("cold ms"));
   assert.equal(heads.length, 2, `two headers carry the tiers: ${heads}`);
   assert.ok(heads.some((h) =>
-    h.startsWith("| parquet writer | ordering | dictionary | row group size | MB | runs | CU "
-      + "| cold ms | warm ms | hot ms |")),
-  heads[0]);
+    /^\| parquet writer \| ordering \| dictionary \| row group size \| MB \| runs \| CU \| cold ms \(\d+ q\)/
+      .test(h)), heads[0]);
   assert.ok(heads.some((h) =>
     h.includes("| etl CU | analytics CU | cold ms | warm ms | hot ms | items |")), heads[1]);
   assert.ok(rows(out).some((r) => r.includes("| 30 | 11 | 9 |")), "the run's own tiers");
@@ -2125,7 +2124,9 @@ test("cost and speed is one table, cheapest first, with a title and nothing else
   const head = rows(out).find((r) =>
     r.startsWith("| parquet writer | ordering | dictionary | row group size | MB | runs | CU |"));
   assert.ok(head, "layout, the key, the size, the sample size, CU, then the tiers");
-  assert.ok(head.includes("| cold ms | warm ms | hot ms |"), head);
+  // The count rides in the HEADER: each tier cell is a SUM over the suite, and the bare `cold ms`
+  // read exactly like one query's time.
+  assert.ok(/\| cold ms \(\d+ q\) \| warm ms \(\d+ q\) \| hot ms \(\d+ q\) \|/.test(head), head);
   // A TITLE AND NOTHING ELSE — no verdict, no correlation, no reading of the numbers.
   const said = plain(out);
   assert.ok(!said.includes("Does paying more buy speed"));
@@ -2836,4 +2837,33 @@ test("every point is named and no two names collide", () => {
     assert.ok(b.x0 >= 0 && b.x1 <= +vb[1] && b.y0 >= 0 && b.y1 <= +vb[2],
       `"${l.t}" stays inside the viewBox`);
   }
+});
+
+test("the warm/hot scatter keeps iceberg — the exclusion is per chart, per reason", () => {
+  // It is cut from the CU/cold chart because it is a ~4x outlier on BOTH of those axes. On warm and
+  // hot it sits inside the pack, so the reason does not apply and a standing blacklist would be
+  // dropping data for a cause that is not present.
+  const p = (engine, name, warm, hot) => ({
+    name, n: 1, ms: { warm, hot, cold: 30000 }, cu: 2000,
+    members: [{ rec: lay(engine, 4, 24, { file: `${name}.json` }) }],
+  });
+  const pts = [p("duckrun", "delta_rs", 4500, 4300), p("dwh", "dwh", 4330, 3661),
+    p("iceberg", "duckdb iceberg", 3646, 3037)];
+  const warmHot = d.scatterTiers(pts);
+  assert.equal([...warmHot.matchAll(/<circle class="dot c\d"/g)].length, 3, "all three plotted");
+  assert.ok(/<title>duckdb iceberg/.test(warmHot));
+  // ...and it is still cut from the cost chart, where the reason does hold.
+  assert.equal([...d.scatterFit(pts).matchAll(/<circle class="dot c\d"/g)].length, 2);
+  // Both axes are times here, so neither is labelled CU.
+  const axes = [...warmHot.matchAll(/<text class="bar-caption"[^>]*>((?:warm|hot) ms|CU)</g)]
+    .map((m) => m[1]);
+  assert.deepEqual(axes.sort(), ["hot ms", "warm ms"], `no CU axis on a time-vs-time plot: ${axes}`);
+});
+
+test("slot 6 is the neutral Other, not a sixth hue", () => {
+  // Five is the ceiling the validator allows on BOTH surfaces: every candidate sixth collapsed
+  // against slot 1 (protan 3.1) or, once light enough for the dark surface, against slot 4.
+  assert.equal(d.WRITER_HUE["duckdb iceberg"], 6);
+  assert.deepEqual(Object.values(d.WRITER_HUE).sort((a, b) => a - b), [1, 2, 3, 4, 5, 6],
+    "one slot per writer, fixed and never cycled");
 });
