@@ -1158,6 +1158,53 @@ export function martPoints(groups, times) {
  * (nothing writes V-Order AND sorts today, but the spelling costs nothing), so they join rather than
  * one winning.
  */
+/**
+ * `"yes"`, `"no (mw, price)"` or a dash — is every mart column dictionary-encoded end to end?
+ *
+ * WHY IT MATTERS: this is the only structural difference between spark's two resource profiles and
+ * it is worth ~200 MB. Under `writeHeavy`, `mw` gives up its dictionary and writes 143,980,961 raw
+ * INT64s (618.6 MB); under `readHeavyForPBI` it keeps it (423.1 MB). Direct Lake can remap a parquet
+ * dictionary into VertiPaq's own; a PLAIN column has to be dictionary-built at load.
+ *
+ * **THE TEST IS DIALECT-AWARE, and it has to be.** `dict_pages == chunks` on every column of every
+ * run here, so that field discriminates nothing. What does is `PLAIN` sitting beside a dictionary
+ * encoding — and what `PLAIN` MEANS depends on the parquet version the writer used:
+ *
+ * - **v2** (`RLE_DICTIONARY` present — arrow-rs, so duckrun and iceberg): data pages are
+ *   `RLE_DICTIONARY` and the DICTIONARY PAGE itself is `PLAIN`. So `PLAIN` is always there and is
+ *   never evidence of a fallback.
+ * - **v1** (`PLAIN_DICTIONARY` present — parquet-mr, so spark): `PLAIN_DICTIONARY` covers both page
+ *   kinds, so a separate `PLAIN` can only be data pages that abandoned the dictionary.
+ *
+ * Read the v1 rule off `writeHeavy`, where exactly `mw` and `price` carry `PLAIN` and the other four
+ * columns do not; the naive "PLAIN means fallback" rule would instead condemn every duckrun column
+ * on this page.
+ *
+ * **KNOWN BLIND SPOT:** in v2 a genuine fallback also writes `PLAIN` data pages, which is
+ * indistinguishable from the dictionary page in a set of encoding names. So this reads `yes` for a
+ * v2 writer that did fall back. Telling those apart needs per-PAGE metadata, which
+ * `parquet_metadata()` does not carry — `stats.py` would have to record the encoding of each page,
+ * not the set per column chunk.
+ */
+export function dictCell(members) {
+  // The newest member that recorded encodings: `stats.py` only started profiling them recently, so
+  // most groups mix runs that have them with runs that do not.
+  let enc = null;
+  for (const { rec } of members || []) {
+    const e = (((rec || {}).layout || {}).encodings || {})[(rec || {}).engine];
+    if (e && Object.keys(e).length) enc = e;
+  }
+  if (!enc) return DASH;
+  const plain = [];
+  for (const [col, v] of Object.entries(enc)) {
+    const set = new Set(v.encodings || []);
+    if (set.has("RLE_DICTIONARY")) continue;                    // v2: PLAIN is the dictionary page
+    if (set.has("PLAIN_DICTIONARY") && !set.has("PLAIN")) continue;
+    plain.push(col);
+  }
+  return plain.length ? `no (${plain.sort().join(", ")})` : "yes";
+}
+
 export function keyCells(members, table = DEFAULTS.table) {
   const stats = (members || []).map(({ rec }) => martStats(rec, table));
   const vals = [...new Set(stats.map((s) => s.num_row_groups)
@@ -1172,6 +1219,7 @@ export function keyCells(members, table = DEFAULTS.table) {
   else if ((members || []).some(({ rec }) => sortKeyOf(rec, table) === true)) bits.push("sorted");
   return {
     ordering: bits.join(" · ") || DASH,
+    dict: dictCell(members),
     rg: !vals.length ? DASH
       : vals.length === 1 ? fmt(vals[0], 0)
         : `${fmt(vals[0], 0)}–${fmt(vals[vals.length - 1], 0)}`,
@@ -1198,11 +1246,11 @@ export function renderFit(groups, times, tiers) {
     // tell them apart is a table asking the reader to trust a grouping it will not show; these three
     // columns ARE `layoutKey` (the engine is already in the label) plus the sample size behind each
     // median, which is what says whether a row is one dispatch or seven.
-    table(["layout", "ordering", "RG", "runs", "CU", ...cols.map((l) => `${l} ms`)],
-      ["left", "left", "right", "right", "right", ...cols.map(() => "right")],
+    table(["layout", "ordering", "dictionary", "RG", "runs", "CU", ...cols.map((l) => `${l} ms`)],
+      ["left", "left", "left", "right", "right", "right", ...cols.map(() => "right")],
       pts.map((p) => {
         const k = keyCells(p.members);
-        return [p.name, k.ordering, k.rg, String(p.n), fmt(p.cu, 0),
+        return [p.name, k.ordering, k.dict, k.rg, String(p.n), fmt(p.cu, 0),
           ...cols.map((l) => (p.ms[l] ? fmt(p.ms[l], 0) : DASH))];
       }),
       { sort: true }),

@@ -1475,7 +1475,7 @@ test("the three tiers are columns of the PER-RUN table, not of the layout block"
   const heads = rows(out).filter((r) => r.includes("cold ms"));
   assert.equal(heads.length, 2, `two headers carry the tiers: ${heads}`);
   assert.ok(heads.some((h) =>
-    h.startsWith("| layout | ordering | RG | runs | CU | cold ms | warm ms | hot ms |")),
+    h.startsWith("| layout | ordering | dictionary | RG | runs | CU | cold ms | warm ms | hot ms |")),
   heads[0]);
   assert.ok(heads.some((h) =>
     h.includes("| etl CU | analytics CU | cold ms | warm ms | hot ms | items |")), heads[1]);
@@ -2102,7 +2102,7 @@ test("cost and speed is one table, cheapest first, with a title and nothing else
   // `duckrun sorted` with nothing to tell them apart is a table hiding what it grouped on.
   // V-Order and the sort key share ONE cell: same kind of fact (a write-time row arrangement), and
   // as two columns each was a dash on every row the other was not.
-  const head = rows(out).find((r) => r.startsWith("| layout | ordering | RG | runs | CU |"));
+  const head = rows(out).find((r) => r.startsWith("| layout | ordering | dictionary | RG | runs | CU |"));
   assert.ok(head, "layout, the key, the sample size, CU, then the tiers");
   assert.ok(head.includes("| cold ms | warm ms | hot ms |"), head);
   // A TITLE AND NOTHING ELSE — no verdict, no correlation, no reading of the numbers.
@@ -2518,4 +2518,27 @@ test("V-Order and the sort key share the ordering cell", () => {
   const unnamed = { rec: lay("duckrun", 1, 9, { cfg: { sorted: "true" } }) };
   assert.equal(d.keyCells([unnamed]).ordering, "sorted");
   assert.equal(d.keyCells([{ rec: lay("dwh", 78, 78) }]).ordering, "—", "neither is a dash");
+});
+
+test("the dictionary check reads PLAIN differently per parquet version", () => {
+  // `dict_pages == chunks` on every column of every real run, so it discriminates nothing. What does
+  // is PLAIN beside a dictionary encoding — and PLAIN means opposite things in v1 and v2.
+  const enc = (cols) => ({ rec: { engine: "x", layout: { encodings: { x: cols } } } });
+  // v2 (arrow-rs / duckrun): data pages are RLE_DICTIONARY and the DICTIONARY PAGE is PLAIN, so
+  // PLAIN is always present. The naive rule would condemn every duckrun column on the page.
+  assert.equal(d.dictCell([enc({ mw: { encodings: ["PLAIN", "RLE", "RLE_DICTIONARY"] } })]), "yes");
+  // v1 (parquet-mr / spark): PLAIN_DICTIONARY covers both page kinds, so a separate PLAIN can only
+  // be data pages that abandoned the dictionary. This is `writeHeavy`'s mw, worth ~200 MB.
+  assert.equal(d.dictCell([enc({
+    DUID: { encodings: ["PLAIN_DICTIONARY", "RLE"] },
+    mw: { encodings: ["PLAIN", "PLAIN_DICTIONARY", "RLE"] },
+    price: { encodings: ["PLAIN", "PLAIN_DICTIONARY", "RLE"] },
+  })]), "no (mw, price)", "names the columns that fell back, sorted");
+  // No dictionary at all is not "yes".
+  assert.equal(d.dictCell([enc({ mw: { encodings: ["PLAIN"] } })]), "no (mw)");
+  // Never measured is a dash, not a "no" — most groups mix runs profiled before and after
+  // `encodings_for` existed, so the newest member carrying encodings is the one that answers.
+  assert.equal(d.dictCell([{ rec: { engine: "x", layout: {} } }]), "—");
+  assert.equal(d.dictCell([{ rec: { engine: "x", layout: {} } },
+    enc({ mw: { encodings: ["PLAIN_DICTIONARY", "RLE"] } })]), "yes");
 });
