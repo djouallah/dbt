@@ -2728,7 +2728,7 @@ test("the scatter brackets the data on round ticks, not on a snapped bound", () 
   // BOUND to 1/2/2.5/5/10x a power of ten rounds a 5,237 maximum up to 10,000, and the whole cloud
   // then lives in the left third with two thirds of the panel empty. The STEP is what snaps.
   const svg = d.scatterSvg("t", "s", [pt("a", 2773, 1514), pt("b", 5237, 8641)]);
-  const xs = [...svg.matchAll(/<circle class="dot s\d" cx="([\d.]+)"/g)].map((m) => +m[1]);
+  const xs = [...svg.matchAll(/<circle class="dot c\d" cx="([\d.]+)"/g)].map((m) => +m[1]);
   const span = Math.max(...xs) - Math.min(...xs);
   // Measured against the figure's OWN viewBox, so enlarging the chart cannot quietly weaken this.
   const vb = +/viewBox="0 0 (\d+)/.exec(svg)[1];
@@ -2736,20 +2736,22 @@ test("the scatter brackets the data on round ticks, not on a snapped bound", () 
   assert.ok(!/NaN|Infinity/.test(svg), "no degenerate geometry");
 });
 
-test("EVERY dot is named, and the title carries the rest", () => {
-  // ONE SERIES, so nothing is encoded in colour and there is no legend. Thirteen hues for thirteen
-  // layouts is past where any palette stays separable under CVD; a name on all thirteen is a
-  // thicket at this size. The table directly above is the table view of these same points.
-  const svg = d.scatterSvg("t", "s", [pt("cheap", 5000, 1000), pt("mid", 4000, 2000, 3),
-    pt("dear", 3000, 9000), pt("fast", 2000, 5000)]);
-  assert.equal([...svg.matchAll(/<title>/g)].length, 4, "one title per dot");
-  assert.ok(svg.includes("<title>mid (16.0M): 2,000 CU, 4,000 ms cold, 3 run(s)</title>"));
-  // It labelled three and left the rest as anonymous blobs, identifiable only by hovering.
-  const named = [...svg.matchAll(/<text class="bar-caption"[^>]*>([^<]+)</g)].map((m) => m[1]);
-  for (const n of ["cheap", "dear", "fast", "mid"]) {
-    assert.ok(named.includes(n), `${n} is named on the plot, not just in its title`);
-  }
-  assert.ok(!/fill="#/.test(svg), "no hardcoded colour — the ramp lives in CSS custom properties");
+test("a dot is labelled iff the caller gave it an id", () => {
+  // The CALLER decides, because only it knows which names are unique on the plot: `dwh` and the
+  // three spark profiles are one dot each and get labels, `delta_rs` is seven dots and gets its
+  // identity from the legend's colour instead — labelling it would print one word seven times.
+  const svg = d.scatterSvg("t", "s", [
+    { label: "dwh", id: "dwh", x: 5000, y: 1000, c: 2e6, hue: 2 },
+    { label: "delta_rs", id: "", x: 4000, y: 2000, c: 6e6, hue: 1 },
+    { label: "delta_rs", id: "", x: 3000, y: 2500, c: 16e6, hue: 1 }],
+  "cold ms", "row group size");
+  assert.equal([...svg.matchAll(/<title>/g)].length, 3, "one title per dot, always");
+  const named = [...svg.matchAll(/<text class="bar-caption" [^>]*>([^<]+)</g)].map((m2) => m2[1])
+    .filter((t) => !["cold ms", "CU"].includes(t));
+  assert.deepEqual(named, ["dwh"], "only the point with an id, and never twice");
+  // The legend is what names the rest, so identity never rests on colour alone.
+  const key = [...svg.matchAll(/<text class="bar-caption key"[^>]*>([^<]+)</g)].map((m2) => m2[1]);
+  assert.ok(key.includes("delta_rs") && key.includes("dwh"), `legend names every writer: ${key}`);
 });
 
 test("a label that would overrun the plot flips to the left of its dot", () => {
@@ -2771,33 +2773,7 @@ test("fewer than two points is no chart at all", () => {
     "a missing measure is dropped, not plotted at zero");
 });
 
-test("the third variable is a SEQUENTIAL ramp with a legend, never categorical hues", () => {
-  // Row-group size is a MAGNITUDE, so one hue light-to-dark — not a hue per layout. The steps live in
-  // CSS as `--seq1..5`, selected per theme against that theme's surface rather than flipped, so
-  // nothing here hardcodes a colour and the dark page is its own validated ramp.
-  const svg = d.scatterSvg("t", "s", [
-    { label: "small", x: 2000, y: 1500, c: 0.12e6 },
-    { label: "mid", x: 3000, y: 2000, c: 6e6 },
-    { label: "big", x: 5000, y: 8000, c: 16e6 }],
-  "cold ms", "row group size", (v) => `${(v / 1e6).toFixed(1)}M`);
-  const bins = [...svg.matchAll(/class="dot s(\d)"/g)].map((m) => +m[1]);
-  // EQUAL-WIDTH bins over the observed range, so the colour reads as the value and not as a rank:
-  // 6M sits 37% of the way from 0.12M to 16M, which is bin 2 of 5 — not the middle.
-  assert.deepEqual(bins, [1, 2, 5], "binned by value across the observed range, low to high");
-  assert.equal([...svg.matchAll(/class="swatch dot s\d"/g)].length, 5, "a five-step ramp legend");
-  const said = [...svg.matchAll(/<text class="bar-caption"[^>]*>([^<]+)</g)].map((m) => m[1]);
-  assert.ok(said.includes("row group size") && said.includes("0.1M") && said.includes("16.0M"),
-    `the scale is stated, not implied: ${said}`);
-  assert.ok(!/fill="#|stroke="#/.test(svg), "no colour literal in the markup");
-});
 
-test("one row-group size everywhere draws dots but no ramp legend", () => {
-  // Nothing to grade, so the legend would state a scale with no range in it.
-  const svg = d.scatterSvg("t", "s", [{ label: "a", x: 2000, y: 1500, c: 6e6 },
-    { label: "b", x: 3000, y: 2500, c: 6e6 }], "cold ms", "row group size");
-  assert.equal([...svg.matchAll(/class="swatch/g)].length, 0);
-  assert.equal([...svg.matchAll(/class="dot s3"/g)].length, 2, "all dots take the middle step");
-});
 
 test("iceberg is off the scatter, and the subtitle says so", () => {
   // A ~4x outlier on BOTH axes set the scale for everyone else: 12 of 78 dot pairs overlapped with
@@ -2810,7 +2786,7 @@ test("iceberg is off the scatter, and the subtitle says so", () => {
   const svg = d.scatterFit([p("duckrun", "delta_rs", 25000, 1800),
     p("spark", "spark writeHeavy", 45000, 3700),
     p("iceberg", "duckdb iceberg", 100394, 8641)]);
-  assert.equal([...svg.matchAll(/<circle class="dot/g)].length, 2, "two dots, not three");
+  assert.equal([...svg.matchAll(/<circle class="dot c\d"/g)].length, 2, "two dots, not three");
   assert.equal([...svg.matchAll(/<title>([^<]+)/g)].filter((m) => /iceberg/.test(m[1])).length, 0);
   const sub = /<span class="chart-sub">([^<]+)</.exec(svg)[1];
   assert.ok(sub.includes("iceberg left out"), `the exclusion is stated: ${sub}`);

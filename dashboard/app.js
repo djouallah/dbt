@@ -1103,6 +1103,34 @@ function niceScale(min, max, want = 4) {
  * data. (The zero-baseline rule is a BAR rule — a truncated bar misstates a ratio, a truncated
  * scatter axis does not.)
  */
+/**
+ * Writer -> categorical slot, FIXED and never cycled.
+ *
+ * Colour follows the ENTITY, not its rank: a run landing or a filter changing which writers are on
+ * the plot must not repaint the survivors, so the map is a constant rather than an enumeration of
+ * whatever happens to be present. Slot 1 is pinned to `delta_rs` deliberately — it is the one writer
+ * with no direct label (seven dots share the name, so labelling it would print one word seven
+ * times), and the palette's weakest pair sits at slots 3 and 4, whose points are both labelled.
+ *
+ * FIVE SLOTS IS THE CEILING the validator allows; a sixth hue collapsed against slot 1. `iceberg` is
+ * off this chart, which is what makes five enough. Anything unmapped falls back to slot 1 rather
+ * than to a generated hue.
+ */
+export const WRITER_HUE = {
+  delta_rs: 1, dwh: 2, "spark readHeavyForPBI": 3, "spark writeHeavy": 4,
+  "spark readHeavyForSpark": 5,
+};
+
+/** `[{name, hue}]` for the writers actually plotted, in slot order — the legend's own source. */
+function legendOf(rows) {
+  const seen = new Map();
+  for (const p of rows || []) {
+    const n = String(p.label || "");
+    if (n && !seen.has(n)) seen.set(n, WRITER_HUE[n] || 1);
+  }
+  return [...seen].map(([name, hue]) => ({ name, hue })).sort((a, b) => a.hue - b.hue);
+}
+
 export function scatterSvg(title, subtitle, pts, xLabel = "cold ms", legend = "",
   fmtC = (v) => fmt(v, 1)) {
   const rows = (pts || []).filter((p) => Number.isFinite(Number(p.x)) && Number(p.x) > 0
@@ -1117,7 +1145,7 @@ export function scatterSvg(title, subtitle, pts, xLabel = "cold ms", legend = ""
   // panel; a scatter carries no row labels, only axis ticks, so giving it `main` room buys plot
   // area at an unchanged text size — 920 units into ~86rem is the same 1.5x scale 660 into 62rem
   // was. Twelve dots in a dense cluster is exactly the case that wants the area.
-  const W = 920, H = 560, L = 62, R = 16, T = 20, B = 48, LEG = 36;
+  const W = 920, H = 610, L = 62, R = 16, T = 20, B = 96, LEG = 36;
   const xs = rows.map((p) => Number(p.x)), ys = rows.map((p) => Number(p.y));
   // 4% padding, so a dot on the extreme does not sit half-outside the axis line.
   const pad = (v, k) => (v[1] - v[0]) * 0.04 * k;
@@ -1171,7 +1199,8 @@ export function scatterSvg(title, subtitle, pts, xLabel = "cold ms", legend = ""
   const hits = (b) => placed.some((q) => b.x0 < q.x1 && b.x1 > q.x0 && b.y0 < q.y1 && b.y1 > q.y0)
     || rows.some((q) => {
       const qx = px(q.x), qy = py(q.y);
-      return qx + 8 > b.x0 && qx - 8 < b.x1 && qy + 8 > b.y0 && qy - 8 < b.y1;
+      const qr = rad(q.c) + 2;
+      return qx + qr > b.x0 && qx - qr < b.x1 && qy + qr > b.y0 && qy - qr < b.y1;
     });
   // Two rings. The inner one keeps a label tight against its dot; the outer is what the dense
   // middle of the cluster needs — with one ring, two labels there exhausted every candidate and
@@ -1195,34 +1224,58 @@ export function scatterSvg(title, subtitle, pts, xLabel = "cold ms", legend = ""
     placed.push(box(t, x, y, "start"));
     return { x, y, anchor: "start" };
   };
+  // SIZE CARRIES THE ROW GROUP SIZE, and it is scaled by AREA — `r = sqrt(lerp(rMin², rMax²))`.
+  // Scaling the RADIUS instead is the classic bubble lie: the eye reads the disc, and a disc whose
+  // radius doubled has four times the area, so a 9x value would look ~80x. Range 5..13 units: wide
+  // enough to rank by eye, tight enough that the biggest dot does not swallow its neighbours in a
+  // cluster this dense. Defined before the loop that calls `label`, which is what `hits` needs it
+  // for — a label must not be placed under a dot, and the dots are no longer all one size.
   const cs = rows.map((p) => Number(p.c)).filter((v) => Number.isFinite(v));
   const cLo = cs.length ? Math.min(...cs) : 0, cHi = cs.length ? Math.max(...cs) : 0;
-  const bin = (v) => (!Number.isFinite(Number(v)) || cHi === cLo ? 3
-    : Math.min(5, 1 + Math.floor(((Number(v) - cLo) / (cHi - cLo)) * 5)));
+  const R_MIN = 5, R_MAX = 13;
+  const rad = (v) => {
+    if (!Number.isFinite(Number(v)) || cHi === cLo) return (R_MIN + R_MAX) / 2;
+    const t = (Number(v) - cLo) / (cHi - cLo);
+    return Math.sqrt(R_MIN * R_MIN + t * (R_MAX * R_MAX - R_MIN * R_MIN));
+  };
   for (const p of [...rows].sort((a, b) => Number(a.y) - Number(b.y))) {
     const cx = px(p.x), cy = py(p.y);
-    const at = label(p);
+    const at = p.id ? label(p) : { x: 0, y: 0, anchor: "start" };
     out.push(`<g><title>${esc(p.label)}${p.sub ? ` (${esc(p.sub)})` : ""}: ` +
       `${fmt(p.y, 0)} CU, ${fmt(p.x, 0)} ms ${esc(xLabel.replace(/ ms$/, ""))}` +
       `${p.n ? `, ${p.n} run(s)` : ""}</title>` +
-      `<circle class="dot s${bin(p.c)}" cx="${cx.toFixed(1)}" cy="${cy.toFixed(1)}" r="7"/>` +
-      `<text class="bar-caption" x="${at.x.toFixed(1)}" y="${at.y.toFixed(1)}"` +
-      `${at.anchor === "start" ? "" : ` text-anchor="${at.anchor}"`}>` +
-      `${esc(String(p.id || p.label))}</text></g>`);
+      `<circle class="dot c${p.hue || 1}" cx="${cx.toFixed(1)}" cy="${cy.toFixed(1)}" ` +
+      `r="${rad(p.c).toFixed(1)}"/>` +
+      (p.id ? `<text class="bar-caption" x="${at.x.toFixed(1)}" y="${at.y.toFixed(1)}"` +
+        `${at.anchor === "start" ? "" : ` text-anchor="${at.anchor}"`}>` +
+        `${esc(String(p.id))}</text>` : "") + "</g>");
   }
-  // THE RAMP LEGEND. A sequential encoding is unreadable without one — a reader can see that two dots
-  // differ and not which way. Five swatches with the observed ends labelled, so the scale is stated
-  // rather than implied.
+  // TWO LEGENDS, because there are two encodings and neither is self-evident. The writer legend is
+  // REQUIRED — colour is categorical now, and identity may never rest on colour alone; only four of
+  // the five writers carry a direct label, so without it `delta_rs` would be an unnamed hue. The
+  // size legend is three circles at the observed min, middle and max, area-scaled by the same
+  // function the dots use, so the key cannot drift from the marks.
+  const ly = T + PH + LEG + 6;
+  let lx = L;
+  for (const g of legendOf(rows)) {
+    // `key` marks legend furniture, so a plot mark and its key are never confused — by a reader
+    // scanning the markup, or by a test counting dots.
+    out.push(`<circle class="key dot c${g.hue}" cx="${lx + 6}" cy="${ly + 3}" r="6"/>`,
+      `<text class="bar-caption key" x="${lx + 16}" y="${ly + 7}">${esc(g.name)}</text>`);
+    lx += 22 + g.name.length * 5.15 + 14;
+  }
   if (cs.length && cHi > cLo && legend) {
-    const ly = T + PH + LEG + 8, sw = 26;
-    out.push(`<text class="bar-caption" x="${L}" y="${ly + 9}">${esc(legend)}</text>`);
-    for (let i = 0; i < 5; i++) {
-      out.push(`<rect class="swatch dot s${i + 1}" x="${L + 96 + i * sw}" y="${ly}" ` +
-        `width="${sw}" height="11" stroke="none"/>`);
+    const sy = ly + 26;
+    out.push(`<text class="bar-caption key" x="${L}" y="${sy + 4}">${esc(legend)}</text>`);
+    let sx = L + 8 + legend.length * 5.15;
+    for (const v of [cLo, (cLo + cHi) / 2, cHi]) {
+      const r = rad(v);
+      out.push(`<circle class="key swatch c0" cx="${(sx + R_MAX).toFixed(1)}" cy="${sy}" ` +
+        `r="${r.toFixed(1)}"/>`,
+      `<text class="bar-caption key" x="${(sx + R_MAX).toFixed(1)}" y="${sy + R_MAX + 12}" ` +
+        `text-anchor="middle">${esc(fmtC(v))}</text>`);
+      sx += R_MAX * 2 + 26;
     }
-    out.push(`<text class="bar-caption" x="${L + 90}" y="${ly + 9}" text-anchor="end">` +
-      `${esc(fmtC(cLo))}</text>`,
-    `<text class="bar-caption" x="${L + 96 + 5 * sw + 6}" y="${ly + 9}">${esc(fmtC(cHi))}</text>`);
   }
   out.push(`<line class="axis" x1="${L}" y1="${T}" x2="${L}" y2="${(T + PH).toFixed(0)}"/>`,
     `<line class="axis" x1="${L}" y1="${(T + PH).toFixed(0)}" x2="${W - R}" ` +
@@ -1457,19 +1510,14 @@ export function scatterFit(pts) {
       "off the scale on both axes" : ""),
     shown.map((p) => {
       const k = keyCells(p.members);
-      // THE LABEL IS THE TABLE'S ROW IDENTITY, not the writer. Seven of twelve dots are `delta_rs`,
-      // so the writer alone prints one word seven times and separates nothing; what tells those
-      // seven apart is the ordering, which is the column the table puts beside the writer. The
-      // writer is dropped from the label when the ordering already names it uniquely — `spark
-      // writeHeavy` needs no sort key, and `date, time · 16.0M` needs no `delta_rs`.
-      const same = shown.filter((q) => q.name === p.name).length;
-      // `unsorted` rather than the writer, for the one group whose ordering cell is a dash: it is a
-      // delta_rs point among six other delta_rs points, so falling back to the writer would print
-      // the ambiguous word this label exists to avoid.
-      const how = k.ordering === DASH ? "unsorted" : k.ordering;
-      const id = same > 1 ? `${how} · ${k.rgSize}` : p.name;
-      return { x: p.ms.cold, y: p.cu, label: p.name, id, n: p.n, sub: k.rgSize,
-        c: martSize(p.members) };
+      // LABELLED ONLY WHERE THE WRITER NAME IS UNIQUE on the plot — `dwh` and the three spark
+      // profiles. `delta_rs` is seven of the twelve dots, so labelling it would print one word seven
+      // times and separate nothing; those seven are told apart by the LEGEND's colour, and their
+      // ordering and size are one hover away. No sort key appears on the chart at all: it was the
+      // only thing making the labels long, and it is a column of the table three lines above.
+      const unique = shown.filter((q) => q.name === p.name).length === 1;
+      return { x: p.ms.cold, y: p.cu, label: p.name, id: unique ? p.name : "", n: p.n,
+        sub: k.rgSize, hue: WRITER_HUE[p.name] || 1, c: martSize(p.members) };
     }), "cold ms", "row group size", (v) => `${fmt(v / 1e6, 1)}M`);
 }
 

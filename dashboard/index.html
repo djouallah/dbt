@@ -28,17 +28,53 @@
      so a second hue would be a distinction with nothing to distinguish. The dark value is a SELECTED
      step for the dark surface, not an automatic flip of the light one. */
   --series:#2a78d6;
-  --seq1:#6ea3de; --seq2:#4482cd; --seq3:#2a64b4; --seq4:#1a4a8c; --seq5:#123564; }
+  /* CATEGORICAL, one hue per parquet writer — Okabe-Ito, which is designed for colour-vision
+     deficiency. Validated with the dataviz validator over ALL pairs, not just adjacent ones,
+     because a scatter intermixes its colours freely: on light every check passes; on dark it
+     passes chroma, normal-vision separation and contrast, and only the categorical lightness
+     BAND is out. Every re-stepped dark variant that fixed the band broke separation instead —
+     #CC79A7 against #009E73 sits at deutan dE 7.6, in the 6-8 floor band that is legal only
+     with secondary encoding, so slot 1 is pinned to the ONE writer that carries no direct
+     label and every other slot belongs to a labelled point. FIVE IS THE CEILING: a sixth hue
+     collapsed against slot 1 at protan dE 3.1. */
+  --cat1:#0072B2; --cat2:#E69F00; --cat3:#009E73; --cat4:#CC79A7; --cat5:#D55E00; }
 @media (prefers-color-scheme: dark) {
   :root { --bg:#14171a; --fg:#e8eaed; --dim:#9aa4b2; --line:#2a2f36; --head:#1c2025; --sub:#20252b;
     --code:#22262c; --series:#3987e5;
-  --seq1:#315c8e; --seq2:#4478b8; --seq3:#5f97d8; --seq4:#86b6ec; --seq5:#b3d3f7; } }
+  /* CATEGORICAL, one hue per parquet writer — Okabe-Ito, which is designed for colour-vision
+     deficiency. Validated with the dataviz validator over ALL pairs, not just adjacent ones,
+     because a scatter intermixes its colours freely: on light every check passes; on dark it
+     passes chroma, normal-vision separation and contrast, and only the categorical lightness
+     BAND is out. Every re-stepped dark variant that fixed the band broke separation instead —
+     #CC79A7 against #009E73 sits at deutan dE 7.6, in the 6-8 floor band that is legal only
+     with secondary encoding, so slot 1 is pinned to the ONE writer that carries no direct
+     label and every other slot belongs to a labelled point. FIVE IS THE CEILING: a sixth hue
+     collapsed against slot 1 at protan dE 3.1. */
+  --cat1:#0072B2; --cat2:#E69F00; --cat3:#009E73; --cat4:#CC79A7; --cat5:#D55E00; } }
 :root[data-theme="dark"] { --bg:#14171a; --fg:#e8eaed; --dim:#9aa4b2; --line:#2a2f36;
   --head:#1c2025; --sub:#20252b; --code:#22262c; --series:#3987e5;
-  --seq1:#315c8e; --seq2:#4478b8; --seq3:#5f97d8; --seq4:#86b6ec; --seq5:#b3d3f7; }
+  /* CATEGORICAL, one hue per parquet writer — Okabe-Ito, which is designed for colour-vision
+     deficiency. Validated with the dataviz validator over ALL pairs, not just adjacent ones,
+     because a scatter intermixes its colours freely: on light every check passes; on dark it
+     passes chroma, normal-vision separation and contrast, and only the categorical lightness
+     BAND is out. Every re-stepped dark variant that fixed the band broke separation instead —
+     #CC79A7 against #009E73 sits at deutan dE 7.6, in the 6-8 floor band that is legal only
+     with secondary encoding, so slot 1 is pinned to the ONE writer that carries no direct
+     label and every other slot belongs to a labelled point. FIVE IS THE CEILING: a sixth hue
+     collapsed against slot 1 at protan dE 3.1. */
+  --cat1:#0072B2; --cat2:#E69F00; --cat3:#009E73; --cat4:#CC79A7; --cat5:#D55E00; }
 :root[data-theme="light"] { --bg:#fff; --fg:#1a1a1a; --dim:#5b6472; --line:#e3e6ea; --head:#f6f7f9;
   --sub:#eef1f5; --code:#f2f3f5; --series:#2a78d6;
-  --seq1:#6ea3de; --seq2:#4482cd; --seq3:#2a64b4; --seq4:#1a4a8c; --seq5:#123564; }
+  /* CATEGORICAL, one hue per parquet writer — Okabe-Ito, which is designed for colour-vision
+     deficiency. Validated with the dataviz validator over ALL pairs, not just adjacent ones,
+     because a scatter intermixes its colours freely: on light every check passes; on dark it
+     passes chroma, normal-vision separation and contrast, and only the categorical lightness
+     BAND is out. Every re-stepped dark variant that fixed the band broke separation instead —
+     #CC79A7 against #009E73 sits at deutan dE 7.6, in the 6-8 floor band that is legal only
+     with secondary encoding, so slot 1 is pinned to the ONE writer that carries no direct
+     label and every other slot belongs to a labelled point. FIVE IS THE CEILING: a sixth hue
+     collapsed against slot 1 at protan dE 3.1. */
+  --cat1:#0072B2; --cat2:#E69F00; --cat3:#009E73; --cat4:#CC79A7; --cat5:#D55E00; }
 * { box-sizing: border-box; }
 body { margin:0; padding:2.25rem 1.25rem 4rem; background:var(--bg); color:var(--fg);
   font:15px/1.6 ui-sans-serif, -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; }
@@ -227,10 +263,12 @@ figure.chart figcaption { display:flex; flex-wrap:wrap; align-items:baseline; ga
 figure.chart svg { max-width:100%; height:auto; display:block; overflow:visible; }
 .bar { fill:var(--series); }
 /* A 2px ring in the SURFACE colour, so two dots that overlap still read as two. */
-.dot { fill:var(--seq3); stroke:var(--bg); stroke-width:2; }
-.dot.s1 { fill:var(--seq1); } .dot.s2 { fill:var(--seq2); } .dot.s3 { fill:var(--seq3); }
-.dot.s4 { fill:var(--seq4); } .dot.s5 { fill:var(--seq5); }
-.swatch { stroke:var(--line); stroke-width:1; }
+.dot { fill:var(--cat1); stroke:var(--bg); stroke-width:2; }
+.dot.c1 { fill:var(--cat1); } .dot.c2 { fill:var(--cat2); } .dot.c3 { fill:var(--cat3); }
+.dot.c4 { fill:var(--cat4); } .dot.c5 { fill:var(--cat5); }
+/* The size key's circles carry no hue — they encode the size channel alone, so giving them a
+   writer colour would say a size belongs to a writer. */
+.swatch.c0 { fill:var(--dim); opacity:.55; stroke:none; }
 /* Drawn over the bar in the page background colour, so it reads as a range ON the quantity rather
    than as a second series beside it. */
 /* Text ink, not the background: the min–max line runs from inside the bar out past its tip to the
