@@ -172,12 +172,21 @@ jobs:
       # This commit CANNOT trigger anything, and that is a property to preserve: nothing in this repo
       # answers `push` except `Dashboard`, whose path filter is `dashboard/**` and therefore never
       # matches `history/`. Putting `history/` in that filter is the one edit that would build a loop.
+      # SELF-HEALING for the page's directory listing. `record.py` writes `history/runs/index.json`
+      # in the same commit as each record, but only for a dispatch whose WORKFLOW already carried
+      # that step — a run started from an older SHA commits its record and no index, and the page
+      # then silently omits it (run 31141468318 was exactly this). Records moved to `legacy/` by
+      # hand have the same problem from the other side. This job runs after every Benchmark and daily
+      # anyway, so rebuilding the index here costs nothing and closes both holes.
+      - name: Rebuild the record index
+        run: python -c "import sys; sys.path.insert(0, '.github/scripts'); import record; record.reindex('history/runs')"
+
       - name: Commit the ledger
         run: |
           set -euo pipefail
           git config user.name  "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add history/cu.json
+          git add history/cu.json history/runs/index.json
           git diff --cached --quiet && { echo "ledger unchanged — everything settled" >&2; exit 0; }
           git commit -m "cu: capacity units as of run ${{ github.run_id }}"
           git pull --rebase --autostash origin "$BRANCH"
