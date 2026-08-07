@@ -383,8 +383,13 @@ test("a record with no sorted key groups with an unsorted run, not alone", () =>
   // All 13 existing records predate the input. They demonstrably wrote unsorted parquet, so absence
   // here is NOT the "unmeasured" case that earns a bar of its own — that case is a missing file
   // count, which is a different thing entirely.
+  // ONE engine on both sides: the engine is in the key now, so two engines never share a bar and
+  // this test would pass for the wrong reason if it kept comparing duckrun against iceberg.
+  // Both sides carry NO `sorted` key, because that is the only spelling an unsorted run has —
+  // `stats.py` records the flag when it is on and not otherwise. (`sorted: "false"` would not be
+  // that case: it is a truthy STRING, so `sortKeyOf` reads it as sorted-but-unnamed.)
   const old = lay("duckrun", 4, 27, { cfg: { vcores: "64" } });          // no `sorted` key at all
-  const off = lay("iceberg", 4, 27, { cfg: { vcores: "64" } });
+  const off = lay("duckrun", 4, 25, { cfg: { vcores: "64" }, file: "y.json" });
   assert.deepEqual(d.layoutKey(old), d.layoutKey(off));
   assert.equal(d.layoutKey(old)[2], false);
 });

@@ -1385,8 +1385,11 @@ no data at all. `all.yml`, `dbt.yml` and `cu.yml` are gone.
   mark per row — but min/max are still measured and stated in the tooltip and in `Every run`'s
   per-run rows, so the median is what the bar claims and the spread stays checkable.
   **Grouping is MEASURED, labelling is DECLARED — with ONE stated exception.** The key is
-  `(V-Order, band(row groups), sort columns)`, the first two from the parquet as `stats.py`
-  read it, so two unrelated engines that wrote the same shape *do* share a bar; the caption comes
+  `(V-Order, band(row groups), sort columns, ENGINE)`, the first two from the parquet as `stats.py`
+  read it. **Two engines never share a bar** — a reversal of the older "Power BI never sees the
+  engine" reading, which holds only if the key captures everything Power BI can tell apart, and it
+  does not: there is no SIZE element, so duckrun at 777–1,006 MB merged with `spark
+  readHeavyForSpark` at 1,235 MB under the label `duckrun, spark readHeavyForSpark`; the caption comes
   from `LAYOUT_CONFIG` so it does not re-word itself whenever a record lands. The sort element is
   the resolved COLUMN LIST, not a boolean, so two sorts on different keys never share a bar — the
   `['date','time','DUID']` and `['date','time']` runs split by file band today only by luck.

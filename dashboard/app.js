@@ -572,13 +572,21 @@ export function sameGeneration(runs, table = DEFAULTS.table) {
  * groups and the same sort read 1,823 and 1,806 CU. Segments are what Direct Lake transcodes; the
  * file count only bounds incremental framing, which this benchmark does not measure.
  *
+ * **THE ENGINE IS THE LAST ELEMENT, so two engines never share a bar.** This is a deliberate
+ * reversal of the older "Power BI never sees the engine, so the bar is one per LAYOUT" reading. That
+ * argument holds only if the key captures everything Power BI can tell apart, and it does not: the
+ * key carries no SIZE, so `duckrun` at 777–1,006 MB merged with `spark readHeavyForSpark` at
+ * 1,235 MB into one bar labelled `duckrun, spark readHeavyForSpark` — a 1.6× size spread presented
+ * as one layout, under a label that reads like an accident. Keeping the engine separate costs a few
+ * more bars and makes every bar attributable to something that was actually dispatched.
+ *
  * A measured version is possible later and would be better: per-file `date` min/max from the Delta log
  * says whether files cover disjoint date ranges, which is what a date sort actually produces.
  */
 export function layoutKey(rec, table = DEFAULTS.table) {
   const d = martStats(rec, table);
   if (d.num_row_groups === undefined || d.num_row_groups === null) return null;
-  return [Boolean(d.vorder), layoutBand(d.num_row_groups), sortKeyOf(rec, table)];
+  return [Boolean(d.vorder), layoutBand(d.num_row_groups), sortKeyOf(rec, table), rec.engine];
 }
 
 /**
