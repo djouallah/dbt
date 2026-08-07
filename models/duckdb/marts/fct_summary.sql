@@ -23,11 +23,17 @@
 -- mistake in it. Full story: LEARNINGS.md, "Two branches of one model, two different unit
 -- universes"; CLAUDE.md, "fct_summary must be a pure function of its inputs".
 --
--- sort_by is the `sorted` DISPATCH INPUT, off by default, and it now DECLARES the write layout
--- rather than delegating it: the named key ['date','DUID','time'] plus explicit geometry —
--- max_row_group_size 6000000 and target_file_size_mb 1024. ALL THREE DEFAULTS WERE MEASURED, and
--- the first two REPLACE an earlier bet that the data killed. Read the retraction before changing
--- them back.
+-- sort_by is THE `sort_by` DISPATCH INPUT AND ITS OWN SWITCH: a non-blank value declares the write
+-- layout, a blank one declares nothing and the model writes unsorted. There is no `sorted` boolean
+-- any more -- a gate sitting apart from the fields it gated let run 31158671699 be dispatched with
+-- a key and a geometry that were both inert, silently, for the price of a full build and query pass.
+--
+-- Defaults are ['date','time','price'] at max_row_group_size 16000000 / target_file_size_mb 1024.
+-- READ THE NEXT PARAGRAPH BEFORE TREATING 16M AS SETTLED: it is the geometry the measurements below
+-- call the WORST of those tried, on a `date,time` sort. It is the default because `date,time,price`
+-- at 16M is the open question -- price has only ever been measured at 24 RG (596 MB, 3,544 ms warm,
+-- the smallest and among the fastest on the page) and the two knobs have never been varied together.
+-- If that pairing does not beat the 24-RG arm, the honest move is 6000000 back.
 --
 -- 16M was chosen to copy V-Order's segment shape (spark readHeavyForPBI writes 9-11 row groups of
 -- ~16.0M rows; 143,980,961 = 8 x 16M + 15.98M, exactly 9 full segments) on the theory that segment
@@ -149,9 +155,9 @@
     incremental_strategy='merge',
     unique_key=['date', 'time', 'DUID'],
     merge_clauses={'when_matched': [{'action': 'do_nothing'}]},
-    sort_by=(env_var('DUCKDB_SORT_BY', 'date,DUID,time').split(',')
+    sort_by=(env_var('DUCKDB_SORT_BY', 'date,time,price').split(',')
              if env_var('DUCKDB_SORTED', 'false') == 'true' else none),
-    max_row_group_size=(env_var('DUCKDB_ROW_GROUP_SIZE', '6000000') | int
+    max_row_group_size=(env_var('DUCKDB_ROW_GROUP_SIZE', '16000000') | int
                         if env_var('DUCKDB_SORTED', 'false') == 'true' else none),
     target_file_size_mb=(env_var('DUCKDB_FILE_SIZE_MB', '1024') | int
                          if env_var('DUCKDB_SORTED', 'false') == 'true' else none),

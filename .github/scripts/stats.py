@@ -714,7 +714,7 @@ def declared_sort_key():
     # Fallback MUST match the model's own `env_var('DUCKDB_SORT_BY', ...)` default, or a hand run
     # with the var unset records a key it did not write. CI always sets it from the input.
     cols = [c.strip()
-            for c in os.environ.get("DUCKDB_SORT_BY", "date,DUID,time").split(",") if c.strip()]
+            for c in os.environ.get("DUCKDB_SORT_BY", "date,time,price").split(",") if c.strip()]
     return {MART: cols} if cols else {}
 
 

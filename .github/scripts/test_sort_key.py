@@ -101,7 +101,7 @@ def test_the_declared_key_comes_from_the_env_the_model_reads(stats, monkeypatch)
     monkeypatch.setenv("DUCKDB_SORT_BY", "date, time, DUID")     # spaces are the dispatch's problem
     assert stats.declared_sort_key() == {"fct_summary": ["date", "time", "DUID"]}
     monkeypatch.delenv("DUCKDB_SORT_BY")
-    assert stats.declared_sort_key() == {"fct_summary": ["date", "DUID", "time"]}, (
+    assert stats.declared_sort_key() == {"fct_summary": ["date", "time", "price"]}, (
         "must equal the model's own env_var default, or a hand run records a key it did not write")
 
 
@@ -133,8 +133,9 @@ def test_geometry_is_recorded_only_when_it_differs_from_the_baseline(stats, monk
 
 def test_the_baseline_is_history_not_the_current_dispatch_default(stats, monkeypatch):
     """THE TRAP THIS PINS: the baseline is the geometry `history/` was written under, and it must NOT
-    follow the dispatch default when that moves. It already has — `row_group_size` defaulted to
-    16000000 for the 13+ recorded runs and defaults to 6000000 since the knee was measured.
+    follow the dispatch default when that moves. That default has now moved TWICE — 16000000 for the
+    13+ oldest recorded runs, 6000000 once the knee was measured, and 16000000 again since
+    `date,time,price` became the default key — which is exactly why it cannot be read live.
 
     Were the baseline the live default, a 6M run would record `None`, share an `(engine, config)`
     column with the 16M history, and `columnsFor` — latest run per column — would hide six runs of
@@ -142,7 +143,7 @@ def test_the_baseline_is_history_not_the_current_dispatch_default(stats, monkeyp
     counts), so nothing looks broken; the CU and sources tables just report the wrong geometry.
     """
     monkeypatch.setenv("DUCKDB_SORTED", "true")
-    monkeypatch.setenv("DUCKDB_ROW_GROUP_SIZE", "6000000")   # today's default
+    monkeypatch.setenv("DUCKDB_ROW_GROUP_SIZE", "6000000")   # a default this has genuinely held
     assert stats._nonbaseline("DUCKDB_ROW_GROUP_SIZE", "16000000") == "6000000",         "a run at today's default must still record its geometry — history wrote 16M"
 
     src = pathlib.Path(stats.__file__).read_text(encoding="utf-8")

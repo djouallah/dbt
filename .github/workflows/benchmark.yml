@@ -78,23 +78,25 @@ on:
         description: "spark NEE"
         type: boolean
         default: true
-      sorted:
-        description: "duckrun writes fct_summary sorted by `sort_by` in 1 GB files, row groups sized by `row_group_size` (needs duckrun >= 0.4.44; duckrun only)"
-        type: boolean
-        default: false
-      row_group_size:
-        description: "rows per row group when `sorted` is on — any positive integer; 6000000 = 24 segments, the measured knee (8/9/19 RG all sit ~5.4-5.8s warm, 24/25/72 all ~2.7-3.2s) (duckrun only)"
+      # THE SORT IS THE FIELD ITSELF — there is no `sorted` checkbox any more, and that is the fix
+      # for the way this went wrong. A boolean gate sitting apart from the three fields it gated let
+      # run 31158671699 be dispatched with a sort key and a row-group size that were both inert,
+      # and nothing said so: it spent a full build and query pass rewriting the parquet it already
+      # had. Blank `sort_by` is now the only way to ask for no sort, so the field a user fills in is
+      # the field that takes effect.
+      sort_by:
+        description: "duckrun: sort fct_summary by — blank for no sort"
         type: string
-        default: "6000000"
+        default: "date,time,price"
+      row_group_size:
+        description: "duckrun: rows per row group"
+        type: string
+        default: "16000000"
       file_size_mb:
-        description: "target parquet file size when `sorted` is on (duckrun only)"
+        description: "duckrun: parquet file size MB"
         type: choice
         options: ["1024", "512", "128"]
         default: "1024"
-      sort_by:
-        description: "columns to sort fct_summary by when `sorted` is on — comma separated; `date,DUID,time` is 30% smaller than `date,time` at indistinguishable latency and ETL (n=4/arm) (duckrun only)"
-        type: string
-        default: "date,DUID,time"
 
       # ---- rarely touched ----------------------------------------------------------------------
       build:
@@ -174,25 +176,24 @@ env:
   # Spark leg only. writeHeavy is the workspace default, so the default dispatch writes what a plain
   # Fabric session writes — and therefore NO V-Order, which readHeavyForPBI alone enables.
   SPARK_RESOURCE_PROFILE: ${{ inputs.spark_resource_profile }}
-  # DuckDB legs only, off by default: fct_summary renders `sort_by=['date','time']` plus the
-  # declared geometry (16M-row row groups, 1 GB files — needs duckrun >= 0.4.44, which forwards the
-  # two keys through _delta_core.sql's config dict; 0.4.43 dropped them silently, see model header).
-  # Reaches the notebook through fabric_run.py's _FORWARD — a var missing from that tuple is
-  # silently inert, which is how a 4GB DUCKDB_MEMORY_LIMIT nobody could dispatch around stood for
-  # months — and reaches the `layout` job through this env, which is what puts it in the record and
-  # therefore in the dashboard's column and bar keys. iceberg parses the same model and has no such
-  # config, so only duckrun's parquet moves; see the model header for what that costs.
-  DUCKDB_SORTED: ${{ inputs.sorted && 'true' || 'false' }}
-  # Rows per row group, read by the same model config and forwarded by the same `_FORWARD` tuple.
-  # Only bites while `sorted` is on — that is where the geometry is declared at all — so a default
-  # dispatch writes exactly what it wrote before this input existed. VALIDATED IN `plan`, not here:
-  # a non-integer would otherwise reach duckrun as a string and fail mid-write, after the legs have
-  # already spent capacity.
+  # DuckDB legs only. `sort_by` is the switch AND the value: non-blank means the model declares a
+  # sort and the geometry beside it, blank means it declares neither. DUCKDB_SORTED is DERIVED here
+  # and is not an input — it stays because the model, `stats.py`'s `_nonbaseline` /
+  # `declared_sort_key`, and the dashboard's `sorted` layout key all already read it, and deriving
+  # it in one place is what makes the three impossible to disagree with the form.
+  #
+  # All four reach the notebook through fabric_run.py's `_FORWARD`, and a var missing from that
+  # tuple is SILENTLY INERT — how a 4GB DUCKDB_MEMORY_LIMIT nobody could dispatch around stood for
+  # months. They reach the `layout` job through this env, which is what puts them in the record and
+  # therefore in the dashboard's column and bar keys. iceberg parses the same model and has no sort
+  # or geometry config at all, so only duckrun's parquet moves; see the model header for the cost.
+  #
+  # `row_group_size` and `sort_by` are free text and are VALIDATED IN `plan`, not here: a typo would
+  # otherwise reach duckrun as a string and fail mid-write, after the legs have spent capacity.
+  DUCKDB_SORT_BY: ${{ inputs.sort_by }}
+  DUCKDB_SORTED: ${{ inputs.sort_by != '' && 'true' || 'false' }}
   DUCKDB_ROW_GROUP_SIZE: ${{ inputs.row_group_size }}
   DUCKDB_FILE_SIZE_MB: ${{ inputs.file_size_mb }}
-  # The sort KEY, not just on/off. `stats.py`'s `declared_sort_key()` reads THIS rather than
-  # regexing the model, because the model no longer holds a literal list to regex.
-  DUCKDB_SORT_BY: ${{ inputs.sort_by }}
   BENCH_ENGINES: ${{ inputs.engines }}
   BENCH_RUNS: ${{ inputs.runs }}
   BENCH_THINK_SECONDS: ${{ inputs.think_seconds }}
@@ -223,7 +224,14 @@ jobs:
           RUNIN_CORES: ${{ inputs.cores }}
           RUNIN_SPARK_RESOURCE_PROFILE: ${{ inputs.spark_resource_profile }}
           RUNIN_NATIVE_EXECUTION_ENGINE: ${{ inputs.native_execution_engine }}
-          RUNIN_SORTED: ${{ inputs.sorted }}
+          # The three duckdb write knobs, which this block did NOT carry — so a record could not say
+          # what sort or geometry its dispatch asked for, and answering "what did that run request?"
+          # meant reading the workflow file at that SHA. `_init()` skips an empty value, so a blank
+          # `sort_by` (no sort) correctly records no key rather than an empty string. These are the
+          # INTENT; `layout.config` is what was measured, and the dashboard groups on that.
+          RUNIN_SORT_BY: ${{ inputs.sort_by }}
+          RUNIN_ROW_GROUP_SIZE: ${{ inputs.row_group_size }}
+          RUNIN_FILE_SIZE_MB: ${{ inputs.file_size_mb }}
           RUNIN_SKIP_DOWNLOAD: ${{ inputs.skip_download }}
           RUNIN_DOWNLOAD_LIMIT: ${{ inputs.download_limit }}
           RUNIN_RUNS: ${{ inputs.runs }}
@@ -293,14 +301,22 @@ jobs:
           rg = (os.environ.get("ROW_GROUP_SIZE") or "").strip()
           if not rg.isdigit() or int(rg) < 1:
               sys.exit(f"row_group_size must be a positive integer, got {rg!r}")
-          # Shape only — plain identifiers, comma separated. A name that is well-formed but not a
-          # column of the model still fails in the leg; that needs the manifest, which lives in the
-          # notebook. This catches the typo class (`date;time`, `date, `, quoting, injection).
-          cols = [c.strip() for c in (os.environ.get("SORT_BY") or "").split(",") if c.strip()]
-          if not cols or not all(re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", c) for c in cols):
-              sys.exit(f"sort_by must be comma-separated column names, got "
-                       f"{os.environ.get('SORT_BY')!r}")
-          sys.stderr.write(f"row_group_size={int(rg):,} rows, sort_by={cols}\n")
+          # BLANK IS LEGAL AND MEANS NO SORT — it is the only way to ask for one now that the
+          # `sorted` checkbox is gone, so rejecting it here would make an unsorted run undispatchable.
+          # Anything NON-blank must be well formed: plain identifiers, comma separated. A name that
+          # is well-formed but not a column of the model still fails in the leg; that needs the
+          # manifest, which lives in the notebook. This catches the typo class (`date;time`, `date, `,
+          # quoting, injection) — and it catches whitespace-only, which would otherwise read as
+          # "sorted" to the workflow env while giving the model no usable key.
+          raw = os.environ.get("SORT_BY") or ""
+          cols = [c.strip() for c in raw.split(",") if c.strip()]
+          if raw.strip() and not all(re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", c) for c in cols):
+              sys.exit(f"sort_by must be comma-separated column names, got {raw!r}")
+          if raw and not raw.strip():
+              sys.exit(f"sort_by is whitespace, which reads as sorted but names no column; "
+                       f"leave it EMPTY for no sort")
+          sys.stderr.write(f"row_group_size={int(rg):,} rows, "
+                           f"sort_by={cols or 'none (unsorted)'}\n")
           LEGS = {
               "duckrun": ("fabric", {"engine": "duckrun", "label": "delta_rs"}),
               "iceberg": ("fabric", {"engine": "iceberg", "label": "iceberg"}),
