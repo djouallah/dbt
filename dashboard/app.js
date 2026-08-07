@@ -1062,6 +1062,108 @@ export function chartSvg(title, subtitle, rowsIn) {
   return out.join("\n");
 }
 
+/**
+ * `{lo, hi, ticks}` bracketing `[min,max]` on round numbers.
+ *
+ * The STEP is what gets snapped to 1/2/2.5/5 × a power of ten — not the bound. Snapping the bound
+ * itself is the obvious version and it is wrong: it rounds a 5,237 maximum up to 10,000, and the
+ * whole cloud then lives in the left third of the plot with two thirds of the panel empty. Caught by
+ * rendering it and measuring where the dots landed, which is the only way this class of bug shows up.
+ */
+function niceScale(min, max, want = 4) {
+  const lo0 = Number(min), hi0 = Number(max);
+  const span = (hi0 - lo0) || Math.abs(hi0) || 1;
+  const raw = span / want;
+  const mag = 10 ** Math.floor(Math.log10(raw));
+  const n = raw / mag;
+  const step = (n <= 1 ? 1 : n <= 2 ? 2 : n <= 2.5 ? 2.5 : n <= 5 ? 5 : 10) * mag;
+  const lo = Math.floor(lo0 / step) * step;
+  const hi = Math.ceil(hi0 / step) * step;
+  const ticks = [];
+  for (let t = lo; t <= hi + step / 1e6; t += step) ticks.push(t);
+  return { lo, hi, ticks };
+}
+
+/**
+ * CU against query time, one dot per layout — the relationship the ranked table cannot show.
+ *
+ * WHY A SCATTER AND NOT A THIRD BAR CHART: the table above ranks by CU and the reader can already
+ * read `hot ms` off the same row, but a ranking is blind to whether the two move TOGETHER. Two
+ * quantitative measures whose association is the question is exactly the scatter's job — and the
+ * answer here reads off the shape rather than off any single row: the cheapest layouts are the
+ * SLOWEST, so paying more CU does not buy latency.
+ *
+ * **ONE SERIES, so no categorical palette and no legend.** Every dot is the same `--series` the bars
+ * already use; identity comes from a direct label on the outliers and a `<title>` on every mark, so
+ * nothing is encoded in colour alone and there is no hue order to get wrong. Thirteen hues for
+ * thirteen layouts would be past the point any palette stays separable under CVD, and the table
+ * directly above IS the table view of these same points.
+ *
+ * NOT ZERO-BASED, deliberately: a scatter shows association, not magnitude, so the axes bracket the
+ * data. (The zero-baseline rule is a BAR rule — a truncated bar misstates a ratio, a truncated
+ * scatter axis does not.)
+ */
+export function scatterSvg(title, subtitle, pts) {
+  const rows = (pts || []).filter((p) => Number.isFinite(Number(p.x)) && Number(p.x) > 0
+    && Number.isFinite(Number(p.y)) && Number(p.y) > 0);
+  if (rows.length < 2) return "";
+  const W = WIDTH, H = 300, L = 58, R = 14, T = 18, B = 40;
+  const xs = rows.map((p) => Number(p.x)), ys = rows.map((p) => Number(p.y));
+  // 4% padding, so a dot on the extreme does not sit half-outside the axis line.
+  const pad = (v, k) => (v[1] - v[0]) * 0.04 * k;
+  const xr = [Math.min(...xs), Math.max(...xs)], yr = [Math.min(...ys), Math.max(...ys)];
+  const X = niceScale(xr[0] - pad(xr, 1), xr[1] + pad(xr, 1));
+  const Y = niceScale(yr[0] - pad(yr, 1), yr[1] + pad(yr, 1));
+  const px = (v) => L + (W - L - R) * ((Number(v) - X.lo) / ((X.hi - X.lo) || 1));
+  const py = (v) => T + (H - T - B) * (1 - (Number(v) - Y.lo) / ((Y.hi - Y.lo) || 1));
+  const out = [
+    '<figure class="chart">' +
+    `<figcaption><span class="chart-title">${esc(title)}</span>` +
+    `<span class="chart-sub">${esc(subtitle)}</span></figcaption>`,
+    `<svg viewBox="0 0 ${W} ${H}" width="100%" height="${H}" role="img" ` +
+    `aria-label="${esc(title)}">`,
+  ];
+  for (const t of Y.ticks) {
+    out.push(`<line class="axis" x1="${L}" y1="${py(t).toFixed(1)}" x2="${W - R}" ` +
+      `y2="${py(t).toFixed(1)}"/>`,
+    `<text class="bar-value" x="${L - 8}" y="${(py(t) + 4).toFixed(1)}" text-anchor="end">` +
+      `${fmt(t, 0)}</text>`);
+  }
+  for (const t of X.ticks) {
+    out.push(`<text class="bar-value" x="${px(t).toFixed(1)}" y="${H - B + 20}" ` +
+      `text-anchor="middle">${fmt(t, 0)}</text>`);
+  }
+  out.push(`<text class="bar-caption" x="${(L + (W - L - R) / 2).toFixed(0)}" y="${H - 6}" ` +
+    `text-anchor="middle">hot ms</text>`,
+  `<text class="bar-caption" x="14" y="${(T + (H - T - B) / 2).toFixed(0)}" ` +
+    `text-anchor="middle" transform="rotate(-90 14 ${(T + (H - T - B) / 2).toFixed(0)})">CU</text>`);
+  // Labelled SELECTIVELY — the cheapest, the fastest and the dearest. A name on all thirteen is a
+  // thicket at this size, and every dot carries the full identity in its `<title>`.
+  const named = new Set([
+    rows.reduce((a, b) => (Number(a.y) <= Number(b.y) ? a : b)),
+    rows.reduce((a, b) => (Number(a.x) <= Number(b.x) ? a : b)),
+    rows.reduce((a, b) => (Number(a.y) >= Number(b.y) ? a : b))]);
+  for (const p of rows) {
+    const cx = px(p.x), cy = py(p.y);
+    // The label sits right of its dot unless that would run past the plot, in which case it flips to
+    // the left. The cheapest-CU point is often also the slowest, i.e. hard against the right edge —
+    // `spark readHeavyForPBI` ran 10px past the viewBox before this, which no amount of reading the
+    // code would have shown.
+    const wide = String(p.label).length * 5.4;
+    const flip = cx + 9 + wide > W - R;
+    out.push(`<g><title>${esc(p.label)}${p.sub ? ` (${esc(p.sub)})` : ""}: ` +
+      `${fmt(p.y, 0)} CU, ${fmt(p.x, 0)} ms hot${p.n ? `, ${p.n} run(s)` : ""}</title>` +
+      `<circle class="dot" cx="${cx.toFixed(1)}" cy="${cy.toFixed(1)}" r="5"/>` +
+      (named.has(p) ? `<text class="bar-caption" x="${(cx + (flip ? -9 : 9)).toFixed(1)}" ` +
+        `y="${(cy + 4).toFixed(1)}"${flip ? ' text-anchor="end"' : ""}>${esc(p.label)}</text>`
+        : "") + "</g>");
+  }
+  out.push(`<line class="axis" x1="${L}" y1="${T}" x2="${L}" y2="${H - B}"/>`,
+    `<line class="axis" x1="${L}" y1="${H - B}" x2="${W - R}" y2="${H - B}"/>`);
+  out.push("</svg></figure>");
+  return out.join("\n");
+}
+
 // ------------------------------------------------------------------------------------- the page
 
 
@@ -1315,7 +1417,14 @@ export function renderFit(groups, times, tiers) {
           ...cols.map((l) => (p.ms[l] ? fmt(p.ms[l], 0) : DASH))];
       }),
       { sort: true }),
-  ].join("\n");
+    // The same points as the table, plotted against each other. A ranked table cannot show whether
+    // two measures move TOGETHER, which is the one question `CU` and `hot ms` side by side invite.
+    // Only where `hot` was measured — a history with no query half has no x to plot.
+    scatterSvg("CU against query time", "one dot per layout — hot ms across, CU up",
+      pts.filter((p) => p.ms.hot).map((p) => ({
+        x: p.ms.hot, y: p.cu, label: p.name, n: p.n, sub: keyCells(p.members).rgSize,
+      }))),
+  ].filter(Boolean).join("\n");
 }
 
 export function groupRows(groups, table = DEFAULTS.table) {

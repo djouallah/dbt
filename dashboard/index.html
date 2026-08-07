@@ -215,6 +215,9 @@ figure.chart figcaption { display:flex; flex-wrap:wrap; align-items:baseline; ga
 .chart-sub { color:var(--dim); font-size:.78rem; }
 figure.chart svg { max-width:100%; height:auto; display:block; overflow:visible; }
 .bar { fill:var(--series); }
+/* A 2px ring in the SURFACE colour, so two dots that overlap still read as two. The scatter is one
+   series, so the ring is the only separator it has. */
+.dot { fill:var(--series); stroke:var(--bg); stroke-width:2; }
 /* Drawn over the bar in the page background colour, so it reads as a range ON the quantity rather
    than as a second series beside it. */
 /* Text ink, not the background: the min–max line runs from inside the bar out past its tip to the

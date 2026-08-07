@@ -2718,3 +2718,50 @@ test("row group size is rows per group in millions, ranged when the group differ
   assert.equal(derived.rgSize, "6.0M", "total_rows / num_row_groups when the field is absent");
   assert.equal(d.keyCells([{ rec: full("e-5.json", "spark") }]).rgSize, "—", "unmeasured is a dash");
 });
+
+// ------------------------------------------------------------------- CU against query time (scatter)
+
+const pt = (label, x, y, n = 1) => ({ label, x, y, n, sub: "16.0M" });
+
+test("the scatter brackets the data on round ticks, not on a snapped bound", () => {
+  // THE BUG THIS PINS, found by rendering it and measuring where the dots landed: snapping the
+  // BOUND to 1/2/2.5/5/10x a power of ten rounds a 5,237 maximum up to 10,000, and the whole cloud
+  // then lives in the left third with two thirds of the panel empty. The STEP is what snaps.
+  const svg = d.scatterSvg("t", "s", [pt("a", 2773, 1514), pt("b", 5237, 8641)]);
+  const xs = [...svg.matchAll(/<circle class="dot" cx="([\d.]+)"/g)].map((m) => +m[1]);
+  const span = Math.max(...xs) - Math.min(...xs);
+  assert.ok(span > (646 - 58) * 0.5, `the cloud fills the plot, not a corner: ${span.toFixed(0)}px`);
+  assert.ok(!/NaN|Infinity/.test(svg), "no degenerate geometry");
+});
+
+test("every dot carries its identity in a title, and only the outliers are labelled", () => {
+  // ONE SERIES, so nothing is encoded in colour and there is no legend. Thirteen hues for thirteen
+  // layouts is past where any palette stays separable under CVD; a name on all thirteen is a
+  // thicket at this size. The table directly above is the table view of these same points.
+  const svg = d.scatterSvg("t", "s", [pt("cheap", 5000, 1000), pt("mid", 4000, 2000, 3),
+    pt("dear", 3000, 9000), pt("fast", 2000, 5000)]);
+  assert.equal([...svg.matchAll(/<title>/g)].length, 4, "one title per dot");
+  assert.ok(svg.includes("<title>mid (16.0M): 2,000 CU, 4,000 ms hot, 3 run(s)</title>"));
+  const named = [...svg.matchAll(/<text class="bar-caption"[^>]*>([^<]+)</g)].map((m) => m[1]);
+  assert.ok(named.includes("cheap") && named.includes("dear") && named.includes("fast"));
+  assert.ok(!named.includes("mid"), "the interior point is not labelled");
+  assert.ok(!svg.includes("<legend") && !/fill="#/.test(svg), "no legend, no hardcoded colour");
+});
+
+test("a label that would overrun the plot flips to the left of its dot", () => {
+  // The cheapest-CU point is often also the slowest, i.e. hard against the right edge.
+  const svg = d.scatterSvg("t", "s", [pt("a-very-long-writer-name-indeed", 9999, 1000),
+    pt("b", 1000, 2000)]);
+  assert.ok(svg.includes('text-anchor="end"'), "flipped rather than allowed to overflow");
+  for (const m of svg.matchAll(/<text class="bar-caption" x="([\d.]+)"[^>]*>([^<]+)</g)) {
+    if (m[2] === "hot ms" || m[2] === "CU") continue;
+    assert.ok(+m[1] <= 660, `label starts inside the viewBox: ${m[2]} at ${m[1]}`);
+  }
+});
+
+test("fewer than two points is no chart at all", () => {
+  assert.equal(d.scatterSvg("t", "s", []), "");
+  assert.equal(d.scatterSvg("t", "s", [pt("a", 1, 1)]), "", "one dot shows no relationship");
+  assert.equal(d.scatterSvg("t", "s", [pt("a", 0, 5), pt("b", 3, 0)]), "",
+    "a missing measure is dropped, not plotted at zero");
+});
