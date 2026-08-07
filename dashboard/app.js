@@ -2415,6 +2415,19 @@ export function renderPage(cols, runs, ledger, opts = {}) {
   }
   const groups = layoutGroups(anaEntries, martTable);
 
+  // The mart block and the charts quote the SAME numbers as this table — the same groups, the same
+  // members, the same median, all of it through `martPoints`. They are one measurement described
+  // three ways, and a page printing dwh at 1,916 in a bar and 1,960 in the row under it would be
+  // inviting the reader to work out which one it meant. The timings are keyed per RUN for the same
+  // reason the CU is: a group's tiers are its own runs' median, not its column's newest record.
+  const { times, counts } = queryTime(anaEntries.map(({ qid, rec }) => ({ col: qid, rec })));
+
+  // FIRST, ABOVE THE CHARTS. It carries everything a bar does — the same median, from the same
+  // `martPoints` — plus the grouping key, the sample size and the three query tiers, as numbers
+  // rather than as bar lengths. A reader who wants one thing from this page wants this table; the
+  // charts are the same content made scannable, so they follow it rather than introduce it.
+  out.push(renderFit(groups, times, TIERS.map(([l]) => l).filter((l) => l in counts)));
+
   // TWO CHARTS, STACKED, AND THEY ARE KEYED ON DIFFERENT THINGS — that is the design, not an
   // inconsistency to tidy. Analytics is ONE BAR PER LAYOUT, because Power BI never sees the engine:
   // it opens parquet through Direct Lake and transcodes row groups, so what a query costs belongs to
@@ -2452,17 +2465,6 @@ export function renderPage(cols, runs, ledger, opts = {}) {
     .filter((e) => ADAPTER_URLS[e])
     .map((e) => `[${STACK[e][0]}](${ADAPTER_URLS[e]}) — ${STACK[e][1]}`)
     .join("<br>")));
-
-  // The mart block and the fit chart quote the SAME numbers as the analytics bars above — the same
-  // groups, the same members, the same mean, all of it through `martPoints`. They are one measurement
-  // described three ways, and a page printing dwh at 1,916 in a bar and 1,960 in the row under it
-  // would be inviting the reader to work out which one it meant. The timings are keyed per RUN for the
-  // same reason the CU is: a group's tiers are its own runs' mean, not its column's newest record.
-  const { times, counts } = queryTime(anaEntries.map(({ qid, rec }) => ({ col: qid, rec })));
-
-  // What each layout cost to query and how long it took, together. `Table layout` is physical layout
-  // alone; these are the numbers that used to sit beside it.
-  out.push(renderFit(groups, times, TIERS.map(([l]) => l).filter((l) => l in counts)));
 
   out.push("<h3>Cost by engine</h3>");
   const secsCol = Object.fromEntries(cols.map(({ col, rec }) =>

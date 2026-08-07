@@ -2090,8 +2090,14 @@ test("cost and speed is one table, cheapest first, with a title and nothing else
   ]), ledger({ OUT: 1.0, SEM: 2.0 }));
   const at = out.indexOf("<h3>Cost and speed by layout</h3>");
   assert.ok(at > 0, "the table is on the page");
-  assert.ok(out.indexOf('<div class="charts">') < at, "after the two bar charts");
-  assert.ok(at < out.indexOf("<h3>Cost by engine</h3>"), "before the cost table");
+  // FIRST, above the charts. It carries what a bar does — the same median from the same
+  // `martPoints` — plus the grouping key, the sample size and the tiers, as numbers rather than bar
+  // lengths, so it is what a reader wanting one thing from this page should meet first.
+  // The selector is `<figure class="chart">`, the markup `chartSvg` actually emits: this line read
+  // `<div class="charts">` for as long as it existed, which is in no version of the page, so it
+  // compared -1 against a positive index and passed whatever the order was.
+  assert.ok(at < out.indexOf('<figure class="chart">'), "above the bar charts");
+  assert.ok(at < out.indexOf("<h3>Cost by engine</h3>"), "and above the cost table");
   // The GROUPING KEY is printed between the label and the numbers — six rows reading
   // `duckrun sorted` with nothing to tell them apart is a table hiding what it grouped on.
   const head = rows(out).find((r) => r.startsWith("| layout | V-Order | sorted by | RG | runs | CU |"));
