@@ -1858,6 +1858,37 @@ test("the loader reads raw for files and the contents API for the listing", asyn
   assert.ok(!seen.some((u) => u.includes("legacy") || u.includes("notes.md")));
 });
 
+test("the listing comes from a committed index, and the contents API is only the fallback", async () => {
+  // The API is 60 requests/hour/IP unauthenticated and answers 403 after that — on a shared or
+  // corporate egress IP a reader hits it long before they have loaded the page 60 times, and gets a
+  // page with no data. `history/runs/index.json` is served by raw, which has no such limit.
+  const seen = [];
+  const fake = async (url) => {
+    seen.push(url);
+    if (url.endsWith("runs/index.json")) {
+      return { ok: true, json: async () => ["b-2.json", "a-1.json", "index.json", "legacy/x.json"] };
+    }
+    if (url.includes("api.github.com")) throw new Error("the API must not be touched");
+    if (url.endsWith("cu.json")) return { ok: true, json: async () => ledger({ OUT: 1.0 }) };
+    return { ok: true, json: async () => full(url.split("/").pop(), "spark") };
+  };
+  const { names } = await d.loadRemote({ fetch: fake, repo: "o/r", ref: "main" });
+  assert.deepEqual(names, ["a-1.json", "b-2.json"], "sorted; itself and legacy/ filtered out");
+  assert.ok(!seen.some((u) => u.includes("api.github.com")), "no contents API call at all");
+
+  // ...and a fork or branch with no index still renders, through the API.
+  const noIndex = async (url) => {
+    if (url.endsWith("runs/index.json")) return { ok: false, status: 404, statusText: "Not Found" };
+    if (url.includes("api.github.com")) {
+      return { ok: true, json: async () => [{ type: "file", name: "a-1.json" }] };
+    }
+    if (url.endsWith("cu.json")) return { ok: true, json: async () => ledger({ OUT: 1.0 }) };
+    return { ok: true, json: async () => full("a-1.json", "spark") };
+  };
+  assert.deepEqual((await d.loadRemote({ fetch: noIndex, repo: "o/r", ref: "main" })).names,
+    ["a-1.json"]);
+});
+
 test("one unreadable record does not cost the whole page", async () => {
   const fake = async (url) => {
     if (url.includes("api.github.com")) {

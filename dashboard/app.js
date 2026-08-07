@@ -2568,9 +2568,14 @@ export function compose(records, ledgerDoc, opts = {}) {
 // ------------------------------------------------------------------------------------ the loader
 //
 // Live data comes from raw.githubusercontent.com, which serves the repo's own files with
-// `Access-Control-Allow-Origin: *` and a ~5 minute CDN TTL. The DIRECTORY LISTING cannot come from
-// there — raw serves files, not indexes — so it comes from the contents API, which is also CORS-open
-// and rate-limited to 60 requests per hour per IP unauthenticated. One call per page load.
+// `Access-Control-Allow-Origin: *` and a ~5 minute CDN TTL. Raw serves FILES, not indexes, so the
+// directory listing is itself a file: `history/runs/index.json`, written by `record.py` in the same
+// commit as the record it names.
+//
+// THE CONTENTS API IS THE FALLBACK, NOT THE PATH. It is CORS-open but rate-limited to 60 requests
+// per hour per IP unauthenticated, and a reader who runs out gets a 403 and a page with no data on
+// it — which is what happens on a shared or corporate egress IP long before anyone has looked at
+// the page 60 times. It stays as the fallback so a branch or fork with no index still renders.
 
 const jsonOf = async (url, fetchImpl) => {
   const r = await fetchImpl(url, { headers: { Accept: "application/json" } });
@@ -2586,13 +2591,17 @@ export async function loadRemote(opts = {}) {
   const raw = `https://raw.githubusercontent.com/${repo}/${ref}/`;
   const api = `https://api.github.com/repos/${repo}/contents/history/runs` +
     `?ref=${encodeURIComponent(ref)}`;
-  // `legacy/` is a directory and is filtered out here, which is the same thing the old loader did by
-  // only reading `history/runs/*.json` at the top level: those records predate the item GUIDs and
-  // cannot be joined to a ledger at all.
-  const listing = await jsonOf(api, fetchImpl);
-  const names = (Array.isArray(listing) ? listing : [])
-    .filter((e) => e.type === "file" && e.name.endsWith(".json"))
-    .map((e) => e.name).sort();
+  // `legacy/` is a directory and is filtered out on both paths: those records predate the item GUIDs
+  // and cannot be joined to a ledger at all.
+  const keep = (n) => typeof n === "string" && n.endsWith(".json")
+    && n !== "index.json" && !n.includes("/");
+  const fromIndex = await jsonOf(raw + "history/runs/index.json", fetchImpl).catch(() => null);
+  let names = Array.isArray(fromIndex) ? fromIndex.filter(keep).sort() : [];
+  if (!names.length) {
+    const listing = await jsonOf(api, fetchImpl);
+    names = (Array.isArray(listing) ? listing : [])
+      .filter((e) => e.type === "file" && keep(e.name)).map((e) => e.name).sort();
+  }
   const [ledger, ...records] = await Promise.all([
     jsonOf(raw + "history/cu.json", fetchImpl).catch(() => null),
     ...names.map((n) => jsonOf(raw + "history/runs/" + n, fetchImpl)

@@ -876,7 +876,9 @@ jobs:
           set -euo pipefail
           git config user.name  "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add "${{ steps.rec.outputs.path }}"
+          # index.json alongside the record it names, in ONE commit — it is the page's directory
+          # listing (raw serves files, not indexes) and a lagging index is a page missing a run.
+          git add "${{ steps.rec.outputs.path }}" history/runs/index.json
           git diff --cached --quiet && { echo "record identical to HEAD" >&2; exit 0; }
           git commit -m "record: run ${{ github.run_id }} (${{ inputs.engines }})"
           git pull --rebase --autostash origin "${{ github.ref_name }}"

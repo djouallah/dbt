@@ -160,7 +160,35 @@ def finish(frag_dir, bench, dest):
                            key=lambda kv: (kv[1].get("role", ""), kv[1].get("name", ""))):
         sys.stderr.write(f"    {it.get('role', '?'):<15} {it.get('name', '?'):<24} {guid}"
                          + ("  (deleted)" if it.get("deleted") else "") + "\n")
+    reindex(os.path.dirname(dest))
     return dest
+
+
+def reindex(run_dir):
+    """Write `<run_dir>/index.json` — the record filenames, sorted. Best-effort.
+
+    WHY: the page listed this directory through the GitHub CONTENTS API, which is 60 requests per
+    hour per IP unauthenticated and returns 403 when that runs out — one wasted page load per
+    reader, and the page then shows an error instead of the data. raw.githubusercontent.com serves
+    repo files with no such limit, but it serves FILES and not indexes, so the index has to be a
+    file. Committed beside the records it names, in the same commit, so it cannot lag them.
+
+    `legacy/` is excluded here exactly as the loader excluded directories: those records predate the
+    item GUIDs and cannot be joined to a ledger.
+
+    A record moved by hand without re-running this leaves the index stale; the loader drops a name it
+    cannot fetch and falls back to the contents API when the index is missing entirely, so the
+    failure is a slightly short page rather than an error.
+    """
+    try:
+        names = sorted(f for f in os.listdir(run_dir)
+                       if f.endswith(".json") and f != "index.json"
+                       and os.path.isfile(os.path.join(run_dir, f)))
+        with open(os.path.join(run_dir, "index.json"), "w", encoding="utf-8") as f:
+            json.dump(names, f, indent=1)
+        sys.stderr.write(f"  indexed {len(names)} record(s) -> {run_dir}/index.json\n")
+    except Exception as e:                              # noqa: BLE001 — never fail the record job
+        sys.stderr.write(f"  index not written ({type(e).__name__}: {e})\n")
 
 
 if __name__ == "__main__":
