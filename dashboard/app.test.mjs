@@ -1475,7 +1475,7 @@ test("the three tiers are columns of the PER-RUN table, not of the layout block"
   const heads = rows(out).filter((r) => r.includes("cold ms"));
   assert.equal(heads.length, 2, `two headers carry the tiers: ${heads}`);
   assert.ok(heads.some((h) =>
-    h.startsWith("| layout | ordering | dictionary | RG | runs | CU | cold ms | warm ms | hot ms |")),
+    h.startsWith("| parquet writer | ordering | dictionary | RG | runs | CU | cold ms | warm ms | hot ms |")),
   heads[0]);
   assert.ok(heads.some((h) =>
     h.includes("| etl CU | analytics CU | cold ms | warm ms | hot ms | items |")), heads[1]);
@@ -2102,7 +2102,7 @@ test("cost and speed is one table, cheapest first, with a title and nothing else
   // `duckrun sorted` with nothing to tell them apart is a table hiding what it grouped on.
   // V-Order and the sort key share ONE cell: same kind of fact (a write-time row arrangement), and
   // as two columns each was a dash on every row the other was not.
-  const head = rows(out).find((r) => r.startsWith("| layout | ordering | dictionary | RG | runs | CU |"));
+  const head = rows(out).find((r) => r.startsWith("| parquet writer | ordering | dictionary | RG | runs | CU |"));
   assert.ok(head, "layout, the key, the sample size, CU, then the tiers");
   assert.ok(head.includes("| cold ms | warm ms | hot ms |"), head);
   // A TITLE AND NOTHING ELSE — no verdict, no correlation, no reading of the numbers.

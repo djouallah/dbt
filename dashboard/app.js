@@ -1246,7 +1246,8 @@ export function renderFit(groups, times, tiers) {
     // tell them apart is a table asking the reader to trust a grouping it will not show; these three
     // columns ARE `layoutKey` (the engine is already in the label) plus the sample size behind each
     // median, which is what says whether a row is one dispatch or seven.
-    table(["layout", "ordering", "dictionary", "RG", "runs", "CU", ...cols.map((l) => `${l} ms`)],
+    table(["parquet writer", "ordering", "dictionary", "RG", "runs", "CU",
+      ...cols.map((l) => `${l} ms`)],
       ["left", "left", "left", "right", "right", "right", ...cols.map(() => "right")],
       pts.map((p) => {
         const k = keyCells(p.members);
