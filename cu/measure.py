@@ -158,14 +158,26 @@ def die(msg):
 # --------------------------------------------------------------------------------- the metrics model
 
 def execute_dax(dax, tries=4, fatal=True):
-    """POST one DAX query. Retries the rate limits, honouring `Retry-After` when it is given."""
+    """POST one DAX query. Retries the rate limits, honouring `Retry-After` when it is given.
+
+    **500 IS IN THE RETRY SET, and it was the omission that cost a run.** The list read
+    429/502/503/504 — every transient status except the one the service actually returns most
+    often — so run 31145654785 hung four minutes and died on a bare
+    `executeQueries returned 500: {"Message":"An error has occurred."}`, with nothing wrong on this
+    side. Fabric produced a matching 500 on the control plane in the same four-minute window and
+    took a teardown down with it (see `provision.py`'s `_req`).
+
+    Retrying is risk-free HERE specifically: every read re-reads the whole window from the floor and
+    merges with `max(old, new)`, so a repeated query is idempotent and monotonic by construction.
+    401/403 stay fatal below — those are a credential problem and must remain loud.
+    """
     url = f"{PBI}/groups/{WS}/datasets/{MODEL}/executeQueries"
     body = {"queries": [{"query": dax}], "serializerSettings": {"includeNulls": True}}
     for i in range(tries):
         r = requests.post(url, headers={"Authorization": f"Bearer {TOKEN}"}, json=body, timeout=300)
         if r.status_code == 200:
             return r.json()["results"][0]["tables"][0].get("rows", [])
-        if r.status_code in (429, 502, 503, 504) and i < tries - 1:
+        if r.status_code in (429, 500, 502, 503, 504) and i < tries - 1:
             wait = int(r.headers.get("Retry-After") or min(60, 5 * 2 ** i))
             log(f"  {r.status_code} from executeQueries; retrying in {wait}s")
             time.sleep(wait)

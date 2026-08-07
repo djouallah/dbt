@@ -123,9 +123,56 @@ def fabric_token():
 
 H = {"Authorization": "Bearer " + fabric_token()}
 
+# Statuses worth trying again. Fabric hands back a bare 500 often enough to matter: run
+# 31144099879's TEARDOWN died on `GET /workspaces/*/folders`, and the CU read died on
+# `executeQueries` four minutes later — one bad four-minute window, two red runs, no code fault in
+# either. 429 is the documented throttle.
+_RETRY_STATUS = (429, 500, 502, 503, 504)
+# Resolved off the module rather than imported, so the offline tests can keep substituting a plain
+# namespace of verb functions for `requests` without also having to fake its exception tree. Real
+# `requests` gives the precise base class; a stub without one degrades to `Exception`, which is
+# correct for a stub that never raises transport errors in the first place.
+_TRANSPORT_ERROR = getattr(getattr(requests, "exceptions", None), "RequestException", Exception)
+
+
+def _req(method, url, *, tries=3, **kw):
+    """One Fabric REST call, retried on TRANSIENT failures only, then returned AS-IS.
+
+    **5xx, 429 and connection errors, nothing else.** A 4xx is a real answer that a caller here
+    already reads: `409 ItemDisplayNameNotAvailableYet` has its own 40x15s poll in `ensure()`, and a
+    404 from a DELETE means the item is already gone, which `drop_guid()` counts as success.
+    Retrying those would either fight a caller that handles it or paper over a genuine bug.
+
+    Exhausting the retries returns the LAST RESPONSE rather than raising, so every `raise_for_status`
+    and every `status_code in (...)` check downstream sees exactly what it saw before this existed —
+    the blast radius of adding this is a delay, never a different control flow. Only a connection
+    error, which has no response to hand back, re-raises.
+    """
+    kw.setdefault("headers", H)
+    kw.setdefault("timeout", 60)
+    call = getattr(requests, method.lower())
+    resp = exc = None
+    for attempt in range(1, tries + 1):
+        if attempt > 1:
+            time.sleep(2 ** (attempt - 1))
+        try:
+            resp, exc = call(url, **kw), None
+        except _TRANSPORT_ERROR as e:
+            resp, exc = None, e
+            sys.stderr.write(f"  {method} …/{url.rsplit('/', 1)[-1]}: {type(e).__name__} "
+                             f"(attempt {attempt}/{tries})\n")
+            continue
+        if resp.status_code not in _RETRY_STATUS:
+            return resp
+        sys.stderr.write(f"  {method} …/{url.rsplit('/', 1)[-1]}: {resp.status_code} transient "
+                         f"(attempt {attempt}/{tries})\n")
+    if resp is not None:
+        return resp
+    raise exc
+
 
 def find(kind, name):
-    r = requests.get(f"{FAB}/workspaces/{ws}/{kind}", headers=H)
+    r = _req("GET", f"{FAB}/workspaces/{ws}/{kind}")
     r.raise_for_status()
     return next((i for i in r.json().get("value", []) if i["displayName"] == name), None)
 
@@ -136,7 +183,7 @@ def ensure_folder(name):
     if it:
         record.item(it["id"], "folder", "Folder", name, created=False, at=record.now())
         return it["id"]
-    r = requests.post(f"{FAB}/workspaces/{ws}/folders", headers=H, json={"displayName": name})
+    r = _req("POST", f"{FAB}/workspaces/{ws}/folders", json={"displayName": name})
     if r.status_code in (200, 201):
         fid = r.json()["id"]
         record.item(fid, "folder", "Folder", name, created=True, at=record.now())
@@ -153,8 +200,22 @@ def ensure_folder(name):
 # `benchmark` rather than `dbt` because `benchmark/deploy_models.py` already puts its semantic models
 # there (`BENCH_FOLDER`), so one name now covers every item either half of the workflow creates.
 RUN_FOLDER, LANDING_FOLDER = "benchmark", "landing"
-FOLDER_ID = ensure_folder(RUN_FOLDER)
-LANDING_FOLDER_ID = ensure_folder(LANDING_FOLDER)
+_FOLDERS = {}
+
+
+def folder_id(name):
+    """The folder's id, resolved on FIRST USE and cached — never at import.
+
+    **LAZY IS THE WHOLE POINT.** These two were module-level assignments, so every subcommand paid
+    `GET /workspaces/<ws>/folders` twice before `mode` was even dispatched — including `teardown`,
+    which reads neither id (only `ensure()` does). Run 31144099879 lost its teardown to a transient
+    Fabric 500 on exactly that call: the one job in the workflow that must always run, killed by an
+    API it does not use, leaving items standing and its record with no deletion stamps. Resolving on
+    demand means a teardown makes only the calls a teardown needs.
+    """
+    if name not in _FOLDERS:
+        _FOLDERS[name] = ensure_folder(name)
+    return _FOLDERS[name]
 
 
 def reparent(item_id, folder_id, name):
@@ -166,7 +227,7 @@ def reparent(item_id, folder_id, name):
     if not folder_id:
         return
     try:
-        r = requests.post(f"{FAB}/workspaces/{ws}/items/{item_id}/move", headers=H,
+        r = _req("POST", f"{FAB}/workspaces/{ws}/items/{item_id}/move",
                           json={"targetFolderId": folder_id}, timeout=60)
         if r.status_code in (200, 201, 202):
             sys.stderr.write(f"  moved {name} into folder {folder_id}\n")
@@ -188,7 +249,7 @@ def drop_guid(guid, name, kind, role):
     """
     if name == LANDING:
         raise SystemExit(f"refusing to drop {name}: it holds the raw landing data")
-    r = requests.delete(f"{FAB}/workspaces/{ws}/items/{guid}", headers=H)
+    r = _req("DELETE", f"{FAB}/workspaces/{ws}/items/{guid}")
     if r.status_code == 404:
         sys.stderr.write(f"  {kind}/{name} ({guid}) already gone\n")
     elif r.status_code not in (200, 202, 204):
@@ -198,9 +259,18 @@ def drop_guid(guid, name, kind, role):
         sys.stderr.write(f"  DELETED {kind}/{name} ({guid})\n")
     # Confirm rather than assume: the DELETE is accepted asynchronously (202), and an item that is
     # still listed is still billable. Same 10-minute budget as `drop()`.
+    #
+    # `tries=1` DELIBERATELY: this loop IS the retry, and letting `_req` back off inside it would
+    # multiply the documented 120x5s budget by the backoff whenever Fabric is unwell — precisely
+    # when the poll most needs to keep its shape. A connection blip is caught and read as "not gone
+    # yet" rather than as an answer, because the only status that ends this loop is a 404 and a
+    # thrown exception is not evidence the item was deleted.
     for _ in range(120):
-        g = requests.get(f"{FAB}/workspaces/{ws}/items/{guid}", headers=H)
-        if g.status_code == 404:
+        try:
+            g = _req("GET", f"{FAB}/workspaces/{ws}/items/{guid}", tries=1)
+        except _TRANSPORT_ERROR:
+            g = None
+        if g is not None and g.status_code == 404:
             record.item(guid, role, kind, name, deleted=record.now())
             return True
         time.sleep(5)
@@ -248,7 +318,7 @@ def record_sql_endpoint(item_id, name):
     have no id yet. Missing it costs a couple of hundred CU of attribution, never the build.
     """
     try:
-        r = requests.get(f"{FAB}/workspaces/{ws}/lakehouses/{item_id}", headers=H, timeout=60)
+        r = _req("GET", f"{FAB}/workspaces/{ws}/lakehouses/{item_id}")
         if r.status_code != 200:
             return None
         ep = ((r.json().get("properties") or {}).get("sqlEndpointProperties") or {}).get("id")
@@ -264,7 +334,7 @@ def record_sql_endpoint(item_id, name):
 
 
 def ensure(kind, name, payload=None, role="output", folder=None):
-    folder = FOLDER_ID if folder is None else folder
+    folder = folder_id(RUN_FOLDER) if folder is None else folder
     it = find(kind, name)
     if it:
         sys.stderr.write(f"  {kind}/{name} exists ({it['id']})\n")
@@ -288,7 +358,7 @@ def ensure(kind, name, payload=None, role="output", folder=None):
     # land in it, and a leg waiting minutes here is that, not a permissions problem. Fabric marks
     # the error `isRetriable`; anything not retriable still raises on the first response.
     for attempt in range(40):                      # ~10 minutes at 15s
-        r = requests.post(f"{FAB}/workspaces/{ws}/{kind}", headers=H, json=body)
+        r = _req("POST", f"{FAB}/workspaces/{ws}/{kind}", json=body)
         if r.status_code in (200, 201, 202):
             break
         try:
@@ -327,7 +397,7 @@ def warehouse_conn(name):
 def workspace_display_name():
     """The workspace's display name, resolved from its GUID (WS_ID) — Spark's
     workspace_name for schema-enabled lakehouse relations. Derived, never hardcoded."""
-    r = requests.get(f"{FAB}/workspaces/{ws}", headers=H)
+    r = _req("GET", f"{FAB}/workspaces/{ws}")
     r.raise_for_status()
     return r.json()["displayName"]
 
@@ -352,15 +422,14 @@ def ensure_landing_shortcut(item):
     land = find("lakehouses", LANDING)
     if not land:
         raise SystemExit(f"{LANDING} does not exist — run `provision.py land` first")
-    r = requests.get(f"{FAB}/workspaces/{ws}/items/{item}/shortcuts/Files/{LANDING_SHORTCUT}",
-                     headers=H)
+    r = _req("GET", f"{FAB}/workspaces/{ws}/items/{item}/shortcuts/Files/{LANDING_SHORTCUT}")
     if r.status_code == 200:
         sys.stderr.write(f"  shortcut Files/{LANDING_SHORTCUT} exists in {item}\n")
     else:
         sys.stderr.write(f"  creating shortcut Files/{LANDING_SHORTCUT} -> {LANDING}/Files "
                          f"in {item} ...\n")
-        r = requests.post(
-            f"{FAB}/workspaces/{ws}/items/{item}/shortcuts", headers=H,
+        r = _req(
+            "POST", f"{FAB}/workspaces/{ws}/items/{item}/shortcuts",
             json={"path": "Files", "name": LANDING_SHORTCUT,
                   "target": {"oneLake": {"workspaceId": ws, "itemId": land["id"],
                                          "path": "Files"}}})
@@ -376,7 +445,7 @@ if mode == "teardown":
 
 elif mode == "land":
     lh = ensure("lakehouses", LANDING, lh_payload, role="landing",
-                folder=LANDING_FOLDER_ID)
+                folder=folder_id(LANDING_FOLDER))
     # The FILES_PATH printed here is the DIRECT path, and stays that way: download_aemo.py writes
     # the archive through it, and the download's write CU belongs to `dbt_landing`. Only the legs
     # read through a shortcut, and each ensures its own — see the engine modes below.

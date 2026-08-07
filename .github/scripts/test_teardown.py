@@ -21,8 +21,10 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 
 WS = "00000000-0000-0000-0000-0000000000ws"
-# provision.py ensures both folders at import time: `benchmark` for everything a run creates and
-# `landing` for the one lakehouse that outlives it.
+# The two workspace folders: `benchmark` for everything a run creates and `landing` for the one
+# lakehouse that outlives it. provision.py used to resolve BOTH at import, in every mode — see
+# test_the_teardown_never_reads_folders for what that cost. They are resolved on first use now, so
+# these are here for the provisioning paths and a teardown should never ask for them.
 FOLDERS = [{"id": "BENCH-FOLDER", "displayName": "benchmark"},
            {"id": "LANDING-FOLDER", "displayName": "landing"}]
 
@@ -48,9 +50,11 @@ class Fabric:
         self.items = dict(items)                 # guid -> displayName
         self.undeletable = set(undeletable)      # guids whose DELETE is accepted but never takes
         self.deletes = []
+        self.folder_gets = 0                     # see test_the_teardown_never_reads_folders
 
     def get(self, url, headers=None, **kw):
         if url.endswith("/folders"):
+            self.folder_gets += 1
             return Resp(200, {"value": FOLDERS})
         if "/items/" in url:
             guid = url.rsplit("/", 1)[1]
@@ -213,3 +217,86 @@ def test_both_folders_survive_the_teardown(tmp_path, monkeypatch):
             "LANDING-FOLDER": {"role": "folder", "kind": "Folder", "name": "landing"},
             "OUT": {"role": "output", "kind": "Lakehouse", "name": "dbt_spark"}})
     assert fab.deletes == ["OUT"]
+
+
+# --------------------------------------------------------- transient Fabric failures, and the folders
+
+def test_the_teardown_never_reads_folders(tmp_path, monkeypatch):
+    """THE regression test for run 31144099879.
+
+    `FOLDER_ID` and `LANDING_FOLDER_ID` were module-level assignments, so importing provision.py in
+    ANY mode fired two `GET /workspaces/<ws>/folders` calls before `mode` was dispatched. `teardown`
+    reads neither id — only `ensure()` does — so a transient Fabric 500 on that call killed the one
+    job in the workflow that must always run, left the run's items standing, and shipped a record
+    with no deletion stamps. They resolve on first use now, and a teardown has no first use.
+    """
+    fab, rec = run_teardown(
+        tmp_path, monkeypatch,
+        items={"OUT": "dbt_delta"},
+        record_items={"OUT": {"role": "output", "kind": "Lakehouse", "name": "dbt_delta"}})
+    assert fab.deletes == ["OUT"]
+    assert rec["OUT"]["deleted"]
+    assert fab.folder_gets == 0, "a teardown must not call an endpoint it reads nothing from"
+
+
+def _reload_req(tmp_path, monkeypatch):
+    """Import provision.py (teardown mode, empty record) and hand back the live module."""
+    run_teardown(tmp_path, monkeypatch, items={}, record_items={})
+    return sys.modules["provision"]
+
+
+def test_a_transient_status_is_retried_and_an_answer_is_not(tmp_path, monkeypatch):
+    """5xx and 429 are retried; every 4xx is returned on the first call.
+
+    A 4xx here is a real answer that a caller already reads — `409 ItemDisplayNameNotAvailableYet`
+    has its own poll in `ensure()`, and a 404 from a DELETE means the item is already gone, which
+    `drop_guid()` counts as success. Retrying those would fight a caller that handles them.
+    """
+    prov = _reload_req(tmp_path, monkeypatch)
+    for status in (500, 502, 503, 504, 429):
+        calls = []
+
+        def flaky(url, _s=status, _c=calls, **kw):
+            _c.append(url)
+            return Resp(_s) if len(_c) < 3 else Resp(200, {"ok": True})
+
+        monkeypatch.setattr(prov.requests, "get", flaky, raising=False)
+        assert prov._req("GET", "https://f/x").status_code == 200
+        assert len(calls) == 3, f"{status} should have been retried"
+
+    for status in (400, 403, 404, 409):
+        calls = []
+        monkeypatch.setattr(
+            prov.requests, "get",
+            lambda url, _s=status, _c=calls, **kw: (_c.append(url), Resp(_s))[1], raising=False)
+        assert prov._req("GET", "https://f/x").status_code == status
+        assert len(calls) == 1, f"{status} is an answer, not a transient failure"
+
+
+def test_exhausted_retries_return_the_last_response_rather_than_raising(tmp_path, monkeypatch):
+    """The blast radius of adding retries is a DELAY, never a different control flow: every
+    `raise_for_status()` and `status_code in (...)` check downstream must see what it saw before."""
+    prov = _reload_req(tmp_path, monkeypatch)
+    calls = []
+    monkeypatch.setattr(
+        prov.requests, "get",
+        lambda url, **kw: (calls.append(url), Resp(500))[1], raising=False)
+    r = prov._req("GET", "https://f/x")
+    assert r.status_code == 500, "the caller still gets the failure to handle its own way"
+    assert len(calls) == 3, "and it was tried three times first"
+
+
+def test_a_transport_error_is_retried_then_re_raised(tmp_path, monkeypatch):
+    """A connection blip has no response to hand back, so it is the one case that re-raises —
+    swallowing it would turn a network failure into a silent success."""
+    prov = _reload_req(tmp_path, monkeypatch)
+    calls = []
+
+    def boom(url, **kw):
+        calls.append(url)
+        raise OSError("connection reset")
+
+    monkeypatch.setattr(prov.requests, "get", boom, raising=False)
+    with pytest.raises(OSError):
+        prov._req("GET", "https://f/x")
+    assert len(calls) == 3

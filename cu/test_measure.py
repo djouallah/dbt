@@ -260,3 +260,48 @@ def test_the_directory_index_is_not_read_as_a_run(tmp_path):
     (tmp_path / "b.json").write_text(json.dumps(["not", "a", "record"]), encoding="utf-8")
     got = measure.load_runs(str(tmp_path))
     assert [r["_file"] for r in got] == ["a.json"]
+
+
+# ------------------------------------------------------------------- transient endpoint failures
+
+class _Resp:
+    def __init__(self, status, payload=None):
+        self.status_code = status
+        self._payload = payload or {}
+        self.text = json.dumps(self._payload)
+        self.headers = {}
+
+    def json(self):
+        return self._payload
+
+
+_OK = {"results": [{"tables": [{"rows": [{"n": 1}]}]}]}
+
+
+def test_a_500_from_execute_queries_is_retried(monkeypatch):
+    """Run 31145654785 died on a bare `executeQueries returned 500` after a four-minute hang.
+
+    The retry set read 429/502/503/504 — every transient status EXCEPT the one the service actually
+    returns most often — so a Fabric blip that lasted minutes took the whole read down. Retrying is
+    risk-free here specifically: every read re-reads the window from the floor and merges with
+    `max(old, new)`, so a repeated query is idempotent and monotonic by construction.
+    """
+    calls = []
+    monkeypatch.setattr(measure.time, "sleep", lambda *_: None)
+    monkeypatch.setattr(measure.requests, "post",
+                        lambda *a, **kw: (calls.append(1),
+                                          _Resp(500) if len(calls) < 3 else _Resp(200, _OK))[1])
+    assert measure.execute_dax("EVALUATE {1}") == [{"n": 1}]
+    assert len(calls) == 3, "the 500 was retried rather than being read as an answer"
+
+
+def test_a_403_is_never_retried_and_stays_fatal(monkeypatch):
+    """A credential problem must stay loud and immediate — retrying it would only delay the message
+    that names the manual PBI_TOKEN escape hatch."""
+    calls = []
+    monkeypatch.setattr(measure.time, "sleep", lambda *_: None)
+    monkeypatch.setattr(measure.requests, "post",
+                        lambda *a, **kw: (calls.append(1), _Resp(403))[1])
+    with pytest.raises(SystemExit):
+        measure.execute_dax("EVALUATE {1}")
+    assert len(calls) == 1
