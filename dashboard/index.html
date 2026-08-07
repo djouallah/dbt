@@ -112,6 +112,15 @@ tbody tr:last-child td { border-bottom:none; }
 .filterbar input:focus, .filterbar select:focus { outline:2px solid var(--series);
   outline-offset:1px; border-color:var(--series); }
 .fcount { color:var(--dim); font-size:.78rem; margin-left:auto; white-space:nowrap; }
+/* COPY THE TABLE AS TSV — the destination is a spreadsheet, so tabs, and the button reports back
+   ("copied" / "select and copy") because `navigator.clipboard` can be refused and a control that
+   silently does nothing is worse than none. `.barecopy` is the bar a sort-only table gets: no
+   search box, no count, just this. */
+.copybtn { font:inherit; font-size:.78rem; padding:.3rem .6rem; cursor:pointer;
+  border:1px solid var(--line); border-radius:8px; background:var(--bg); color:var(--dim); }
+.copybtn:hover { color:var(--fg); border-color:var(--series); }
+.copybtn:focus-visible { outline:2px solid var(--series); outline-offset:1px; }
+.filterbar.barecopy { margin:.9rem 0 -.2rem; }
 /* The header is the sort control, so it has to look like one — and the caret marks the sorted
    column in place rather than needing a legend. */
 .filtered thead th, .sortable thead th { cursor:pointer; user-select:none; }

@@ -1115,7 +1115,10 @@ test("a sort-only table gets clickable headers and none of the bar", () => {
     [["duckrun", "1,810.1"], ["spark V-Order", "1,381.0"]], {});
   box.className = "sortable";
   assert.equal(d.wireTables(root, doc), 1, "a .sortable box counts as wired");
-  assert.equal(box.querySelector(".filterbar"), null, "no bar, no menus, no count");
+  assert.equal(box.querySelector(".ffind"), null, "no search box");
+  assert.equal(box.querySelector(".fpick"), null, "no menus");
+  assert.equal(box.querySelector(".fcount"), null, "no row count");
+  assert.ok(box.querySelector(".copybtn"), "but a copy button — every table is worth pasting");
   th[1].fire("click");
   assert.deepEqual(tbl.tBodies[0].rows.map((r) => r.cells[0].textContent),
     ["spark V-Order", "duckrun"], "and the headers sort, cheapest first");
@@ -2552,4 +2555,63 @@ test("the dictionary check reads PLAIN differently per parquet version", () => {
   assert.equal(d.dictCell([{ rec: { engine: "x", layout: {} } }]), "—");
   assert.equal(d.dictCell([{ rec: { engine: "x", layout: {} } },
     enc({ mw: { encodings: ["PLAIN_DICTIONARY", "RLE"] } })]), "yes");
+});
+
+// ------------------------------------------------------------------ copying a table to a spreadsheet
+
+test("copy emits the header and every visible row, tab separated", () => {
+  // TSV, not markdown or CSV: the destination is a spreadsheet, and unlike CSV it needs no quoting
+  // rules for the commas already in `date, time, price` and `1,053`.
+  const { root, doc, tbl } = stubTable(
+    ["parquet writer", "ordering", "CU"],
+    [["delta_rs", "date, time", "1,569"], ["dwh", "—", "1,960"]], {});
+  const heads = tbl.tHead.rows[0].cells;
+  const rows = tbl.tBodies[0].rows;
+  assert.equal(d.tableTsv(heads, rows),
+    "parquet writer\tordering\tCU\ndelta_rs\tdate, time\t1,569\ndwh\t—\t1,960");
+  assert.ok(root && doc);
+});
+
+test("copy takes what you SEE — current sort order, filtered rows dropped", () => {
+  // Reading the DOM after `wireSort` rather than the underlying model is the point: a second path
+  // to the same numbers is how a copy button starts disagreeing with the table above it.
+  const { root, doc, th, tbl } = stubTable(
+    ["column", "etl CU"],
+    [["duckrun", "26,990.9"], ["spark", "9,986.3"], ["dwh", "38,225.3"]], { menus: "" });
+  d.wireTables(root, doc);
+  th[1].fire("click");                                    // cheapest first
+  const heads = tbl.tHead.rows[0].cells;
+  assert.equal(d.tableTsv(heads, tbl.tBodies[0].rows),
+    "column\tetl CU\nspark\t9,986.3\nduckrun\t26,990.9\ndwh\t38,225.3",
+    "the sort the reader applied is the order they get");
+  tbl.tBodies[0].rows.find((r) => r.cells[0].textContent === "duckrun").style.display = "none";
+  assert.ok(!d.tableTsv(heads, tbl.tBodies[0].rows).includes("duckrun"),
+    "a filtered-out row is hidden from the copy too, not silently included");
+});
+
+test("a clipboard that refuses is reported, never silently swallowed", async () => {
+  assert.equal(await d.writeClipboard("x", {}), false, "no clipboard API at all");
+  assert.equal(await d.writeClipboard("x", { clipboard: {} }), false, "no writeText");
+  assert.equal(
+    await d.writeClipboard("x", { clipboard: { writeText: () => Promise.reject(new Error("nope")) } }),
+    false, "a rejected write is false, not an unhandled rejection");
+  let got = null;
+  assert.equal(
+    await d.writeClipboard("hello", { clipboard: { writeText: (t) => { got = t; return Promise.resolve(); } } }),
+    true);
+  assert.equal(got, "hello");
+});
+
+test("the copy button says what happened", async () => {
+  const { root, doc, box } = stubTable(
+    ["column", "CU"], [["duckrun", "1,810.1"]], {});
+  box.className = "sortable";
+  d.wireTables(root, doc);
+  const btn = box.querySelector(".copybtn");
+  assert.equal(btn.textContent, "copy");
+  // No `navigator` in the test runner, so `writeClipboard` finds no API and reports the failure —
+  // which is exactly the state a reader on an insecure origin or a locked-down policy would see.
+  await btn.listeners.click[0]({});
+  assert.equal(btn.textContent, "select and copy",
+    "a button that silently does nothing is worse than no button");
 });

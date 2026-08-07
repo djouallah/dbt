@@ -2780,6 +2780,14 @@ export function wireTables(root, doc = null) {
     const text = all.map((r) => [...r.cells].map(cellText));
     if (box.classList.contains("sortable")) {
       wireSort(heads, body, all, text);
+      // A sort-only table has no bar to hang a control on, so it gets a minimal one holding just
+      // the copy button — a search box and a row count over seven rows would be furniture, which is
+      // why `{sort: true}` exists at all, but a table a reader wants to paste into a spreadsheet is
+      // every table on this page.
+      const bar = d.createElement("div");
+      bar.className = "filterbar barecopy";
+      bar.appendChild(copyButton(d, heads, all));
+      box.insertBefore(bar, box.firstChild);
       wired++;
       continue;
     }
@@ -2815,6 +2823,8 @@ export function wireTables(root, doc = null) {
       picks.set(i, sel);
       bar.appendChild(sel);
     }
+    // Before the count, so the count keeps its `margin-left:auto` and stays hard right.
+    bar.appendChild(copyButton(d, heads, all));
     const count = d.createElement("span");
     count.className = "fcount";
     bar.appendChild(count);
@@ -2841,6 +2851,59 @@ export function wireTables(root, doc = null) {
     wired++;
   }
   return wired;
+}
+
+/**
+ * One table as TAB-SEPARATED text: the header, then every VISIBLE row in current DOM order.
+ *
+ * Tab separated rather than markdown or CSV, because the destination is a spreadsheet — TSV is what
+ * Excel, Sheets and Numbers paste into cells with no import dialog, and unlike CSV it needs no
+ * quoting rules for the commas already sitting in `date, time, price` and `1,053`.
+ *
+ * **What you see is what you get.** It reads the DOM after `wireSort` has reordered it and skips
+ * `display:none`, so a sorted, filtered table copies sorted and filtered. Reading the rendered cells
+ * rather than the underlying model is the whole point: a second path to the same numbers is how a
+ * copy button starts disagreeing with the table above it.
+ */
+export function tableTsv(heads, rows) {
+  const line = (cells) => cells.map((c) => cellText(c).replace(/\s+/g, " ")).join("\t");
+  return [line(heads),
+    ...rows.filter((r) => r.style.display !== "none").map((r) => line([...r.cells]))].join("\n");
+}
+
+/** Put `text` on the clipboard. Returns a promise of true/false — never throws, because the caller
+ *  is a click handler whose only job is to say whether it worked. */
+export function writeClipboard(text, nav) {
+  const n = nav || (typeof navigator === "undefined" ? null : navigator);
+  if (!n || !n.clipboard || !n.clipboard.writeText) return Promise.resolve(false);
+  return Promise.resolve(n.clipboard.writeText(text)).then(() => true, () => false);
+}
+
+/**
+ * A `copy` button for one table, appended to whatever bar the caller has.
+ *
+ * It says what happened. `navigator.clipboard` needs a secure context and can be refused by
+ * permissions policy, and a button that silently does nothing is worse than no button — so a
+ * failure reads `select and copy` and leaves the table alone rather than pretending.
+ */
+function copyButton(d, heads, all) {
+  const btn = d.createElement("button");
+  btn.className = "copybtn";
+  btn.type = "button";
+  btn.textContent = "copy";
+  btn.setAttribute("aria-label", "copy this table as tab-separated text");
+  let undo = null;
+  btn.addEventListener("click", () => {
+    const say = (msg) => {
+      btn.textContent = msg;
+      if (undo && typeof clearTimeout === "function") clearTimeout(undo);
+      if (typeof setTimeout === "function") {
+        undo = setTimeout(() => { btn.textContent = "copy"; }, 1500);
+      }
+    };
+    return writeClipboard(tableTsv(heads, all)).then((ok) => say(ok ? "copied" : "select and copy"));
+  });
+  return btn;
 }
 
 /** Clickable, keyboard-reachable column sort on one table — shared by the autofilter and the
