@@ -1152,37 +1152,63 @@ export function scatterSvg(title, subtitle, pts, xLabel = "cold ms", legend = ""
     `y="${(T + PH + 36).toFixed(0)}" text-anchor="middle">${esc(xLabel)}</text>`,
   `<text class="bar-caption" x="14" y="${(T + PH / 2).toFixed(0)}" ` +
     `text-anchor="middle" transform="rotate(-90 14 ${(T + PH / 2).toFixed(0)})">CU</text>`);
-  // Labelled SELECTIVELY — the cheapest, the fastest and the dearest. A name on all thirteen is a
-  // thicket at this size, and every dot carries the full identity in its `<title>`.
-  const named = new Set([
-    rows.reduce((a, b) => (Number(a.y) <= Number(b.y) ? a : b)),
-    rows.reduce((a, b) => (Number(a.x) <= Number(b.x) ? a : b)),
-    rows.reduce((a, b) => (Number(a.y) >= Number(b.y) ? a : b))]);
-  // THE THIRD VARIABLE IS A MAGNITUDE, so it gets a SEQUENTIAL ramp — one hue, light to dark — and
-  // not categorical hues. Five equal-width bins over the observed range of `p.c`; the steps live in
-  // CSS as `--seq1..5` and are SELECTED per theme against that theme's surface rather than flipped,
-  // so the dark page is its own ramp. Validated with the dataviz validator: lightness is monotonic
-  // in both, and the one endpoint that lands under 3:1 takes its relief from the table directly
-  // above and from the per-dot title, which is what a contrast WARN obligates.
+  // EVERY DOT IS NAMED. It labelled three — the cheapest, the fastest and the dearest — and the
+  // other nine were anonymous blobs a reader could only identify by hovering. Worse, the label was
+  // the WRITER, and seven of twelve points are `delta_rs`: naming them all would have printed one
+  // word seven times and disambiguated nothing. So the label is `p.id`, the writer PLUS whatever
+  // distinguishes it (its ordering), which is exactly the identity the table above uses.
+  //
+  // Placed greedily against eight candidate offsets, taking the first that hits no already-placed
+  // label and no dot. Sorted by y first so the placement order is stable run to run rather than
+  // depending on group iteration order. A point with nowhere free keeps its label anyway, to the
+  // right: an overlapping name is recoverable by hovering, an absent one is the bug being fixed.
+  const CH = 5.15, LH = 13;                        // glyph advance and line height at 10px
+  const placed = [];
+  const box = (t, x, y, anchor) => ({
+    x0: anchor === "end" ? x - t.length * CH : x, x1: anchor === "end" ? x : x + t.length * CH,
+    y0: y - LH * 0.72, y1: y + LH * 0.28,
+  });
+  const hits = (b) => placed.some((q) => b.x0 < q.x1 && b.x1 > q.x0 && b.y0 < q.y1 && b.y1 > q.y0)
+    || rows.some((q) => {
+      const qx = px(q.x), qy = py(q.y);
+      return qx + 8 > b.x0 && qx - 8 < b.x1 && qy + 8 > b.y0 && qy - 8 < b.y1;
+    });
+  // Two rings. The inner one keeps a label tight against its dot; the outer is what the dense
+  // middle of the cluster needs — with one ring, two labels there exhausted every candidate and
+  // fell back to overlapping.
+  const CANDIDATES = [[11, 4, "start"], [-11, 4, "end"], [11, -9, "start"], [-11, -9, "end"],
+    [11, 15, "start"], [-11, 15, "end"], [0, -13, "middle"], [0, 19, "middle"],
+    [11, -22, "start"], [-11, -22, "end"], [11, 28, "start"], [-11, 28, "end"],
+    [0, -26, "middle"], [0, 32, "middle"], [11, -35, "start"], [-11, -35, "end"]];
+  const label = (p) => {
+    const t = String(p.id || p.label);
+    const cx = px(p.x), cy = py(p.y);
+    for (const [dx, dy, anchor] of CANDIDATES) {
+      const x = cx + dx, y = cy + dy;
+      const b = anchor === "middle" ? box(t, x - (t.length * CH) / 2, y, "start") : box(t, x, y, anchor);
+      if (b.x0 < L || b.x1 > W - R || b.y0 < T || b.y1 > T + PH) continue;
+      if (hits(b)) continue;
+      placed.push(b);
+      return { x, y, anchor };
+    }
+    const x = cx + 11, y = cy + 4;
+    placed.push(box(t, x, y, "start"));
+    return { x, y, anchor: "start" };
+  };
   const cs = rows.map((p) => Number(p.c)).filter((v) => Number.isFinite(v));
   const cLo = cs.length ? Math.min(...cs) : 0, cHi = cs.length ? Math.max(...cs) : 0;
   const bin = (v) => (!Number.isFinite(Number(v)) || cHi === cLo ? 3
     : Math.min(5, 1 + Math.floor(((Number(v) - cLo) / (cHi - cLo)) * 5)));
-  for (const p of rows) {
+  for (const p of [...rows].sort((a, b) => Number(a.y) - Number(b.y))) {
     const cx = px(p.x), cy = py(p.y);
-    // The label sits right of its dot unless that would run past the plot, in which case it flips to
-    // the left. The cheapest-CU point is often also the slowest, i.e. hard against the right edge —
-    // `spark readHeavyForPBI` ran 10px past the viewBox before this, which no amount of reading the
-    // code would have shown.
-    const wide = String(p.label).length * 5.4;
-    const flip = cx + 9 + wide > W - R;
+    const at = label(p);
     out.push(`<g><title>${esc(p.label)}${p.sub ? ` (${esc(p.sub)})` : ""}: ` +
       `${fmt(p.y, 0)} CU, ${fmt(p.x, 0)} ms ${esc(xLabel.replace(/ ms$/, ""))}` +
       `${p.n ? `, ${p.n} run(s)` : ""}</title>` +
       `<circle class="dot s${bin(p.c)}" cx="${cx.toFixed(1)}" cy="${cy.toFixed(1)}" r="7"/>` +
-      (named.has(p) ? `<text class="bar-caption" x="${(cx + (flip ? -9 : 9)).toFixed(1)}" ` +
-        `y="${(cy + 4).toFixed(1)}"${flip ? ' text-anchor="end"' : ""}>${esc(p.label)}</text>`
-        : "") + "</g>");
+      `<text class="bar-caption" x="${at.x.toFixed(1)}" y="${at.y.toFixed(1)}"` +
+      `${at.anchor === "start" ? "" : ` text-anchor="${at.anchor}"`}>` +
+      `${esc(String(p.id || p.label))}</text></g>`);
   }
   // THE RAMP LEGEND. A sequential encoding is unreadable without one — a reader can see that two dots
   // differ and not which way. Five swatches with the observed ends labelled, so the scale is stated
@@ -1429,10 +1455,22 @@ export function scatterFit(pts) {
     "one dot per layout — cold ms across, CU up, shaded by row group size" +
     (cut ? ` · ${SCATTER_OMIT} left out, ${cut > 1 ? `${cut} layouts, ` : ""}` +
       "off the scale on both axes" : ""),
-    shown.map((p) => ({
-      x: p.ms.cold, y: p.cu, label: p.name, n: p.n,
-      sub: keyCells(p.members).rgSize, c: martSize(p.members),
-    })), "cold ms", "row group size", (v) => `${fmt(v / 1e6, 1)}M`);
+    shown.map((p) => {
+      const k = keyCells(p.members);
+      // THE LABEL IS THE TABLE'S ROW IDENTITY, not the writer. Seven of twelve dots are `delta_rs`,
+      // so the writer alone prints one word seven times and separates nothing; what tells those
+      // seven apart is the ordering, which is the column the table puts beside the writer. The
+      // writer is dropped from the label when the ordering already names it uniquely — `spark
+      // writeHeavy` needs no sort key, and `date, time · 16.0M` needs no `delta_rs`.
+      const same = shown.filter((q) => q.name === p.name).length;
+      // `unsorted` rather than the writer, for the one group whose ordering cell is a dash: it is a
+      // delta_rs point among six other delta_rs points, so falling back to the writer would print
+      // the ambiguous word this label exists to avoid.
+      const how = k.ordering === DASH ? "unsorted" : k.ordering;
+      const id = same > 1 ? `${how} · ${k.rgSize}` : p.name;
+      return { x: p.ms.cold, y: p.cu, label: p.name, id, n: p.n, sub: k.rgSize,
+        c: martSize(p.members) };
+    }), "cold ms", "row group size", (v) => `${fmt(v / 1e6, 1)}M`);
 }
 
 /** A group's rows-per-row-group as a NUMBER — the median across its members, for the colour ramp. */

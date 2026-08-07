@@ -2736,7 +2736,7 @@ test("the scatter brackets the data on round ticks, not on a snapped bound", () 
   assert.ok(!/NaN|Infinity/.test(svg), "no degenerate geometry");
 });
 
-test("every dot carries its identity in a title, and only the outliers are labelled", () => {
+test("EVERY dot is named, and the title carries the rest", () => {
   // ONE SERIES, so nothing is encoded in colour and there is no legend. Thirteen hues for thirteen
   // layouts is past where any palette stays separable under CVD; a name on all thirteen is a
   // thicket at this size. The table directly above is the table view of these same points.
@@ -2744,9 +2744,11 @@ test("every dot carries its identity in a title, and only the outliers are label
     pt("dear", 3000, 9000), pt("fast", 2000, 5000)]);
   assert.equal([...svg.matchAll(/<title>/g)].length, 4, "one title per dot");
   assert.ok(svg.includes("<title>mid (16.0M): 2,000 CU, 4,000 ms cold, 3 run(s)</title>"));
+  // It labelled three and left the rest as anonymous blobs, identifiable only by hovering.
   const named = [...svg.matchAll(/<text class="bar-caption"[^>]*>([^<]+)</g)].map((m) => m[1]);
-  assert.ok(named.includes("cheap") && named.includes("dear") && named.includes("fast"));
-  assert.ok(!named.includes("mid"), "the interior point is not labelled");
+  for (const n of ["cheap", "dear", "fast", "mid"]) {
+    assert.ok(named.includes(n), `${n} is named on the plot, not just in its title`);
+  }
   assert.ok(!/fill="#/.test(svg), "no hardcoded colour — the ramp lives in CSS custom properties");
 });
 
@@ -2822,4 +2824,40 @@ test("with nothing to exclude the subtitle claims no exclusion", () => {
   const svg = d.scatterFit([p("duckrun", "delta_rs", 25000, 1800),
     p("spark", "spark writeHeavy", 45000, 3700)]);
   assert.ok(!/left out/.test(svg), "no caveat where nothing was cut");
+});
+
+test("every point is named and no two names collide", () => {
+  // The chart labelled three dots and left nine anonymous, and the label was the WRITER — so even
+  // naming them all would have printed `delta_rs` seven times and separated nothing. The label is
+  // the table's row identity, and placement is greedy over two rings of candidate offsets.
+  const cluster = Array.from({ length: 9 }, (_, i) => ({
+    label: "delta_rs", id: `date, time · ${i}.0M`, x: 25000 + i * 300, y: 1800 + i * 40, c: i * 1e6,
+  }));
+  const svg = d.scatterSvg("t", "s", [...cluster,
+    { label: "dwh", id: "dwh", x: 33000, y: 2600, c: 1.8e6 },
+    { label: "spark writeHeavy", id: "spark writeHeavy", x: 45000, y: 3700, c: 10e6 }],
+  "cold ms", "row group size");
+  const CH = 5.15, LH = 13;
+  const labs = [...svg.matchAll(/<text class="bar-caption" x="([\d.]+)" y="([\d.]+)"([^>]*)>([^<]+)</g)]
+    .map((m) => ({ x: +m[1], y: +m[2], a: /end/.test(m[3]) ? "end" : /middle/.test(m[3]) ? "mid" : "s", t: m[4] }))
+    .filter((l) => !["cold ms", "CU", "row group size"].includes(l.t) && !/^[\d,.]+M?$/.test(l.t));
+  assert.equal(labs.length, 11, "one label per dot, none dropped");
+  const box = (l) => {
+    const w = l.t.length * CH;
+    const x0 = l.a === "end" ? l.x - w : l.a === "mid" ? l.x - w / 2 : l.x;
+    return { x0, x1: x0 + w, y0: l.y - LH * 0.72, y1: l.y + LH * 0.28 };
+  };
+  for (let i = 0; i < labs.length; i++) {
+    for (let j = i + 1; j < labs.length; j++) {
+      const A = box(labs[i]), B = box(labs[j]);
+      assert.ok(!(A.x0 < B.x1 && A.x1 > B.x0 && A.y0 < B.y1 && A.y1 > B.y0),
+        `"${labs[i].t}" collides with "${labs[j].t}"`);
+    }
+  }
+  const vb = /viewBox="0 0 (\d+) (\d+)"/.exec(svg);
+  for (const l of labs) {
+    const b = box(l);
+    assert.ok(b.x0 >= 0 && b.x1 <= +vb[1] && b.y0 >= 0 && b.y1 <= +vb[2],
+      `"${l.t}" stays inside the viewBox`);
+  }
 });
