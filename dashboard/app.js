@@ -1147,7 +1147,17 @@ export function martPoints(groups, times) {
   });
 }
 
-/** The key elements as text, for a table that has to say what it grouped on: `{vorder, sort, rg}`. */
+/**
+ * The key elements as text, for a table that has to say what it grouped on: `{ordering, rg}`.
+ *
+ * **V-ORDER AND THE SORT KEY SHARE ONE CELL, and that is the honest shape.** They were two columns,
+ * one of which was a dash on every row but spark's and the other a dash on every row but duckrun's —
+ * two thirds of the width spent saying "not this one". They are also the same KIND of fact: both are
+ * write-time decisions about how the rows are arranged and encoded before Power BI ever sees them,
+ * which is exactly why `layoutKey` carries them side by side. A row can legitimately hold both
+ * (nothing writes V-Order AND sorts today, but the spelling costs nothing), so they join rather than
+ * one winning.
+ */
 export function keyCells(members, table = DEFAULTS.table) {
   const stats = (members || []).map(({ rec }) => martStats(rec, table));
   const vals = [...new Set(stats.map((s) => s.num_row_groups)
@@ -1155,10 +1165,13 @@ export function keyCells(members, table = DEFAULTS.table) {
     .sort((a, b) => a - b);
   const sorts = [...new Set((members || []).map(({ rec }) => sortKeyOf(rec, table))
     .filter((s) => typeof s === "string"))];
+  const bits = [];
+  if (stats.some((s) => s.vorder)) bits.push("V-Order");
+  if (sorts.length) bits.push(sorts.join(" / ").split(",").join(", "));
+  // Sorted by something the record does not name — say that, never invent a key.
+  else if ((members || []).some(({ rec }) => sortKeyOf(rec, table) === true)) bits.push("sorted");
   return {
-    vorder: stats.some((s) => s.vorder) ? "yes" : DASH,
-    sort: sorts.length ? sorts.join(" / ").split(",").join(", ")
-      : ((members || []).some(({ rec }) => sortKeyOf(rec, table) === true) ? "unnamed" : DASH),
+    ordering: bits.join(" · ") || DASH,
     rg: !vals.length ? DASH
       : vals.length === 1 ? fmt(vals[0], 0)
         : `${fmt(vals[0], 0)}–${fmt(vals[vals.length - 1], 0)}`,
@@ -1185,11 +1198,11 @@ export function renderFit(groups, times, tiers) {
     // tell them apart is a table asking the reader to trust a grouping it will not show; these three
     // columns ARE `layoutKey` (the engine is already in the label) plus the sample size behind each
     // median, which is what says whether a row is one dispatch or seven.
-    table(["layout", "V-Order", "sorted by", "RG", "runs", "CU", ...cols.map((l) => `${l} ms`)],
-      ["left", "left", "left", "right", "right", "right", ...cols.map(() => "right")],
+    table(["layout", "ordering", "RG", "runs", "CU", ...cols.map((l) => `${l} ms`)],
+      ["left", "left", "right", "right", "right", ...cols.map(() => "right")],
       pts.map((p) => {
         const k = keyCells(p.members);
-        return [p.name, k.vorder, k.sort, k.rg, String(p.n), fmt(p.cu, 0),
+        return [p.name, k.ordering, k.rg, String(p.n), fmt(p.cu, 0),
           ...cols.map((l) => (p.ms[l] ? fmt(p.ms[l], 0) : DASH))];
       }),
       { sort: true }),

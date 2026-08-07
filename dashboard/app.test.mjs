@@ -1475,7 +1475,7 @@ test("the three tiers are columns of the PER-RUN table, not of the layout block"
   const heads = rows(out).filter((r) => r.includes("cold ms"));
   assert.equal(heads.length, 2, `two headers carry the tiers: ${heads}`);
   assert.ok(heads.some((h) =>
-    h.startsWith("| layout | V-Order | sorted by | RG | runs | CU | cold ms | warm ms | hot ms |")),
+    h.startsWith("| layout | ordering | RG | runs | CU | cold ms | warm ms | hot ms |")),
   heads[0]);
   assert.ok(heads.some((h) =>
     h.includes("| etl CU | analytics CU | cold ms | warm ms | hot ms | items |")), heads[1]);
@@ -2100,7 +2100,9 @@ test("cost and speed is one table, cheapest first, with a title and nothing else
   assert.ok(at < out.indexOf("<h3>Cost by engine</h3>"), "and above the cost table");
   // The GROUPING KEY is printed between the label and the numbers — six rows reading
   // `duckrun sorted` with nothing to tell them apart is a table hiding what it grouped on.
-  const head = rows(out).find((r) => r.startsWith("| layout | V-Order | sorted by | RG | runs | CU |"));
+  // V-Order and the sort key share ONE cell: same kind of fact (a write-time row arrangement), and
+  // as two columns each was a dash on every row the other was not.
+  const head = rows(out).find((r) => r.startsWith("| layout | ordering | RG | runs | CU |"));
   assert.ok(head, "layout, the key, the sample size, CU, then the tiers");
   assert.ok(head.includes("| cold ms | warm ms | hot ms |"), head);
   // A TITLE AND NOTHING ELSE — no verdict, no correlation, no reading of the numbers.
@@ -2499,4 +2501,21 @@ test("the analysis section introduces no new CSS", () => {
   for (const m of sec.matchAll(/class="([^"]+)"/g)) {
     assert.ok(["note", "sortable", "scroll", "left", "right", "sub"].includes(m[1]), m[1]);
   }
+});
+
+test("V-Order and the sort key share the ordering cell", () => {
+  // Two columns meant each was a dash on every row the other was not. They are the same kind of
+  // fact — a write-time arrangement of the rows — which is why `layoutKey` carries them together.
+  const vo = { rec: lay("spark", 11, 11, { vorder: true }) };
+  const sorted = { rec: lay("duckrun", 1, 24, { cfg: { sorted: "true" } }) };
+  sorted.rec.dbt = { duckrun: { sort_by: { fct_summary: ["date", "time"] } } };
+  const both = { rec: lay("duckrun", 1, 9, { vorder: true, cfg: { sorted: "true" } }) };
+  both.rec.dbt = { duckrun: { sort_by: { fct_summary: ["date", "DUID"] } } };
+  assert.equal(d.keyCells([vo]).ordering, "V-Order");
+  assert.equal(d.keyCells([sorted]).ordering, "date, time");
+  assert.equal(d.keyCells([both]).ordering, "V-Order · date, DUID", "a row may hold both");
+  // Sorted by something the record does not name: say so, never invent a key.
+  const unnamed = { rec: lay("duckrun", 1, 9, { cfg: { sorted: "true" } }) };
+  assert.equal(d.keyCells([unnamed]).ordering, "sorted");
+  assert.equal(d.keyCells([{ rec: lay("dwh", 78, 78) }]).ordering, "—", "neither is a dash");
 });
