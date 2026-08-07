@@ -1140,7 +1140,7 @@ test("the run table is the only filterable one, and renders whole without JS", (
   assert.ok(rows(runs).length >= 2, "header and at least one run, filter or no filter");
 });
 
-test("every run carries its own RG count, and a run without one carries a dash", () => {
+test("every run carries its own row-group count, and a run without one carries a dash", () => {
   // The shape the row's analytics numbers were measured against, per run — the chart caption can
   // only say the bar's range. A dash when the run recorded no layout: unmeasured is not zero.
   const measured = lay("duckrun", 4, 27, { cfg: { vcores: "64" }, file: "a-1.json" });
@@ -1148,14 +1148,15 @@ test("every run carries its own RG count, and a run without one carries a dash",
     { stats: { spark: { fct_summary: { total_rows: 143980961 } } } });
   const { html } = d.compose([measured, bare], ledger({ OUT: 1.0, SEM: 2.0 }), {});
   const body = rows(block(html, "Every run on this page")).slice(1);
-  const cell = (r) => r.split("|").map((c) => c.trim())[4];     // column, run, built, RG
-  assert.ok(rows(block(html, "Every run on this page"))[0].includes("| RG |"));
+  const cell = (r) => r.split("|").map((c) => c.trim())[4];     // column, run, built, row groups
+  assert.ok(rows(block(html, "Every run on this page"))[0].includes("| row groups |"),
+    "spelled out — the same quantity is `row groups` in every other table on the page");
   assert.equal(cell(body.find((r) => r.includes("duckrun"))), "27");
   assert.equal(cell(body.find((r) => r.includes("spark"))), "—");
 });
 
 test("every run carries its own mart SIZE beside the row groups", () => {
-  // RG alone does not say what was written: `duckrun·64c+sorted` runs share a column and a 24-RG
+  // The row-group count alone does not say what was written: `duckrun·64c+sorted` runs share a column and a 24-RG
   // count while ranging 543-813 MB on the sort key alone, so a reader comparing two rows of one
   // column sees identical numbers for parquet that differs by half. Same dash rule as RG —
   // unmeasured is not zero, and a table reading `0` would say the run wrote nothing.
@@ -1164,9 +1165,9 @@ test("every run carries its own mart SIZE beside the row groups", () => {
     { stats: { spark: { fct_summary: { total_rows: 143980961, num_row_groups: 9 } } } });
   const { html } = d.compose([measured, bare], ledger({ OUT: 1.0, SEM: 2.0 }), {});
   const head = rows(block(html, "Every run on this page"))[0];
-  assert.ok(head.includes("| RG | MB |"), `size sits beside the shape: ${head}`);
+  assert.ok(head.includes("| row groups | MB |"), `size sits beside the shape: ${head}`);
   const body = rows(block(html, "Every run on this page")).slice(1);
-  const cell = (r) => r.split("|").map((c) => c.trim())[5];   // column, run, built, RG, MB
+  const cell = (r) => r.split("|").map((c) => c.trim())[5];   // column, run, built, row groups, MB
   assert.equal(cell(body.find((r) => r.includes("duckrun"))), "543", "whole megabytes");
   assert.equal(cell(body.find((r) => r.includes("spark"))), "—", "no size recorded -> dash");
 });
@@ -1485,7 +1486,7 @@ test("the three tiers are columns of the PER-RUN table, not of the layout block"
   const heads = rows(out).filter((r) => r.includes("cold ms"));
   assert.equal(heads.length, 2, `two headers carry the tiers: ${heads}`);
   assert.ok(heads.some((h) =>
-    h.startsWith("| parquet writer | ordering | dictionary | RG | MB | runs | CU "
+    h.startsWith("| parquet writer | ordering | dictionary | row groups | MB | runs | CU "
       + "| cold ms | warm ms | hot ms |")),
   heads[0]);
   assert.ok(heads.some((h) =>
@@ -2116,7 +2117,7 @@ test("cost and speed is one table, cheapest first, with a title and nothing else
   // `MB` sits beside `RG` and is NOT part of `layoutKey` — printed so a reader can see where the key
   // is coarser than the parquet, since a group merged on RG band can still hold two file sizes.
   const head = rows(out).find((r) =>
-    r.startsWith("| parquet writer | ordering | dictionary | RG | MB | runs | CU |"));
+    r.startsWith("| parquet writer | ordering | dictionary | row groups | MB | runs | CU |"));
   assert.ok(head, "layout, the key, the size, the sample size, CU, then the tiers");
   assert.ok(head.includes("| cold ms | warm ms | hot ms |"), head);
   // A TITLE AND NOTHING ELSE — no verdict, no correlation, no reading of the numbers.

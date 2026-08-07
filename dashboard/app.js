@@ -1282,7 +1282,7 @@ export function renderFit(groups, times, tiers) {
     // than the parquet — a wide `MB` range or a `dictionary` cell that had to name columns is a row
     // holding more than one physical shape. `runs` is the sample size behind each median, which is
     // what says whether a row is one dispatch or seven.
-    table(["parquet writer", "ordering", "dictionary", "RG", "MB", "runs", "CU",
+    table(["parquet writer", "ordering", "dictionary", "row groups", "MB", "runs", "CU",
       ...cols.map((l) => `${l} ms`)],
       ["left", "left", "left", "right", "right", "right", "right", ...cols.map(() => "right")],
       pts.map((p) => {
@@ -1531,7 +1531,10 @@ export function renderSources(cols, entries, ledger, repo, now = null, gen = {})
   // and the only one a reader arrives at looking for a particular dispatch. Menus on `column` and
   // `state` — the two cells that repeat; `run`, `built` and the CU columns are unique per row, so a
   // dropdown of them would just be the table again.
-  out.push(table(["column", "run", "built", "RG", "MB", "etl CU", "analytics CU",
+  // `row groups`, not `RG` — the same quantity is headed `row groups` in `Table layout` and in
+  // `Cost and speed by parquet layout`, and one page calling it two things is a puzzle for the
+  // reader to solve. The abbreviation only ever reads as obvious to whoever wrote it.
+  out.push(table(["column", "run", "built", "row groups", "MB", "etl CU", "analytics CU",
     ...tiers.map((l) => `${l} ms`), "items", "state"],
   ["left", "left", "left", "right", "right", "right", "right",
     ...tiers.map(() => "right"), "right", "left"],
