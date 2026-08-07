@@ -526,22 +526,22 @@ to `provision.py teardown`, which polls for a 404 and goes red if it is still li
   sets; `delta.parquet.vorder.enabled` is a `TBLPROPERTIES` key and not a session conf at all.
   Community claims that "V-Order config is deprecated" trace back to the first spelling. Check
   which one a source is quoting before acting on it.
-- **`stats.py`'s `vorder` column cannot see spark's V-Order, and never could.** It comes from
-  duckrun's `get_stats()`, which reads the **table property** `delta.parquet.vorder.enabled` off
-  `dt.metadata().configuration` (`dbt/adapters/duckrun/engine.py:909-913`). Nothing in this repo
-  or in Fabric's writer sets that property — spark records V-Order as a **per-file `add.tags`
-  entry**, and duckrun's own comment there notes `get_add_actions` does not surface tags. So that
-  column reads `·` for spark whatever the files contain, and it is not evidence either way. Two
-  independent sources also warn the property and the file metadata are unrelated — either can be set
-  without the other. Fixing the COLUMN itself would still mean setting
-  `delta.parquet.vorder.enabled` as a real table property (dbt-fabricspark honours
-  `tblproperties`, but only through `create_table_as`, so existing tables need one
-  `ALTER TABLE … SET TBLPROPERTIES`) or teaching duckrun's reader to read tags.
-  **The honest check is no longer a by-hand recipe — `layout.ordering` measures it every run.** See
-  the bullet below; `vorder_files` in that document is the `_delta_log` `add.tags` read this file
-  described for months without anything implementing it, and it is what to believe when it and the
-  `vorder` column disagree. The column stays as it is: it reports the table property truthfully, and
-  the property is genuinely unset.
+- **RETRACTED: "`stats.py`'s `vorder` column cannot see spark's V-Order, and never could." IT SEES
+  IT, AND IT ALWAYS DID.** Checked against every spark record in `history/`: the column reads `True`
+  for all seven `readHeavyForPBI` runs and `False` for all three `writeHeavy` runs and the one
+  `readHeavyForSpark` — 12 for 12, no exceptions. The independent `add.tags` read added in
+  `layout.ordering` agrees with it on both sides (12/12 files tagged under the PBI profile, 0/13
+  under `writeHeavy`), so two sources with nothing in common now confirm each other.
+  The retracted claim reasoned from duckrun's source — `get_stats()` reads the **table property**
+  `delta.parquet.vorder.enabled` off `dt.metadata().configuration`
+  (`dbt/adapters/duckrun/engine.py:909-913`), and nothing in THIS repo sets that property, so the
+  column "must" be blind. The missing step is that **Fabric's own writer sets it** when the resource
+  profile enables V-Order. Reading an adapter to predict what a column will say is not the same as
+  reading the column, and this file spent months asserting a `·` that the records never contained.
+  The two warnings that remain true and are worth keeping: the property and the per-file metadata
+  are independent in principle — either can be set without the other — so they *can* disagree, and
+  `vorder_files` is what to believe if they ever do. The by-hand recipe this file used to prescribe
+  is gone: `layout.ordering` measures it every run.
 - **WHETHER THE ROWS WERE ACTUALLY REORDERED IS MEASURED NOW — `layout.ordering` in the run record,
   and one step-summary section in the `layout` job.** V-Order is documented as a row-reordering plus
   encoding pass and nothing here could say whether it happened; the record could state that a run
@@ -573,6 +573,34 @@ to `provision.py teardown`, which polls for a 404 and goes red if it is still li
   two swap. A near-unique column (`mw`, `price`) is the built-in control: it cannot drop below ~100%
   unless the file really was reordered, so a run where every column falls together is measuring
   something real rather than low cardinality.
+  **MEASURED ANSWER: V-ORDER DOES NOT REORDER THE ROWS. It is an encoding pass here, worth ~16% of
+  the file size and nothing else.** Two spark dispatches an hour apart on identical data, differing
+  only in resource profile — 31129088830 (`readHeavyForPBI`, 12 files, 1,059 MB, 12/12 files tagged
+  `VORDER`) against 31131727297 (`writeHeavy`, 13 files, 1,260 MB, 0/13 tagged) — put the physical
+  row order within measurement noise of each other on every column, with the un-V-Ordered run
+  slightly MORE clustered on three of them:
+
+  | column | `readHeavyForPBI` runs | `writeHeavy` runs |
+  |---|---:|---:|
+  | `date` | 88 (0.00%) | 77 (0.00%) |
+  | `time` | 3,620,191 (90.50%) | 3,558,608 (88.97%) |
+  | `price` | 3,614,952 (90.37%) | 3,546,547 (88.66%) |
+  | `DUID` | 3,977,201 (99.43%) | 3,978,804 (99.47%) |
+  | `mw` | 3,997,905 (99.95%) | 3,996,712 (99.92%) |
+
+  So the V-Order documentation's "row reordering" is not observable in the parquet Fabric writes
+  here, while the tag, the table property and a 16% size drop all say the feature genuinely engaged.
+  Do not explain a V-Order CU result by row order — the rows are in the same order either way.
+  What IS clustered is `date`, in BOTH runs equally: ~45,000-row runs against ~49,600 rows per date,
+  i.e. each date contiguous. That is the model's own trailing `ORDER BY date` reaching the merge
+  source, not the writer — which is exactly the confound this pair was run to separate, and the
+  reason a single V-Order run could not have answered it. `time` and `price` sit ~9% below their
+  random-adjacency baselines in both, which is the data (price repeats per region per interval), not
+  the writer. `DUID` and `mw` are at baseline in both: nothing reordered them.
+  One asymmetry worth not over-reading: `date` row-group overlap is 100% under the PBI profile and
+  75% under `writeHeavy`, i.e. the PBI run's files each span the whole date domain while a quarter of
+  the `writeHeavy` pairs are disjoint. That is `optimizeWrite`'s 1 GB bin packing rearranging which
+  dates share a file, on 12 and 13 row groups respectively — a very small sample to draw a rule from.
   It lives under `layout.ordering`, a sibling of `stats`/`encodings` — **never in `layout.config`**,
   whose every key `variant()` walks into a dashboard column name: a MEASURED value there would split
   an engine's column and its layout bar every time the parquet moved. The dashboard does not read it
