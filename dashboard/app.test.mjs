@@ -139,14 +139,14 @@ function timings(perQuery) {
 
 /** A record whose mart layout is spelled out, so grouping has something to group on. */
 function lay(engine, files, rgs, opts = {}) {
-  const { vorder = false, cfg = {}, file = "x.json", ...rest } = opts;
+  const { vorder = false, cfg = {}, file = "x.json", mb = 1.0, ...rest } = opts;
   return full(file, engine, {
     config: { [engine]: cfg },
     stats: {
       [engine]: {
         fct_summary: {
           total_rows: 143980961, num_files: files, num_row_groups: rgs,
-          avg_row_group: 1, size_mb: 1.0, vorder, schema: "mart",
+          avg_row_group: 1, size_mb: mb, vorder, schema: "mart",
         },
       },
     },
@@ -1124,7 +1124,7 @@ test("the run table is the only filterable one, and renders whole without JS", (
   const { html } = d.compose([full("a-1.json", "spark")], ledger({ OUT: 12.5, SEM: 3.25 }), {});
   const runs = block(html, "Every run on this page");
   assert.ok(runs.includes('class="filtered"'), "the run table is marked for the autofilter");
-  assert.ok(runs.includes('data-menus="0,7"'), "menus on `column` and `state`");
+  assert.ok(runs.includes('data-menus="0,8"'), "menus on `column` and `state`");
   assert.ok(!runs.includes("<select") && !runs.includes("<input"),
     "and it emits no controls — `wireTables` builds them from the rows");
   assert.equal((html.match(/class="filtered"/g) || []).length, 1, "no other table gets one");
@@ -1143,6 +1143,23 @@ test("every run carries its own RG count, and a run without one carries a dash",
   assert.ok(rows(block(html, "Every run on this page"))[0].includes("| RG |"));
   assert.equal(cell(body.find((r) => r.includes("duckrun"))), "27");
   assert.equal(cell(body.find((r) => r.includes("spark"))), "—");
+});
+
+test("every run carries its own mart SIZE beside the row groups", () => {
+  // RG alone does not say what was written: `duckrun·64c+sorted` runs share a column and a 24-RG
+  // count while ranging 543-813 MB on the sort key alone, so a reader comparing two rows of one
+  // column sees identical numbers for parquet that differs by half. Same dash rule as RG —
+  // unmeasured is not zero, and a table reading `0` would say the run wrote nothing.
+  const measured = lay("duckrun", 1, 24, { mb: 543.03, cfg: { vcores: "64" }, file: "a-1.json" });
+  const bare = full("b-2.json", "spark",
+    { stats: { spark: { fct_summary: { total_rows: 143980961, num_row_groups: 9 } } } });
+  const { html } = d.compose([measured, bare], ledger({ OUT: 1.0, SEM: 2.0 }), {});
+  const head = rows(block(html, "Every run on this page"))[0];
+  assert.ok(head.includes("| RG | MB |"), `size sits beside the shape: ${head}`);
+  const body = rows(block(html, "Every run on this page")).slice(1);
+  const cell = (r) => r.split("|").map((c) => c.trim())[5];   // column, run, built, RG, MB
+  assert.equal(cell(body.find((r) => r.includes("duckrun"))), "543", "whole megabytes");
+  assert.equal(cell(body.find((r) => r.includes("spark"))), "—", "no size recorded -> dash");
 });
 
 // ------------------------------------------------------------------------------------- the charts

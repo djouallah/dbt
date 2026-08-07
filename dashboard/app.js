@@ -1369,8 +1369,16 @@ export function renderSources(cols, entries, ledger, repo, now = null, gen = {})
     // measured against, per run rather than as the bar's range. A dash when the run recorded no
     // layout, same as everywhere else: unmeasured is not zero.
     const rg = martStats(rec, gen.table).num_row_groups;
+    // ...and the SIZE it wrote, beside the row groups, for the same reason and with the same dash
+    // rule. The two are the layout in the only terms this table has room for, and they are not
+    // interchangeable: `duckrun·64c+sorted` runs sharing a column and an RG count have ranged from
+    // 543 MB to 813 MB depending on the sort key, which is invisible if only RG is printed. Rounded
+    // to whole megabytes — a tenth of a megabyte on a 543 MB table is noise, and the column is
+    // already the widest table on the page.
+    const mb = martStats(rec, gen.table).size_mb;
     rows.push([col, link, `${started} (${load})`,
       rg === undefined || rg === null ? DASH : fmt(Math.trunc(Number(rg)), 0),
+      mb === undefined || mb === null ? DASH : fmt(Number(mb), 0),
       cu.etl ? fmt(classTotal(cu, "etl"), 1) : DASH,
       cu.analytics ? fmt(classTotal(cu, "analytics"), 1) : DASH,
       ...tiers.map((l) => (ms[l] ? fmt(ms[l], 0) : DASH)),
@@ -1383,11 +1391,12 @@ export function renderSources(cols, entries, ledger, repo, now = null, gen = {})
   // and the only one a reader arrives at looking for a particular dispatch. Menus on `column` and
   // `state` — the two cells that repeat; `run`, `built` and the CU columns are unique per row, so a
   // dropdown of them would just be the table again.
-  out.push(table(["column", "run", "built", "RG", "etl CU", "analytics CU",
+  out.push(table(["column", "run", "built", "RG", "MB", "etl CU", "analytics CU",
     ...tiers.map((l) => `${l} ms`), "items", "state"],
-  ["left", "left", "left", "right", "right", "right", ...tiers.map(() => "right"), "right", "left"],
+  ["left", "left", "left", "right", "right", "right", "right",
+    ...tiers.map(() => "right"), "right", "left"],
   rows,
-  { find: "filter runs — engine, run id, date…", menus: [0, 7 + tiers.length] }));
+  { find: "filter runs — engine, run id, date…", menus: [0, 8 + tiers.length] }));
   out.push(note("**`etl CU` and `analytics CU` are that RUN's own totals** — the same GUID join as " +
     "*Cost by engine*, which quotes each column's newest run. The CHARTS quote neither: each bar is " +
     "the MEDIAN over the runs listed here that fed it — a bad sample on a shared capacity is not a "
