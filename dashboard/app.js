@@ -1719,6 +1719,26 @@ export function renderInput(cols) {
  * `stats.py` learned to profile the mart. An empty table would read as "the engines have no
  * encodings", which is not a state parquet can be in.
  */
+/**
+ * The mart's columns, in reading order — the grain first, then the measures, then the bookkeeping.
+ *
+ * **HARDCODED, AND THAT IS THE POINT.** This table used to key its rows on whatever
+ * `Object.keys()` came back from the parquet footer, and a Fabric Warehouse writes its Delta tables
+ * with COLUMN MAPPING on — so the footer's names there are generated GUIDs
+ * (`col-89683a34-759f-4df8-a82f-f52e60fb35e0`). Six of those went down the first column, in their
+ * own rows, pushing the real names into a separate block: twelve rows for six columns, every cell in
+ * each half a dash, and nothing on the page saying they were the same six columns twice. A rendering
+ * layer has no business displaying an identifier it cannot name.
+ *
+ * Alphabetical was the old order and it is worse than it looks — it opens with `DUID` and `cutoff`,
+ * the two least interesting columns on a page about what Power BI transcodes.
+ *
+ * The cost is that a NEW model column silently does not appear here until this list grows. That is
+ * the right trade for a display list: it is checked against `stats.py` by a test, and the alternative
+ * has already shipped GUIDs to the page.
+ */
+export const MART_COLUMNS = ["date", "time", "DUID", "mw", "price", "cutoff"];
+
 export function renderEncodings(groups, martTable = DEFAULTS.table) {
   const cols = [];
   for (const [, members] of groups || []) {
@@ -1739,7 +1759,22 @@ export function renderEncodings(groups, martTable = DEFAULTS.table) {
   // Truncated in the MIDDLE, never the tail: a layout's name ends in its row-group count, which is
   // what tells two bars sharing a label apart.
   const short = (n) => n.length <= 34 ? n : `${n.slice(0, 17)}…${n.slice(-15)}`;
-  const names = [...new Set(cols.flatMap((c) => Object.keys(c.enc)))].sort();
+  // ONLY a column this page can name. Declared order, not `Object.keys()` — see MART_COLUMNS.
+  const known = new Set(MART_COLUMNS);
+  const names = MART_COLUMNS.filter((n) => cols.some((c) => c.enc[n]));
+  // A layout whose footer named NOTHING we recognise contributed only physical names — a
+  // column-mapped table read by a duckrun older than 0.4.47, which resolves them. Say which one,
+  // because dropping the rows silently would leave that engine as a column of dashes and an
+  // unmeasured column and an unnameable one look exactly alike.
+  const unnamed = cols.filter((c) => Object.keys(c.enc).length
+    && !Object.keys(c.enc).some((k) => known.has(k))).map((c) => c.name);
+  const caveat = unnamed.length
+    ? note(`**${unnamed.length} layout(s) reported column names this page cannot resolve** — ` +
+      `${unnamed.join(", ")}. Fabric Warehouse writes its Delta tables with column mapping on, so ` +
+      "the parquet footer carries generated physical names rather than `mw` or `price`; " +
+      "duckrun resolves them from the Delta schema since 0.4.47. Those rows are dropped rather " +
+      "than printed as identifiers, so the layout is simply absent here until it is re-measured.")
+    : "";
   const cell = (c, col) => {
     const v = c.enc[col];
     if (!v) return DASH;
@@ -1748,16 +1783,22 @@ export function renderEncodings(groups, martTable = DEFAULTS.table) {
     return `\`${enc}\`${v.dict_pages ? (partial ? ` ⚠️ dict in ${v.dict_pages}/${v.chunks}` : "")
       : " ⚠️ no dict"} · ${fmt(v.mb || 0, 1)} MB`;
   };
-  return [`<h3>Column encoding <span class="asof">\`${esc(martTable)}\`</span></h3>`,
+  const head = [`<h3>Column encoding <span class="asof">\`${esc(martTable)}\`</span></h3>`,
     note("**What Power BI has to transcode.** Direct Lake converts parquet into VertiPaq segments on " +
       "first touch, and that conversion is where a cold pass spends its capacity — so what each " +
       "column is ENCODED as matters in a way its size does not. Read from the parquet footers by " +
-      "`stats.py`, aggregated per column over every row group."),
+      "`stats.py`, aggregated per column over every row group.")];
+  // No nameable column anywhere: emit the heading and the caveat, never an empty table. A table with
+  // a header row and no body reads as "these engines have no encodings", which is not a state
+  // parquet can be in — the same rule that makes an absent `encodings` key render nothing at all.
+  if (!names.length) return caveat ? [...head, caveat].join("\n") : "";
+  return [...head,
     table(["column", "type", ...cols.map((c) => short(c.name))],
       ["left", "left", ...cols.map(() => "left")],
       names.map((n) => [`\`${n}\``,
         `\`${(cols.find((c) => c.enc[n]) || { enc: {} }).enc[n].type || "?"}\``,
-        ...cols.map((c) => cell(c, n))]))].join("\n");
+        ...cols.map((c) => cell(c, n))])),
+    caveat].filter(Boolean).join("\n");
 }
 
 export function renderLayouts(cols, groups, times, counts, martTable = DEFAULTS.table) {

@@ -2615,3 +2615,81 @@ test("the copy button says what happened", async () => {
   assert.equal(btn.textContent, "select and copy",
     "a button that silently does nothing is worse than no button");
 });
+
+// ---------------------------------------------- the encoding table only ever prints a column it can name
+
+/** A column-mapped footer: the physical names a Fabric Warehouse actually writes. */
+const guidEnc = () => ({
+  "col-198f7fa3-51d0-4557-905a-c6408fec0454": {
+    encodings: ["PLAIN", "RLE", "RLE_DICTIONARY"], type: "INT64", dict_pages: 77, chunks: 77, mb: 0.01 },
+  "col-89683a34-759f-4df8-a82f-f52e60fb35e0": {
+    encodings: ["PLAIN", "RLE", "RLE_DICTIONARY"], type: "INT64", dict_pages: 77, chunks: 77, mb: 492.46 },
+});
+
+const encRuns = (a, b) => {
+  const runs = [lay("duckrun", 4, 27, { cfg: { vcores: "64" }, file: "a-1.json" }),
+    lay("dwh", 78, 78, { file: "b-2.json" })];
+  runs[0].layout.encodings = { duckrun: a };
+  runs[1].layout.encodings = { dwh: b };
+  runs.forEach((r, i) => {
+    r.items = { [`S${i}`]: gone("semantic_model", `aemo_${r.engine}`),
+      [`O${i}`]: gone("output", `dbt_${r.engine}`) };
+  });
+  return d.compose(runs, ledger({ S0: { "XMLA Read Operation": 10 }, O0: 1,
+    S1: { "XMLA Read Operation": 20 }, O1: 1 }), {}).html;
+};
+
+test("a physical column name is never printed as a row", () => {
+  // Fabric Warehouse writes Delta with COLUMN MAPPING on, so its parquet footer carries
+  // `col-89683a34-759f-…` and not `mw`. Keying rows on Object.keys() put six of those down the first
+  // column, in rows of their own, pushing the real names into a second block — twelve rows for six
+  // columns, every cell in each half a dash. A render layer has no business showing an identifier.
+  const html = encRuns(enc(false), guidEnc());
+  assert.ok(!html.includes("col-89683a34"), "no GUID reaches the page");
+  assert.ok(!html.includes("col-198f7fa3"));
+  const body = rows(block(html, "Column encoding")).slice(1);
+  assert.deepEqual(body.map((r) => r.split("|")[1].trim()), ["`date`", "`mw`", "`price`"],
+    "only the named columns, in MART_COLUMNS order — never alphabetical");
+});
+
+test("a layout whose columns are ALL unnameable is named in a caveat, not dropped in silence", () => {
+  // An unmeasured column and an unnameable one look identical as a column of dashes, and only one of
+  // them is a tooling problem the reader can act on.
+  const html = encRuns(enc(false), guidEnc());
+  const said = plain(html);
+  assert.ok(said.includes("column names this page cannot resolve"), said.slice(0, 400));
+  assert.ok(said.includes("0.4.47"), "and it says which duckrun resolves them");
+});
+
+test("every column being unnameable renders the caveat and NO empty table", () => {
+  const html = encRuns(guidEnc(), guidEnc());
+  assert.ok(plain(html).includes("column names this page cannot resolve"));
+  assert.ok(!/Column encoding[\s\S]{0,400}<tbody>/.test(html),
+    "a header row with no body reads as 'these engines have no encodings'");
+});
+
+test("MART_COLUMNS is the model's own select list, in its own order", () => {
+  assert.deepEqual(d.MART_COLUMNS, ["date", "time", "DUID", "mw", "price", "cutoff"]);
+});
+
+test("MART_COLUMNS covers every column stats.py has actually recorded", async () => {
+  // THE DRIFT GUARD, and the cost of hardcoding the list: a new model column would silently not
+  // appear in the encoding table. Checked against real recorded data rather than by parsing SQL —
+  // `history/` holds what `stats.py` read out of the footers, and the duckdb engines write no column
+  // mapping, so their names ARE the logical ones. Skips when nothing has been profiled yet.
+  const fs = await import("node:fs");
+  let seen = new Set(), any = false;
+  const dir = "history/runs";
+  if (!fs.existsSync(dir)) return;
+  for (const f of fs.readdirSync(dir).filter((n) => n.endsWith(".json") && n !== "index.json")) {
+    const rec = JSON.parse(fs.readFileSync(`${dir}/${f}`, "utf8"));
+    const e = ((rec.layout || {}).encodings || {})[rec.engine];
+    if (!e || !["duckrun", "iceberg", "spark"].includes(rec.engine)) continue;
+    any = true;
+    for (const c of Object.keys(e)) seen.add(c);
+  }
+  if (!any) return;
+  const missing = [...seen].filter((c) => !d.MART_COLUMNS.includes(c));
+  assert.deepEqual(missing, [],
+    `stats.py recorded column(s) MART_COLUMNS does not list, so the page silently hides them: ${missing}`);
+});
