@@ -140,16 +140,18 @@ function timings(perQuery) {
 /** A record whose mart layout is spelled out, so grouping has something to group on. */
 function lay(engine, files, rgs, opts = {}) {
   const { vorder = false, cfg = {}, file = "x.json", mb = 1.0, ...rest } = opts;
+  // `avg_row_group` defaults to what stats.py would actually record — `total_rows / num_row_groups`,
+  // because every engine writes the identical row count. It was a hardcoded `1`, which is not a
+  // number any run can produce. Pass `avg: null` to omit the field and exercise the derived path.
+  const avg = "avg" in opts ? opts.avg : 143980961 / rgs;
+  const summary = {
+    total_rows: 143980961, num_files: files, num_row_groups: rgs,
+    size_mb: mb, vorder, schema: "mart",
+  };
+  if (avg != null) summary.avg_row_group = avg;
   return full(file, engine, {
     config: { [engine]: cfg },
-    stats: {
-      [engine]: {
-        fct_summary: {
-          total_rows: 143980961, num_files: files, num_row_groups: rgs,
-          avg_row_group: 1, size_mb: mb, vorder, schema: "mart",
-        },
-      },
-    },
+    stats: { [engine]: { fct_summary: summary } },
     ...rest,
   });
 }
@@ -1486,7 +1488,7 @@ test("the three tiers are columns of the PER-RUN table, not of the layout block"
   const heads = rows(out).filter((r) => r.includes("cold ms"));
   assert.equal(heads.length, 2, `two headers carry the tiers: ${heads}`);
   assert.ok(heads.some((h) =>
-    h.startsWith("| parquet writer | ordering | dictionary | row groups | MB | runs | CU "
+    h.startsWith("| parquet writer | ordering | dictionary | row group size | MB | runs | CU "
       + "| cold ms | warm ms | hot ms |")),
   heads[0]);
   assert.ok(heads.some((h) =>
@@ -2117,7 +2119,7 @@ test("cost and speed is one table, cheapest first, with a title and nothing else
   // `MB` sits beside `RG` and is NOT part of `layoutKey` — printed so a reader can see where the key
   // is coarser than the parquet, since a group merged on RG band can still hold two file sizes.
   const head = rows(out).find((r) =>
-    r.startsWith("| parquet writer | ordering | dictionary | row groups | MB | runs | CU |"));
+    r.startsWith("| parquet writer | ordering | dictionary | row group size | MB | runs | CU |"));
   assert.ok(head, "layout, the key, the size, the sample size, CU, then the tiers");
   assert.ok(head.includes("| cold ms | warm ms | hot ms |"), head);
   // A TITLE AND NOTHING ELSE — no verdict, no correlation, no reading of the numbers.
@@ -2693,4 +2695,22 @@ test("MART_COLUMNS covers every column stats.py has actually recorded", async ()
   const missing = [...seen].filter((c) => !d.MART_COLUMNS.includes(c));
   assert.deepEqual(missing, [],
     `stats.py recorded column(s) MART_COLUMNS does not list, so the page silently hides them: ${missing}`);
+});
+
+test("row group size is rows per group in millions, ranged when the group differs", () => {
+  // The same fact as the row-group count — every engine writes the identical 143,980,961 rows, so
+  // `avg_row_group` IS `total_rows / num_row_groups` — said the way it can be acted on: `16.0M` is a
+  // segment size to compare against VertiPaq's own, where `9` is a number you must divide first.
+  const one = d.keyCells([{ rec: lay("duckrun", 1, 9, { avg: 15997884.6, file: "a-1.json" }) }]);
+  assert.equal(one.rgSize, "16.0M");
+  const many = d.keyCells([{ rec: lay("spark", 12, 9, { avg: 16000000, file: "a-1.json" }) },
+    { rec: lay("spark", 12, 11, { avg: 13089178, file: "b-2.json" }) }]);
+  assert.equal(many.rgSize, "13.1–16.0M", "a band of counts is a band of sizes");
+  // Small groups must not round to 0.0M and vanish — iceberg writes 1,172 of them.
+  assert.equal(d.keyCells([{ rec: lay("iceberg", 366, 1172, { avg: 122850.6, file: "c-3.json" }) }])
+    .rgSize, "0.1M");
+  // Derived when `avg_row_group` was never recorded, so older records still fill the column.
+  const derived = d.keyCells([{ rec: lay("duckrun", 4, 24, { file: "d-4.json", avg: null }) }]);
+  assert.equal(derived.rgSize, "6.0M", "total_rows / num_row_groups when the field is absent");
+  assert.equal(d.keyCells([{ rec: full("e-5.json", "spark") }]).rgSize, "—", "unmeasured is a dash");
 });

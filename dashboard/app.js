@@ -1238,6 +1238,24 @@ function span(values) {
       : `${fmt(vals[0], 0)}–${fmt(vals[vals.length - 1], 0)}`;
 }
 
+/**
+ * Rows per row group, in millions: `16.0M`, `13.1–16.0M`, or a dash.
+ *
+ * THE SAME FACT AS THE ROW-GROUP COUNT, said the way it can be acted on. Every engine writes the
+ * identical 143,980,961 rows — that parity is what the whole project rests on — so `avg_row_group`
+ * is exactly `total_rows ÷ num_row_groups` and carries no information the count did not. What it
+ * carries BETTER is meaning: `16.0M` is a segment size a reader can compare against VertiPaq's own,
+ * where `9` is a number you have to divide the table by first.
+ */
+function spanM(values) {
+  const vals = [...new Set((values || [])
+    .map((v) => (v === undefined || v === null || v === "" ? NaN : Math.round(Number(v) / 1e5) / 10))
+    .filter((v) => Number.isFinite(v)))].sort((a, b) => a - b);
+  return !vals.length ? DASH
+    : vals.length === 1 ? `${fmt(vals[0], 1)}M`
+      : `${fmt(vals[0], 1)}–${fmt(vals[vals.length - 1], 1)}M`;
+}
+
 export function keyCells(members, table = DEFAULTS.table) {
   const stats = (members || []).map(({ rec }) => martStats(rec, table));
   const sorts = [...new Set((members || []).map(({ rec }) => sortKeyOf(rec, table))
@@ -1251,6 +1269,10 @@ export function keyCells(members, table = DEFAULTS.table) {
     ordering: bits.join(" · ") || DASH,
     dict: dictCell(members),
     rg: span(stats.map((s) => s.num_row_groups)),
+    // `avg_row_group` when `stats.py` recorded it; otherwise derived, so the older records that
+    // predate that field still fill the column rather than dashing out.
+    rgSize: spanM(stats.map((s) => (s.avg_row_group != null ? s.avg_row_group
+      : (s.total_rows && s.num_row_groups ? Number(s.total_rows) / Number(s.num_row_groups) : null)))),
     // NOT a key element — `layoutKey` has no size term, deliberately, and this is the column that
     // exposes what that costs: a group whose MB cell reads as a wide range is one the page merged on
     // (V-Order, RG band, sort key, engine) while the files themselves differ in size. Printed rather
@@ -1277,17 +1299,19 @@ export function renderFit(groups, times, tiers) {
   return ["<h3>Cost and speed by parquet layout</h3>",
     // THE KEY IS PRINTED, not just grouped on. Six rows reading `duckrun sorted` with nothing to
     // tell them apart is a table asking the reader to trust a grouping it will not show. `ordering`
-    // and `RG` ARE `layoutKey` (the engine is already in the label); `dictionary` and `MB` are
-    // MEASURED BUT NOT GROUPED ON, and printing them is how a reader sees where the key is coarser
-    // than the parquet — a wide `MB` range or a `dictionary` cell that had to name columns is a row
-    // holding more than one physical shape. `runs` is the sample size behind each median, which is
-    // what says whether a row is one dispatch or seven.
-    table(["parquet writer", "ordering", "dictionary", "row groups", "MB", "runs", "CU",
+    // and `row group size` ARE `layoutKey` (the engine is already in the label) — the key bands the
+    // row-group COUNT, and with every engine writing the identical 143,980,961 rows the size is that
+    // same number inverted, so nothing is hidden by printing the more meaningful of the two.
+    // `dictionary` and `MB` are MEASURED BUT NOT GROUPED ON, and printing them is how a reader sees
+    // where the key is coarser than the parquet — a wide `MB` range, or a `dictionary` cell that had
+    // to name columns, is a row holding more than one physical shape. `runs` is the sample size
+    // behind each median, which is what says whether a row is one dispatch or seven.
+    table(["parquet writer", "ordering", "dictionary", "row group size", "MB", "runs", "CU",
       ...cols.map((l) => `${l} ms`)],
       ["left", "left", "left", "right", "right", "right", "right", ...cols.map(() => "right")],
       pts.map((p) => {
         const k = keyCells(p.members);
-        return [p.name, k.ordering, k.dict, k.rg, k.mb, String(p.n), fmt(p.cu, 0),
+        return [p.name, k.ordering, k.dict, k.rgSize, k.mb, String(p.n), fmt(p.cu, 0),
           ...cols.map((l) => (p.ms[l] ? fmt(p.ms[l], 0) : DASH))];
       }),
       { sort: true }),
