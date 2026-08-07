@@ -869,17 +869,48 @@ jobs:
       # Committing from CI is safe in THIS repo precisely because nothing runs on push — that
       # standing rule is what stops a bot commit from starting a paid build.
       #
-      # `pull --rebase` because a queued dispatch can have moved main since checkout; the diff check
-      # exits 0 so a re-run producing an identical record does not fail the job.
+      # **NO REBASE, AND THAT IS THE WHOLE POINT.** `history/runs/index.json` is a GENERATED file
+      # that this job and `Capacity units` both rebuild and both commit, on DIFFERENT concurrency
+      # groups — so they race, and a rebase asks git to merge content that should never be merged.
+      # Run 31151001360 died there: a fully green iceberg build, layout, benchmark and teardown, all
+      # the capacity spent, then `CONFLICT (content): Merge conflict in history/runs/index.json` and
+      # no record. `Capacity units` 31151880071 lost the other half of the same race the same hour —
+      # `[remote rejected] cannot lock ref` between its rebase and its push, because neither side
+      # retried.
+      #
+      # Instead: reset onto whatever origin holds RIGHT NOW, drop the record back in, REGENERATE the
+      # index from the merged directory, commit, push. The index is derived rather than merged, so
+      # there is nothing to conflict on; a lost push repeats the whole block against the newer
+      # origin. Nothing here can leave a half-rebased tree behind.
+      #
+      # The record is copied to RUNNER_TEMP first because `reset --hard` DELETES a file that exists
+      # only in the commit being discarded — which on attempt 2 is exactly our own record.
       - name: Commit the record
+        env:
+          REC: ${{ steps.rec.outputs.path }}
+          BR: ${{ github.ref_name }}
         run: |
           set -euo pipefail
           git config user.name  "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          # index.json alongside the record it names, in ONE commit — it is the page's directory
-          # listing (raw serves files, not indexes) and a lagging index is a page missing a run.
-          git add "${{ steps.rec.outputs.path }}" history/runs/index.json
-          git diff --cached --quiet && { echo "record identical to HEAD" >&2; exit 0; }
-          git commit -m "record: run ${{ github.run_id }} (${{ inputs.engines }})"
-          git pull --rebase --autostash origin "${{ github.ref_name }}"
-          git push origin "HEAD:${{ github.ref_name }}"
+          cp "$REC" "$RUNNER_TEMP/record.json"
+          for attempt in 1 2 3 4 5; do
+            git fetch -q origin "$BR"
+            git reset -q --hard "origin/$BR"
+            mkdir -p history/runs
+            cp "$RUNNER_TEMP/record.json" "$REC"
+            # index.json alongside the record it names, in ONE commit — it is the page's directory
+            # listing (raw serves files, not indexes) and a lagging index is a page missing a run.
+            python -c "import sys; sys.path.insert(0, '.github/scripts'); import record; record.reindex('history/runs')"
+            git add "$REC" history/runs/index.json
+            if git diff --cached --quiet; then echo "record identical to HEAD" >&2; exit 0; fi
+            git commit -q -m "record: run ${{ github.run_id }} (${{ inputs.engines }})"
+            if git push -q origin "HEAD:$BR"; then
+              echo "pushed the record on attempt $attempt" >&2; exit 0
+            fi
+            echo "push lost a race on attempt $attempt — refetching origin/$BR" >&2
+            sleep $((attempt * 5))
+          done
+          echo "could not push the record after 5 attempts; it is still uploaded as the" >&2
+          echo "run-record artifact and can be committed by hand" >&2
+          exit 1

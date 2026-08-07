@@ -172,22 +172,46 @@ jobs:
       # This commit CANNOT trigger anything, and that is a property to preserve: nothing in this repo
       # answers `push` except `Dashboard`, whose path filter is `dashboard/**` and therefore never
       # matches `history/`. Putting `history/` in that filter is the one edit that would build a loop.
-      # SELF-HEALING for the page's directory listing. `record.py` writes `history/runs/index.json`
-      # in the same commit as each record, but only for a dispatch whose WORKFLOW already carried
-      # that step — a run started from an older SHA commits its record and no index, and the page
-      # then silently omits it (run 31141468318 was exactly this). Records moved to `legacy/` by
-      # hand have the same problem from the other side. This job runs after every Benchmark and daily
-      # anyway, so rebuilding the index here costs nothing and closes both holes.
-      - name: Rebuild the record index
-        run: python -c "import sys; sys.path.insert(0, '.github/scripts'); import record; record.reindex('history/runs')"
-
+      # **NO REBASE, AND THE REINDEX LIVES INSIDE THE LOOP.** This job and `Benchmark`'s `record` job
+      # both rebuild and commit `history/runs/index.json`, on different concurrency groups, so they
+      # race — and a rebase asks git to merge a GENERATED file. Both halves of that race were paid
+      # for in one hour: run 31151001360 lost a green iceberg record to `CONFLICT (content): Merge
+      # conflict in history/runs/index.json`, and this workflow's 31151880071 died on `[remote
+      # rejected] cannot lock ref` between its own rebase and its push, because neither side retried.
+      #
+      # Reset onto origin as it stands now, put the freshly-measured ledger back, REGENERATE the
+      # index from the merged directory, commit, push — and repeat against a newer origin if the
+      # push loses. Derived, not merged, so there is nothing to conflict on. `cu.json` is copied
+      # aside for the same reason the record is: `reset --hard` reverts a tracked file we modified.
+      # Overwriting it wholesale is safe because this workflow is the ONLY writer of `cu.json` and
+      # its own concurrency group serializes it against itself.
+      #
+      # The reindex is also SELF-HEALING for the page's directory listing: `record.py` writes the
+      # index beside each record, but only for a dispatch whose workflow already carried that step —
+      # a run started from an older SHA commits its record and no index, and the page then silently
+      # omits it (run 31141468318 was exactly this). Records moved to `legacy/` by hand have the same
+      # problem from the other side. This runs after every Benchmark and daily anyway.
       - name: Commit the ledger
         run: |
           set -euo pipefail
           git config user.name  "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add history/cu.json history/runs/index.json
-          git diff --cached --quiet && { echo "ledger unchanged — everything settled" >&2; exit 0; }
-          git commit -m "cu: capacity units as of run ${{ github.run_id }}"
-          git pull --rebase --autostash origin "$BRANCH"
-          git push origin "HEAD:$BRANCH"
+          cp history/cu.json "$RUNNER_TEMP/cu.json"
+          for attempt in 1 2 3 4 5; do
+            git fetch -q origin "$BRANCH"
+            git reset -q --hard "origin/$BRANCH"
+            cp "$RUNNER_TEMP/cu.json" history/cu.json
+            python -c "import sys; sys.path.insert(0, '.github/scripts'); import record; record.reindex('history/runs')"
+            git add history/cu.json history/runs/index.json
+            if git diff --cached --quiet; then
+              echo "ledger unchanged — everything settled" >&2; exit 0
+            fi
+            git commit -q -m "cu: capacity units as of run ${{ github.run_id }}"
+            if git push -q origin "HEAD:$BRANCH"; then
+              echo "pushed the ledger on attempt $attempt" >&2; exit 0
+            fi
+            echo "push lost a race on attempt $attempt — refetching origin/$BRANCH" >&2
+            sleep $((attempt * 5))
+          done
+          echo "could not push the ledger after 5 attempts" >&2
+          exit 1
