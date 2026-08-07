@@ -1385,7 +1385,7 @@ no data at all. `all.yml`, `dbt.yml` and `cu.yml` are gone.
   mark per row — but min/max are still measured and stated in the tooltip and in `Every run`'s
   per-run rows, so the median is what the bar claims and the spread stays checkable.
   **Grouping is MEASURED, labelling is DECLARED — with ONE stated exception.** The key is
-  `(V-Order, band(files), band(row groups), sort columns)`, the first three from the parquet as
+  `(V-Order, band(row groups), sort columns)`, the first three from the parquet as
   `stats.py`
   read it, so two unrelated engines that wrote the same shape *do* share a bar; the caption comes
   from `LAYOUT_CONFIG` so it does not re-word itself whenever a record lands. The sort element is

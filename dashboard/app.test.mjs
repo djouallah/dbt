@@ -371,12 +371,12 @@ test("a sort splits the layout bar even though the bands do not move", () => {
   // to make.
   const plain = lay("duckrun", 4, 27, { cfg: { vcores: "64" } });
   const sorted = lay("duckrun", 4, 25, { cfg: { vcores: "64", sorted: "true" } });
-  assert.deepEqual(d.layoutKey(plain).slice(0, 3), d.layoutKey(sorted).slice(0, 3),
-    "same V-Order and same bands — the measured half cannot tell them apart");
+  assert.deepEqual(d.layoutKey(plain).slice(0, 2), d.layoutKey(sorted).slice(0, 2),
+    "same V-Order and same band — the measured half cannot tell them apart");
   assert.notDeepEqual(d.layoutKey(plain), d.layoutKey(sorted));
   // This fixture records no key, so it reads `true` — sorted by something unnamed. The COLUMNS case
   // is the two-sorts test below.
-  assert.equal(d.layoutKey(sorted)[3], true);
+  assert.equal(d.layoutKey(sorted)[2], true);
 });
 
 test("a record with no sorted key groups with an unsorted run, not alone", () => {
@@ -386,7 +386,7 @@ test("a record with no sorted key groups with an unsorted run, not alone", () =>
   const old = lay("duckrun", 4, 27, { cfg: { vcores: "64" } });          // no `sorted` key at all
   const off = lay("iceberg", 4, 27, { cfg: { vcores: "64" } });
   assert.deepEqual(d.layoutKey(old), d.layoutKey(off));
-  assert.equal(d.layoutKey(old)[3], false);
+  assert.equal(d.layoutKey(old)[2], false);
 });
 
 // A sorted record's own key, in either spelling. `sort_by` is what the run DECLARED (stats.py),
@@ -399,14 +399,14 @@ const sortedBy = (files, rgs, key, opts = {}) => {
 };
 
 test("two sorts on different keys never share a bar, even when the bands agree", () => {
-  // The real pair — `['date','time','DUID']` (run 30955591822) and `['date','time']` — sits in
-  // separate bars today only because 3 and 4 files cross a band boundary. That is luck, so the key
-  // carries the columns.
+  // The real pair — `['date','time','DUID']` (run 30955591822) and `['date','time']` — writes the
+  // same row-group band, so the COLUMNS are now the only thing keeping them apart. This used to be
+  // covered accidentally by 3 vs 4 files crossing a band boundary; that element is gone.
   const duid = sortedBy(4, 25, ["date", "time", "DUID"], { file: "a-1.json" });
   const dt = sortedBy(4, 25, ["date", "time"], { file: "b-2.json" });
-  assert.equal(d.layoutKey(duid)[3], "date,time,DUID");
-  assert.equal(d.layoutKey(dt)[3], "date,time");
-  assert.deepEqual(d.layoutKey(duid).slice(0, 3), d.layoutKey(dt).slice(0, 3));
+  assert.equal(d.layoutKey(duid)[2], "date,time,DUID");
+  assert.equal(d.layoutKey(dt)[2], "date,time");
+  assert.deepEqual(d.layoutKey(duid).slice(0, 2), d.layoutKey(dt).slice(0, 2));
   assert.equal(d.layoutGroups([{ rec: duid }, { rec: dt }]).length, 2,
     "identical shape, different sort — two bars");
 });
@@ -1292,14 +1292,14 @@ test("the same parquet is one bar however many engines wrote it", () => {
 });
 
 test("two runs of ONE column that wrote different parquet are two bars", () => {
-  // The bug this pins, on the real records: `duckrun·64c+sorted` wrote 3 files / 26 RG under an
-  // explicit sort key and 4 files / 25 under the one `sort_by='auto'` resolved to. Grouping the
-  // COLUMNS and pouring every run of each into its bar put them together at their mean — 2,041.8, a
-  // number neither run measured — captioned with only the newer one's shape. The layout is measured
-  // per RUN, so it has to be grouped per run.
+  // The bug this pins, on the real records: `duckrun·64c+sorted` wrote two different shapes under
+  // one column. Grouping the COLUMNS and pouring every run of each into its bar put them together at
+  // their mean — 2,041.8, a number neither run measured — captioned with only the newer one's shape.
+  // The layout is measured per RUN, so it has to be grouped per run. (The original pair differed by
+  // file count too; that element has left the key, so the fixture separates on row groups.)
   const cfg = { vcores: "64", sorted: "true" };
   const runs = [
-    lay("duckrun", 3, 26, { cfg, file: "a-1.json", finishedHoursAgo: 72 }),
+    lay("duckrun", 3, 9, { cfg, file: "a-1.json", finishedHoursAgo: 72 }),
     lay("duckrun", 4, 25, { cfg, file: "b-2.json", finishedHoursAgo: 48 }),
   ];
   runs.forEach((r) => { r.dbt = { duckrun: { sort_by: { fct_summary: ["date", "time"] } } }; });
@@ -1313,13 +1313,13 @@ test("two runs of ONE column that wrote different parquet are two bars", () => {
   assert.deepEqual(c.labels, ["duckrun sorted", "duckrun sorted"], "one label, two layouts");
   assert.deepEqual(c.values, ["1,600.0", "2,400.0"], "each run's OWN CU, never their mean");
   // The caption is the whole reason two bars with one label read: the label answers who wrote it.
-  assert.deepEqual(c.captions, ["by date, time · 25 RG", "by date, time · 26 RG"]);
+  assert.deepEqual(c.captions, ["by date, time · 25 RG", "by date, time · 9 RG"]);
   // ...and the mart block says the same thing, because its rows ARE these groups.
   const body = rows(block(out, "the mart the queries land on")).slice(1);
   assert.equal(body.length, 2, "one mart row per bar, not one per writer");
   // Fewest files first, and the block carries LAYOUT ONLY — the CU that used to sit here is in the
   // charts and in `Cost by engine`, on the run that measured it.
-  assert.ok(body[0].startsWith("| duckrun sorted | 3 | 26 |"), body[0]);
+  assert.ok(body[0].startsWith("| duckrun sorted | 3 | 9 |"), body[0]);
   assert.ok(body[1].startsWith("| duckrun sorted | 4 | 25 |"), body[1]);
   assert.ok(!body[0].includes("1,600"), "no CU column on the layout block");
   // The ETL half groups per COLUMN, and both runs are samples of one column — so two analytics
@@ -2227,7 +2227,7 @@ test("every run a chart drew from has a row of its own", () => {
   // that run's CU appeared nowhere else on the page: `duckrun sorted` read 2,454.1 and no row said so.
   const cfg = { vcores: "64", sorted: "true" };
   const runs = [
-    lay("duckrun", 3, 26, { cfg, file: "a-1.json", finishedHoursAgo: 72 }),
+    lay("duckrun", 3, 9, { cfg, file: "a-1.json", finishedHoursAgo: 72 }),
     lay("duckrun", 4, 25, { cfg, file: "b-2.json", finishedHoursAgo: 48 }),
   ];
   runs[0].items = { S0: gone("semantic_model", "aemo_duckrun"), O0: gone("output", "dbt_delta") };

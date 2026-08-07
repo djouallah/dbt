@@ -559,22 +559,26 @@ export function sameGeneration(runs, table = DEFAULTS.table) {
  * transcodes — and V-Order is already element `[0]`, so it belongs in the same key. The difference is
  * where each comes from: `vorder` is read off the Delta table property by `stats.py`, while nothing in
  * `stats.py` measures sort ORDER, so the config the run recorded is the only witness that the parquet
- * differs. Leaving it out is not neutral — a sorted and an unsorted duckrun run wrote 4 files and the
- * same bands either way, so they would share one bar and have their cold/warm/hot means averaged
+ * differs. Leaving it out is not neutral — a sorted and an unsorted duckrun run wrote the same bands
+ * either way, so they would share one bar and have their cold/warm/hot means averaged
  * together, which is precisely the comparison the flag exists to make. It carries the resolved
- * COLUMN LIST, not a boolean, so two sorts on different keys can never share a bar either — the
- * `['date','time','DUID']` and `['date','time']` runs land in separate bars today only because their
- * file bands happen to differ, and that is luck, not a rule.
+ * COLUMN LIST, not a boolean, so two sorts on different keys can never share a bar either.
+ *
+ * **THE FILE COUNT IS NOT IN THE KEY, AND WAS REMOVED FOR SPLITTING BARS INVISIBLY.** It used to sit
+ * between V-Order and the row groups, while `layoutLabel` prints row groups ONLY — so two bars could
+ * carry overlapping captions (`19–25 RG` at 1,805.7 beside `24 RG` at 1,823.5) that looked like an
+ * arbitrary split of one group. They were one RG band, separated by a dimension the page refused to
+ * show. Measured, the dimension does not earn its place either: 1 file and 4 files at the same row
+ * groups and the same sort read 1,823 and 1,806 CU. Segments are what Direct Lake transcodes; the
+ * file count only bounds incremental framing, which this benchmark does not measure.
  *
  * A measured version is possible later and would be better: per-file `date` min/max from the Delta log
  * says whether files cover disjoint date ranges, which is what a date sort actually produces.
  */
 export function layoutKey(rec, table = DEFAULTS.table) {
   const d = martStats(rec, table);
-  if (d.num_files === undefined && d.num_row_groups === undefined) return null;
-  if (d.num_files === null && d.num_row_groups === null) return null;
-  return [Boolean(d.vorder), layoutBand(d.num_files), layoutBand(d.num_row_groups),
-    sortKeyOf(rec, table)];
+  if (d.num_row_groups === undefined || d.num_row_groups === null) return null;
+  return [Boolean(d.vorder), layoutBand(d.num_row_groups), sortKeyOf(rec, table)];
 }
 
 /**
@@ -592,10 +596,10 @@ export function layoutKey(rec, table = DEFAULTS.table) {
  * log, and it is the only witness for an `'auto'` run, whose declaration names no columns).
  *
  * `false` — not `null` — for a record with no `sorted` config at all: every run before the input
- * existed demonstrably wrote unsorted parquet, so absence here is not "unmeasured" (unlike the file
- * counts in `layoutKey`) and must key identically to an explicit unsorted run. A sorted run with no
- * key recorded is the opposite case and gets `true`, which shares a bar with neither an unsorted run
- * nor any named sort — the same rule `layoutKey` applies to a missing file count.
+ * existed demonstrably wrote unsorted parquet, so absence here is not "unmeasured" (unlike the row
+ * group count in `layoutKey`) and must key identically to an explicit unsorted run. A sorted run with
+ * no key recorded is the opposite case and gets `true`, which shares a bar with neither an unsorted
+ * run nor any named sort — the same rule `layoutKey` applies to a missing row group count.
  */
 export function sortKeyOf(rec, table = DEFAULTS.table) {
   const engine = (rec || {}).engine || "?";
