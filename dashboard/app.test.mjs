@@ -2728,7 +2728,7 @@ test("the scatter brackets the data on round ticks, not on a snapped bound", () 
   // BOUND to 1/2/2.5/5/10x a power of ten rounds a 5,237 maximum up to 10,000, and the whole cloud
   // then lives in the left third with two thirds of the panel empty. The STEP is what snaps.
   const svg = d.scatterSvg("t", "s", [pt("a", 2773, 1514), pt("b", 5237, 8641)]);
-  const xs = [...svg.matchAll(/<circle class="dot" cx="([\d.]+)"/g)].map((m) => +m[1]);
+  const xs = [...svg.matchAll(/<circle class="dot s\d" cx="([\d.]+)"/g)].map((m) => +m[1]);
   const span = Math.max(...xs) - Math.min(...xs);
   assert.ok(span > (646 - 58) * 0.5, `the cloud fills the plot, not a corner: ${span.toFixed(0)}px`);
   assert.ok(!/NaN|Infinity/.test(svg), "no degenerate geometry");
@@ -2741,11 +2741,11 @@ test("every dot carries its identity in a title, and only the outliers are label
   const svg = d.scatterSvg("t", "s", [pt("cheap", 5000, 1000), pt("mid", 4000, 2000, 3),
     pt("dear", 3000, 9000), pt("fast", 2000, 5000)]);
   assert.equal([...svg.matchAll(/<title>/g)].length, 4, "one title per dot");
-  assert.ok(svg.includes("<title>mid (16.0M): 2,000 CU, 4,000 ms hot, 3 run(s)</title>"));
+  assert.ok(svg.includes("<title>mid (16.0M): 2,000 CU, 4,000 ms cold, 3 run(s)</title>"));
   const named = [...svg.matchAll(/<text class="bar-caption"[^>]*>([^<]+)</g)].map((m) => m[1]);
   assert.ok(named.includes("cheap") && named.includes("dear") && named.includes("fast"));
   assert.ok(!named.includes("mid"), "the interior point is not labelled");
-  assert.ok(!svg.includes("<legend") && !/fill="#/.test(svg), "no legend, no hardcoded colour");
+  assert.ok(!/fill="#/.test(svg), "no hardcoded colour — the ramp lives in CSS custom properties");
 });
 
 test("a label that would overrun the plot flips to the left of its dot", () => {
@@ -2764,4 +2764,32 @@ test("fewer than two points is no chart at all", () => {
   assert.equal(d.scatterSvg("t", "s", [pt("a", 1, 1)]), "", "one dot shows no relationship");
   assert.equal(d.scatterSvg("t", "s", [pt("a", 0, 5), pt("b", 3, 0)]), "",
     "a missing measure is dropped, not plotted at zero");
+});
+
+test("the third variable is a SEQUENTIAL ramp with a legend, never categorical hues", () => {
+  // Row-group size is a MAGNITUDE, so one hue light-to-dark — not a hue per layout. The steps live in
+  // CSS as `--seq1..5`, selected per theme against that theme's surface rather than flipped, so
+  // nothing here hardcodes a colour and the dark page is its own validated ramp.
+  const svg = d.scatterSvg("t", "s", [
+    { label: "small", x: 2000, y: 1500, c: 0.12e6 },
+    { label: "mid", x: 3000, y: 2000, c: 6e6 },
+    { label: "big", x: 5000, y: 8000, c: 16e6 }],
+  "cold ms", "row group size", (v) => `${(v / 1e6).toFixed(1)}M`);
+  const bins = [...svg.matchAll(/class="dot s(\d)"/g)].map((m) => +m[1]);
+  // EQUAL-WIDTH bins over the observed range, so the colour reads as the value and not as a rank:
+  // 6M sits 37% of the way from 0.12M to 16M, which is bin 2 of 5 — not the middle.
+  assert.deepEqual(bins, [1, 2, 5], "binned by value across the observed range, low to high");
+  assert.equal([...svg.matchAll(/class="swatch dot s\d"/g)].length, 5, "a five-step ramp legend");
+  const said = [...svg.matchAll(/<text class="bar-caption"[^>]*>([^<]+)</g)].map((m) => m[1]);
+  assert.ok(said.includes("row group size") && said.includes("0.1M") && said.includes("16.0M"),
+    `the scale is stated, not implied: ${said}`);
+  assert.ok(!/fill="#|stroke="#/.test(svg), "no colour literal in the markup");
+});
+
+test("one row-group size everywhere draws dots but no ramp legend", () => {
+  // Nothing to grade, so the legend would state a scale with no range in it.
+  const svg = d.scatterSvg("t", "s", [{ label: "a", x: 2000, y: 1500, c: 6e6 },
+    { label: "b", x: 3000, y: 2500, c: 6e6 }], "cold ms", "row group size");
+  assert.equal([...svg.matchAll(/class="swatch/g)].length, 0);
+  assert.equal([...svg.matchAll(/class="dot s3"/g)].length, 2, "all dots take the middle step");
 });

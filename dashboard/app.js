@@ -1103,19 +1103,29 @@ function niceScale(min, max, want = 4) {
  * data. (The zero-baseline rule is a BAR rule — a truncated bar misstates a ratio, a truncated
  * scatter axis does not.)
  */
-export function scatterSvg(title, subtitle, pts) {
+export function scatterSvg(title, subtitle, pts, xLabel = "cold ms", legend = "",
+  fmtC = (v) => fmt(v, 1)) {
   const rows = (pts || []).filter((p) => Number.isFinite(Number(p.x)) && Number(p.x) > 0
     && Number.isFinite(Number(p.y)) && Number(p.y) > 0);
   if (rows.length < 2) return "";
-  const W = WIDTH, H = 300, L = 58, R = 14, T = 18, B = 40;
+  // TALLER THAN THE BARS, on purpose. It is drawn at the same 660-unit width so it lines up with the
+  // bar charts in the same 62rem column; height is the only axis free to grow, and a scatter needs
+  // vertical room the way a bar list does not — thirteen dots in a 300-tall box sat on top of one
+  // another. `LEG` is the strip the sequential legend gets under the plot.
+  const W = WIDTH, H = 470, L = 58, R = 14, T = 18, B = 46, LEG = 34;
   const xs = rows.map((p) => Number(p.x)), ys = rows.map((p) => Number(p.y));
   // 4% padding, so a dot on the extreme does not sit half-outside the axis line.
   const pad = (v, k) => (v[1] - v[0]) * 0.04 * k;
   const xr = [Math.min(...xs), Math.max(...xs)], yr = [Math.min(...ys), Math.max(...ys)];
-  const X = niceScale(xr[0] - pad(xr, 1), xr[1] + pad(xr, 1));
+  // MORE TICKS ON X than on Y, so the step stays small enough that flooring it does not walk the
+  // axis back to zero. `cold ms` carries one 4x outlier (iceberg, 100,394 against 22,823-45,010),
+  // and a coarse step turned that into an axis running 0-125,000 with twelve of thirteen dots
+  // piled in the left quarter.
+  const X = niceScale(xr[0] - pad(xr, 1), xr[1] + pad(xr, 1), 8);
   const Y = niceScale(yr[0] - pad(yr, 1), yr[1] + pad(yr, 1));
   const px = (v) => L + (W - L - R) * ((Number(v) - X.lo) / ((X.hi - X.lo) || 1));
-  const py = (v) => T + (H - T - B) * (1 - (Number(v) - Y.lo) / ((Y.hi - Y.lo) || 1));
+  const PH = H - T - B - LEG;                      // plot height, above the legend strip
+  const py = (v) => T + PH * (1 - (Number(v) - Y.lo) / ((Y.hi - Y.lo) || 1));
   const out = [
     '<figure class="chart">' +
     `<figcaption><span class="chart-title">${esc(title)}</span>` +
@@ -1130,19 +1140,29 @@ export function scatterSvg(title, subtitle, pts) {
       `${fmt(t, 0)}</text>`);
   }
   for (const t of X.ticks) {
-    out.push(`<text class="bar-value" x="${px(t).toFixed(1)}" y="${H - B + 20}" ` +
+    out.push(`<text class="bar-value" x="${px(t).toFixed(1)}" y="${(T + PH + 18).toFixed(0)}" ` +
       `text-anchor="middle">${fmt(t, 0)}</text>`);
   }
-  out.push(`<text class="bar-caption" x="${(L + (W - L - R) / 2).toFixed(0)}" y="${H - 6}" ` +
-    `text-anchor="middle">hot ms</text>`,
-  `<text class="bar-caption" x="14" y="${(T + (H - T - B) / 2).toFixed(0)}" ` +
-    `text-anchor="middle" transform="rotate(-90 14 ${(T + (H - T - B) / 2).toFixed(0)})">CU</text>`);
+  out.push(`<text class="bar-caption" x="${(L + (W - L - R) / 2).toFixed(0)}" ` +
+    `y="${(T + PH + 36).toFixed(0)}" text-anchor="middle">${esc(xLabel)}</text>`,
+  `<text class="bar-caption" x="14" y="${(T + PH / 2).toFixed(0)}" ` +
+    `text-anchor="middle" transform="rotate(-90 14 ${(T + PH / 2).toFixed(0)})">CU</text>`);
   // Labelled SELECTIVELY — the cheapest, the fastest and the dearest. A name on all thirteen is a
   // thicket at this size, and every dot carries the full identity in its `<title>`.
   const named = new Set([
     rows.reduce((a, b) => (Number(a.y) <= Number(b.y) ? a : b)),
     rows.reduce((a, b) => (Number(a.x) <= Number(b.x) ? a : b)),
     rows.reduce((a, b) => (Number(a.y) >= Number(b.y) ? a : b))]);
+  // THE THIRD VARIABLE IS A MAGNITUDE, so it gets a SEQUENTIAL ramp — one hue, light to dark — and
+  // not categorical hues. Five equal-width bins over the observed range of `p.c`; the steps live in
+  // CSS as `--seq1..5` and are SELECTED per theme against that theme's surface rather than flipped,
+  // so the dark page is its own ramp. Validated with the dataviz validator: lightness is monotonic
+  // in both, and the one endpoint that lands under 3:1 takes its relief from the table directly
+  // above and from the per-dot title, which is what a contrast WARN obligates.
+  const cs = rows.map((p) => Number(p.c)).filter((v) => Number.isFinite(v));
+  const cLo = cs.length ? Math.min(...cs) : 0, cHi = cs.length ? Math.max(...cs) : 0;
+  const bin = (v) => (!Number.isFinite(Number(v)) || cHi === cLo ? 3
+    : Math.min(5, 1 + Math.floor(((Number(v) - cLo) / (cHi - cLo)) * 5)));
   for (const p of rows) {
     const cx = px(p.x), cy = py(p.y);
     // The label sits right of its dot unless that would run past the plot, in which case it flips to
@@ -1152,14 +1172,30 @@ export function scatterSvg(title, subtitle, pts) {
     const wide = String(p.label).length * 5.4;
     const flip = cx + 9 + wide > W - R;
     out.push(`<g><title>${esc(p.label)}${p.sub ? ` (${esc(p.sub)})` : ""}: ` +
-      `${fmt(p.y, 0)} CU, ${fmt(p.x, 0)} ms hot${p.n ? `, ${p.n} run(s)` : ""}</title>` +
-      `<circle class="dot" cx="${cx.toFixed(1)}" cy="${cy.toFixed(1)}" r="5"/>` +
+      `${fmt(p.y, 0)} CU, ${fmt(p.x, 0)} ms ${esc(xLabel.replace(/ ms$/, ""))}` +
+      `${p.n ? `, ${p.n} run(s)` : ""}</title>` +
+      `<circle class="dot s${bin(p.c)}" cx="${cx.toFixed(1)}" cy="${cy.toFixed(1)}" r="6"/>` +
       (named.has(p) ? `<text class="bar-caption" x="${(cx + (flip ? -9 : 9)).toFixed(1)}" ` +
         `y="${(cy + 4).toFixed(1)}"${flip ? ' text-anchor="end"' : ""}>${esc(p.label)}</text>`
         : "") + "</g>");
   }
-  out.push(`<line class="axis" x1="${L}" y1="${T}" x2="${L}" y2="${H - B}"/>`,
-    `<line class="axis" x1="${L}" y1="${H - B}" x2="${W - R}" y2="${H - B}"/>`);
+  // THE RAMP LEGEND. A sequential encoding is unreadable without one — a reader can see that two dots
+  // differ and not which way. Five swatches with the observed ends labelled, so the scale is stated
+  // rather than implied.
+  if (cs.length && cHi > cLo && legend) {
+    const ly = T + PH + LEG + 8, sw = 26;
+    out.push(`<text class="bar-caption" x="${L}" y="${ly + 9}">${esc(legend)}</text>`);
+    for (let i = 0; i < 5; i++) {
+      out.push(`<rect class="swatch dot s${i + 1}" x="${L + 96 + i * sw}" y="${ly}" ` +
+        `width="${sw}" height="11" stroke="none"/>`);
+    }
+    out.push(`<text class="bar-caption" x="${L + 90}" y="${ly + 9}" text-anchor="end">` +
+      `${esc(fmtC(cLo))}</text>`,
+    `<text class="bar-caption" x="${L + 96 + 5 * sw + 6}" y="${ly + 9}">${esc(fmtC(cHi))}</text>`);
+  }
+  out.push(`<line class="axis" x1="${L}" y1="${T}" x2="${L}" y2="${(T + PH).toFixed(0)}"/>`,
+    `<line class="axis" x1="${L}" y1="${(T + PH).toFixed(0)}" x2="${W - R}" ` +
+    `y2="${(T + PH).toFixed(0)}"/>`);
   out.push("</svg></figure>");
   return out.join("\n");
 }
@@ -1358,6 +1394,16 @@ function spanM(values) {
       : `${fmt(vals[0], 1)}–${fmt(vals[vals.length - 1], 1)}M`;
 }
 
+/** A group's rows-per-row-group as a NUMBER — the median across its members, for the colour ramp. */
+function martSize(members, table = DEFAULTS.table) {
+  const vals = (members || []).map(({ rec }) => {
+    const s = martStats(rec, table);
+    if (s.avg_row_group != null) return Number(s.avg_row_group);
+    return s.total_rows && s.num_row_groups ? Number(s.total_rows) / Number(s.num_row_groups) : NaN;
+  }).filter((v) => Number.isFinite(v));
+  return vals.length ? median(vals) : NaN;
+}
+
 export function keyCells(members, table = DEFAULTS.table) {
   const stats = (members || []).map(({ rec }) => martStats(rec, table));
   const sorts = [...new Set((members || []).map(({ rec }) => sortKeyOf(rec, table))
@@ -1418,12 +1464,16 @@ export function renderFit(groups, times, tiers) {
       }),
       { sort: true }),
     // The same points as the table, plotted against each other. A ranked table cannot show whether
-    // two measures move TOGETHER, which is the one question `CU` and `hot ms` side by side invite.
-    // Only where `hot` was measured — a history with no query half has no x to plot.
-    scatterSvg("CU against query time", "one dot per layout — hot ms across, CU up",
-      pts.filter((p) => p.ms.hot).map((p) => ({
-        x: p.ms.hot, y: p.cu, label: p.name, n: p.n, sub: keyCells(p.members).rgSize,
-      }))),
+    // two measures move TOGETHER, which is the one question `CU` and a time column side by side
+    // invite. COLD, not hot: the cold pass is the transcode — parquet into VertiPaq segments — which
+    // is what CU is mostly buying, so it is the tier with a mechanism connecting it to the y axis.
+    // Row-group size rides along as the colour, since it is the shape most likely to explain both.
+    scatterSvg("CU against cold query time",
+      "one dot per layout — cold ms across, CU up, shaded by row group size",
+      pts.filter((p) => p.ms.cold).map((p) => ({
+        x: p.ms.cold, y: p.cu, label: p.name, n: p.n,
+        sub: keyCells(p.members).rgSize, c: martSize(p.members),
+      })), "cold ms", "row group size", (v) => `${fmt(v / 1e6, 1)}M`),
   ].filter(Boolean).join("\n");
 }
 

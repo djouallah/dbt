@@ -27,14 +27,18 @@
      all pass. Slot 2 (orange) went with the ETL chart; there is one chart now and one measure on it,
      so a second hue would be a distinction with nothing to distinguish. The dark value is a SELECTED
      step for the dark surface, not an automatic flip of the light one. */
-  --series:#2a78d6; }
+  --series:#2a78d6;
+  --seq1:#6ea3de; --seq2:#4482cd; --seq3:#2a64b4; --seq4:#1a4a8c; --seq5:#123564; }
 @media (prefers-color-scheme: dark) {
   :root { --bg:#14171a; --fg:#e8eaed; --dim:#9aa4b2; --line:#2a2f36; --head:#1c2025; --sub:#20252b;
-    --code:#22262c; --series:#3987e5; } }
+    --code:#22262c; --series:#3987e5;
+  --seq1:#315c8e; --seq2:#4478b8; --seq3:#5f97d8; --seq4:#86b6ec; --seq5:#b3d3f7; } }
 :root[data-theme="dark"] { --bg:#14171a; --fg:#e8eaed; --dim:#9aa4b2; --line:#2a2f36;
-  --head:#1c2025; --sub:#20252b; --code:#22262c; --series:#3987e5; }
+  --head:#1c2025; --sub:#20252b; --code:#22262c; --series:#3987e5;
+  --seq1:#315c8e; --seq2:#4478b8; --seq3:#5f97d8; --seq4:#86b6ec; --seq5:#b3d3f7; }
 :root[data-theme="light"] { --bg:#fff; --fg:#1a1a1a; --dim:#5b6472; --line:#e3e6ea; --head:#f6f7f9;
-  --sub:#eef1f5; --code:#f2f3f5; --series:#2a78d6; }
+  --sub:#eef1f5; --code:#f2f3f5; --series:#2a78d6;
+  --seq1:#6ea3de; --seq2:#4482cd; --seq3:#2a64b4; --seq4:#1a4a8c; --seq5:#123564; }
 * { box-sizing: border-box; }
 body { margin:0; padding:2.25rem 1.25rem 4rem; background:var(--bg); color:var(--fg);
   font:15px/1.6 ui-sans-serif, -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; }
@@ -215,9 +219,11 @@ figure.chart figcaption { display:flex; flex-wrap:wrap; align-items:baseline; ga
 .chart-sub { color:var(--dim); font-size:.78rem; }
 figure.chart svg { max-width:100%; height:auto; display:block; overflow:visible; }
 .bar { fill:var(--series); }
-/* A 2px ring in the SURFACE colour, so two dots that overlap still read as two. The scatter is one
-   series, so the ring is the only separator it has. */
-.dot { fill:var(--series); stroke:var(--bg); stroke-width:2; }
+/* A 2px ring in the SURFACE colour, so two dots that overlap still read as two. */
+.dot { fill:var(--seq3); stroke:var(--bg); stroke-width:2; }
+.dot.s1 { fill:var(--seq1); } .dot.s2 { fill:var(--seq2); } .dot.s3 { fill:var(--seq3); }
+.dot.s4 { fill:var(--seq4); } .dot.s5 { fill:var(--seq5); }
+.swatch { stroke:var(--line); stroke-width:1; }
 /* Drawn over the bar in the page background colour, so it reads as a range ON the quantity rather
    than as a second series beside it. */
 /* Text ink, not the background: the min–max line runs from inside the bar out past its tip to the
