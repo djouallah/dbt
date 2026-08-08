@@ -894,7 +894,7 @@ to `provision.py teardown`, which polls for a 404 and goes red if it is still li
   | workflow | file | does | triggered by |
   |---|---|---|---|
   | `Benchmark` | `benchmark.yml` | open the record, offline checks, plan, land, build, layout, resolve, bench, report, teardown, record | nightly `cron` · dispatch — it is the only one that spends capacity |
-  | `Capacity units` | `capacity.yml` | `cu/measure.py` → commits `history/cu.json` | `workflow_run` after Benchmark · dispatch |
+  | `Capacity units` | `capacity.yml` | `cu/measure.py` → commits `history/cu.json` | `workflow_run` after Benchmark · `17 10 * * *` · dispatch |
   | `Dashboard` | `dashboard.yml` | `dashboard/build.mjs` → deploys the page | `push` to `dashboard/**` · dispatch |
 
   In the normal case a human starts nothing but a `Benchmark`: the ledger tops itself up after every
@@ -1222,8 +1222,8 @@ no data at all. `all.yml`, `dbt.yml` and `cu.yml` are gone.
   - **`Capacity units` fires on `workflow_run` after `Benchmark`, and on dispatch. The daily
     `schedule` is GONE.** The `workflow_run` trigger is a scoped reversal of the "dispatch only" rule
     and it is earned: the rule's stated reason was that *publishing is a decision*, and an automatic
-    measurement now publishes nothing. `Benchmark` now has a nightly of its own, so a CU read fires
-    after it automatically — but that read is a LOWER BOUND and nothing raises it unattended.
+    measurement now publishes nothing. `Benchmark` has a nightly of its own, so a CU read fires after
+    it automatically — that read is a LOWER BOUND, and the 10:17 cron is what raises it.
   - **`workflow_run`, never `workflow_call`** — see the three taxes below. It also means
     `benchmark.yml` needs **no edit**: the CU read is a separate run that starts after Benchmark
     completes, so Benchmark's duration, status and job graph are untouched. No conclusion filter: a
@@ -1240,18 +1240,24 @@ no data at all. `all.yml`, `dbt.yml` and `cu.yml` are gone.
     a schedule that inverts — a failed read would report green and the ledger would quietly stop being
     topped up. Red, so the scheduled-failure mail arrives; nothing downstream breaks, because the page
     keeps serving the last good ledger.
-- **ONE AUTOMATIC TRIGGER, AND THE COST IS A LOWER BOUND NOBODY RAISES.** A CU hour keeps growing
-  for up to ~70 minutes (~6 min ingestion lag, 5–64 min smoothing), and `measure.py` has **no settle
-  logic** — every read re-reads the whole window from the floor and merges with `max(old, new)`, so a
-  re-read is idempotent and monotonic and two reads of one window can only RAISE a number. The read
-  after a `Benchmark` fires within a minute of it finishing, so it is a deliberate LOWER BOUND: it is
-  there so a fresh run's column is populated in minutes rather than blank. **The daily `cron` that
-  used to make it final is deleted, so a run's CU stays a lower bound until somebody dispatches
-  `Capacity units` by hand.** The page's `may still rise` caveat is derived from the clock and expires
-  after two hours, so past that a low number reads as settled whether or not it is. Two ways back if
-  that bites, neither taken: re-add the `cron` (it was `17 21 * * *`, and GitHub disables a schedule
-  after 60 days of repo inactivity anyway, which made it silently unreliable), or sleep ~70 minutes
-  before the read so the single trigger is authoritative.
+- **TWO AUTOMATIC READS, DOING DIFFERENT JOBS — and the second is what makes a number true.** A CU
+  hour keeps growing for up to ~70 minutes (~6 min ingestion lag, 5–64 min smoothing), and
+  `measure.py` has **no settle logic** — every read re-reads the whole window from the floor and
+  merges with `max(old, new)`, so a re-read is idempotent and monotonic and two reads of one window
+  can only RAISE a number, never lower one. That is what makes a pair of reads safe and a
+  badly-timed one merely useless rather than wrong. The `workflow_run` read fires within a minute of
+  a `Benchmark` finishing and is a deliberate LOWER BOUND, there so a fresh run's column is populated
+  immediately; `cron: "17 10 * * *"` is the settling read.
+  **ITS TIME IS ARITHMETIC, NOT A ROUND NUMBER.** `Benchmark`'s nightly starts 07:17; its run is a
+  measured median of 31 minutes and max of 84 across 47 duckrun records, so it finishes ~07:48–~08:41,
+  and plus the ~70 minute settle that is ~09:51 worst case. 10:17 clears it. An "hour after the
+  nightly" would land mid-smoothing on a typical run and add almost nothing.
+  **It is aimed at the NIGHTLY, not at every run** — that was the old daily `17 21 * * *`, which is not
+  coming back — so **a run you start by hand still needs a dispatch to settle it.** The page's `may
+  still rise` caveat is derived from the clock and expires after two hours, so past that a
+  hand-started run's low number reads as settled whether or not it is. Note GitHub disables a
+  schedule after 60 days of repo inactivity, silently; if that bites, the `workflow_run` read still
+  populates the column, it just never gets raised.
   One run is about **two DAX queries** (`discover_columns()` plus one `read_cu()` per capacity, and
   `CU_CAPACITY_ID` is pinned to one), so the cadence is nearly free.
   **Do NOT add a high-water mark to narrow the floor.** It is one query either way — the aggregation
@@ -1677,7 +1683,7 @@ no data at all. `all.yml`, `dbt.yml` and `cu.yml` are gone.
   of the arrangement), and now the measurement does not even run in this workflow. The snapshot is
   still not immune, and that is all the `ref:` protects.
 - **`Dashboard` is `push` to `dashboard/**` plus dispatch; `Capacity units` is `workflow_run` after
-  Benchmark plus dispatch; `Benchmark` is a nightly `cron` plus dispatch.** This replaced a blanket
+  Benchmark plus a 10:17 `cron` plus dispatch; `Benchmark` is a 07:17 nightly plus dispatch.** This replaced a blanket
   "`workflow_dispatch` only" that applied when one workflow both measured and published. What each
   reason protects now: for `Benchmark`, capacity — unchanged and absolute. For the page, that
   publishing is a decision — still true, and satisfied because pushing to `dashboard/` IS that

@@ -138,17 +138,21 @@ This is the `Capacity units` workflow (`.github/workflows/capacity.yml`), and it
 | trigger | why |
 |---|---|
 | `workflow_run` after `Benchmark` | so a fresh run's column is populated in minutes rather than blank. Deliberately a **lower bound** — the settle has not happened yet. |
+| `cron: "17 10 * * *"` | the settling read for the nightly, 3 hours after `Benchmark`'s own 07:17 cron |
 | `workflow_dispatch` | by hand, when you want a number now, need `since`, or want to RAISE a lower bound |
 
-**THE DAILY `schedule` IS GONE, AND IT WAS THE ONLY THING THAT SETTLED A NUMBER UNATTENDED.** It ran
-at 21:17 UTC (07:17 in the model's +10 clock), one read covering the whole previous day. What it
-protected: a CU hour keeps growing for up to ~70 minutes after the work, and the post-Benchmark read
-fires within a minute of the build finishing, so **every fresh number is a lower bound and nothing
-now raises it but a hand-started dispatch.** The `max(old, new)` rule means that dispatch can only
-ever improve the ledger — a re-read of the same window cannot lower a number — so the habit worth
-keeping is: dispatch `Capacity units` an hour or so after a `Benchmark` you care about. Watch for the
-page's `may still rise` caveat, too: it is derived from the clock and expires after two hours, so
-past that a low number looks settled whether or not it is.
+**THE 10:17 CRON IS AIMED AT THE NIGHTLY, NOT AT EVERY RUN.** A CU hour keeps growing for up to ~70
+minutes after the work, and the post-Benchmark read fires within a minute of the build finishing, so
+that one is always a lower bound. The timing is arithmetic, not a round number: `Benchmark`'s nightly
+starts 07:17, its run is a measured median of 31 minutes and max of 84 over 47 duckrun records, so it
+finishes ~07:48–~08:41; plus the ~70 minute settle that is ~09:51 worst case, and 10:17 clears it.
+An "hour after the nightly" would have landed mid-smoothing and measured almost nothing new.
+
+This replaced a daily `17 21 * * *` that settled anything measured at any hour. **So a run you start
+by hand still needs a dispatch to settle it** — the `max(old, new)` rule means such a dispatch can
+only ever improve the ledger, since a re-read of the same window cannot lower a number. Watch the
+page's `may still rise` caveat too: it is derived from the clock and expires after two hours, so past
+that a hand-started run's low number looks settled whether or not it is.
 
 It is cheap either way — about **two DAX queries** per run (`discover_columns()` plus one
 `read_cu()` per capacity, and `CU_CAPACITY_ID` is pinned to one), whatever the window width.
