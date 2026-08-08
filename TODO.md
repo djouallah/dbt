@@ -9,15 +9,20 @@ exercise cost. This file is what has not been done.
 
 ---
 
-## `etl CU (8 vCores)` is a dash on 7 of 17 layout groups
+## `etl CU (8 vCores)` is hidden until 7 of 17 layout groups are built at 8 cores
+
+**The column is currently OFF** — `SHOW_ETL = false` in `dashboard/app.js`. The logic is not: the
+value is still computed, still filtered to one core count, and still pinned by tests, so closing this
+item is flipping one constant. Hidden because a column that is more dash than number reads as "the
+build was free" rather than "nobody measured it at that size".
 
 *Cost and speed by parquet layout* reports build cost at ONE core count, because build cost tracks
 the machine and `layoutKey` does not carry `vcores` — a group holds runs from several machines and a
 median over them describes none of them (measured: one duckrun layout reads **9,986 CU at 8 vCores
 against 22,547 blended** across 8/16/32/64). See the `ETL_VCORES` comment in `dashboard/app.js`.
 
-Seven groups have never been built at 8 vCores, so their cell is a dash. All seven are duckrun; every
-one exists only at 64 cores.
+Seven groups have never been built at 8 vCores, so their cell would be a dash. All seven are
+duckrun; every one exists only at 64 cores.
 
 **⚠️ The nightly does NOT fill these in, and an earlier note claiming it would was wrong.** The
 nightly builds one layout — `sort_by=date,time,price` at `row_group_size=2000000`, 72 row groups —
@@ -48,9 +53,9 @@ of 370M rows plus their query passes. At 8 vCores the CU rate is `cores / 2` = 4
 
 Three ways to close it, in rough order of preference:
 
-1. **Dispatch the seven.** Complete data, known cost, no code change.
-2. **Do nothing.** A dash is honest — it says "never built at this size", which is true and is not
-   the same as a zero or a blend. The column is already comparable across the rows that have it.
+1. **Dispatch the seven, then set `SHOW_ETL = true`.** Complete data, known cost, one-line change.
+2. **Leave it hidden.** The status quo, and defensible: the numbers that exist are already in the
+   record and on `Cost by engine`, and a mostly-dashed column adds less than it misleads.
 3. **Lower `ETL_VCORES` coverage by re-pinning it.** Only worth it if the fleet's usual core count
    moves; the constant already has to be kept in step with the dispatch default by hand, and moving
    it to chase coverage would make the column mean whatever happens to be best populated.

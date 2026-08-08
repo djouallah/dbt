@@ -661,6 +661,25 @@ export function vcoresOf(rec) {
  */
 const ETL_VCORES = "8";
 
+/**
+ * Whether the `etl CU` column is PRINTED. The logic behind it runs either way.
+ *
+ * **OFF UNTIL THE COLUMN IS POPULATED — see TODO.md.** 7 of 17 layout groups have never been built
+ * at `ETL_VCORES` and read as a dash, and a column that is more dash than number invites the reader
+ * to conclude the build was free rather than that nobody measured it at that size. Closing the gap
+ * is seven deliberate `cores=8` dispatches, which is ~70,000 CU, so the column waits rather than
+ * the dispatches being rushed.
+ *
+ * DELIBERATELY NOT A DELETION. `martPoints` still computes `etl`, the core-count filter still
+ * applies and the tests still pin both, so turning this to `true` is the whole change — no logic to
+ * reconstruct from a commit message, and nothing silently rots in the meantime.
+ */
+const SHOW_ETL = false;
+
+/** The layout table's fixed leading columns — shared by the header and the hidden-column test. */
+const FIT_HEAD = ["parquet writer", "ordering", "dictionary", "row group size", "MB", "runs",
+  "analytics CU"];
+
 export function sortKeyOf(rec, table = DEFAULTS.table) {
   const engine = (rec || {}).engine || "?";
   const cfg = (((rec || {}).layout || {}).config || {})[engine] || {};
@@ -1779,15 +1798,14 @@ export function renderFit(groups, times, tiers, counts = {}) {
     // the engine and the machine it was given, so it is reported at one core count and the header
     // says which (`ETL_VCORES`). They are named for the ledger's own buckets, the same two words
     // `Cost by engine` labels its rows with, so nothing has to be translated between the tables.
-    table(["parquet writer", "ordering", "dictionary", "row group size", "MB", "runs",
-      "analytics CU", `etl CU (${ETL_VCORES} vCores)`,
+    table([...FIT_HEAD, ...(SHOW_ETL ? [`etl CU (${ETL_VCORES} vCores)`] : []),
       ...cols.map((l) => (counts[l] ? `${l} ms (${counts[l]} q)` : `${l} ms`))],
-      ["left", "left", "left", "right", "right", "right", "right", "right",
-        ...cols.map(() => "right")],
+      ["left", "left", "left", "right", "right", "right", "right",
+        ...(SHOW_ETL ? ["right"] : []), ...cols.map(() => "right")],
       pts.map((p) => {
         const k = keyCells(p.members);
         return [p.name, k.ordering, k.dict, k.rgSize, k.mb, String(p.n), fmt(p.cu, 0),
-          p.etl ? fmt(p.etl, 0) : DASH,
+          ...(SHOW_ETL ? [p.etl ? fmt(p.etl, 0) : DASH] : []),
           ...cols.map((l) => (p.ms[l] ? fmt(p.ms[l], 0) : DASH))];
       }),
       { sort: true }),

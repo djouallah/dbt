@@ -1502,7 +1502,7 @@ test("the three tiers are columns of the PER-RUN table, not of the layout block"
   const heads = rows(out).filter((r) => r.includes("cold ms"));
   assert.equal(heads.length, 2, `two headers carry the tiers: ${heads}`);
   assert.ok(heads.some((h) =>
-    /^\| parquet writer \| ordering \| dictionary \| row group size \| MB \| runs \| analytics CU \| etl CU \(\d+ vCores\) \| cold ms \(\d+ q\)/
+    /^\| parquet writer \| ordering \| dictionary \| row group size \| MB \| runs \| analytics CU \| cold ms \(\d+ q\)/
       .test(h)), heads[0]);
   assert.ok(heads.some((h) =>
     h.includes("| etl CU | analytics CU | cold ms | warm ms | hot ms | items |")), heads[1]);
@@ -2111,55 +2111,54 @@ const fitRuns = (spec) => spec.map(([engine, cold, warm, hot], i) =>
     timings: timings({ q1: [cold, warm, hot] }),
   }));
 
-test("etl CU is reported at ONE core count, and the header says which", () => {
+test("etl CU is computed at ONE core count, even while the column is hidden", () => {
   // BUILD COST TRACKS THE MACHINE, and `layoutKey` does not carry `vcores` — it is about the
   // parquet, and duckrun writes the same files at every core count. So a layout group really does
   // hold runs from several machines, and a median over all of them describes none of them: measured
   // on the real records one duckrun layout reads 9,986 CU at 8 vCores and 22,547 blended.
-  const at = (cores, cu, file) => {
-    const r = lay("duckrun", 4, 27, { cfg: { vcores: cores }, file });
-    r.items = { [`O${file}`]: gone("output", "dbt_delta"), [`S${file}`]: gone("semantic_model", "aemo_duckrun") };
-    return r;
-  };
-  const runs = [at("8", 1, "a-1.json"), at("64", 2, "b-2.json")];
-  const out = render(runs, ledger({
-    "Oa-1.json": { "Jupyter Notebook Scheduled Run": 9986.0 },
-    "Sa-1.json": { "XMLA Read Operation": 1500.0 },
-    "Ob-2.json": { "Jupyter Notebook Scheduled Run": 22547.0 },
-    "Sb-2.json": { "XMLA Read Operation": 1500.0 },
-  }));
-  const head = rows(out).find((r) => r.includes("etl CU"));
-  assert.ok(/\| etl CU \(8 vCores\) \|/.test(head), `the filter is PRINTED, not hidden: ${head}`);
-  const body = rows(block(out, "Cost and speed by parquet layout")).slice(1)
-    .map((r) => r.split("|").map((c) => c.trim()));
-  assert.equal(body.length, 1, "one layout — both runs wrote the same parquet");
-  assert.equal(body[0][6], "2", "two runs behind the row");
-  assert.equal(body[0][8], "9,986", "the 8-core reading alone, never a blend with the 64-core one");
-  // ...while analytics CU spans BOTH, because that one belongs to the parquet and both runs wrote
-  // the same parquet. The two columns summarising different member sets is the whole point.
-  assert.equal(body[0][7], "1,500", "analytics is the median over both runs");
+  //
+  // Driven through `martPoints` rather than the rendered table, because the COLUMN is off (see
+  // `SHOW_ETL` / TODO.md) and the logic is not. That is the point of hiding rather than deleting:
+  // this stays green while the column waits, so switching it back on is one constant.
+  const at = (cores, file, cu, etl) => ({
+    col: "duckrun", qid: file, cu, etl,
+    rec: lay("duckrun", 4, 27, { cfg: { vcores: cores }, file }),
+  });
+  const mid = (entries) => d.martPoints(d.layoutGroups(entries), {})[0];
 
-  // A LAYOUT NOBODY BUILT AT THIS SIZE IS A DASH, never a blend and never a zero.
-  const only64 = [at("64", 2, "c-3.json")];
-  const dashed = render(only64, ledger({
-    "Oc-3.json": { "Jupyter Notebook Scheduled Run": 22547.0 },
-    "Sc-3.json": { "XMLA Read Operation": 1500.0 },
-  }));
-  const row = rows(block(dashed, "Cost and speed by parquet layout")).slice(1)[0].split("|");
-  assert.equal(row[8].trim(), "—", `no 8-core run means no number: ${row.join("|")}`);
+  const both = mid([at("8", "a-1.json", 1500, 9986), at("64", "b-2.json", 1500, 22547)]);
+  assert.equal(both.n, 2, "one layout — both runs wrote the same parquet");
+  assert.equal(both.etl, 9986, "the 8-core reading alone, never a blend with the 64-core one");
+  assert.equal(both.cu, 1500, "while analytics CU spans BOTH — that one belongs to the parquet");
+
+  // A LAYOUT NOBODY BUILT AT THIS SIZE IS ZERO here and a dash when printed — never a blend.
+  assert.equal(mid([at("64", "c-3.json", 1500, 22547), at("32", "d-4.json", 1500, 13083)]).etl, 0);
 
   // SPARK AND DWH RECORD NO `vcores` AT ALL — FABRIC_CORES sizes the DuckDB notebook and neither
   // reads it. Filtering on the value alone would delete two of the four engines from the column.
   assert.equal(d.vcoresOf(lay("spark", 11, 11)), undefined);
   assert.equal(d.vcoresOf(lay("dwh", 78, 78)), undefined);
   assert.equal(d.vcoresOf(lay("duckrun", 4, 27, { cfg: { vcores: "8" } })), "8");
-  const sp = full("s-1.json", "spark");
-  sp.items = { O: gone("output", "dbt_spark"), S: gone("semantic_model", "aemo_spark") };
-  const kept = render([sp], ledger({
-    O: { "High Concurrency Session Livy Run": 33444.0 }, S: { "XMLA Read Operation": 1500.0 },
-  }));
-  assert.ok(rows(block(kept, "Cost and speed by parquet layout")).slice(1)[0].includes("33,444"),
-    "an engine with no core count keeps its build CU");
+  const spark = mid([{ col: "spark", qid: "s-1.json", cu: 1500, etl: 33444,
+    rec: lay("spark", 11, 11, { file: "s-1.json" }) }]);
+  assert.equal(spark.etl, 33444, "an engine with no core count keeps its build CU");
+});
+
+test("the etl CU column is HIDDEN, and nothing else moved to hide it", () => {
+  // Off until the seven unbuilt layouts are dispatched — TODO.md. A column that is more dash than
+  // number reads as "the build was free" rather than "nobody measured it at that size".
+  const out = render(fitRuns([["duckrun", 40000, 5000, 4000], ["dwh", 80000, 3000, 5000]]),
+    ledger({ OUT: 1.0, SEM: 2.0 }));
+  const head = rows(block(out, "Cost and speed by parquet layout"))[0];
+  assert.ok(!/etl CU/.test(head), `no etl column while it is unpopulated: ${head}`);
+  assert.ok(/\| analytics CU \|/.test(head), `and the query cost keeps its name: ${head}`);
+  // The alignment list must shrink WITH the header, or every tier column shifts one to the left and
+  // the numbers right-align under the wrong titles — which no assertion above would notice.
+  const body = rows(block(out, "Cost and speed by parquet layout")).slice(1);
+  for (const r of body) {
+    assert.equal(r.split("|").length, head.split("|").length,
+      `every row has as many cells as the header: ${r}`);
+  }
 });
 
 test("cost and speed is one table, cheapest first, with a title and nothing else", () => {
@@ -2187,7 +2186,7 @@ test("cost and speed is one table, cheapest first, with a title and nothing else
   // is coarser than the parquet, since a group merged on RG band can still hold two file sizes.
   const head = rows(out).find((r) =>
     r.startsWith("| parquet writer | ordering | dictionary | row group size | MB | runs "
-    + "| analytics CU | etl CU (8 vCores) |"));
+    + "| analytics CU |"));
   assert.ok(head, "layout, the key, the size, the sample size, CU, then the tiers");
   // The count rides in the HEADER: each tier cell is a SUM over the suite, and the bare `cold ms`
   // read exactly like one query's time.
