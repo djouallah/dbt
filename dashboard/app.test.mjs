@@ -58,12 +58,29 @@ function block(html, heading) {
   return end < 0 ? rest : rest.slice(0, end);
 }
 
+/**
+ * `[{writer, runs, cu}]` from *Cost and speed by parquet layout* — one entry per layout group, in
+ * page order (cheapest first).
+ *
+ * THIS IS WHERE THE GROUPING SURFACES NOW. The analytics bar chart used to be the readable form of
+ * `layoutGroups` + `groupMid`, and the tests below reached for its bar labels and values; the chart
+ * is gone and the grouping is not, so they read the table that always carried the same numbers.
+ */
+function layoutTable(html) {
+  return rows(block(html, "Cost and speed by parquet layout"))
+    .map((r) => r.split("|").map((c) => c.trim()))
+    .filter((c) => c.length > 7 && c[1] && c[1] !== "parquet writer")
+    .map((c) => ({ writer: c[1], ordering: c[2], rgSize: c[4], runs: c[6], cu: c[7] }));
+}
+
 /** `[{title, subtitle, labels, values, captions}]` for each chart drawn, in page order. */
 function charts(html) {
   return [...String(html).matchAll(/<figure class="chart"[^>]*>([\s\S]*?)<\/figure>/g)].map(([, f]) => ({
     title: plain((f.match(/<span class="chart-title">([\s\S]*?)<\/span>/) || [])[1] || ""),
     subtitle: plain((f.match(/<span class="chart-sub">([\s\S]*?)<\/span>/) || [])[1] || ""),
-    labels: [...f.matchAll(/<text class="bar-label"[^>]*>([\s\S]*?)<\/text>/g)].map((m) => plain(m[1])),
+    // `labels` was the bar chart's row names and has no source left; kept as an empty array so a
+    // stale assertion fails loudly on a length rather than on `undefined.length`.
+    labels: [],
     values: [...f.matchAll(/<text class="bar-value"[^>]*>([\s\S]*?)<\/text>/g)].map((m) => plain(m[1])),
     captions: [...f.matchAll(/<text class="bar-caption"[^>]*>([\s\S]*?)<\/text>/g)]
       .map((m) => plain(m[1])),
@@ -585,9 +602,6 @@ test("the page renders end to end with charts and a layout", () => {
     NB: { "Jupyter Notebook Scheduled Run": 29571.0 },
     SEM: { "XMLA Read Operation": 2041.0 },
   }));
-  const c = charts(out);
-  assert.equal(c.length, 2, "analytics first, then the build chart");
-  assert.ok(c[1].title.includes("per engine build"), c[1].title);
   const text = plain(out);
   const rr = rows(out);
   assert.ok(rr.some((r) => r.startsWith("| **etl** |")));
@@ -600,14 +614,15 @@ test("the page renders end to end with charts and a layout", () => {
     "the layout block, with row-group size abbreviated");
   assert.ok(text.includes("8,167") && text.includes("12,345.60"),
     "the input archive should be on the page");
-  // ANALYTICS is the only chart: it is the interactive CU that throttles, which is the point of the
-  // project. It is labelled by the LAYOUT's writer and captioned by the shape, because Power BI
-  // never sees the engine.
-  assert.ok(c[0].title.includes("Capacity units per parquet layout"));
-  assert.ok(c[0].subtitle.includes("lower is better"));
-  assert.deepEqual(c[0].labels, ["delta_rs"]);
-  assert.deepEqual(c[0].captions, ["79 RG"], "the shape is the sub-label, row groups only");
-  assert.ok(c[0].values[0].startsWith("2,041.0"));
+  // ANALYTICS CU is per LAYOUT — named for the writer, keyed on the measured parquet, because Power
+  // BI never sees the engine. One run is one layout, and it is a TABLE ROW: the two bar charts that
+  // used to draw these same figures are gone, since a bar length is a worse way to read a number
+  // printed one block away.
+  const t = layoutTable(out);
+  assert.deepEqual(t.map((r) => r.writer), ["delta_rs"]);
+  assert.equal(t[0].cu, "2,041");
+  assert.ok(text.includes("Cost and speed by parquet layout"));
+  assert.ok(!/Capacity units per (parquet layout|engine build)/.test(text), "no bar charts");
   // The ETL total is still on the page, in the table that reports it per bucket.
   assert.ok(rr.some((r) => r.startsWith("| **etl** |") && r.includes("31,080.0")), rr.join(" / "));
 });
@@ -668,10 +683,14 @@ test("the rendered page mentions no landing CU anywhere", () => {
 });
 
 test("the numbers come before the methodology", () => {
-  // The charts and the table are what the page is for. A reader who already knows what a capacity unit
-  // is should not have to scroll past a paragraph explaining it, and a provenance table, to reach them.
+  // The chart and the tables are what the page is for. A reader who already knows what a capacity
+  // unit is should not have to scroll past a paragraph explaining it, and a provenance table, to
+  // reach them.
   const out = render([full("a-1.json", "spark")], ledger({ OUT: 34046.3, SEM: 1514.0 }));
-  const firstChart = out.indexOf('<figure class="chart">');
+  // THE FIRST TABLE, not the first chart. A single run is a single layout, and the line chart needs
+  // two points to show a relationship, so on this fixture there is no figure at all — anchoring on
+  // one compared -1 against every index below and passed regardless of the order.
+  const firstChart = out.indexOf("<table");
   assert.ok(firstChart > 0);
   assert.ok(firstChart < out.indexOf("Capacity units (CU-seconds) are what this page leads with"));
   assert.ok(firstChart < out.indexOf("About these numbers"));
@@ -1213,14 +1232,14 @@ test("every run carries its own mart SIZE beside the row groups", () => {
 
 // ------------------------------------------------------------------------------------- the charts
 
-test("the bar is the MEDIAN across runs", () => {
+test("a layout's CU is the MEDIAN across its runs", () => {
   // One dispatch is one sample of a SHARED capacity, so a single number is a reading rather than a
   // result — and a BAD sample is not a property of the layout. Real case: run 30966983384 read
   // 2,629.3 against 1,331.5/1,577.1/1,586.7 for byte-identical parquet, because its XMLA read billed
-  // 49s against ~33s and its refresh took 28.4s against ~8s. A mean lets that one run lift the bar;
-  // the median does not. The values below are that shape — mean 2,000, median 1,500 — so this test
-  // fails if anyone puts the mean back. The outlier is still reachable — the tooltip carries the
-  // range and `Every run` carries the dispatch — it is simply not plotted.
+  // 49s against ~33s and its refresh took 28.4s against ~8s. A mean lets that one run lift the
+  // figure; the median does not. The values below are that shape — mean 2,000, median 1,500 — so
+  // this test fails if anyone puts the mean back. The outlier is still reachable: `Every run`
+  // carries the dispatch, and the line chart's hover carries the sample size.
   const runs = [full("a-1.json", "spark", { finishedHoursAgo: 72 }),
     full("b-2.json", "spark", { finishedHoursAgo: 48 }),
     full("c-3.json", "spark", { finishedHoursAgo: 24 })];
@@ -1233,19 +1252,15 @@ test("the bar is the MEDIAN across runs", () => {
     S2: { "XMLA Read Operation": 1500.0 }, O2: { "Warehouse Query": 1.0 },
   });
   const out = render(runs, led);
-  const c = charts(out)[0];
-  assert.deepEqual(c.labels, ["spark"], "the analytics bar is NAMED for its writer");
-  assert.equal(c.values[0], "1,500.0", "the median, NOT the 2,000.0 mean");
-  assert.ok(c.svg.includes("range 1,000.0–3,500.0"), "the outlier is still drawn, not averaged away");
-  assert.ok(!c.subtitle.includes("mean of"), "no run-count chatter in the subtitle");
-  // ...and the two tables under it quote that same 1,500: one measurement shown three times.
-  assert.ok(rows(block(out, "Cost and speed by parquet layout")).some((r) => r.includes("| 1,500 |")),
-    rows(block(out, "Cost and speed by parquet layout")).join(" / "));
+  const t = layoutTable(out);
+  assert.deepEqual(t.map((r) => r.writer), ["spark"], "one row, NAMED for its writer");
+  assert.equal(t[0].cu, "1,500", "the median, NOT the 2,000.0 mean");
+  assert.equal(t[0].runs, "3", "and the sample size behind it is printed");
 });
 
 test("an even number of runs takes the middle two, and one run is itself", () => {
   // The honest limit, pinned so nobody reads the median as a noise fix: at n=1 and n=2 it IS the
-  // mean, and four of nine bars on the real page are that thin. It dampens an outlier once there
+  // mean, and four of nine rows on the real page are that thin. It dampens an outlier once there
   // are three samples; only more dispatches make one trustworthy.
   const four = [1000, 1500, 1600, 4000];   // middle two -> 1,550, mean would be 2,025
   const mk = (vals) => {
@@ -1255,15 +1270,15 @@ test("an even number of runs takes the middle two, and one run is itself", () =>
       r.items = { [`S${i}`]: gone("semantic_model", "aemo_spark"),
         [`O${i}`]: gone("output", "dbt_spark") };
     });
-    return charts(render(runs, ledger(Object.fromEntries(vals.flatMap((v, i) =>
+    return layoutTable(render(runs, ledger(Object.fromEntries(vals.flatMap((v, i) =>
       [[`S${i}`, { "XMLA Read Operation": v }], [`O${i}`, { "Warehouse Query": 1.0 }]])))))[0];
   };
-  assert.equal(mk(four).values[0], "1,550.0");
-  assert.equal(mk([1000, 3000]).values[0], "2,000.0", "n=2: the median is the mean");
-  assert.equal(mk([2500]).values[0], "2,500.0", "n=1: the reading itself");
+  assert.equal(mk(four).cu, "1,550");
+  assert.equal(mk([1000, 3000]).cu, "2,000", "n=2: the median is the mean");
+  assert.equal(mk([2500]).cu, "2,500", "n=1: the reading itself");
 });
 
-test("the chart sorts by the bar value", () => {
+test("the layout table sorts by CU", () => {
   const runs = [full("a-1.json", "spark"), full("b-2.json", "dwh")];
   runs[0].items = { S0: gone("semantic_model", "aemo_spark"), O0: gone("output", "dbt_spark") };
   runs[1].items = { S1: gone("semantic_model", "aemo_dwh"), O1: gone("output", "dbt_dwh") };
@@ -1271,51 +1286,15 @@ test("the chart sorts by the bar value", () => {
     S0: { "XMLA Read Operation": 9.0 }, O0: { "Warehouse Query": 1.0 },
     S1: { "XMLA Read Operation": 3.0 }, O1: { "Warehouse Query": 1.0 },
   }));
-  assert.deepEqual(charts(out)[0].labels, ["dwh", "spark"], "cheapest mean first");
+  assert.deepEqual(layoutTable(out).map((r) => r.writer), ["dwh", "spark"], "cheapest first");
 });
 
-test("the svg draws ONE mark per row — no whisker over the bar", () => {
-  // A bar with an interval laid over it is two marks for one row, and once the bar became a median
-  // the interval plotted a spread the bar deliberately ignores. The range is still MEASURED and
-  // still carried — it just is not drawn.
-  const wide = d.chartSvg("t", "s", [["spark", 1500.0, 1000.0, 2000.0, "cap"]]);
-  assert.ok(!wide.includes("whisker"), "nothing overlaid on the bar");
-  assert.equal((wide.match(/class="bar"/g) || []).length, 1, "one bar, one row");
-  assert.ok(wide.includes("range 1,000.0–2,000.0"), "the exact spread survives in the tooltip");
-  assert.ok(wide.includes("median 1,500.0 CU"), "and the tooltip names the statistic");
-});
+// ------------------------------------------------------- one ROW per LAYOUT, not per engine
 
-test("the plot is scaled to the widest BAR, not to a range it no longer draws", () => {
-  // While the whisker was drawn the plot had to fit `hi`, so every bar was shortened to leave room
-  // for it. Kept after removing it, one wide-spread row would squash the whole chart for nothing.
-  const svg = d.chartSvg("t", "s", [["a", 100.0, 10.0, 9000.0, ""], ["b", 50.0, 50.0, 50.0, ""]]);
-  // `barPath` ends the straight run one corner-radius short, so add it back to compare widths.
-  const widths = [...svg.matchAll(/class="bar" d="M0,0 H([\d.]+) A([\d.]+)/g)]
-    .map((m) => Number(m[1]) + Number(m[2]));
-  assert.equal(widths.length, 2);
-  // Rows sort cheapest first, so `b` (50) is drawn above `a` (100). `a` is the largest VALUE and
-  // fills the plot; `b` is exactly half of it. Neither is scaled against the 9,000 that set `top`
-  // while the whisker existed — under that scale both bars would be a sliver.
-  assert.equal(widths[0] / widths[1], 0.5, `the 50 bar should be half the 100 bar: ${widths}`);
-});
-
-test("the svg still takes the older three-field row", () => {
-  // `[label, value, caption]` — so a chart spec from an artifact rendered months ago still draws.
-  const svg = d.chartSvg("t", "s", [["spark", 42.0, "cap"]]);
-  assert.ok(svg.includes("42.0") && !svg.includes('class="whisker"'));
-});
-
-test("a chart with nothing but zeros is not drawn", () => {
-  assert.equal(d.chartSvg("t", "s", [["spark", 0, 0, 0, ""]]), "");
-  assert.equal(d.chartSvg("t", "s", []), "");
-});
-
-// ------------------------------------------------------- one bar per LAYOUT, not per engine
-
-test("the same parquet is one bar however many engines wrote it", () => {
+test("the same parquet is one row however many engines wrote it", () => {
   // Power BI never sees the engine — it opens parquet through Direct Lake and transcodes row groups.
-  // duckrun at 64 cores and at 32 wrote 4 files and 27 row groups either way, so two bars 50% apart
-  // was not a comparison: it was one layout measured twice, presented as two results.
+  // duckrun at 64 cores and at 32 wrote 4 files and 27 row groups either way, so two entries 50%
+  // apart was not a comparison: it was one layout measured twice, presented as two results.
   const runs = [
     lay("duckrun", 4, 27, { cfg: { vcores: "64" }, file: "a-1.json", finishedHoursAgo: 72 }),
     lay("duckrun", 4, 27, { cfg: { vcores: "32" }, file: "b-2.json", finishedHoursAgo: 48 }),
@@ -1326,24 +1305,21 @@ test("the same parquet is one bar however many engines wrote it", () => {
     S0: { "XMLA Read Operation": 1000.0 }, O0: 1.0,
     S1: { "XMLA Read Operation": 2000.0 }, O1: 1.0,
   }));
-  const c = charts(out);
-  assert.deepEqual(c[0].labels, ["delta_rs"], "one layout, one bar");
-  assert.equal(c[0].values[0], "1,500.0");
-  assert.deepEqual(c[0].captions, ["27 RG"], "the shape it grouped on sits underneath");
-  // ...while the ETL side keeps BOTH columns, because there the writer and the compute it was given
-  // are the entire subject. ONE analytics bar, TWO build bars, from the same two runs — that
-  // asymmetry is the whole point of keying the two charts differently.
-  assert.equal(c.length, 2, "analytics and build");
-  assert.deepEqual([...c[1].labels].sort(), ["duckrun·32c", "duckrun·64c"],
-    "the build chart keeps both (drawn cheapest first, so order follows the CU)");
+  const t = layoutTable(out);
+  assert.deepEqual(t.map((r) => r.writer), ["delta_rs"], "one layout, one row");
+  assert.equal(t[0].cu, "1,500");
+  assert.equal(t[0].runs, "2", "both runs behind it");
+  // ...while `Cost by engine` keeps BOTH columns, because there the writer and the compute it was
+  // given are the entire subject. ONE layout row, TWO engine columns, from the same two runs — that
+  // asymmetry is why the two are keyed differently.
   assert.deepEqual(rows(block(out, "Cost by engine"))[0],
     "| CU (s) | duckrun·32c | duckrun·64c |");
 });
 
-test("two runs of ONE column that wrote different parquet are two bars", () => {
+test("two runs of ONE column that wrote different parquet are two rows", () => {
   // The bug this pins, on the real records: `duckrun·64c+sorted` wrote two different shapes under
-  // one column. Grouping the COLUMNS and pouring every run of each into its bar put them together at
-  // their mean — 2,041.8, a number neither run measured — captioned with only the newer one's shape.
+  // one column. Grouping the COLUMNS and pouring every run of each into one entry put them together
+  // at their mean — 2,041.8, a number neither run measured — described by only the newer's shape.
   // The layout is measured per RUN, so it has to be grouped per run. (The original pair differed by
   // file count too; that element has left the key, so the fixture separates on row groups.)
   const cfg = { vcores: "64", sorted: "true" };
@@ -1358,27 +1334,28 @@ test("two runs of ONE column that wrote different parquet are two bars", () => {
     S0: { "XMLA Read Operation": 2400.0 }, O0: 1.0,
     S1: { "XMLA Read Operation": 1600.0 }, O1: 1.0,
   }));
-  const c = charts(out)[0];
-  assert.deepEqual(c.labels, ["delta_rs", "delta_rs"], "one label, two layouts");
-  assert.deepEqual(c.values, ["1,600.0", "2,400.0"], "each run's OWN CU, never their mean");
-  // The caption is the whole reason two bars with one label read: the label answers who wrote it.
-  assert.deepEqual(c.captions, ["by date, time · 25 RG", "by date, time · 9 RG"]);
+  const t = layoutTable(out);
+  assert.deepEqual(t.map((r) => r.writer), ["delta_rs", "delta_rs"], "one writer, two layouts");
+  assert.deepEqual(t.map((r) => r.cu), ["1,600", "2,400"], "each run's OWN CU, never their mean");
+  // The `ordering`/`row group size` cells are the whole reason two rows with one writer read: the
+  // writer answers who wrote it, the key answers what.
+  assert.deepEqual(t.map((r) => r.rgSize), ["5.8M", "16.0M"], "and the shapes tell them apart");
   // ...and the mart block says the same thing, because its rows ARE these groups.
   const body = rows(block(out, "the mart the queries land on")).slice(1);
   assert.equal(body.length, 2, "one mart row per bar, not one per writer");
-  // Fewest files first, and the block carries LAYOUT ONLY — the CU that used to sit here is in the
-  // charts and in `Cost by engine`, on the run that measured it.
+  // Fewest files first, and the block carries LAYOUT ONLY — the CU that used to sit here is in
+  // *Cost and speed by parquet layout* and in `Cost by engine`, on the run that measured it.
   assert.ok(body[0].startsWith("| delta_rs | 3 | 9 |"), body[0]);
   assert.ok(body[1].startsWith("| delta_rs | 4 | 25 |"), body[1]);
   assert.ok(!body[0].includes("1,600"), "no CU column on the layout block");
-  // The ETL half groups per COLUMN, and both runs are samples of one column — so two analytics
-  // bars (two layouts) and ONE build bar (one column).
-  assert.equal(charts(out).length, 2, "analytics and build");
-  assert.equal(charts(out)[1].labels.length, 1, "one column, one build bar");
+  // `Cost by engine` groups per COLUMN, and both runs are samples of one — so two layout rows and
+  // ONE engine column.
+  assert.equal(rows(block(out, "Cost by engine"))[0].split("|").length - 2, 2,
+    "one measure column and one engine column");
   assert.ok(rows(block(out, "Cost by engine")).some((r) => r.startsWith("| **etl** |")));
 });
 
-test("a column whose runs recorded no layout stays ONE bar", () => {
+test("a column whose runs recorded no layout stays ONE row", () => {
   // The "two unmeasured layouts are not one layout" rule is about two different COLUMNS. Splitting one
   // column's own runs would print the same label three times with no caption able to say why.
   const runs = ["a-1.json", "b-2.json", "c-3.json"].map((f, i) =>
@@ -1386,12 +1363,12 @@ test("a column whose runs recorded no layout stays ONE bar", () => {
   runs.forEach((r, i) => {
     r.items = { [`S${i}`]: gone("semantic_model", "aemo_spark"), [`O${i}`]: gone("output", "dbt_spark") };
   });
-  const c = charts(render(runs, ledger({
+  const t = layoutTable(render(runs, ledger({
     S0: { "XMLA Read Operation": 1000.0 }, S1: { "XMLA Read Operation": 2000.0 },
     S2: { "XMLA Read Operation": 1500.0 },
-  })))[0];
-  assert.deepEqual(c.labels, ["spark"]);
-  assert.equal(c.values[0], "1,500.0", "the mean of all three, as before");
+  })));
+  assert.deepEqual(t.map((r) => r.writer), ["spark"]);
+  assert.equal(t[0].cu, "1,500", "the median of all three, as before");
 });
 
 test("an engine is named for who WRITES, not for the dbt target that asked", () => {
@@ -1455,9 +1432,9 @@ test("a group of genuinely different writers names both", () => {
   assert.equal(d.producers(members), "delta_rs, spark writeHeavy", "deduplicated, and both kept");
 });
 
-test("the layout table is one row per writer and agrees with the chart", () => {
-  // The table groups by the DECLARED producer and the chart by the MEASURED parquet — two directions
-  // onto the same rows. And both quote the same CU.
+test("the mart layout block is one row per writer, and carries no CU", () => {
+  // The mart block groups by the DECLARED producer; *Cost and speed by parquet layout* groups by the
+  // MEASURED parquet — two directions onto the same rows, and only the latter carries a cost.
   const runs = [
     lay("duckrun", 4, 27, { cfg: { vcores: "64" }, file: "a-1.json", finishedHoursAgo: 72 }),
     lay("duckrun", 4, 27, { cfg: { vcores: "32" }, file: "b-2.json", finishedHoursAgo: 48 }),
@@ -1471,7 +1448,7 @@ test("the layout table is one row per writer and agrees with the chart", () => {
   const body = rows(block(out, "the mart the queries land on"));
   assert.equal(body.length, 2, "a header and ONE row — one writer, not one per run");
   assert.ok(body[1].startsWith("| delta_rs | 4 | 27 |"), body[1]);
-  assert.equal(charts(out)[0].values[0].split(" ")[0], "1,500.0", "the chart still carries the CU");
+  assert.equal(layoutTable(out)[0].cu, "1,500", "the cost table still carries the CU");
   assert.ok(!body[1].includes("1,500"), "but the layout block does not");
   assert.ok(!body[0].includes("| writer |"), "the row label IS the writer now");
 });
@@ -1578,7 +1555,8 @@ test("the rate is a row of the engine table, not a section", () => {
   const rr = rows(out);
   assert.ok(rr.some((r) => r === "| **etl** | **900.0** |"));
   assert.ok(rr.some((r) => r === "| `compute CU per second` | 30.0 |"), "under its class");
-  assert.equal(charts(out).length, 2, "the rate row adds no chart of its own");
+  assert.ok(!charts(out).some((c) => /per second/.test(c.title)),
+    "the rate row adds no chart of its own");
 });
 
 test("etl carries a duration row and analytics deliberately does not", () => {
@@ -1666,7 +1644,8 @@ test("a class the ledger has not read yet is a dash, not a zero", () => {
 test("a ledger with no seconds renders no rate row", () => {
   const out = render([full("a-1.json", "spark")], ledger({ OUT: 1.0, SEM: 2.0 }));
   assert.ok(!rows(out).some((r) => r.startsWith("| `compute CU per second` |")), "no ROW");
-  assert.equal(charts(out).length, 2, "seconds drive the rate ROW, not a chart");
+  assert.ok(!charts(out).some((c) => /per second/.test(c.title)),
+    "seconds drive the rate ROW, not a chart");
 });
 
 test("the rate is compute over compute, never total over total", () => {
@@ -1734,7 +1713,8 @@ test("the rate is computed per class", () => {
   assert.ok(rr.some((r) => r === "| `compute CU per second` | 30.0 |"), "900 CU over 30 s");
   assert.ok(rr.some((r) => r === "| **analytics** | **40.0** |"));
   assert.ok(rr.some((r) => r === "| `compute CU per second` | 10.0 |"), "40 CU over 4 s");
-  assert.equal(charts(out).length, 2, "the two CU charts, and the rate adds none");
+  assert.ok(!charts(out).some((c) => /per second/.test(c.title)),
+    "the rate adds no chart of its own");
 });
 
 // ------------------------------------------------------------------------ live loading, new here
@@ -1811,9 +1791,9 @@ test("the filter runs BEFORE columnsFor, so a stale engine loses its column enti
   assert.equal(dropped.length, 1);
 });
 
-test("a chart mean never blends two generations", () => {
+test("a group's median never blends two generations", () => {
   // spreadFor walks the whole runs array, so filtering the array is what stops a stale run from
-  // pulling the mean. Two spark runs, one stale: the bar must be the survivor's number alone.
+  // pulling the middle. Two spark runs, one stale: the figure must be the survivor's alone.
   const runs = [
     gen("a-1.json", "spark", 999, { finishedHoursAgo: 72 }),
     gen("b-2.json", "spark", 143980961, { finishedHoursAgo: 24 }),
@@ -1824,8 +1804,10 @@ test("a chart mean never blends two generations", () => {
     S0: { "XMLA Read Operation": 5000.0 }, O0: { "Warehouse Query": 1.0 },
     S1: { "XMLA Read Operation": 1000.0 }, O1: { "Warehouse Query": 1.0 },
   }), {});
-  const c = charts(html)[0];
-  assert.equal(c.values[0], "1,000.0", "no range, no mean of 5000 and 1000 — one sample survives");
+  const t = layoutTable(html);
+  assert.equal(t.length, 1, "one generation, one row");
+  assert.equal(t[0].cu, "1,000", "no mean of 5,000 and 1,000 — one sample survives");
+  assert.equal(t[0].runs, "1");
 });
 
 test("the excluded runs are NAMED on the page, with their counts", () => {
@@ -2098,25 +2080,21 @@ test("the layout blocks sit behind a tab strip when more than one table renders"
   assert.ok(plain(out).includes("9 rows on every engine"));
 });
 
-test("TWO charts, stacked full width, analytics first", () => {
-  // Analytics leads because it is the half that matters — interactive CU is what throttles, build CU
-  // is background and smoothed over 24h — but "less important" is not "not worth plotting", and the
-  // build half carries the sharpest operational result on the page (duckrun costs 1.8x at 64 cores
-  // for the same wall time). Stacked, never side by side: the SVG draws at a 660-unit viewBox and a
-  // narrower box inflates every label with it.
+test("the two CU bar charts are GONE, and their numbers are not", () => {
+  // They were `Capacity units per parquet layout` and `… per engine build`, analytics above ETL.
+  // Removing them is not a judgement on the build half — that is still where the sharpest
+  // operational result lives (duckrun costs 1.8x at 64 cores for the same wall time). It is that
+  // both drew a figure the page already PRINTS one block away: the analytics bar was the `CU`
+  // column of *Cost and speed by parquet layout*, the ETL bar the `etl` row of *Cost by engine*.
+  // So this test is really the no-loss check — if either number ever stops being printed, restoring
+  // a chart is a different argument from the one that removed these.
   const out = render([full("a-1.json", "spark")], ledger({ OUT: 1.0, SEM: 2.0 }));
-  assert.ok(!out.includes('<div class="charts">'), "no side-by-side wrapper");
-  assert.equal((out.match(/<figure class="chart"/g) || []).length, 2, "two figures");
-  assert.ok(!out.includes("data-kind"), "one measure, one hue, nothing to mark");
-  const c = charts(out);
-  assert.ok(c[0].title.includes("Capacity units per parquet layout"), c[0].title);
-  assert.ok(c[1].title.includes("Capacity units per engine build"), c[1].title);
-  assert.ok(out.indexOf("per parquet layout") < out.indexOf("per engine build"),
-    "analytics is FIRST — the order is the ranking");
-  // Keyed differently on purpose: the analytics bar is a layout, the build bar is a column.
-  assert.deepEqual(c[1].labels, ["spark"]);
-  // Gone from the CHART, not from the page.
-  assert.ok(rows(block(out, "Cost by engine")).some((r) => r.startsWith("| **etl** |")));
+  assert.ok(!/Capacity units per parquet layout|Capacity units per engine build/.test(plain(out)));
+  assert.equal((out.match(/class="bar"/g) || []).length, 0, "no bar marks anywhere");
+  assert.ok(!out.includes('<div class="charts">'), "and no wrapper left behind");
+  assert.equal(layoutTable(out)[0].cu, "2", "analytics CU is a table cell");
+  assert.ok(rows(block(out, "Cost by engine")).some((r) => r.startsWith("| **etl** |")),
+    "and the build CU is a table row");
 });
 
 // ------------------------------------------------------------------- cost and speed by layout
@@ -2143,10 +2121,12 @@ test("cost and speed is one table, cheapest first, with a title and nothing else
   // FIRST, above the charts. It carries what a bar does — the same median from the same
   // `martPoints` — plus the grouping key, the sample size and the tiers, as numbers rather than bar
   // lengths, so it is what a reader wanting one thing from this page should meet first.
-  // The selector is `<figure class="chart">`, the markup `chartSvg` actually emits: this line read
-  // `<div class="charts">` for as long as it existed, which is in no version of the page, so it
-  // compared -1 against a positive index and passed whatever the order was.
-  assert.ok(at < out.indexOf('<figure class="chart">'), "above the bar charts");
+  // The selector is UNTERMINATED — the only figure left is `class="chart wide"`, and a selector
+  // closing the quote matches nothing. This line read `<div class="charts">` for as long as it
+  // existed, which is in no version of the page, so it compared -1 against a positive index and
+  // passed whatever the order was; then it read `class="chart">`, which was right until the bar
+  // charts went. Twice now, the same silent-pass shape.
+  assert.ok(at < out.indexOf('<figure class="chart'), "above its chart");
   assert.ok(at < out.indexOf("<h3>Cost by engine</h3>"), "and above the cost table");
   // The GROUPING KEY is printed between the label and the numbers — six rows reading
   // `duckrun sorted` with nothing to tell them apart is a table hiding what it grouped on.
@@ -2324,10 +2304,11 @@ test("a class the ledger has not read is a dash on the run row, never 0.0", () =
   assert.ok(!row.includes("| 0.0 |"), row);
 });
 
-test("every run a chart drew from has a row of its own", () => {
-  // A bar with no row behind it is what this table exists to prevent. The charts average an engine's
-  // whole history, so a superseded run still moves one — and while this listed column holders only,
-  // that run's CU appeared nowhere else on the page: `duckrun sorted` read 2,454.1 and no row said so.
+test("every run a summary drew from has a row of its own", () => {
+  // A summarised figure with no row behind it is what this table exists to prevent. A layout group's
+  // median spans its whole history, so a superseded run still moves one — and while this listed
+  // column holders only, that run's CU appeared nowhere else: `duckrun sorted` read 2,454.1 and no
+  // row said so.
   const cfg = { vcores: "64", sorted: "true" };
   const runs = [
     lay("duckrun", 3, 9, { cfg, file: "a-1.json", finishedHoursAgo: 72 }),
@@ -2346,8 +2327,8 @@ test("every run a chart drew from has a row of its own", () => {
   // ...and the superseded one is a row like any other: the RUN is the key, and which one is newest is
   // already what the sort order and the `built` column say.
   assert.ok(body[1].startsWith("| duckrun |"), body[1]);
-  assert.ok(body[1].includes("| 2,400.0 |"), `the number the older bar reads: ${body[1]}`);
-  assert.ok(charts(html)[0].values.includes("2,400.0"), "which is on a bar");
+  assert.ok(body[1].includes("| 2,400.0 |"), `the older run's own number: ${body[1]}`);
+  assert.ok(layoutTable(html).some((r) => r.cu === "2,400"), "which is a layout row of its own");
 });
 
 test("the run rows and Cost by engine quote the same numbers", () => {
@@ -2514,14 +2495,14 @@ test("the knob table pairs columns, bolds what clears the floor, and says whose 
   assert.ok(row.includes("| same |"), row);
 });
 
-test("Part A quotes the CHARTS' numbers, not a second derivation", () => {
-  // A page printing 1,916 in a bar and 1,960 in the row under it is asking which one it meant.
+test("Part A quotes the LAYOUT TABLE's numbers, not a second derivation", () => {
+  // A page printing 1,916 in one place and 1,960 in the row under it is asking which one it meant.
   const runs = [own(lay("duckrun", 4, 4, { file: "d-1.json" }), "d"),
     own(lay("spark", 11, 11, { file: "s-1.json", vorder: true }), "s")];
   const out = render(runs, ledger({ Od: 100, Sd: 40, Os: 300, Ss: 90 }));
   const find = (what) => rows(block(out, "Where the rankings hold")).find((r) => r.includes(what));
   assert.ok(find("cheapest to query").includes("| 40.0 |"), find("cheapest to query"));
-  assert.ok(charts(out)[0].values.includes("40.0"), "which is the cheapest analytics bar");
+  assert.ok(layoutTable(out)[0].cu === "40", "which is the cheapest layout row");
   // Build CU is still reported, just not RANKED — it belongs to the engine and the compute it was
   // given, not to the parquet, so it has no place in a table whose every other row ranks layouts.
   assert.ok(rows(block(out, "Cost by engine")).some((r) => r.includes("| **100.0** |")),

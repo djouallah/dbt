@@ -711,7 +711,7 @@ to `provision.py teardown`, which polls for a 404 and goes red if it is still li
 - Cancel superseded runs immediately (`gh run cancel <id>`) — spark and Fabric legs cost money.
 - **The two DuckDB legs run on IDENTICAL DuckDB settings, and keeping them that way is the point
   of the pair.** `duckrun` and `iceberg` are the same DuckDB on the same notebook at the same
-  `FABRIC_CORES`, which is what makes their two CU bars the sharpest comparison on the dashboard —
+  `FABRIC_CORES`, which is what makes their two CU columns the sharpest comparison on the dashboard —
   so any `on-run-start` hook or `profiles.yml` setting given to one must be given to the other.
   This was violated for a long time: `dbt_project.yml` set `memory_limit = 4GB` for
   `target.name == 'duckrun'` alone while iceberg ran at DuckDB's default (~80% of node RAM), and
@@ -839,7 +839,7 @@ to `provision.py teardown`, which polls for a 404 and goes red if it is still li
   **It was off by default and is now on.** That is a deliberate change of what a bare dispatch
   measures, not a finding: across seven spark runs NEE moves **nothing** — analytics CU 1,149 /
   1,306 / 1,480 with it on against 1,514 with it off under `readHeavyForPBI`, and the same file and
-  row-group layout either way, which is why `LAYOUT_CONFIG` excludes it from the analytics bars in
+  row-group layout either way, which is why `LAYOUT_CONFIG` excludes it from the layout grouping in
   the first place. The default flipped because it is what a Fabric user gets by choosing the faster
   engine. Note the consequence for the page: `variantTag` omits a flag that is OFF, so spark columns
   now read `spark·readHeavyForPBI+NEE` by default and a deliberately-disabled run is the one that
@@ -1252,7 +1252,7 @@ no data at all. `all.yml`, `dbt.yml` and `cu.yml` are gone.
   HTML in the browser — is exactly the drift the rest of this repo is built against, so the browser's
   is the only one. There is no `dashboard.md` and no job summary of the page any more. The whole
   Python suite moved with it: `node --test dashboard/app.test.mjs` is now what pins the join, the
-  labelling rules and both charts, and `python -m pytest cu/ -q` pins the ledger alone.
+  labelling rules and the chart, and `python -m pytest cu/ -q` pins the ledger alone.
   The port was verified row-for-row against the last Python render — 73 table rows and both charts
   identical on the real `history/`, with **one** difference: rounding TIES move by one in the last
   digit, because Python rounds half-to-even and JavaScript half-up (`1,378.5` printed `1,378`, now
@@ -1378,23 +1378,30 @@ no data at all. `all.yml`, `dbt.yml` and `cu.yml` are gone.
   second read returns bigger numbers and `max()` takes them. "May still rise" on the page is DERIVED
   from `run.finished` being under two hours old — a property of the clock, not a flag written into a
   file that then has to be kept in step.
-- **THE TWO CHARTS ARE KEYED ON DIFFERENT THINGS, AND THAT IS THE DESIGN — do not "unify" them.**
-  They are STACKED, full width, **analytics first**, and that order is the ranking: interactive CU is
-  what throttles a capacity, build CU is background and smoothed over 24 hours. The build chart was
-  deleted once on that argument alone and is back — "less important" is not "not worth plotting", and
-  the build half carries the sharpest operational result on the page: **duckrun costs 1.8× at 64
-  cores for the same wall time** (705s/13,083 CU at 32 against 692s/23,992 at 64), which the analytics
-  chart structurally CANNOT show, because both wrote identical parquet and are therefore one bar
-  there. It goes through the same `groupMid` median as the analytics bars and `Cost by engine`.
-  **Analytics is one bar per PARQUET LAYOUT.** Power BI never sees the engine: it opens parquet
+- **THE TWO CU BAR CHARTS ARE DELETED. There is ONE chart on the page** — the line chart under
+  *Cost and speed by parquet layout*, one line per layout, warm ms to cold ms on a shared log axis
+  at the height of its CU. `chartSvg`, `barPath`, `groupRows` and the `.bar` rules went with them.
+  They were `Capacity units per parquet layout` and `Capacity units per engine build`, stacked,
+  analytics first. **The reason is NOT that the build half stopped mattering** — it still carries
+  the sharpest operational result here, **duckrun costs 1.8× at 64 cores for the same wall time**
+  (705s/13,083 CU at 32 against 692s/23,992 at 64), which the analytics keying structurally CANNOT
+  show because both wrote identical parquet. It is that **both drew a figure the page already prints
+  as a figure one block away**: the analytics bar was the `CU` column of *Cost and speed by parquet
+  layout*, the build bar the `etl` row of *Cost by engine*. A bar length is a worse way to read a
+  number you can be told. **That no-loss claim is what to re-check before restoring one** — a test
+  pins it, and a chart brought back for a number no table carries is a different argument from the
+  one that removed these. `spreadFor` survives; the noise floor uses it.
+  **The GROUPING survives too, and now surfaces as table rows and as the chart's lines.** Read the
+  rest of this bullet as describing a layout GROUP, not a bar.
+  Power BI never sees the engine: it opens parquet
   through Direct Lake and transcodes row groups, so what a query costs belongs to what was WRITTEN
-  and the writer is metadata. The bar is **named for its writer and captioned with the shape** —
+  and the writer is metadata. The group is **named for its writer and described by the shape** —
   `spark readHeavyForPBI` over `V-Order · 10–11 RG`: the grouping is the layout, but a file
   count is a poor NAME even when it is the real subject, so the shape sits underneath where it
-  explains why two writers would ever share a bar. **The caption prints ROW GROUPS ONLY** — segments
+  explains why two writers would ever share a group. **Only ROW GROUPS are printed** — segments
   are what drive Direct Lake's transcode/scan cost and the file count was a second number saying
-  less; the file BAND still separates bars, it just is not printed. **A sorted bar's caption names
-  its sort columns** (`by date, time · 9 RG`), **and that key comes off the RECORD — never a constant
+  less; the file BAND still separates groups, it just is not printed. **A sorted group names
+  its sort columns** (`date, time · 9 RG`), **and that key comes off the RECORD — never a constant
   here.** THE KEY IS A PROPERTY OF THE COMMIT: the model declared `['date','time','DUID']` for a
   while and `['date','time']` since, so a constant in `app.js` is right only for today's model, and
   briefly was not — it captioned run 30955591822, a DUID sort, `by date, time`, which is the exact
@@ -1403,27 +1410,27 @@ no data at all. `all.yml`, `dbt.yml` and `cu.yml` are gone.
   regex over the model in its own checkout — the notebook cannot write to the record, so the
   manifest never reaches here), `dbt.<engine>.sort_by_auto` is what duckrun's picker RESOLVED
   (`fabric_run.py`'s log scrape, and the only witness for an `'auto'` run, whose declaration names no
-  columns). **A sorted run with no key recorded reads `true`** — it shares a bar with neither an
-  unsorted run nor any named sort, and its caption adds nothing, because the label already says
+  columns). **A sorted run with no key recorded reads `true`** — it shares a group with neither an
+  unsorted run nor any named sort, and it adds no columns to say, because the label already says
   `sorted`. The five records predating `declared_sort_key()` were **backfilled** from the model at
   the SHA each ran; the two `'auto'` ones were deliberately left alone, their scrape being the better
-  source. **ETL is one bar per column**, unchanged, because
-  there the writer and the compute it was given are the entire subject.
-  What forced it: duckrun at 64 cores and at 32 wrote 4 files and 27 row groups either way, so two
-  bars 50% apart was not a comparison — it was one layout measured twice, presented as two results.
+  source. **Build CU stays keyed per COLUMN** — `Cost by engine` — because there the writer and the
+  compute it was given are the entire subject.
+  What forced the layout keying: duckrun at 64 cores and at 32 wrote 4 files and 27 row groups either
+  way, so two entries 50% apart was not a comparison — it was one layout measured twice, presented as
+  two results.
   **A GROUP'S NUMBER IS THE MEDIAN OF ITS RUNS, NOT THE MEAN — `groupMid`, and everything that
-  summarises several runs goes through that one function** (the bar, `Cost and speed by layout`, and
-  the mart rows are one measurement shown three times; deriving the middle separately is how a page
-  plots 1,582 above a row reading 1,781). Measured: run 30966983384 read **2,629.3** analytics CU
+  summarises several runs goes through that one function** (`Cost and speed by layout`, the line
+  chart and the mart rows are one measurement shown three times; deriving the middle separately is
+  how a page plots 1,582 above a row reading 1,781). Measured: run 30966983384 read **2,629.3** analytics CU
   against 1,331.5, 1,577.1 and 1,586.7 for **byte-identical parquet** — 1 file, 9 RG, same sort —
   because its XMLA read billed 49s against ~33s and its model refresh took **28.4s against ~8s**.
   Nothing about the parquet makes a refresh 3.5× longer; the capacity was busy. Under a mean that one
-  dispatch lifted its bar 11% and dwh's 16%, i.e. the chart reported Fabric's weather as a property
+  dispatch lifted its figure 11% and dwh's 16%, i.e. the page reported Fabric's weather as a property
   of the layout. **What the median does NOT fix, and must not be sold as fixing: at n=1 and n=2 it IS
-  the mean**, and four of nine bars are that thin — it dampens an outlier once there are three
-  samples, and only more dispatches make one trustworthy. **Nothing is plotted over the bar** — one
-  mark per row — but min/max are still measured and stated in the tooltip and in `Every run`'s
-  per-run rows, so the median is what the bar claims and the spread stays checkable.
+  the mean**, and four of nine groups are that thin — it dampens an outlier once there are three
+  samples, and only more dispatches make one trustworthy. min/max are still measured and stated in
+  `Every run`'s per-run rows, so the median is what the page claims and the spread stays checkable.
   **Grouping is MEASURED, labelling is DECLARED — with ONE stated exception.** The key is
   `(V-Order, band(row groups), sort columns, ENGINE)`, the first two from the parquet as `stats.py`
   read it. **Two engines never share a bar** — a reversal of the older "Power BI never sees the
@@ -1438,13 +1445,13 @@ no data at all. `all.yml`, `dbt.yml` and `cu.yml` are gone.
   parquet — which is not hypothetical: `duckrun·64c+sorted` wrote **3 files / 26 RG** under an explicit
   `sort_by=['date','time','DUID']` (run 30805417412) and **4 files / 25 RG** under the `sort_by='auto'`
   the picker resolved to `['date','time']` (run 30809945203). `layoutGroups` keyed the COLUMNS and
-  `spreadFor` then poured every run of each into its bar, so those two landed in one bar valued at
-  their mean — **2,041.8, a number neither run measured** — captioned `4 files · 25 RG` from the newer
-  record alone, because `layoutLabel` ranged over columns too. Per run they are two bars sharing the
-  label `duckrun sorted`, at 2,454.1 and 1,629.5, and the caption is what tells them apart. Two bars
-  with one label is the correct output, not a defect to tidy: the label answers who wrote it and the
-  caption answers what. A run whose record carries no file count falls back to its COLUMN rather than
-  to a bar of its own — the "two unmeasured layouts are not one layout" rule below is about two
+  `spreadFor` then poured every run of each into one entry, so those two landed together valued at
+  their mean — **2,041.8, a number neither run measured** — described as `4 files · 25 RG` from the
+  newer record alone, because `layoutLabel` ranged over columns too. Per run they are two entries
+  sharing the writer `duckrun sorted`, at 2,454.1 and 1,629.5, and the shape is what tells them apart.
+  Two rows with one writer is the correct output, not a defect to tidy: the writer answers who wrote
+  it and the key answers what. A run whose record carries no file count falls back to its COLUMN
+  rather than to a group of its own — the "two unmeasured layouts are not one layout" rule below is about two
   different columns and still holds, but one column's own runs must not split into a bar each with no
   caption able to say why.
   **`sorted` is the exception and it is DECLARED**, because nothing in `stats.py` measures sort
@@ -1491,7 +1498,7 @@ no data at all. `all.yml`, `dbt.yml` and `cu.yml` are gone.
   reverses it** — `STACK`, the adapter caption and the (engine, variant) join to a record stay keyed
   on `iceberg`, and without the reversal each would silently MISS rather than raise: a blank caption,
   a chart row quietly gone.
-  `variantTag()` still names columns everywhere the ENGINE is the subject — the ETL chart, the CU
+  `variantTag()` still names columns everywhere the ENGINE is the subject — `Cost by engine`, the CU
   table, the sources table — but it now **shares `PROFILE_LABEL`**, so a profile reads the same in a
   header as in a caption, and it **omits a flag that is OFF**: `spark·V-Order+NEE` against
   `spark·V-Order`, never `spark·readHeavyForPBI+noNEE`. That header appears in every table and both
@@ -1500,7 +1507,7 @@ no data at all. `all.yml`, `dbt.yml` and `cu.yml` are gone.
   a record predating the dispatch input has no key at all and would collide with an explicit `false` —
   so `columnsFor` checks for a collision and falls the whole engine back to the explicit spelling.
   Two identical column headers is the failure it prevents, and it is silent about why.
-  **The MART block's rows ARE the chart's bars** — same grouping, same members, same mean — and every
+  **The MART block's rows ARE the chart's lines** — same grouping, same members, same median — and every
   other block stays one row per DECLARED writer. That split replaced "two directions onto the same
   rows", which held only while no writer produced two layouts: the mart block is the only one carrying
   CU and the query tiers, so it is the only one where a row spanning two shapes prints a number
@@ -1520,13 +1527,13 @@ no data at all. `all.yml`, `dbt.yml` and `cu.yml` are gone.
   mart's `total_rows` from the latest record and DROPS every run that disagrees. The columns are
   different dispatches days apart and nothing else made them comparable: if the AEMO archive changes,
   an engine nobody has rebuilt keeps its column and its numbers sit beside engines built from
-  different data, in the tables and inside the chart's own bars.
+  different data, in the tables and inside the chart's own groups.
   **Newest wins, NOT the most common value**, and that is the point rather than a shortcut — right
   after a genuine source change the old count is still the majority, which is exactly the case this
   handles; a mode would keep the stale generation and drop the new run.
   **It runs BEFORE `columnsFor`, and the order is load-bearing twice.** `columnsFor` takes the latest
   run per (engine, config), so filtering after it would let a stale run hold a column; and
-  `spreadFor` walks the whole `runs` array for the chart's bars and ranges, so filtering the array is
+  `spreadFor` walks the whole `runs` array for the groups and ranges, so filtering the array is
   what stops a mean blending two generations. Both come free from filtering at that one point.
   **The exclusion MUST stay loud, and that is what pays for the heading it silenced.** `renderSources`
   names every dropped run — engine, run id, its own count and the delta against current — plus the
@@ -1542,11 +1549,11 @@ no data at all. `all.yml`, `dbt.yml` and `cu.yml` are gone.
   survivable only because it is loud — the note calls out `N of M runs were excluded` and says the
   newest is then the likelier anomaly — and because the next good run reverses it on its own.
 - **THE SECONDS GET NO CHART. Do not add one back** — and this is exactly why they are a table ROW
-  and nothing more. The page carries two bars and both are capacity units, the measure it leads with
-  and can defend. A third in the same visual language, drawn from billed operation seconds that SUM
+  and nothing more. The page carries ONE chart and its subject is capacity units against query time,
+  the measures it leads with and can defend. A second, drawn from billed operation seconds that SUM
   across concurrent operations and are not wall clock, invites precisely the cross-engine ranking
   that the caveat withdraws. A number that needs a caveat belongs where the caveat can sit beside it
-  — in the row label, as `compute seconds` does — not in a bar, where length alone reads as a
+  — in the row label, as `compute seconds` does — not in a mark, where length alone reads as a
   ranking and there is nowhere to put the qualification.
 - **THE PAGE CARRIES TWO NON-CU MEASURES NOW, and each states where its own number bends.**
   *cold / warm / hot* appear **TWICE, and the two placements answer different questions.** They
@@ -1666,7 +1673,7 @@ no data at all. `all.yml`, `dbt.yml` and `cu.yml` are gone.
 - **THERE ARE TWO OFFLINE GATES, one per directory, and each job runs its own.** `python -m pytest
   cu/ -q` pins the ledger — the three rules, the settle conditions, that an absent item keeps its
   value — and runs in `measure` before the login. `node --test dashboard/app.test.mjs` pins the page
-  — the GUID join, the compute/storage split, the layout banding, both charts, and that a variant tag
+  — the GUID join, the compute/storage split, the layout banding, the chart, and that a variant tag
   never contains the column separator (`baseEngine` splits on it, so a tag carrying one would make a
   column id unparseable back to its engine and every `STACK` lookup would silently miss) — and runs in
   `page`, which installs no Python. Both are offline, tokenless and about a second.

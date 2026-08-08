@@ -270,7 +270,6 @@ figure.chart figcaption { display:flex; flex-wrap:wrap; align-items:baseline; ga
    it is the same kind of thing: take this away with you. */
 .savebtn { margin-left:auto; order:1; }
 figure.chart svg { max-width:100%; height:auto; display:block; overflow:visible; }
-.bar { fill:var(--series); }
 /* A 2px ring in the SURFACE colour, so two dots that overlap still read as two. */
 .dot { fill:var(--cat1); stroke:var(--bg); stroke-width:2; }
 .dot.c1 { fill:var(--cat1); } .dot.c2 { fill:var(--cat2); } .dot.c3 { fill:var(--cat3); }
@@ -300,12 +299,9 @@ figure.chart svg { max-width:100%; height:auto; display:block; overflow:visible;
 /* The size key's circles carry no hue — they encode the size channel alone, so giving them a
    writer colour would say a size belongs to a writer. */
 .swatch.c0 { fill:var(--dim); opacity:.55; stroke:none; }
-/* Drawn over the bar in the page background colour, so it reads as a range ON the quantity rather
-   than as a second series beside it. */
-/* Text ink, not the background: the min–max line runs from inside the bar out past its tip to the
-   max, and a bg-coloured stroke vanished the moment it left the fill — which read as "no range
-   shown". One ink that stays legible on the bar fill and on the page ground alike, both themes. */
-.bar-label { fill:var(--fg); font-size:12px; font-weight:600; }
+/* `bar-*` NAMES SURVIVE THE BAR CHARTS, which are gone: these are the chart type scale for text in
+   an SVG, and renaming them would churn every axis label, tick and legend line for nothing.
+   `.bar-label` has no marks left to name — the bar rows were its only user — so it goes. */
 .bar-caption { fill:var(--dim); font-size:10px; }
 .bar-value { fill:var(--dim); font-size:12px; font-variant-numeric:tabular-nums; }
 .axis { stroke:var(--line); stroke-width:1; }

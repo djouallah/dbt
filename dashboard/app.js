@@ -971,131 +971,6 @@ export const fold = (summary, ...texts) =>
   `<details class="note"><summary>${inline(summary)}</summary>` +
   texts.map((t) => `<p class="note">${inline(t)}</p>`).join("") + "</details>";
 
-// ------------------------------------------------------------------------------------------ charts
-//
-// Horizontal bars, one series, drawn as inline SVG.
-//
-// Bars because the job is magnitude across a handful of named categories; HORIZONTAL because the
-// categories are words. ONE series per chart, so there is no legend and no categorical palette to
-// validate — the engine names are on the axis, and colouring each bar differently would encode nothing
-// the label does not already say. Colour by RANK would be worse: it repaints when the numbers move.
-//
-// Geometry follows the mark spec: bar ≤ 24px thick, square at the baseline, 4px rounded data-end, and
-// a gap between bands wider than the 2px surface-gap minimum. No gridlines — every bar carries its
-// value at the tip, so ticks would be a second copy of the same number.
-//
-// The value label wears text ink, never the bar colour, and each bar carries a <title> so hovering
-// gives a native tooltip.
-//
-// A row may carry a CAPTION — the adapter and the compute the engine ran on — drawn as a second,
-// dimmer line under the name. It is the difference between "iceberg cost 2.3x duckrun" and "the same
-// DuckDB writing to an Iceberg catalog instead of through delta-rs, at the same notebook size, cost
-// 2.3x". The label gutter widens and the band grows only when a caption is actually present, so a
-// plain chart keeps the geometry it had.
-const BAR_H = 18, BAND = 30, PAD_T = 26, LABEL_W = 96, VALUE_W = 74, WIDTH = 660;
-const SUB_BAND = 36, SUB_LABEL_W = 224;
-
-function barPath(w, h, r = 4) {
-  if (w <= r) return `M0,0 h${w.toFixed(1)} v${h} h-${w.toFixed(1)} Z`;
-  return `M0,0 H${(w - r).toFixed(1)} A${r},${r} 0 0 1 ${w.toFixed(1)},${r} V${h - r} ` +
-    `A${r},${r} 0 0 1 ${(w - r).toFixed(1)},${h} H0 Z`;
-}
-
-/**
- * A bar at the group's MEDIAN across its runs. One mark per row, nothing overlaid.
- *
- * One run is one sample and Fabric's capacity is shared, so a single number is a reading rather than a
- * result — which is why the bar is a median rather than a mean (see `groupMid`) and why the min..max
- * range is still carried in every row and in the tooltip. It is no longer DRAWN: a bar with an
- * interval laid over it is two marks for one row, and once the bar stopped following the extremes the
- * interval was plotting a spread the bar deliberately ignores. A reader who wants the samples has the
- * tooltip and the per-run rows in `Every run`, both of which name the actual dispatches.
- *
- * Rows arrive as `[label, median, min, max, caption]`, and are sorted CHEAPEST FIRST because "lower is
- * better" makes the ranking the finding. A ZERO sorts to the BOTTOM: zero means "this engine did no
- * such work", and at the top under that caption it would read as the winner — the one value whose rank
- * would lie. A chart with nothing but zeros is not drawn at all.
- */
-export function chartSvg(title, subtitle, rowsIn) {
-  const rows = [...(rowsIn || [])]
-    .map((r) => {
-      // `[label, mean, min, max, caption]`, tolerating the older `[label, value, caption]` — so a
-      // chart spec carried in an artifact rendered months ago still draws, with lo/hi collapsed
-      // onto the value because there was never a range in it.
-      const avg = Number(r[1]) || 0;
-      const ranged = r.length >= 4 && r[2] !== null && r[2] !== undefined &&
-        r[3] !== null && r[3] !== undefined;
-      return {
-        label: String(r[0]), avg,
-        lo: ranged ? Number(r[2]) || 0 : avg,
-        hi: ranged ? Number(r[3]) || 0 : avg,
-        sub: ranged ? (r[4] ? String(r[4]) : "") : (r[2] ? String(r[2]) : ""),
-      };
-    })
-    .sort((a, b) => (a.avg === 0) - (b.avg === 0) || a.avg - b.avg);
-  if (!rows.length || !rows.some((r) => r.avg)) return "";
-  for (const r of rows) {
-    r.ranged = r.hi - r.lo > 0.05;
-    // The MEAN alone at the tip. The range used to ride beside it in parentheses, which doubled the
-    // ink beside every bar for a fact the tooltip states exactly.
-    r.value = fmt(r.avg, 1);
-  }
-  const subs = rows.some((r) => r.sub);
-  const band = subs ? SUB_BAND : BAND;
-  // Both gutters are sized to what is actually printed, so the text ends inside the viewBox and the
-  // bars get whatever is left. They used to be fixed and rely on `overflow:visible` spilling into
-  // empty page — which stopped existing the moment a second chart sat to the right.
-  const need = Math.max(...rows.map((r) =>
-    Math.max(r.label.length * 7.2, (r.sub || "").length * 5.4)));
-  const labelW = Math.max(LABEL_W, Math.min(SUB_LABEL_W + 12, Math.ceil(need) + 14));
-  // Scaled to the largest BAR, not the largest `hi`. While the whisker was drawn the plot had to fit
-  // it, so every bar was shortened to leave room for a mark that is no longer there — the widest-
-  // spread row would have squashed the whole chart for nothing.
-  const top = Math.max(...rows.map((r) => r.avg)) || 1;
-  const valueW = Math.max(VALUE_W,
-    Math.ceil(Math.max(...rows.map((r) => r.value.length)) * 6.8) + 14);
-  const plot = WIDTH - labelW - valueW;
-  const height = PAD_T + rows.length * band + 6;
-  const out = [
-    '<figure class="chart">' +
-    `<figcaption><span class="chart-title">${esc(title)}</span>` +
-    `<span class="chart-sub">${esc(subtitle)}</span></figcaption>`,
-    `<svg viewBox="0 0 ${WIDTH} ${height}" width="100%" height="${height}" role="img" ` +
-    `aria-label="${esc(title)}">`,
-  ];
-  rows.forEach((r, i) => {
-    const y = PAD_T + i * band;
-    const w = plot * (r.avg / top);
-    // With a caption the name sits on the bar's upper half and the caption under it, so the pair reads
-    // as one block against the bar rather than as two columns.
-    const ly = subs ? BAR_H / 2 : BAR_H / 2 + 4;
-    // NO WHISKER IS DRAWN. The range is still measured, still carried in
-    // `[label, mid, min, max, caption]`, and still readable in the tooltip and in the run table's
-    // per-run rows — it is only not plotted. A bar plus an overlaid interval is two marks for one
-    // row, and once the bar became a median the interval was drawing a spread the bar deliberately
-    // does not follow.
-    //
-    // The value sits against the BAR (`w`), not against the old `max(w, whi)`. While the whisker was
-    // drawn the label had to clear it; keeping that would leave a gap on exactly the rows with the
-    // widest spread, i.e. the number floating away from the bar it belongs to.
-    out.push(
-      `<g transform="translate(0,${y})">` +
-      `<title>${esc(r.label)}${r.sub ? ` (${esc(r.sub)})` : ""}: median ${fmt(r.avg, 1)} CU` +
-      `${r.ranged ? `, range ${fmt(r.lo, 1)}–${fmt(r.hi, 1)} over the group's runs` : ""}</title>` +
-      `<text class="bar-label" x="${labelW - 10}" y="${ly.toFixed(0)}" text-anchor="end">` +
-      `${esc(r.label)}</text>` +
-      (r.sub ? `<text class="bar-caption" x="${labelW - 10}" y="${(ly + 13).toFixed(0)}" ` +
-        `text-anchor="end">${esc(r.sub)}</text>` : "") +
-      `<g transform="translate(${labelW},0)"><path class="bar" d="${barPath(w, BAR_H)}"/></g>` +
-      `<text class="bar-value" x="${(labelW + w + 8).toFixed(1)}" ` +
-      `y="${(BAR_H / 2 + 4).toFixed(0)}">${r.value}</text></g>`);
-  });
-  out.push(`<line class="axis" x1="${labelW}" y1="${PAD_T - 6}" x2="${labelW}" ` +
-    `y2="${PAD_T + rows.length * band - band + BAR_H + 4}"/>`);
-  out.push("</svg></figure>");
-  return out.join("\n");
-}
-
 /**
  * `{lo, hi, ticks}` bracketing `[min,max]` on round numbers.
  *
@@ -1878,24 +1753,6 @@ export function renderFit(groups, times, tiers, counts = {}) {
     // and the line is that trade as one mark.
     scatterFit(pts),
   ].filter(Boolean).join("\n");
-}
-
-export function groupRows(groups, table = DEFAULTS.table) {
-  const out = [];
-  for (const [, members] of groups) {
-    const vals = members.map((m) => m.cu).filter((v) => v);
-    const label = producers(members);
-    let caption = layoutLabel(members, table);
-    if (caption === label) caption = "";       // nothing was measured, so it would read twice
-    if (!vals.length) { out.push([label, 0, 0, 0, caption]); continue; }
-    // `groupMid`, the same call `martPoints` makes — the bar and the two tables under it are one
-    // measurement shown three times, and deriving the middle differently here is exactly how a page
-    // ends up plotting 1,582 above a row reading 1,781. min/max ride along unplotted: the median is
-    // what the bar CLAIMS, and the tooltip is where a reader checks it against the spread.
-    out.push([label, round1(groupMid(vals)), round1(Math.min(...vals)), round1(Math.max(...vals)),
-      caption]);
-  }
-  return out;
 }
 
 
@@ -3154,39 +3011,22 @@ export function renderPage(cols, runs, ledger, opts = {}) {
   // reason the CU is: a group's tiers are its own runs' median, not its column's newest record.
   const { times, counts } = queryTime(anaEntries.map(({ qid, rec }) => ({ col: qid, rec })));
 
-  // FIRST, ABOVE THE CHARTS. It carries everything a bar does — the same median, from the same
-  // `martPoints` — plus the grouping key, the sample size and the three query tiers, as numbers
-  // rather than as bar lengths. A reader who wants one thing from this page wants this table; the
-  // charts are the same content made scannable, so they follow it rather than introduce it.
+  // THE TABLE, THEN ITS CHART. It carries the grouping key, the sample size and the three query
+  // tiers as numbers; the chart under it is the same `martPoints` made scannable, so it follows
+  // rather than introduces.
+  //
+  // TWO BAR CHARTS USED TO SIT HERE — `Capacity units per parquet layout` and `… per engine build`,
+  // analytics above ETL — and they are DELETED. Not because the build half stopped mattering: it
+  // still holds the sharpest operational result on the page (duckrun costs 1.8x at 64 cores for the
+  // same wall time). Because both were a second rendering of a number already printed as a number
+  // one block away — the analytics bar is the `CU` column of *Cost and speed by parquet layout*,
+  // the ETL bar is the `etl` row of *Cost by engine* — and a bar length is a worse way to read a
+  // figure you can simply be told. NOTHING WAS LOST FROM THE PAGE, only from the ink: check that
+  // claim before restoring one, because a chart restored for a number no table carries is a
+  // different argument from the one that removed these.
   out.push(renderFit(groups, times, TIERS.map(([l]) => l).filter((l) => l in counts), counts));
 
-  // TWO CHARTS, STACKED, AND THEY ARE KEYED ON DIFFERENT THINGS — that is the design, not an
-  // inconsistency to tidy. Analytics is ONE BAR PER LAYOUT, because Power BI never sees the engine:
-  // it opens parquet through Direct Lake and transcodes row groups, so what a query costs belongs to
-  // what was written and the writer is metadata the caption carries. ETL is ONE BAR PER COLUMN,
-  // because there the writer and the compute it was given ARE the subject — duckrun at 32 and at 64
-  // cores wrote identical parquet (one analytics bar) and cost 13,083 against 23,992 CU to do it
-  // (two ETL bars, which is the finding).
-  //
-  // ANALYTICS FIRST, and the order is the ranking. `About these numbers` says analytics is the half
-  // that matters — interactive CU is what throttles a capacity, while build CU is background, smoothed
-  // over 24 hours, and nobody waits for it. The ETL chart was removed once on that argument alone; it
-  // is back because "less important" is not "not worth plotting", and the build half is where the
-  // sharpest operational result on the page lives. Stacked rather than side by side so neither is
-  // squeezed: the SVG draws at a 660-unit viewBox and a narrower box inflates every label with it.
-  out.push(chartSvg("Capacity units per parquet layout", "querying — lower is better",
-    groupRows(groups, martTable)));
-  // Per COLUMN and through `groupMid`, the same median `Cost by engine` and the analytics bars use,
-  // so no two numbers on this page summarise a set of runs differently. `spreadFor` already returns
-  // every run's reading per column, which is what the ETL half has always been built from.
-  const etlRows = Object.entries(spreadFor(runs, ledger, "etl", keyOf))
-    .map(([col, vals]) => [col, round1(groupMid(vals)),
-      round1(Math.min(...vals)), round1(Math.max(...vals)), ""])
-    .filter((r) => r[1]);
-  if (etlRows.length) {
-    out.push(chartSvg("Capacity units per engine build", "building — lower is better", etlRows));
-  }
-  // The one place the ADAPTERS are named and linked. The bars stopped captioning them because the
+  // The one place the ADAPTERS are named and linked. The chart does not caption them because the
   // column name already implies the adapter — this line is where that implication resolves.
   //
   // ONE PER LINE. Four `name — what it is` pairs joined with `·` ran together as a single wrapped

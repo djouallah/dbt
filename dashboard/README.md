@@ -2,7 +2,7 @@
 
 **It runs in the reader's browser and reads `history/` live.** `app.js` fetches
 `history/runs/*.json` and `history/cu.json` from `raw.githubusercontent.com` on every load, joins
-them on the Fabric item GUID, and writes the whole page — tables, both bar charts, every note — into
+them on the Fabric item GUID, and writes the whole page — tables, the chart, every note — into
 an empty shell.
 
 **So publishing is what you do when the VISUALISATION changes, not when a number does.** A
@@ -108,7 +108,7 @@ without a build, a token or a dispatch.
 ## The page
 
 - **The page says what it IS before what it measures.** It opened on `Capacity units` and went
-  straight into the charts, so it named its measure and never its subject: a reader arriving on a
+  straight into the numbers, so it named its measure and never its subject: a reader arriving on a
   link met four columns of CU with no statement of the scale any of it describes. Now an `<h1>`
   **Fabric dbt benchmark** with the repo link under it, then one sentence of scale, then
   `Capacity units` — kept, and heading the section it always described rather than the page.
@@ -162,7 +162,7 @@ without a build, a token or a dispatch.
   Pages URL, because the offline copy is one loose file with no sibling to point at — and a 404 off
   a local disk looks like nothing happened at all. The build fails if that link ever stops matching.
 - **EVERY CHART AND TABLE COMES BEFORE EVERY PARAGRAPH, and the methodology is LAST.** The order is
-  the two CU charts, *Cost and speed by layout* (its table, then its line chart), *Cost by engine*,
+  *Cost and speed by layout* (its table, then its line chart), *Cost by engine*,
   *Table layout*, *Input archive*,
   *Every run*, then *About these numbers* and the provenance line. `About these numbers` used to sit
   between the layout tables and the run table, so the last table on the page was below a screen of
@@ -182,12 +182,9 @@ without a build, a token or a dispatch.
   enumerated to 12 panels in the stylesheet; past that `renderLayouts` falls back to stacked blocks
   rather than render tabs whose panels could never show. The `?table=` param still picks which table
   leads, i.e. which tab is first and checked.
-- **The bar tip carries the median alone**, one mark per row; the exact range is in the tooltip —
-  the parenthetical range beside every bar doubled the ink for a fact already drawn. Both gutters
-  (labels, values) are sized to what is actually printed so nothing leaves the viewBox.
-- **Bar charts cheapest first**, because "lower is better" makes the
-  ranking the finding. A **zero sorts to the bottom**, never the top: zero means the engine did no
-  such work, and at the top under that caption it would read as the winner.
+- **Every ranked table is cheapest first**, because "lower is better" makes the ranking the
+  finding. A **zero sorts to the bottom**, never the top: zero means the engine did no such work,
+  and at the top under that heading it would read as the winner.
 - **`Column encoding` sits under `Table layout`, and is the half shape could not explain.** One row
   per `fct_summary` column, one column per layout: what each column is ENCODED as in parquet, read
   from the footers by `stats.py` and aggregated over every row group. Shape does not predict the
@@ -198,7 +195,7 @@ without a build, a token or a dispatch.
   `PLAIN_DICTIONARY`, so `dict_pages < chunks` is flagged separately; no dictionary at all is
   flagged loudest. **Absent, never empty**, when no record carries `encodings` — which is every
   record written before `stats.py` learned to profile the mart.
-- **Cost and speed by layout is a TABLE, between the charts and *Cost by engine*.** One row per
+- **Cost and speed by layout is a TABLE, above its chart and *Cost by engine*.** One row per
   layout, cheapest first: `CU`, `cold ms`, `warm ms`, `hot ms`. These four were columns of the mart's
   layout block, which made one table answer two questions — what the parquet looks like, and what
   querying it cost. *Table layout* is now physical layout alone and this is the other half. It has a
@@ -237,7 +234,7 @@ without a build, a token or a dispatch.
   profiles. `delta_rs` is most of the lines, so its name separates nothing; it is in the legend, and
   what actually tells its lines apart takes its place: the sort key and the row group count,
   `date, time · 9 RG`. That string is `layoutLabel`, the same one the analytics bar is captioned
-  with, minus its leading `by ` — so a line and its bar cannot describe the same parquet two
+  with, minus its leading `by ` — so a line and the mart's own rows cannot describe one parquet two
   different ways, and three characters each is what keeps eleven of them off each other.
   **The cold end because that is where the eye already is**: the cold ends are what the chart is
   ranked by and what spreads out, while the warm ends bunch toward the y axis. The warm end is the
@@ -270,78 +267,60 @@ without a build, a token or a dispatch.
   layout answered instantly". The axis reaching 0 on today's data is a *consequence* (the combined
   span snaps `niceScale`'s step to 5,000), not a zero-baseline policy.
   One `<title>` per layout, on the line itself — which is the mark a reader is pointing at.
-- **TWO CHARTS, STACKED, analytics first — and they are keyed on DIFFERENT THINGS, which is the
-  design rather than an inconsistency.** The order is the ranking: interactive CU is what throttles a
-  capacity, build CU is background and smoothed over 24h. The build chart was removed once on that
-  argument and is back, because "less important" is not "not worth plotting" — it is where the
-  sharpest operational result on the page lives (duckrun costs 1.8x at 64 cores for the same wall
-  time, which the analytics chart cannot show because both wrote identical parquet).
-  Stacked, never side by side: the SVG draws at a 660-unit viewBox and a narrower box inflates every
-  label with it.
-  **Analytics is one bar
-  per PARQUET LAYOUT**, because Power BI never sees the engine — it opens parquet through Direct Lake
-  and transcodes row groups, so what a query costs belongs to what was written and the writer is
-  metadata. The bar is **named for its writer and captioned with the shape** — `spark readHeavyForPBI`
-  over `V-Order · 10–11 RG`: the grouping is the layout, but a file count is a poor name
-  even when it is the real subject, so the shape sits underneath where it explains why two writers
-  would ever share a bar. **The caption prints row groups only** — segments are what drive Direct
-  Lake's transcode and scan cost, and the file count was a second number saying less; the file BAND
-  still separates bars, it just is not printed. **A sorted bar names its sort columns** —
-  `by date, time · 9 RG` — because `sorted` alone does not say what Power BI is reading in order.
-  **The columns come off the RECORD, never a constant here**: the key is a property of the COMMIT,
-  and the model declared `['date','time','DUID']` for a while and `['date','time']` since, so a
-  constant was right for today's model only — it captioned run 30955591822, a DUID sort,
-  `by date, time`. Two spellings are read, both legitimate: `dbt.<engine>.sort_by` is what the run
-  DECLARED (`stats.py`), `dbt.<engine>.sort_by_auto` what duckrun's picker RESOLVED
-  (`fabric_run.py`'s log scrape, the only witness for an `'auto'` run). A sorted run that recorded
-  neither reads `true` — its own bar, and no `by` bit, because the label already says `sorted`.
-  **The build chart is one bar per COLUMN**, because there the writer and the compute it was given
-  ARE the subject — `duckrun·32c` and `duckrun·64c` are one analytics bar (identical parquet) and two
-  build bars at 13,083 against 23,992 CU, which is exactly the finding the analytics keying cannot
-  express. It goes through the same `groupMid` median as everything else, so no two numbers on the
-  page summarise a set of runs differently.
-  What forced this: duckrun at 64 cores and at 32 wrote 4 files and 27 row groups either way, so two
-  bars 50% apart was not a comparison — it was one layout measured twice, presented as two results.
-  Grouping merges them and the range says what the gap really was.
-  **The bar is the MEDIAN of the group's runs, never the mean** — `groupMid`, and the bar, *Cost and
-  speed by layout* and the mart rows all call it, so the three cannot disagree. One dispatch is a
-  sample of a shared capacity and a bad sample is not a property of the layout: run 30966983384 read
-  2,629.3 against 1,331.5/1,577.1/1,586.7 for byte-identical parquet, because its XMLA read billed
-  49s against ~33s and its refresh took 28.4s against ~8s — Fabric being busy, not the parquet being
-  slow. A mean let it lift that bar 11% and dwh's 16%. **It is not a noise fix, and the page should
-  not be read as if it were**: at n=1 and n=2 the median IS the mean, and four of nine bars are that
-  thin. **Nothing is plotted over the bar** — a bar with an interval laid on it is two marks for one
-  row, and once the bar became a median the interval drew a spread the bar deliberately ignores. The
-  min/max are still measured and still stated, in the tooltip and in `Every run`'s per-run rows, so
-  the outlier is findable rather than quietly averaged away.
+- **THE TWO CU BAR CHARTS ARE DELETED, and what they drew is not.** They were
+  `Capacity units per parquet layout` and `Capacity units per engine build`, stacked, analytics
+  first. Removing them is not a judgement on the build half — that is still where the sharpest
+  operational result on the page lives (duckrun costs 1.8x at 64 cores for the same wall time, which
+  the analytics keying structurally cannot show, because both runs wrote identical parquet). It is
+  that **both drew a figure the page already prints as a figure one block away**: the analytics bar
+  was the `CU` column of *Cost and speed by parquet layout*, the build bar was the `etl` row of
+  *Cost by engine*. A bar length is a worse way to read a number you can simply be told.
+  What went with them: `chartSvg`, `barPath`, `groupRows`, the `.bar`/`.bar-label` rules and four
+  unit tests about bar geometry. What did NOT: `spreadFor`, which the noise floor still uses, and
+  every grouping rule below, which now surfaces as table rows and as the line chart's marks.
+  **The no-loss claim is the thing to re-check before restoring one.** A test pins it — if either
+  number ever stops being printed, a chart brought back for it is a different argument from the one
+  that removed these.
+- **A LAYOUT GROUP IS ONE ROW, and the grouping is the same one the line chart plots.** Power BI
+  never sees the engine — it opens parquet through Direct Lake and transcodes row groups — so what a
+  query costs belongs to what was WRITTEN, and the writer is metadata. The row is named for its
+  writer; the `ordering` and `row group size` cells are what tell two rows of one writer apart.
   **Grouping is MEASURED, labelling is DECLARED.** The key is
   `(V-Order, power-of-two band of files, power-of-two band of row groups, sort columns)` read off
-  the parquet
-  as `stats.py` saw it, so two unrelated engines that wrote the same shape *do* share a bar. The caption
-  comes from `LAYOUT_CONFIG`, so it does not re-word itself every time a record lands. The sort
-  element is the run's own COLUMN LIST, not a boolean, so two sorts on different keys can never share
-  a bar — the `['date','time','DUID']` and `['date','time']` runs split by file band today only by
-  luck.
+  the parquet as `stats.py` saw it, so two unrelated engines that wrote the same shape *do* share a
+  row. The sort element is the run's own COLUMN LIST, not a boolean, so two sorts on different keys
+  can never merge — the `['date','time','DUID']` and `['date','time']` runs split by file band today
+  only by luck. **The columns come off the RECORD, never a constant here**: the key is a property of
+  the COMMIT, and the model declared `['date','time','DUID']` for a while and `['date','time']`
+  since. Two spellings are read, both legitimate: `dbt.<engine>.sort_by` is what the run DECLARED
+  (`stats.py`), `dbt.<engine>.sort_by_auto` what duckrun's picker RESOLVED (`fabric_run.py`'s log
+  scrape, the only witness for an `'auto'` run).
   **It groups RUNS, not columns, and that distinction is load-bearing.** A column is
   `(engine, config)`, so two of its runs can write different parquet — `duckrun·64c+sorted` wrote
-  3 files / 26 row groups under an explicit `sort_by=['date','time','DUID']` and 4 files / 25 under the
-  `sort_by='auto'` the picker resolved to `['date','time']`. Grouping the columns and then averaging
-  every run of each put those two in one bar at their mean (2,041.8 — a number neither run measured)
-  captioned with only the newer one's shape. Per run they are **two bars sharing a label**, and the
-  caption is what tells them apart: the label answers who wrote it, the caption answers what. A run with
-  no file count at all falls back to its column rather than to a bar of its own — two *unmeasured*
-  layouts are still never merged, but one column's own runs are not split into a bar each with nothing
-  able to say why.
-  It surfaces two things the old chart hid:
-  V-Order on and off sit in the same file band and differ 2.8× (1,332 against 3,769), which is the
-  sharpest experiment on the page; and NEE on and off produce the same layout, so the gap between
-  them was never an NEE effect.
+  3 files / 26 row groups under an explicit `sort_by=['date','time','DUID']` and 4 files / 25 under
+  the `sort_by='auto'` the picker resolved to `['date','time']`. Grouping the columns and averaging
+  every run of each put those two together at their mean (2,041.8 — a number neither run measured),
+  described by only the newer one's shape. Per run they are two rows sharing a writer, and the key
+  cells are what tell them apart. A run with no file count at all falls back to its column rather
+  than to a row of its own — two *unmeasured* layouts are still never merged, but one column's own
+  runs are not split with nothing able to say why.
   Banded, not exact: exact equality splits dwh's own two runs from each other (78 files and 80) and
   splits duckrun on 1.1 MB of size. The accepted cost is the boundary — 15 row groups and 17 land in
-  different bands. A record with **no** file count keys to `null` and keeps a bar of its own; two
-  unmeasured layouts are not one identical layout.
+  different bands. A record with **no** file count keys to `null` and keeps a row of its own.
+  It surfaces two things a per-engine view hid: V-Order on and off sit in the same file band and
+  differ 2.8x (1,332 against 3,769), the sharpest experiment on the page; and NEE on and off produce
+  the same layout, so the gap between them was never an NEE effect.
+- **The figure is the MEDIAN of the group's runs, never the mean** — `groupMid`, called by *Cost and
+  speed by parquet layout*, the mart rows and the line chart alike, so the three cannot disagree. One
+  dispatch is a sample of a shared capacity and a bad sample is not a property of the layout: run
+  30966983384 read 2,629.3 against 1,331.5/1,577.1/1,586.7 for byte-identical parquet, because its
+  XMLA read billed 49s against ~33s and its refresh took 28.4s against ~8s — Fabric being busy, not
+  the parquet being slow. A mean let it lift that figure 11% and dwh's 16%. **It is not a noise fix,
+  and the page should not be read as if it were**: at n=1 and n=2 the median IS the mean, and four of
+  nine groups are that thin. The min/max are still measured and still reachable, in `Every run`'s
+  per-run rows, so the outlier is findable rather than quietly averaged away.
 - **A column header is an engine plus the SHORTEST config that still tells it apart** (`variantTag`).
-  It appears in every table and both charts, so width is a real cost. One rule keeps it short: a flag
+  It appears in every table and in the chart, so width is a real cost. One rule keeps it short: a flag
   that is **off is absent** rather than negated — `spark·readHeavyForPBI+NEE` against
   `spark·readHeavyForPBI`, never `+noNEE`, which spends header width saying nothing happened when the
   contrast with the run that did enable it is what a reader is looking for.
@@ -353,7 +332,7 @@ without a build, a token or a dispatch.
   the record called one setting two things. `default` was the worse half: it named the workspace's
   *choice* rather than the profile, so it would silently become a lie the day that default changed,
   and it hid which profile a bare dispatch actually got. The effect is still said — **where it is
-  measured rather than declared**: `layoutLabel` reads `vorder` off the parquet, so a bar reads
+  measured rather than declared**: `layoutLabel` reads `vorder` off the parquet, so a label reads
   `spark readHeavyForPBI` over `V-Order · 10–11 RG`. The label names the knob that was
   turned, the caption states what came out — a split that also survives a profile whose name misleads,
   which is not hypothetical, since `readHeavyForSpark` reads like it enables V-Order and sets no
@@ -442,7 +421,7 @@ without a build, a token or a dispatch.
   generation and drop the new run.
   It runs **before `columnsFor`**, which matters twice: `columnsFor` takes the latest run per
   (engine, config), so filtering later would let a stale run hold a column, and `spreadFor` walks the
-  whole array for the chart's bars, so filtering the array is what stops a bar blending two
+  whole array for the chart's marks, so filtering the array is what stops a group blending two
   generations.
   **The exclusion is loud on purpose, and must stay that way.** It bought its silence from the
   `row counts DISAGREE` heading, so it pays it back: every dropped run is named with its engine, run
@@ -509,11 +488,11 @@ without a build, a token or a dispatch.
   not expose the column — because absent says "not measured" and a zero would say "instant". Same
   rule on a class subtotal: a column the ledger has not read yet is a **dash**, never `0.0`, which
   would say the engine did that work for free.
-- **There is no chart of the seconds and no third bar — which is exactly why they are a table row.**
+- **There is no chart of the seconds — which is exactly why they are a table row.**
   The page carries two bars and both are capacity units, the measure it leads with and can defend. A
   third in the same visual language, drawn from numbers that need a caveat, invites precisely the
   cross-engine ranking the caveat withdraws. A number that needs a caveat belongs where the caveat
-  can sit beside it — in the row label — not in a bar, where length alone reads as a ranking.
+  can sit beside it — in the row label — not in a mark, where length alone reads as a ranking.
 - **A record has to be built and benchmarked to reach the page.** `incomplete()` skips anything else
   and names why — a run with no benchmark shows an empty analytics column, which reads as "querying
   this engine was free" rather than "nobody measured it". The skipped records are **listed by file
@@ -547,7 +526,7 @@ ranking.
 The core count still reaches the chart because a run at a different size is a different data point —
 but through the column tag (`duckrun·64c`), not a caption. An ETL caption states only what the
 column name does not already say, which in practice is the vCores of a single-config engine whose
-bare column carries no tag: `dbt-fabricspark · writeHeavy · NEE off` under a bar already labelled
+bare column carries no tag: `dbt-fabricspark · writeHeavy · NEE off` under a column already labelled
 `spark·writeHeavy` was three facts the label carries (the profile named by its effect, an off flag
 absent, the adapter implied by the engine name).
 
@@ -555,7 +534,7 @@ absent, the adapter implied by the engine name).
 
 - **`app.js` must not touch `document` at import time.** It exports pure functions that return
   STRINGS and boots only under `DOMContentLoaded`; that is what lets the whole page — join, layout
-  grouping, both charts — be tested under `node --test` with no browser and no jsdom.
+  grouping, the chart — be tested under `node --test` with no browser and no jsdom.
 - **The render layer escapes before it interprets markdown.** A Fabric display name containing `<`
   is text, and link hrefs are restricted to `http(s)://`. Pinned by a test.
 - **A tag must never contain `COL_SEP`** (`·`). `baseEngine` splits a column id on it to recover the
