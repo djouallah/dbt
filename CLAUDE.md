@@ -36,7 +36,9 @@ a laptop. It is no longer the only way to grade dwh and spark.
 
 The traps below have all been hit for real. Each one cost a CI run or worse.
 [LEARNINGS.md](LEARNINGS.md) records the longer investigations behind some of them — measured
-numbers, and the routes that were tried and did not work.
+numbers, and the routes that were tried and did not work. **[TODO.md](TODO.md) is open work** —
+things that need a decision or a dispatch, with the cost of each stated. Read it before proposing
+one; the answer may already be there, along with why it has not been done.
 
 ## Verify locally before you push — CI is the last check, not the first
 

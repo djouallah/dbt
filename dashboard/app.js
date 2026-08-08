@@ -654,7 +654,10 @@ export function vcoresOf(rec) {
  * 8 because it is the dispatch default and what the nightly runs at. **It is a CONSTANT that has to
  * be kept in step with that default by hand**, which is why the column HEADER prints it — a filter a
  * reader cannot see is the one that lies. A layout nobody has built at this size gets a dash, never
- * a blend: on today's records that is 7 of 17 groups, all duckrun, and the nightly fills them in.
+ * a blend: on today's records that is 7 of 17 groups, all duckrun. **The nightly does NOT fill
+ * them in** — it writes one layout (`date,time,price` at 2M) and that group already has 8-core
+ * runs, while every dashed group is a sort key or row-group size it never builds. Closing them is
+ * seven deliberate dispatches; see TODO.md, which states the cost.
  */
 const ETL_VCORES = "8";
 

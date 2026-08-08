@@ -216,8 +216,12 @@ without a build, a token or a dispatch.
   workspace Livy pool and dwh's is the warehouse, and neither reads the input. Filtering on the value
   alone would have emptied the column for two of the four engines rather than narrowing it.
   **A layout nobody has built at that size is a DASH, never a blend and never a zero** — 7 of 17
-  groups today, all duckrun, and the nightly fills them in since it runs at 8. `ETL_VCORES` is a
-  constant that has to be kept in step with the dispatch default by hand.
+  groups today, all duckrun. **The nightly does NOT fill them in**, and a first version of this
+  note said it would: the nightly writes ONE layout (`date,time,price` at 2M) whose group already
+  has 8-core runs, while every dashed group is a sort key or row-group size it never builds.
+  Closing them is seven deliberate dispatches at `cores=8` — [TODO.md](../TODO.md) lists them with
+  the cost. `ETL_VCORES` is a constant that has to be kept in step with the dispatch default by
+  hand.
 - **Under it, ONE LINE CHART where there were two scatters.** Each layout is a single horizontal
   line: **warm ms at its left end, cold ms at its right, on one shared linear time axis**, at the
   height of its analytics CU. **The LENGTH is what the cold transcode costs.** Same `martPoints` and
