@@ -17,6 +17,7 @@ silent:
 """
 import json
 import os
+import struct
 import sys
 
 import pytest
@@ -75,6 +76,26 @@ def test_it_asks_sys_databases_for_this_database_only():
     assert "sys.databases" in con.cur.sql
     assert "is_vorder_enabled" in con.cur.sql
     assert "DB_NAME()" in con.cur.sql
+
+
+def test_the_token_is_encoded_exactly_as_the_adapter_encodes_it():
+    """THE FIRST VERSION OF THIS FILE USED pyodbc AND WOULD HAVE FAILED EVERY RUN. The dwh leg pins
+    `dbt-fabric-samdebruyn`, whose dependency is `mssql-python` — pyodbc is not installed there, and
+    because this step is best-effort the failure would have been silent: no key in the record, and the
+    page falling back to the blind property exactly as before.
+
+    So the connection is the risky part, and the token encoding is the half that can be checked
+    offline. The adapter builds it by interleaving zero bytes
+    (`fabric_token_provider.py:224-227`); this asserts our `utf-16-le` spelling is byte-identical, so
+    a future reader cannot "tidy" either one into something the driver rejects."""
+    from itertools import chain, repeat
+    tok = "eyJ0eXAiOiJKV1QiLCJhbGciOiJSUzI1NiJ9.payload.sig"
+    adapter_bytes = bytes(chain.from_iterable(zip(bytes(tok, "UTF-8"), repeat(0))))
+    attrs = dwh_vorder.token_attrs(tok)
+    assert list(attrs) == [1256], "SQL_COPT_SS_ACCESS_TOKEN, the adapter's own constant"
+    assert attrs[1256] == struct.pack("<i", len(adapter_bytes)) + adapter_bytes
+    # The length prefix counts the ENCODED bytes, not the characters — twice the JWT's length.
+    assert struct.unpack("<i", attrs[1256][:4])[0] == 2 * len(tok)
 
 
 def test_a_failure_records_nothing_and_never_fails_the_leg(tmp_path, monkeypatch):

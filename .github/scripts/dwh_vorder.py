@@ -24,8 +24,12 @@ and a value read is a value that would NOTICE if the default ever changed or if 
 by hand. The whole reason this file was needed is that this repo asserted a V-Order default from
 documentation for months and had it backwards.
 
-Runs on the dwh leg, after the build, on the runner that is already the dbt client — so pyodbc, an
-ODBC driver and the `database.windows.net` token are all in place. **Best-effort and never fatal:** a
+Runs on the dwh leg, after the build, on the runner that is already the dbt client — so the driver and
+the `database.windows.net` token are both in place. **`mssql_python`, NOT `pyodbc`:** the pin is
+`dbt-fabric-samdebruyn`, whose dependency is `mssql-python` (which bundles its own driver, hence no
+`DRIVER=` in the connection string and nothing to discover). pyodbc is not installed on that leg at
+all, so the first version of this file would have failed on every run — silently, because the step is
+best-effort. Do not "simplify" it back to pyodbc. **Best-effort and never fatal:** a
 failure leaves the key ABSENT, never `false`, because `false` here is a claim (V-Order was disabled)
 and absence is the truth (nobody could ask). It writes into the leg's own record fragment, whose
 `layout.ordering.dwh` deep-merges with `stats.py`'s — `record.deep_update` unions dicts, and the
@@ -51,8 +55,8 @@ import record
 # this cannot read a sibling warehouse's flag if the connection lands somewhere unexpected.
 QUERY = "SELECT [is_vorder_enabled] FROM sys.databases WHERE [name] = DB_NAME()"
 
-# SQL_COPT_SS_ACCESS_TOKEN. Passing the token as a connection attribute is how dbt-fabric does it
-# too; a token in the connection STRING is not supported by the driver.
+# SQL_COPT_SS_ACCESS_TOKEN, copied from the adapter's own `fabric_token_provider.py:119` — a token in
+# the connection STRING is not supported by the driver.
 SQL_COPT_SS_ACCESS_TOKEN = 1256
 
 
@@ -71,26 +75,32 @@ def read_vorder(con):
     return bool(row[0])
 
 
-def driver():
-    """The newest installed `ODBC Driver NN for SQL Server`, discovered rather than hardcoded.
+def token_attrs(token):
+    """The access token in the shape the driver wants: UTF-16-LE bytes behind a 4-byte length.
 
-    The runner image's driver version moves and dbt-fabric picks its own; pinning a number here would
-    make this fail on an image bump while the leg beside it kept working.
+    The adapter spells the encoding as an explicit zip-with-zeros
+    (`fabric_token_provider.py:224-227`); for an ASCII JWT that is exactly `utf-16-le`, and this is
+    the spelling that survives being read six months from now. Pinned by a test against the
+    adapter's own construction so the two cannot drift apart silently.
     """
-    import pyodbc
-    found = sorted(d for d in pyodbc.drivers() if "ODBC Driver" in d and "SQL Server" in d)
-    if not found:
-        raise RuntimeError(f"no SQL Server ODBC driver among {pyodbc.drivers()}")
-    return found[-1]
+    b = token.encode("utf-16-le")
+    return {SQL_COPT_SS_ACCESS_TOKEN: struct.pack("<i", len(b)) + b}
 
 
 def connect():
-    import pyodbc
+    """`mssql_python`, and a connection string with no `DRIVER=` — see the module docstring.
+
+    Same keys the adapter builds in `fabric_connection_manager.py:158-181`, minus the branches for
+    authentication methods this leg does not use: it always passes a token, never an
+    `Authentication=ActiveDirectory*` mode (which is the one case where the driver acquires its own).
+    """
+    import mssql_python
     server, db = os.environ["FABRIC_DWH_SERVER"], os.environ["FABRIC_DWH_NAME"]
-    tok = os.environ["FABRIC_ACCESS_TOKEN"].encode("utf-16-le")
-    return pyodbc.connect(
-        f"DRIVER={{{driver()}}};SERVER={server};DATABASE={db};Encrypt=yes;TrustServerCertificate=no",
-        attrs_before={SQL_COPT_SS_ACCESS_TOKEN: struct.pack("<i", len(tok)) + tok},
+    return mssql_python.connect(
+        f"Server={server};Database={db};Encrypt=Yes;TrustServerCertificate=No"
+        ";ConnectRetryCount=1;ConnectRetryInterval=10",
+        attrs_before=token_attrs(os.environ["FABRIC_ACCESS_TOKEN"]),
+        autocommit=True,
         timeout=60)
 
 
