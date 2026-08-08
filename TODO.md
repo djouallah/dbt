@@ -62,3 +62,32 @@ Three ways to close it, in rough order of preference:
 
 Do **not** close it by widening the filter to blend core counts. That is the thing the column was
 built to stop.
+
+### Running the set — SERIALLY, and there is no other way
+
+**Two `Benchmark` runs must never overlap** (see the invariant in CLAUDE.md: shared capacity gets
+throttled, which inflates both runs' numbers silently, and `ensure()` reuses an output item by name
+so two duckrun runs would build into one `mart.fct_summary`). The concurrency group is per REF, so it
+does not stop `--ref other-branch` — nothing enforces this but the operator.
+
+The queue cannot be pre-loaded either: `cancel-in-progress: false` allows one running plus **one**
+pending, and a third dispatch evicts the queued one rather than stacking.
+
+So chain them. Dispatch, wait for that run to finish, dispatch the next:
+
+```bash
+# one "sort_by:row_group_size" per remaining layout
+for spec in "date,time:6000000" "date,DUID,time:6000000" "date,time,DUID:6000000"             "date,time,price:6000000" "date,time:2000000" "date,time:1000000"; do
+  # never dispatch while anything is live — this is the serialisation
+  while gh run list --workflow Benchmark --limit 20         --json status -q '.[].status' | grep -qE 'in_progress|queued|pending'; do sleep 60; done
+  gh workflow run Benchmark -f engines=duckrun -f cores=8      -f sort_by="${spec%%:*}" -f row_group_size="${spec##*:}"
+  sleep 30                                   # let the run register before the next poll
+done
+```
+
+The `while` is the important line, not the `for`: it waits on ANY live Benchmark run, so the loop
+serialises against a nightly or a hand dispatch too, not just against itself. Budget ~1–1.5 h per
+iteration — an 8-vCore build is cheaper in CU than a 64-core one but slower on the clock — so the set
+is most of a day.
+
+`date,time,price` / `1000000` is not in the list above: it was dispatched as run 31257855850.

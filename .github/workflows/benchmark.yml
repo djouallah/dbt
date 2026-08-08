@@ -181,6 +181,14 @@ on:
 # Not cancel-in-progress: a half-finished build is worse than a queued one, and cancelling never
 # saved the Fabric compute anyway — the notebook or Livy session keeps running workspace-side after
 # the GitHub job dies. It only erases the evidence.
+# ⚠️ **THIS GROUP IS PER REF, AND SERIAL EXECUTION IS AN INVARIANT THE GROUP ONLY HALF-ENFORCES.**
+# `gh workflow run Benchmark --ref <other-branch>` gets its own group and runs genuinely in parallel.
+# Do not. Two runs share one Fabric capacity and get THROTTLED, which does not fail loudly — it
+# inflates every number in both, so the cost is two quietly wrong measurements rather than one late
+# one. Worse, the output item names are fixed (`dbt_delta`, `dbt_dwh`) and `provision.py`'s `ensure()`
+# REUSES an item it finds by name rather than failing, so two concurrent duckrun runs build into the
+# same lakehouse and the same `mart.fct_summary`, and the first teardown deletes the item the second
+# is still using. To run several layouts, chain them — see TODO.md.
 concurrency:
   group: onelake-${{ github.ref_name }}
   cancel-in-progress: false

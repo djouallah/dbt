@@ -710,6 +710,25 @@ to `provision.py teardown`, which polls for a 404 and goes red if it is still li
 
 ## CI etiquette
 
+- **NEVER RUN TWO `Benchmark` RUNS AT ONCE. SERIAL, ALWAYS — this is an invariant, not a preference.**
+  The first reason is the operational one: they share one Fabric capacity, and two builds plus two
+  query suites competing for it get **THROTTLED**. Throttling does not fail loudly, it inflates every
+  number in both runs, so the cost is two measurements that are quietly wrong rather than one that is
+  late. A wall-clock benchmark cannot absorb capacity contention.
+  The second reason is mechanical and is worse than a clash. Output item names are FIXED strings
+  (`dbt_delta`, `dbt_dwh`), and `provision.py`'s `ensure()` REUSES an item it finds by that name
+  rather than failing — `it = find(kind, name); if it: return it["id"]`. So two concurrent duckrun
+  runs build into the same lakehouse and the same `mart.fct_summary`, interleaving writes, and the
+  first teardown deletes the item the second is still using. Not an error you would see and retry: a
+  corrupted table and a run that dies somewhere else.
+  **The concurrency group only half-enforces this.** `onelake-${{ github.ref_name }}` is PER REF, so
+  `gh workflow run Benchmark --ref <other-branch>` gets its own group and runs genuinely in parallel.
+  That is the hole; do not use it. (`cancel-in-progress: false` also means at most ONE run can be
+  pending — a third dispatch evicts the queued one rather than stacking, so the queue cannot be
+  pre-loaded.)
+  **To run several layouts, chain them: dispatch, wait for completion, dispatch the next.** See
+  [TODO.md](TODO.md) for the loop. Nothing in the repo runs a batch for you, and nothing should
+  without serialising it.
 - Cancel superseded runs immediately (`gh run cancel <id>`) — spark and Fabric legs cost money.
 - **The two DuckDB legs run on IDENTICAL DuckDB settings, and keeping them that way is the point
   of the pair.** `duckrun` and `iceberg` are the same DuckDB on the same notebook at the same
