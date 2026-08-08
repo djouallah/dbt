@@ -3039,19 +3039,20 @@ test("a writer that names several layouts is labelled with the layout, at the co
     .map((m) => ({ end: /text-anchor="end"/.test(m[1]), x: +/x="([\d.]+)"/.exec(m[1])[1], t: m[2] }))
     .filter((l) => !["query time (ms)", "CUs"].includes(l.t));
   const texts = labs.map((l) => l.t);
-  assert.ok(texts.includes("date, time · 9 RG") && texts.includes("date, time, price · 24 RG"),
-    `the layout, not the writer: ${texts}`);
+  // ROW GROUP SIZE, NOT THE COUNT: 143,980,961 rows over 9 row groups is 16.0M, over 24 is 6.0M.
+  // A count is a number you have to divide the table by first; a size is what the dispatch sets.
+  assert.ok(texts.includes("date, time · rg 16.0M")
+    && texts.includes("date, time, price · rg 6.0M"), `the layout, not the writer: ${texts}`);
   assert.ok(texts.includes("dwh"), `and a unique writer keeps its name: ${texts}`);
-  // THE SAME STRING THE ANALYTICS BAR IS CAPTIONED WITH, minus its leading `by ` — a line and its
-  // bar must not describe the same parquet two different ways, and three characters each is what
-  // keeps thirteen of these off each other in the crowded left half.
-  assert.equal(d.layoutLabel([{ rec: sortedBy(1, 9, ["date", "time"], { file: "a.json" }) }]),
-    "by date, time · 9 RG");
+  // THE SAME CELLS THE TABLE BESIDE IT PRINTS — `keyCells`, so a line and its row cannot describe
+  // one parquet two different ways, and a change to either follows the other.
+  const k = d.keyCells([{ rec: sortedBy(1, 9, ["date", "time"], { file: "a.json" }) }]);
+  assert.equal(`${k.ordering} · rg ${k.rgSize}`, "date, time · rg 16.0M");
   // Anchored `start` and past its own line's cold end — printed rightward into the label gutter,
   // never leftward back across the line it names.
   const colds = [...svg.matchAll(/<line class="pair c\d" x1="[\d.]+" y1="[\d.]+" x2="([\d.]+)"/g)]
     .map((m) => +m[1]);
-  for (const l of labs.filter((x) => /RG$/.test(x.t))) {
+  for (const l of labs.filter((x) => /rg [\d.]+M$/.test(x.t))) {
     assert.ok(!l.end, `"${l.t}" reads rightward`);
     assert.ok(colds.some((c) => l.x > c && l.x - c < 40),
       `"${l.t}" at ${l.x} sits just past a cold end; colds ${colds}`);
@@ -3077,7 +3078,7 @@ test("a writer that names several layouts is labelled with the layout, at the co
   ]);
   const far = [...cramped.matchAll(/<text class="bar-caption" x="([\d.]+)"([^>]*)>([^<]+)</g)]
     .map((m) => ({ x: +m[1], end: /text-anchor="end"/.test(m[2]), t: m[3] }))
-    .filter((l) => /RG$/.test(l.t));
+    .filter((l) => /rg [\d.]+M$/.test(l.t));
   assert.equal(far.length, 2, "both are still labelled — a name is never dropped");
   for (const l of far) {
     const w = l.t.length * 5.15;

@@ -1716,6 +1716,22 @@ function modelNote(pts, table = DEFAULTS.table) {
   return "";
 }
 
+/**
+ * A layout as ONE SHORT STRING for the chart's labels: `date, time · rg 2.0M`.
+ *
+ * Built from `keyCells`, which is what the table beside it prints — so the two cannot describe one
+ * parquet two different ways, and a change to either follows the other. Both halves are dropped when
+ * unmeasured rather than dashed: a label is not a column and has nothing to line up with, so
+ * `— · rg —` would be three characters of noise where the writer name says more.
+ */
+function layoutOf(members, table = DEFAULTS.table) {
+  const k = keyCells(members, table);
+  const bits = [];
+  if (k.ordering && k.ordering !== DASH) bits.push(k.ordering);
+  if (k.rgSize && k.rgSize !== DASH) bits.push(`rg ${k.rgSize}`);
+  return bits.join(" · ") || producers(members);
+}
+
 export function scatterFit(pts) {
   // THE FILTER IS COLD ONLY, deliberately. Requiring warm here would silently change WHICH layouts
   // are on the chart, and making the membership quiet is the one thing `cutNote` exists to prevent
@@ -1727,14 +1743,14 @@ export function scatterFit(pts) {
     + "CU up, also log" + cutNote(cut),
     rows.map((p) => ({
       x: p.ms.cold, x2: p.ms.warm, y: p.cu, label: p.name, id: uniqueName(rows, p), n: p.n,
-      // The layout at the WARM end, for a writer whose name identifies nothing. `layoutLabel` is
-      // the string the analytics bar is already captioned with — the sort key and the row group
-      // count — so a line and its bar cannot describe the same parquet two different ways. The
-      // leading `by ` is dropped and ONLY that: thirteen of these sit in the crowded left half, and
-      // three characters each is the difference between a name that finds a free spot and one that
-      // falls back onto a line. It reads fine without the preposition; changing anything else would
-      // make the two captions disagree.
-      id2: uniqueName(rows, p) ? "" : layoutLabel(p.members).replace(/^by /, ""),
+      // The layout, for a writer whose name identifies nothing — `date, time · rg 2.0M`.
+      //
+      // ROW GROUP SIZE, NOT THE COUNT, and the two cells come straight from `keyCells` so the label
+      // and the table row directly above it are the SAME strings rather than two spellings of one
+      // fact. A count is a number you have to divide the table by before it means anything; `2.0M`
+      // is a segment size a reader can hold against VertiPaq's own, and it is what the dispatch
+      // actually sets (`row_group_size`). It also stops the label moving when the row count does.
+      id2: uniqueName(rows, p) ? "" : layoutOf(p.members),
       tip: tipLines(p), hue: WRITER_HUE[p.name] || 1,
     })), "query time (ms)", "", undefined, "CUs", modelNote(rows));
   // NO SIZE CHANNEL. The dots carried row-group size as their AREA; with the marks gone there is

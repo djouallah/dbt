@@ -275,10 +275,15 @@ without a build, a token or a dispatch.
 - **Every line is named at its COLD END, and what the name says depends on the writer.** The writer
   itself when that identifies the line, which `uniqueName` decides — `dwh`, the three spark
   profiles. `delta_rs` is most of the lines, so its name separates nothing; it is in the legend, and
-  what actually tells its lines apart takes its place: the sort key and the row group count,
-  `date, time · 9 RG`. That string is `layoutLabel`, the same one the analytics bar is captioned
-  with, minus its leading `by ` — so a line and the mart's own rows cannot describe one parquet two
-  different ways, and three characters each is what keeps eleven of them off each other.
+  what actually tells its lines apart takes its place: the sort key and the row group SIZE —
+  `date, time · rg 2.0M`. Both halves come from `keyCells`, which is what *Cost and speed by parquet
+  layout* prints in its own cells, so a line and the row beside it cannot describe one parquet two
+  different ways and a change to either follows the other.
+  **Size, not the count.** A count is a number you have to divide the table by before it means
+  anything; `2.0M` is a segment size a reader can hold against VertiPaq's own, it is what the
+  dispatch actually sets (`row_group_size`), and it does not move when the row count does.
+  Either half is DROPPED when unmeasured rather than dashed — an unsorted layout reads `rg 5.3–7.6M`,
+  not `— · rg 5.3–7.6M`. A label is not a column and has nothing to line up with.
   **The cold end because that is where the eye already is**: the cold ends are what the chart is
   ranked by and what spreads out, while the warm ends bunch toward the y axis. The warm end is the
   FALLBACK — both ends are free on a line with no writer name, so a label that cannot fit beside the
