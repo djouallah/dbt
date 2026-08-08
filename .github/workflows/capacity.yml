@@ -13,15 +13,16 @@ name: Capacity units
 # reach a reader.
 #
 #   Benchmark        builds, benchmarks, tears down, commits the run record   dispatch only
-#   Capacity units   this — reads the model, commits the ledger               schedule · dispatch · after Benchmark
+#   Capacity units   this — reads the model, commits the ledger               after Benchmark · dispatch
 #   Dashboard        builds and deploys the page                              push to dashboard/ · dispatch
 #
-# **THE SCHEDULE IS A REVERSAL OF A STANDING RULE, AND IT IS SCOPED.** The rule was
+# **THE `workflow_run` TRIGGER IS A REVERSAL OF A STANDING RULE, AND IT IS SCOPED.** The rule was
 # `workflow_dispatch` only — no schedule, no push, no workflow_run — and its stated reason was that
 # *publishing is a decision*: a page that republishes itself whenever a measurement lands will
 # eventually publish one nobody looked at, on a public repo. The dynamic page severed that link and
-# this split completes it. **A scheduled measurement now publishes nothing.** What is untouched:
-# `Benchmark` stays dispatch-only, because it spends paid capacity.
+# this split completes it. **An automatic measurement now publishes nothing.** What is untouched:
+# `Benchmark` stays dispatch-only, because it spends paid capacity — do not give it a schedule to
+# get the daily read back.
 #
 # **Why `workflow_run` and not `workflow_call`.** A called workflow can never hold MORE permission
 # than its caller grants — run 30735526504 died as a `startup_failure` with no jobs and no log for
@@ -36,13 +37,22 @@ name: Capacity units
 # `if: always()`). The read is idempotent and costs about two DAX queries, so gating on success would
 # only lose data.
 #
-# **Two triggers, and neither is redundant.** A CU hour keeps growing for up to ~70 minutes after the
-# work (~6 min ingestion lag, 5–64 min smoothing), and `measure.py` has no settle logic: every read
-# re-reads the whole window from the floor and merges with `max(old, new)`, so re-reading is
-# idempotent and monotonic — two reads of the same window can only RAISE a number. The read after a
-# Benchmark is therefore deliberately a LOWER BOUND, and it is there so a fresh run's column is
-# populated in minutes rather than blank for a day; the daily read is what makes it final, with
-# nobody watching.
+# **ONE AUTOMATIC TRIGGER NOW, AND THE COST OF THAT IS A LOWER BOUND THAT NOBODY RAISES.** A CU hour
+# keeps growing for up to ~70 minutes after the work (~6 min ingestion lag, 5–64 min smoothing), and
+# `measure.py` has no settle logic: every read re-reads the whole window from the floor and merges
+# with `max(old, new)`, so re-reading is idempotent and monotonic — two reads of the same window can
+# only RAISE a number. The read after a Benchmark fires within a minute of it finishing, so it is
+# deliberately a LOWER BOUND: it exists so a fresh run's column is populated in minutes rather than
+# blank. There used to be a daily `cron` behind it, and THAT is what made a number final with nobody
+# watching. It is gone, so **a run's CU stays a lower bound until somebody dispatches this by hand.**
+# The page's own `may still rise` caveat is derived from the clock and expires after two hours, so
+# past that it reads as settled whether or not it is.
+#
+# Two ways back if that becomes a problem, neither taken here: re-add the `cron` (it was
+# `17 21 * * *`, i.e. 07:17 in the model's own +10 clock, off the hour because GitHub delays
+# scheduled runs under load — and note GitHub DISABLES a schedule after 60 days of repository
+# inactivity, so it stopped the top-up silently anyway), or make the single trigger authoritative by
+# sleeping ~70 minutes before the read. A dispatch an hour after a build is the manual equivalent.
 on:
   workflow_dispatch:
     inputs:
@@ -57,12 +67,8 @@ on:
         description: "workspace GUID; blank = the repo secret"
         type: string
         default: ""
-  schedule:
-    # 21:17 UTC is 07:17 in the model's own +10 clock, so one read covers the whole previous day.
-    # OFF the hour on purpose: GitHub delays scheduled runs under load and the top of the hour is the
-    # worst of it. Note GitHub DISABLES a schedule after 60 days of repository inactivity — a quiet
-    # stretch stops the daily top-up silently, and re-enabling is manual.
-    - cron: "17 21 * * *"
+  # ONE AUTOMATIC TRIGGER: after a Benchmark. The daily `cron: "17 21 * * *"` is GONE — see the note
+  # above on what that costs and how to get it back.
   workflow_run:
     workflows: [Benchmark]
     types: [completed]
@@ -82,7 +88,7 @@ jobs:
   # NOT `continue-on-error`. It was, while this measured and deployed the page in one run: a
   # throttled metrics model had to cost a stale number rather than a stale page. Standalone and
   # unattended that inverts — a failed read would report GREEN and the ledger would quietly stop
-  # being topped up. Red instead, so GitHub's scheduled-workflow failure mail arrives, and nothing
+  # being topped up. Red instead, so the failure shows on the run a Benchmark triggered, and nothing
   # downstream breaks: the page simply keeps serving the last good ledger.
   measure:
     name: read capacity units
@@ -96,8 +102,8 @@ jobs:
       # input's `default:` cannot take a context, so the fallback lives here, where `secrets` IS
       # available. measure.py keeps no default either — a hardcoded fallback would put the value back
       # in the repo and outvote the secret whenever the env var arrived empty.
-      # On a `schedule` or `workflow_run` event the `inputs` context is empty, so both of the
-      # input-fed values below fall through to the secret / to blank, which is what is wanted.
+      # On a `workflow_run` event the `inputs` context is empty, so both of the input-fed values
+      # below fall through to the secret / to blank, which is what is wanted.
       CU_METRICS_WORKSPACE_ID: ${{ secrets.CU_METRICS_WORKSPACE_ID }}
       CU_METRICS_MODEL_ID: ${{ secrets.CU_METRICS_MODEL_ID }}
       CU_CAPACITY_ID: ${{ secrets.CU_CAPACITY_ID }}

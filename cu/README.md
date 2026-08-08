@@ -137,13 +137,20 @@ This is the `Capacity units` workflow (`.github/workflows/capacity.yml`), and it
 
 | trigger | why |
 |---|---|
-| `workflow_run` after `Benchmark` | so a fresh run's column is populated in minutes rather than blank for a day. Deliberately a **lower bound** — the settle has not happened yet. |
-| daily `schedule`, 21:17 UTC (07:17 in the model's +10 clock) | what makes that lower bound final, unattended. One read covers the whole previous day. |
-| `workflow_dispatch` | by hand, when you want a number now or need `since` |
+| `workflow_run` after `Benchmark` | so a fresh run's column is populated in minutes rather than blank. Deliberately a **lower bound** — the settle has not happened yet. |
+| `workflow_dispatch` | by hand, when you want a number now, need `since`, or want to RAISE a lower bound |
 
-**Neither automatic trigger is redundant**, and the reason is the `max(old, new)` rule above: a
-re-read of the same window can only raise a number, so an early read costs nothing and a later one
-completes it. It is also cheap — about **two DAX queries** per run (`discover_columns()` plus one
+**THE DAILY `schedule` IS GONE, AND IT WAS THE ONLY THING THAT SETTLED A NUMBER UNATTENDED.** It ran
+at 21:17 UTC (07:17 in the model's +10 clock), one read covering the whole previous day. What it
+protected: a CU hour keeps growing for up to ~70 minutes after the work, and the post-Benchmark read
+fires within a minute of the build finishing, so **every fresh number is a lower bound and nothing
+now raises it but a hand-started dispatch.** The `max(old, new)` rule means that dispatch can only
+ever improve the ledger — a re-read of the same window cannot lower a number — so the habit worth
+keeping is: dispatch `Capacity units` an hour or so after a `Benchmark` you care about. Watch for the
+page's `may still rise` caveat, too: it is derived from the clock and expires after two hours, so
+past that a low number looks settled whether or not it is.
+
+It is cheap either way — about **two DAX queries** per run (`discover_columns()` plus one
 `read_cu()` per capacity, and `CU_CAPACITY_ID` is pinned to one), whatever the window width.
 
 It **publishes nothing**. `Dashboard` is a separate workflow that only builds and deploys the page,
@@ -157,11 +164,11 @@ gh workflow run "Capacity units" -f since='2026-08-01 00:00:00'    # re-read a w
 
 Locally, with a token in `PBI_TOKEN` and the four GUIDs in the environment: `python cu/measure.py`.
 
-Two things that will surprise you eventually. **A failed read is RED**, not a warning — it was
-`continue-on-error` while it gated a page deploy, and unattended on a schedule that would mean the
-ledger quietly stops being topped up while the run reports green. And **GitHub disables a scheduled
-workflow after 60 days of repository inactivity**, so a quiet stretch stops the daily top-up
-silently; re-enabling is manual.
+One thing that will surprise you eventually. **A failed read is RED**, not a warning — it was
+`continue-on-error` while it gated a page deploy, and unattended that inverts: the ledger would
+quietly stop being topped up while the run reports green. (The other surprise used to be that
+**GitHub disables a scheduled workflow after 60 days of repository inactivity**, which stopped the
+daily top-up silently. That was one of the reasons the schedule was not worth keeping.)
 
 Locally, with a token in `PBI_TOKEN` and the four GUIDs in the environment:
 
