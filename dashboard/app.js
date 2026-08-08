@@ -661,9 +661,11 @@ export function vcoresOf(rec) {
  */
 const ETL_VCORES = "8";
 
-/** The layout table's fixed leading columns. */
-const FIT_HEAD = ["parquet writer", "ordering", "dictionary", "row group size", "MB", "runs",
-  "analytics CU"];
+/**
+ * The layout table's fixed leading columns. `etl CU` is spliced in after `runs` by `renderFit`,
+ * which is why it stops there: BUILD BEFORE QUERY, the order the work actually happens in.
+ */
+const FIT_HEAD = ["parquet writer", "ordering", "dictionary", "row group size", "MB", "runs"];
 
 export function sortKeyOf(rec, table = DEFAULTS.table) {
   const engine = (rec || {}).engine || "?";
@@ -1800,14 +1802,18 @@ export function renderFit(groups, times, tiers, counts = {}) {
     // the engine and the machine it was given, so it is reported at one core count and the header
     // says which (`ETL_VCORES`). They are named for the ledger's own buckets, the same two words
     // `Cost by engine` labels its rows with, so nothing has to be translated between the tables.
-    table([...FIT_HEAD, `etl CU (${ETL_VCORES} vCores)`,
+    // ETL BEFORE ANALYTICS: building the parquet happens before querying it, and the tiers to the
+    // right of them read left-to-right in the same order (cold, then warm, then hot). The table is
+    // still RANKED by `analytics CU`, which no longer leads the pair — sort order and column order
+    // are separate things, and the cheapest-first note above says which one ranks.
+    table([...FIT_HEAD, `etl CU (${ETL_VCORES} vCores)`, "analytics CU",
       ...cols.map((l) => (counts[l] ? `${l} ms (${counts[l]} q)` : `${l} ms`))],
       ["left", "left", "left", "right", "right", "right", "right", "right",
         ...cols.map(() => "right")],
       pts.map((p) => {
         const k = keyCells(p.members);
-        return [p.name, k.ordering, k.dict, k.rgSize, k.mb, String(p.n), fmt(p.cu, 0),
-          p.etl ? fmt(p.etl, 0) : DASH,
+        return [p.name, k.ordering, k.dict, k.rgSize, k.mb, String(p.n),
+          p.etl ? fmt(p.etl, 0) : DASH, fmt(p.cu, 0),
           ...cols.map((l) => (p.ms[l] ? fmt(p.ms[l], 0) : DASH))];
       }),
       { sort: true }),

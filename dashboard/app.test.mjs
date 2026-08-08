@@ -70,7 +70,9 @@ function layoutTable(html) {
   return rows(block(html, "Cost and speed by parquet layout"))
     .map((r) => r.split("|").map((c) => c.trim()))
     .filter((c) => c.length > 7 && c[1] && c[1] !== "parquet writer")
-    .map((c) => ({ writer: c[1], ordering: c[2], rgSize: c[4], runs: c[6], cu: c[7] }));
+    // `etl CU` sits BEFORE `analytics CU` — build before query — so cu is c[8], not c[7].
+    .map((c) => ({ writer: c[1], ordering: c[2], rgSize: c[4], runs: c[6],
+      etl: c[7], cu: c[8] }));
 }
 
 /** `[{title, subtitle, labels, values, captions}]` for each chart drawn, in page order. */
@@ -1503,7 +1505,7 @@ test("the three tiers are columns of the PER-RUN table, not of the layout block"
   const heads = rows(out).filter((r) => r.includes("cold ms"));
   assert.equal(heads.length, 2, `two headers carry the tiers: ${heads}`);
   assert.ok(heads.some((h) =>
-    /^\| parquet writer \| ordering \| dictionary \| row group size \| MB \| runs \| analytics CU \| etl CU \(\d+ vCores\) \| cold ms \(\d+ q\)/
+    /^\| parquet writer \| ordering \| dictionary \| row group size \| MB \| runs \| etl CU \(\d+ vCores\) \| analytics CU \| cold ms \(\d+ q\)/
       .test(h)), heads[0]);
   assert.ok(heads.some((h) =>
     h.includes("| etl CU | analytics CU | cold ms | warm ms | hot ms | items |")), heads[1]);
@@ -2185,7 +2187,7 @@ test("a layout never built at ETL_VCORES leaves the section, and is NAMED as exc
     ledger({ "Sa-1.json": { "XMLA Read Operation": 1500.0 } }));
   const kept = rows(block(unread, "Cost and speed by parquet layout")).slice(1);
   assert.equal(kept.length, 1, "still a row");
-  assert.equal(kept[0].split("|")[8].trim(), "—", `etl unread is a dash: ${kept[0]}`);
+  assert.equal(kept[0].split("|")[7].trim(), "—", `etl unread is a dash: ${kept[0]}`);
 });
 
 test("cost and speed is one table, cheapest first, with a title and nothing else", () => {
@@ -2213,7 +2215,7 @@ test("cost and speed is one table, cheapest first, with a title and nothing else
   // is coarser than the parquet, since a group merged on RG band can still hold two file sizes.
   const head = rows(out).find((r) =>
     r.startsWith("| parquet writer | ordering | dictionary | row group size | MB | runs "
-    + "| analytics CU | etl CU (8 vCores) |"));
+    + "| etl CU (8 vCores) | analytics CU |"));
   assert.ok(head, "layout, the key, the size, the sample size, CU, then the tiers");
   // The count rides in the HEADER: each tier cell is a SUM over the suite, and the bare `cold ms`
   // read exactly like one query's time.

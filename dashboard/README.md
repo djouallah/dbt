@@ -196,7 +196,10 @@ without a build, a token or a dispatch.
   flagged loudest. **Absent, never empty**, when no record carries `encodings` — which is every
   record written before `stats.py` learned to profile the mart.
 - **Cost and speed by layout is a TABLE, above its chart and *Cost by engine*.** One row per
-  layout, cheapest first: `analytics CU`, `etl CU`, `cold ms`, `warm ms`, `hot ms`. Most of these
+  layout, cheapest first: `etl CU`, `analytics CU`, `cold ms`, `warm ms`, `hot ms` — build before
+  query, the order the work happens in, with the tiers continuing left-to-right in their own order.
+  **Column order is not sort order**: the table is still RANKED by `analytics CU`, which no longer
+  leads the pair. Most of these
   were columns of the mart's layout block, which made one table answer two questions — what the
   parquet looks like, and what querying it cost. *Table layout* is now physical layout alone and this
   is the other half. It has a title and no commentary. Built from the same `martPoints` as the chart
