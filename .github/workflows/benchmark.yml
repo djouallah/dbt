@@ -88,10 +88,16 @@ on:
         description: "duckrun: sort fct_summary by — blank for no sort"
         type: string
         default: "date,time,price"
+      # 2M, not 16M. 16M was spark `readHeavyForPBI`'s measured segment size (9 x 16.0M on this
+      # table) and VertiPaq's ceiling, i.e. the largest segment Direct Lake would take whole. 2M is
+      # the other end of that trade: ~72 row groups instead of ~9, so a query that touches a narrow
+      # slice of the sort key scans far less, at the cost of more segments to open. Already measured
+      # here rather than guessed — a `date, time, price` run at 2.0M / 72 RG is in `history/`, which
+      # is why this is a default change and not an experiment.
       row_group_size:
         description: "duckrun: rows per row group"
         type: string
-        default: "16000000"
+        default: "2000000"
       file_size_mb:
         description: "duckrun: parquet file size MB"
         type: choice

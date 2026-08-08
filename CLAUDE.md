@@ -723,12 +723,28 @@ to `provision.py teardown`, which polls for a 404 and goes red if it is still li
   0.3 × 4GB. Spill is unaffected — `temp_directory` is still set for both.
   **The `sorted` dispatch input is a KNOWING exception, and the only one.** With it on, duckrun
   writes `fct_summary` sorted and declares geometry, and **all three values are now dispatch inputs
-  rather than literals in the model**: `sort_by` (default `date,time` — the key the retired `'auto'`
-  picker kept choosing, without its +19% profiling pass; DUID's ~16% of size deliberately left on
-  the table), `row_group_size` (default `16000000` — spark readHeavyForPBI's measured segment size,
-  9×16.0M on this table, and VertiPaq's ceiling; 48M was declared first and was over it) and
-  `file_size_mb` (default `1024`; choice of 1024/512/128). A default dispatch renders exactly the
-  literals that were there before, so nothing about the recorded history moves.
+  rather than literals in the model**: `sort_by` (default `date,time,price`), `row_group_size`
+  (default `2000000`) and `file_size_mb` (default `1024`; choice of 1024/512/128).
+  **BOTH OF THE FIRST TWO DEFAULTS HAVE MOVED, so a bare dispatch no longer reproduces the older
+  history.** `sort_by` was `date,time` — the key the retired `'auto'` picker kept choosing, without
+  its +19% profiling pass, with DUID's ~16% of size deliberately left on the table — and now carries
+  `price` as well. `row_group_size` was `16000000`, spark `readHeavyForPBI`'s measured segment size
+  (9×16.0M on this table) and VertiPaq's ceiling, the largest segment Direct Lake takes whole; 48M
+  was declared first and was over it. 2M is the other end of that trade: ~72 row groups instead of
+  ~9, so a query touching a narrow slice of the sort key scans far less, at the cost of more segments
+  to open. Neither is a guess — a `date, time, price` run at 2.0M / 72 RG is already in `history/`.
+  **The dashboard consequence is a NEW COLUMN AND A NEW GROUP, not drift — and nothing in `stats.py`
+  had to change for that, BY DESIGN.** `_nonbaseline`'s baseline is pinned to `16000000`, the
+  geometry `history/` was written under, and is deliberately NOT the live dispatch default: a 2M run
+  therefore records `row_group_size: "2000000"` explicitly and `variant()` splits it into its own
+  column, while the 16M history keeps the column it has. Had the baseline read the default, a 2M run
+  would have recorded `None`, shared a column with the 16M history, and `columnsFor` — latest run per
+  column — would have hidden nine runs of 9-RG history behind one 72-RG run, with the bars still
+  separating so nothing looked broken. `layoutKey` bands the MEASURED row-group count and carries the
+  sort column list, so 72 RG and 9 RG can never merge and neither can two sort keys. **Do not "tidy"
+  the baseline to match this new default** — that is the trap, and `test_sort_key.py` pins it.
+  Read a jump in the layout table as the defaults changing, and check the record's `inputs` block
+  before calling it a regression.
   Three consequences worth holding. **`row_group_size` and `sort_by` are FREE TEXT**, so the `plan`
   job validates them — a positive integer, and comma-separated plain identifiers — because `plan` is
   free and runs before any leg spends capacity, whereas a typo reaching duckrun dies mid-write with

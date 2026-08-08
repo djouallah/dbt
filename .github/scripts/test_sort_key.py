@@ -133,9 +133,10 @@ def test_geometry_is_recorded_only_when_it_differs_from_the_baseline(stats, monk
 
 def test_the_baseline_is_history_not_the_current_dispatch_default(stats, monkeypatch):
     """THE TRAP THIS PINS: the baseline is the geometry `history/` was written under, and it must NOT
-    follow the dispatch default when that moves. That default has now moved TWICE — 16000000 for the
-    13+ oldest recorded runs, 6000000 once the knee was measured, and 16000000 again since
-    `date,time,price` became the default key — which is exactly why it cannot be read live.
+    follow the dispatch default when that moves. That default has now moved THREE TIMES — 16000000
+    for the 13+ oldest recorded runs, 6000000 once the knee was measured, 16000000 again when
+    `date,time,price` became the default key, and 2000000 since — which is exactly why it cannot be
+    read live.
 
     Were the baseline the live default, a 6M run would record `None`, share an `(engine, config)`
     column with the 16M history, and `columnsFor` — latest run per column — would hide six runs of

@@ -703,9 +703,9 @@ def _nonbaseline(var, baseline):
 
     THE BASELINE IS THE GEOMETRY THE RECORDED HISTORY WAS WRITTEN UNDER, NOT THE DISPATCH'S CURRENT
     DEFAULT, and the two have already diverged — `row_group_size` defaulted to 16000000 for the 13+
-    runs now in `history/`, and defaults to 6000000 since the knee was measured. This was called
+    runs now in `history/`, and defaults to 2000000 since. This was called
     `_nondefault` and read the live default, which is a trap that fires the moment a default moves:
-    a 6M run would record `None`, land in the same `(engine, config)` column as the 16M history, and
+    a 2M run would record `None`, land in the same `(engine, config)` column as the 16M history, and
     `columnsFor` — which takes the LATEST run per column — would HIDE six runs of 9-RG history
     behind one 24-RG run. The bars would still separate (`layoutKey` bands the MEASURED file and row
     group counts), so nothing would look broken; the CU and sources tables would just quietly report
