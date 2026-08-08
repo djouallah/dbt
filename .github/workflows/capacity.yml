@@ -12,7 +12,7 @@ name: Capacity units
 # the published page fetches `history/cu.json` at view time, so committing it IS how the numbers
 # reach a reader.
 #
-#   Benchmark        builds, benchmarks, tears down, commits the run record   dispatch only
+#   Benchmark        builds, benchmarks, tears down, commits the run record   nightly cron · dispatch
 #   Capacity units   this — reads the model, commits the ledger               after Benchmark · dispatch
 #   Dashboard        builds and deploys the page                              push to dashboard/ · dispatch
 #
@@ -21,8 +21,8 @@ name: Capacity units
 # *publishing is a decision*: a page that republishes itself whenever a measurement lands will
 # eventually publish one nobody looked at, on a public repo. The dynamic page severed that link and
 # this split completes it. **An automatic measurement now publishes nothing.** What is untouched:
-# `Benchmark` stays dispatch-only, because it spends paid capacity — do not give it a schedule to
-# get the daily read back.
+# `Benchmark` now runs nightly itself, so this fires after it — but within a minute of the build
+# finishing, which is why that read is a lower bound and not a settled number.
 #
 # **Why `workflow_run` and not `workflow_call`.** A called workflow can never hold MORE permission
 # than its caller grants — run 30735526504 died as a `startup_failure` with no jobs and no log for

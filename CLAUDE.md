@@ -893,7 +893,7 @@ to `provision.py teardown`, which polls for a 404 and goes red if it is still li
 
   | workflow | file | does | triggered by |
   |---|---|---|---|
-  | `Benchmark` | `benchmark.yml` | open the record, offline checks, plan, land, build, layout, resolve, bench, report, teardown, record | dispatch only — it is the only one that spends capacity |
+  | `Benchmark` | `benchmark.yml` | open the record, offline checks, plan, land, build, layout, resolve, bench, report, teardown, record | nightly `cron` · dispatch — it is the only one that spends capacity |
   | `Capacity units` | `capacity.yml` | `cu/measure.py` → commits `history/cu.json` | `workflow_run` after Benchmark · dispatch |
   | `Dashboard` | `dashboard.yml` | `dashboard/build.mjs` → deploys the page | `push` to `dashboard/**` · dispatch |
 
@@ -1046,16 +1046,29 @@ does not: the parity table says the four engines hold the *same rows*, this meas
 takes to **query** them. Ported from `djouallah/duckrun`'s `parquet_layout.yml`.
 [benchmark/README.md](benchmark/README.md) has the detail; what matters when touching this repo:
 
-- **A HUMAN starts every run, and that is the standing instruction.** Do not add `schedule`, `push`,
-  `workflow_run` or `repository_dispatch` — not a nightly, not behind an `if:`. This is not a
-  default to be weighed against convenience. The benchmark's query passes are **interactive CU** on
-  shared Fabric capacity, which is the class of usage a capacity admin sees and asks about; a run
-  nobody chose to start is the one that causes trouble.
-  It now lives in the same workflow as the build, which does not weaken the rule: that workflow is
-  `workflow_dispatch` only, so a human still chose every run that reaches this. The rule was always
-  about *nobody chose it*, not about which file the jobs live in — an earlier wording said "no
-  `needs:` from another workflow", which read as forbidding composition and is now stated as the
-  trigger list above.
+- **THERE IS A NIGHTLY NOW: `cron: "17 7 * * *"` plus `workflow_dispatch`. `push`, `workflow_run`
+  and `repository_dispatch` are still forbidden.** This REVERSES a rule that read "a human starts
+  every run — not a nightly, not behind an `if:`", and the reasoning that rule carried is unchanged
+  and now simply accepted: the benchmark's query passes are **interactive CU** on shared Fabric
+  capacity, the class of usage a capacity admin sees and asks about. One run a day of that is the
+  deliberate cost, and the cron is one line to remove if it stops being worth it.
+  **`push` is forbidden for a different reason and that one has not moved**: this workflow COMMITS
+  the run record, so a `push:` trigger would let its own commit start the next paid build. A clock
+  is not a commit, which is why a nightly does not reopen that loop.
+  07:17 UTC is 02:17 EST / 03:17 EDT — US Eastern asleep either side of the DST boundary — and 17:17
+  in the metrics model's own +10 clock, so a night's results are there to read in the afternoon.
+  ⚠️ **On a `schedule` event the `inputs` context is EMPTY and `workflow_dispatch` defaults do NOT
+  apply**, so every input in that file carries its own scheduled value spelled
+  `github.event_name == 'schedule' && '<value>' || inputs.<name>`. Never `inputs.x || 'default'`:
+  that cannot tell an absent input from a deliberate one, so it would override `build: false` and
+  turn the scouting recipe's `gap_seconds: 0` back into 600. The failures are silent and expensive —
+  blank `engines` is fatal in `plan`, blank `build`/`benchmark` are falsy so a nightly would spend a
+  runner and build nothing, and blank `sort_by` means NO SORT, i.e. a nightly quietly measuring a
+  different layout than the form describes. **Every scheduled value is the form default, `cores`
+  included — 8, not the 64 a hand dispatch usually passes**: 64 is for a run somebody is waiting on,
+  and nobody waits on a nightly. So the nightly opens its own `·8c` column rather than joining the
+  64c history, which is correct — `vcores` is part of `variant()`, and the CU rate (`cores / 2`) says
+  they are different machines.
 - **It measures a USER SESSION, and nothing is ever cleared. The pass number is the tier.**
   `deploy_models.py` **deletes and recreates** each semantic model, so it starts with an empty
   VertiPaq store; `xmla_compare.py` then walks the whole 25-query suite `runs` times — pass 1 **cold**,
@@ -1209,8 +1222,8 @@ no data at all. `all.yml`, `dbt.yml` and `cu.yml` are gone.
   - **`Capacity units` fires on `workflow_run` after `Benchmark`, and on dispatch. The daily
     `schedule` is GONE.** The `workflow_run` trigger is a scoped reversal of the "dispatch only" rule
     and it is earned: the rule's stated reason was that *publishing is a decision*, and an automatic
-    measurement now publishes nothing. `Benchmark` stays dispatch-only because it spends capacity —
-    **do not give it a schedule to get the daily read back.**
+    measurement now publishes nothing. `Benchmark` now has a nightly of its own, so a CU read fires
+    after it automatically — but that read is a LOWER BOUND and nothing raises it unattended.
   - **`workflow_run`, never `workflow_call`** — see the three taxes below. It also means
     `benchmark.yml` needs **no edit**: the CU read is a separate run that starts after Benchmark
     completes, so Benchmark's duration, status and job graph are untouched. No conclusion filter: a
@@ -1664,7 +1677,7 @@ no data at all. `all.yml`, `dbt.yml` and `cu.yml` are gone.
   of the arrangement), and now the measurement does not even run in this workflow. The snapshot is
   still not immune, and that is all the `ref:` protects.
 - **`Dashboard` is `push` to `dashboard/**` plus dispatch; `Capacity units` is `workflow_run` after
-  Benchmark plus dispatch; `Benchmark` is dispatch only.** This replaced a blanket
+  Benchmark plus dispatch; `Benchmark` is a nightly `cron` plus dispatch.** This replaced a blanket
   "`workflow_dispatch` only" that applied when one workflow both measured and published. What each
   reason protects now: for `Benchmark`, capacity — unchanged and absolute. For the page, that
   publishing is a decision — still true, and satisfied because pushing to `dashboard/` IS that

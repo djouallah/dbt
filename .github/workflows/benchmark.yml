@@ -44,17 +44,50 @@ name: Benchmark
 # The teardown is not optional: a deleted item keeps its CU rows in the metrics model, so there is
 # nothing to be gained by leaving one standing and background CU to be paid for if you do.
 #
-# **`workflow_dispatch` only, and that is the standing rule, not a default.** No `schedule`, no
-# `push`, no `workflow_run`, no `repository_dispatch`. Every run lands Fabric legs on paid capacity
-# and the query passes are INTERACTIVE CU on shared capacity — the class of usage a capacity admin
-# notices and asks about. A run nobody chose to start is the one that causes trouble. `paths-ignore`
-# does not soften this and never did: it is per-PUSH, not per-file, so a commit touching a doc AND
-# anything else still ran.
+# **A NIGHTLY `schedule` PLUS `workflow_dispatch`. No `push`, no `workflow_run`, no
+# `repository_dispatch`, and that part is still absolute.** The nightly reverses a long-standing
+# "dispatch only" rule; what that rule protected is unchanged and worth knowing, because it is now
+# accepted rather than avoided: every run lands Fabric legs on paid capacity and the query passes are
+# INTERACTIVE CU on shared capacity, the class of usage a capacity admin notices and asks about. One
+# run a day of that is the deliberate cost. If it ever becomes a problem the cron is one line.
 #
-# It is also what makes the `record` job's commit safe. Nothing answers a push, so a bot commit
-# cannot start a paid build. If any workflow is ever given a `push:` trigger, revisit that step in
-# the same change.
+# **`push` stays forbidden for a DIFFERENT reason, and dropping it would break the `record` job.**
+# This workflow COMMITS `history/runs/<record>.json`, so a `push:` trigger would make the commit
+# start the next build. `paths-ignore` does not soften that and never did: it is per-PUSH, not
+# per-file, so a commit touching a doc AND anything else still fires. The nightly is safe here
+# precisely because a clock is not a commit.
+#
+# ⚠️ **ON A `schedule` EVENT THE `inputs` CONTEXT IS EMPTY — `workflow_dispatch` defaults DO NOT
+# APPLY.** Every `inputs.*` reference below therefore carries its own scheduled value, spelled
+# `github.event_name == 'schedule' && '<value>' || inputs.<name>`. Read that shape before adding an
+# input, because the failures are silent and expensive: blank `engines` is fatal in `plan`, blank
+# `build`/`benchmark` are FALSY so the nightly would spend a runner and build nothing, and blank
+# `sort_by` means NO SORT — the nightly would quietly measure a different layout than the form says.
+# It is deliberately NOT written `inputs.x || 'default'`: that form cannot tell an absent input from
+# a deliberate one, so it would override `build: false` and turn the documented scouting recipe's
+# `gap_seconds: 0` back into 600.
 on:
+  # 07:17 UTC. That is 02:17 EST / 03:17 EDT — US Eastern asleep either side of the DST boundary,
+  # which is the point: the query passes draw interactive CU on shared capacity, so they should not
+  # land while anyone is using it. It is 17:17 in the model's own +10 clock, so the results are ready
+  # to look at during the afternoon here. OFF the hour deliberately — GitHub delays scheduled runs
+  # under load and the top of the hour is the worst of it.
+  #
+  # Three things to expect from an unattended run. GitHub DISABLES a schedule after 60 days of
+  # repository inactivity, silently, and re-enabling is manual. `Capacity units` fires on this
+  # workflow completing, which reads CU within a minute of the build finishing — that read is a LOWER
+  # BOUND (a CU hour keeps growing for ~70 minutes) and nothing raises it automatically since that
+  # workflow's own daily cron was removed, so a nightly's CU needs a hand-started `Capacity units`
+  # dispatch to settle.
+  #
+  # **Every scheduled value is the form default, `cores` included — 8, not the 64 a hand dispatch
+  # usually passes.** 64 is for an interactive run somebody is waiting on; a nightly is not waited
+  # on, so the wall clock does not buy anything worth the vCores. It does mean the nightly opens its
+  # own `duckrun·32c`-style column rather than joining the 64c history — `vcores` is part of
+  # `variant()` — which is correct: 8 and 64 are different machines and the CU rate (`cores / 2`)
+  # says so on the page.
+  schedule:
+    - cron: "17 7 * * *"
   workflow_dispatch:
     inputs:
       # THE FOUR THAT GET CHANGED. Everything below them is a default nobody touches from one
@@ -167,8 +200,8 @@ env:
   AZURE_TRANSPORT_OPTION_TYPE: curl
   CURL_CA_INFO: /etc/ssl/certs/ca-certificates.crt
   DUCKDB_TEMP_DIR: /tmp/duckdb_spill
-  CI_DOWNLOAD_LIMIT: ${{ inputs.download_limit }}
-  FABRIC_CORES: ${{ inputs.cores }}
+  CI_DOWNLOAD_LIMIT: ${{ github.event_name == 'schedule' && '200' || inputs.download_limit }}
+  FABRIC_CORES: ${{ github.event_name == 'schedule' && '8' || inputs.cores }}
   # Spark leg only, ON by default: profiles.yml puts spark.native.enabled into the Livy conf. That
   # single key is Microsoft's current documented session-level recipe.
   # Measured across seven spark runs, NEE moves NOTHING here — analytics CU 1,149/1,306/1,480 with it
@@ -178,10 +211,11 @@ env:
   # should measure that. Read the NEE bullet in CLAUDE.md before drawing conclusions from a run with
   # it on — execution-side semantic divergences (`round()`, DECIMAL->FLOAT), silent JVM fallback for
   # unsupported operators, and V-Order behaviour under NEE still undocumented.
-  SPARK_NATIVE_ENABLED: ${{ inputs.native_execution_engine && 'true' || 'false' }}
+  SPARK_NATIVE_ENABLED: ${{ (github.event_name == 'schedule' || inputs.native_execution_engine)
+    && 'true' || 'false' }}
   # Spark leg only. writeHeavy is the workspace default, so the default dispatch writes what a plain
   # Fabric session writes — and therefore NO V-Order, which readHeavyForPBI alone enables.
-  SPARK_RESOURCE_PROFILE: ${{ inputs.spark_resource_profile }}
+  SPARK_RESOURCE_PROFILE: ${{ github.event_name == 'schedule' && 'writeHeavy' || inputs.spark_resource_profile }}
   # DuckDB legs only. `sort_by` is the switch AND the value: non-blank means the model declares a
   # sort and the geometry beside it, blank means it declares neither. DUCKDB_SORTED is DERIVED here
   # and is not an input — it stays because the model, `stats.py`'s `_nonbaseline` /
@@ -196,14 +230,14 @@ env:
   #
   # `row_group_size` and `sort_by` are free text and are VALIDATED IN `plan`, not here: a typo would
   # otherwise reach duckrun as a string and fail mid-write, after the legs have spent capacity.
-  DUCKDB_SORT_BY: ${{ inputs.sort_by }}
-  DUCKDB_SORTED: ${{ inputs.sort_by != '' && 'true' || 'false' }}
-  DUCKDB_ROW_GROUP_SIZE: ${{ inputs.row_group_size }}
-  DUCKDB_FILE_SIZE_MB: ${{ inputs.file_size_mb }}
-  BENCH_ENGINES: ${{ inputs.engines }}
-  BENCH_RUNS: ${{ inputs.runs }}
-  BENCH_THINK_SECONDS: ${{ inputs.think_seconds }}
-  BENCH_GAP_SECONDS: ${{ inputs.gap_seconds }}
+  DUCKDB_SORT_BY: ${{ github.event_name == 'schedule' && 'date,time,price' || inputs.sort_by }}
+  DUCKDB_SORTED: ${{ (github.event_name == 'schedule' && 'date,time,price' || inputs.sort_by) != '' && 'true' || 'false' }}
+  DUCKDB_ROW_GROUP_SIZE: ${{ github.event_name == 'schedule' && '2000000' || inputs.row_group_size }}
+  DUCKDB_FILE_SIZE_MB: ${{ github.event_name == 'schedule' && '1024' || inputs.file_size_mb }}
+  BENCH_ENGINES: ${{ github.event_name == 'schedule' && 'duckrun' || inputs.engines }}
+  BENCH_RUNS: ${{ github.event_name == 'schedule' && '6' || inputs.runs }}
+  BENCH_THINK_SECONDS: ${{ github.event_name == 'schedule' && '4' || inputs.think_seconds }}
+  BENCH_GAP_SECONDS: ${{ github.event_name == 'schedule' && '600' || inputs.gap_seconds }}
   BENCH_TOP_DUID: ${{ inputs.top_duid }}
   PYTHONIOENCODING: utf-8
 
@@ -224,25 +258,27 @@ jobs:
         with: {python-version: "3.11"}
       - name: Open this run's record
         env:
-          RUN_ENGINE: ${{ inputs.engines }}
-          RUNIN_BUILD: ${{ inputs.build }}
-          RUNIN_BENCHMARK: ${{ inputs.benchmark }}
-          RUNIN_CORES: ${{ inputs.cores }}
-          RUNIN_SPARK_RESOURCE_PROFILE: ${{ inputs.spark_resource_profile }}
-          RUNIN_NATIVE_EXECUTION_ENGINE: ${{ inputs.native_execution_engine }}
+          RUN_ENGINE: ${{ github.event_name == 'schedule' && 'duckrun' || inputs.engines }}
+          RUNIN_BUILD: ${{ github.event_name == 'schedule' && 'true' || inputs.build }}
+          RUNIN_BENCHMARK: ${{ github.event_name == 'schedule' && 'true' || inputs.benchmark }}
+          RUNIN_CORES: ${{ github.event_name == 'schedule' && '8' || inputs.cores }}
+          RUNIN_SPARK_RESOURCE_PROFILE: ${{ github.event_name == 'schedule' && 'writeHeavy' || inputs.spark_resource_profile }}
+          RUNIN_NATIVE_EXECUTION_ENGINE: ${{ github.event_name == 'schedule' && 'true'
+            || inputs.native_execution_engine }}
           # The three duckdb write knobs, which this block did NOT carry — so a record could not say
           # what sort or geometry its dispatch asked for, and answering "what did that run request?"
           # meant reading the workflow file at that SHA. `_init()` skips an empty value, so a blank
           # `sort_by` (no sort) correctly records no key rather than an empty string. These are the
           # INTENT; `layout.config` is what was measured, and the dashboard groups on that.
-          RUNIN_SORT_BY: ${{ inputs.sort_by }}
-          RUNIN_ROW_GROUP_SIZE: ${{ inputs.row_group_size }}
-          RUNIN_FILE_SIZE_MB: ${{ inputs.file_size_mb }}
-          RUNIN_SKIP_DOWNLOAD: ${{ inputs.skip_download }}
-          RUNIN_DOWNLOAD_LIMIT: ${{ inputs.download_limit }}
-          RUNIN_RUNS: ${{ inputs.runs }}
-          RUNIN_THINK_SECONDS: ${{ inputs.think_seconds }}
-          RUNIN_GAP_SECONDS: ${{ inputs.gap_seconds }}
+          RUNIN_SORT_BY: ${{ github.event_name == 'schedule' && 'date,time,price' || inputs.sort_by }}
+          RUNIN_ROW_GROUP_SIZE: ${{ github.event_name == 'schedule' && '2000000' || inputs.row_group_size }}
+          RUNIN_FILE_SIZE_MB: ${{ github.event_name == 'schedule' && '1024' || inputs.file_size_mb }}
+          RUNIN_SKIP_DOWNLOAD: ${{ github.event_name == 'schedule' && 'true'
+            || inputs.skip_download }}
+          RUNIN_DOWNLOAD_LIMIT: ${{ github.event_name == 'schedule' && '200' || inputs.download_limit }}
+          RUNIN_RUNS: ${{ github.event_name == 'schedule' && '6' || inputs.runs }}
+          RUNIN_THINK_SECONDS: ${{ github.event_name == 'schedule' && '4' || inputs.think_seconds }}
+          RUNIN_GAP_SECONDS: ${{ github.event_name == 'schedule' && '600' || inputs.gap_seconds }}
         run: python .github/scripts/record.py init
       - uses: actions/upload-artifact@v4
         with:
@@ -285,7 +321,7 @@ jobs:
   plan:
     name: plan the legs
     needs: checks
-    if: inputs.build
+    if: github.event_name == 'schedule' || inputs.build
     runs-on: ubuntu-latest
     timeout-minutes: 5
     outputs:
@@ -295,9 +331,9 @@ jobs:
     steps:
       - id: p
         env:
-          ENGINES: ${{ inputs.engines }}
-          ROW_GROUP_SIZE: ${{ inputs.row_group_size }}
-          SORT_BY: ${{ inputs.sort_by }}
+          ENGINES: ${{ github.event_name == 'schedule' && 'duckrun' || inputs.engines }}
+          ROW_GROUP_SIZE: ${{ github.event_name == 'schedule' && '2000000' || inputs.row_group_size }}
+          SORT_BY: ${{ github.event_name == 'schedule' && 'date,time,price' || inputs.sort_by }}
         run: |
           python3 - >> "$GITHUB_OUTPUT" <<'EOF'
           import json, os, re, sys
@@ -378,10 +414,10 @@ jobs:
       # so two dispatches of the same commit differ by nothing but what was changed. Turn
       # `skip_download` off to extend the archive; that is a different question and a different run.
       - name: Download AEMO data (obstore -> OneLake)
-        if: ${{ !inputs.skip_download }}
+        if: ${{ github.event_name != 'schedule' && !inputs.skip_download }}
         run: python download_aemo.py
       - name: Say the archive was reused
-        if: ${{ inputs.skip_download }}
+        if: ${{ github.event_name == 'schedule' || inputs.skip_download }}
         run: echo "skip_download is on — building on the landed archive as-is" >&2
       - name: Upload the run-record fragment
         if: always()
@@ -553,7 +589,7 @@ jobs:
     # build means no benchmark timings and `incomplete()` drops the whole record from the page. So
     # it was 10-15 minutes of paid OneLake reads (the iceberg item alone 12m+) for a table read by
     # one human who is already looking at the dbt log above it.
-    if: ${{ !cancelled() && inputs.build
+    if: ${{ !cancelled() && (github.event_name == 'schedule' || inputs.build)
             && needs.fabric.result != 'failure' && needs.server.result != 'failure' }}
     runs-on: ubuntu-latest
     # get_stats() over OneLake is slow on the iceberg item (12m+ observed); 15 minutes was cancelling
@@ -609,7 +645,7 @@ jobs:
     needs: [checks, layout]
     # `!failure() && !cancelled()` so a SKIPPED build (benchmark-only dispatch) still gets here,
     # while a FAILED build does not: benchmarking tables that did not finish writing measures nothing.
-    if: inputs.benchmark && !failure() && !cancelled()
+    if: (github.event_name == 'schedule' || inputs.benchmark) && !failure() && !cancelled()
     runs-on: ubuntu-latest
     timeout-minutes: 10
     env:
@@ -694,7 +730,7 @@ jobs:
       # Before the first token is minted, not after: the gap is idle time by design, and burning it
       # on the far side of the deploy would spend a third of the token's life waiting.
       - name: ${{ matrix.engine }} — idle gap for the capacity chart
-        if: matrix.index != 0 && inputs.gap_seconds != '0'
+        if: matrix.index != 0 && (github.event_name == 'schedule' && '600' || inputs.gap_seconds) != '0'
         run: |
           echo "sleeping ${BENCH_GAP_SECONDS}s before ${{ matrix.engine }} so the Fabric capacity"
           echo "chart shows a clean separation between models (>5min CU smoothing window)."
@@ -936,7 +972,7 @@ jobs:
             python -c "import sys; sys.path.insert(0, '.github/scripts'); import record; record.reindex('history/runs')"
             git add "$REC" history/runs/index.json
             if git diff --cached --quiet; then echo "record identical to HEAD" >&2; exit 0; fi
-            git commit -q -m "record: run ${{ github.run_id }} (${{ inputs.engines }})"
+            git commit -q -m "record: run ${{ github.run_id }} (${{ github.event_name == 'schedule' && 'duckrun' || inputs.engines }})"
             if git push -q origin "HEAD:$BR"; then
               echo "pushed the record on attempt $attempt" >&2; exit 0
             fi

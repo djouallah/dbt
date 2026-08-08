@@ -10,12 +10,16 @@ timings.** No table is built, no Delta log is read, no layout statistic is re-de
 slower reader of the same files. The only endpoints this touches are the Fabric control plane (to
 deploy) and XMLA (to query).
 
-**A human starts every run, and nothing gates on it.** `workflow_dispatch` on *Direct Lake benchmark*
-([benchmark.yml](../.github/workflows/benchmark.yml)), plus `workflow_call` so
-[all.yml](../.github/workflows/all.yml) can run it as the second stage of one dispatch —
-build → benchmark → lag → measure. Never `schedule`, `push`, `workflow_run` or `repository_dispatch`:
-the query passes are interactive CU on shared capacity, and a run nobody chose to start is the one a
-capacity admin asks about. `all.yml` is itself dispatch-only, so that condition still holds.
+**A nightly plus `workflow_dispatch`, on *Benchmark*
+([benchmark.yml](../.github/workflows/benchmark.yml)) — the same workflow that builds the tables.**
+`cron: "17 7 * * *"` is 02:17 EST / 03:17 EDT, US Eastern asleep either side of the DST boundary,
+which is the point: the query passes are interactive CU on shared capacity and should not land while
+anyone is using it. This reverses a rule that said a human starts every run; what that rule protected
+is unchanged and now accepted rather than avoided, and the cron is one line to remove.
+**`push`, `workflow_run` and `repository_dispatch` are still never used** — that workflow commits the
+run record, so a push trigger would let its own commit start the next paid build.
+⚠️ A scheduled event supplies NO inputs (dispatch defaults do not apply to `schedule`), so every
+input there carries its own scheduled value; see the header of `benchmark.yml` before adding one.
 
 **The timings are not what the published page reports.** `cu/` measures what the querying *cost* in
 capacity units, and reads none of this directory's output — the engines are all fast, so the CU is

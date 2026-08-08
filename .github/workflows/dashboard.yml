@@ -13,7 +13,7 @@ name: Dashboard
 # there is nothing left for this workflow to do about data. It used to hold the measurement too,
 # which meant refreshing a number dragged a Pages deploy behind it.
 #
-#   Benchmark        builds, benchmarks, tears down, commits the run record   dispatch only
+#   Benchmark        builds, benchmarks, tears down, commits the run record   nightly cron · dispatch
 #   Capacity units   reads the metrics model, commits history/cu.json         schedule · dispatch · after Benchmark
 #   Dashboard        this — builds and deploys the page                       push to dashboard/ · dispatch
 #
