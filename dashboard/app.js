@@ -603,7 +603,7 @@ export function sameGeneration(runs, table = DEFAULTS.table) {
 export function layoutKey(rec, table = DEFAULTS.table) {
   const d = martStats(rec, table);
   if (d.num_row_groups === undefined || d.num_row_groups === null) return null;
-  return [Boolean(d.vorder), layoutBand(d.num_row_groups), sortKeyOf(rec, table), rec.engine];
+  return [vorderOf(rec, table), layoutBand(d.num_row_groups), sortKeyOf(rec, table), rec.engine];
 }
 
 /**
@@ -633,6 +633,35 @@ export function sortKeyOf(rec, table = DEFAULTS.table) {
   const dbt = ((rec || {}).dbt || {})[engine] || {};
   const key = (dbt.sort_by || {})[table] || (dbt.sort_by_auto || {})[table];
   return Array.isArray(key) && key.length ? key.join(",") : true;
+}
+
+/**
+ * Did this run's writer V-Order the parquet? `layout.ordering.<engine>.vorder_enabled` when the run
+ * recorded it, else the `vorder` detail column.
+ *
+ * **THE FALLBACK IS THE BLIND ONE, WHICH IS WHY IT IS THE FALLBACK.** `stats.<engine>.<table>.vorder`
+ * is the Delta table property `delta.parquet.vorder.enabled`, and `ordering.<engine>.vorder_files` was
+ * the Spark writer's per-file `add.tags.VORDER`. Both are Spark-shaped. Fabric's WAREHOUSE writer sets
+ * neither and V-Orders **by default** on every new warehouse — irreversible once disabled, and nothing
+ * in this repo disables it — so for years this page printed `·` for dwh and grouped its bars as
+ * un-V-Ordered against parquet that was V-Ordered throughout. Measured on runs 31148571096 and
+ * 31167379761: 0 of 77 and 0 of 78 mart files tagged with `unknown: 0`, i.e. a fully successful read
+ * of a log that carries no such marker.
+ *
+ * `vorder_enabled` is the authoritative reading, `sys.databases.is_vorder_enabled` off the warehouse
+ * itself (`.github/scripts/dwh_vorder.py`). A `false` there is a real claim — someone ran the `ALTER` —
+ * so it must win over the property, which is why the check is `typeof === "boolean"` and not a
+ * truthiness test: `vorder_enabled: false` beside `vorder: true` has to read `false`.
+ *
+ * The dwh records predating that read were BACKFILLED to `true` on the documented default, the same
+ * way the sort keys were backfilled from the model at each run's SHA. So an absent key today means a
+ * lakehouse engine, where the property and the tag are the right instruments.
+ */
+export function vorderOf(rec, table = DEFAULTS.table) {
+  const engine = (rec || {}).engine || "?";
+  const ord = (((rec || {}).layout || {}).ordering || {})[engine] || {};
+  if (typeof ord.vorder_enabled === "boolean") return ord.vorder_enabled;
+  return Boolean(martStats(rec, table).vorder);
 }
 
 /**
@@ -696,7 +725,7 @@ export function layoutLabel(members, table = DEFAULTS.table) {
       : `${fmt(vals[0], 0)}–${fmt(vals[vals.length - 1], 0)}`;
   };
   const bits = [];
-  if (stats.some((s) => s.vorder)) bits.push("V-Order");
+  if (members.some(({ rec }) => vorderOf(rec, table))) bits.push("V-Order");
   // One value per bar when grouping came through `layoutKey` (the sort key is IN the key); the
   // dedup only matters for the unmeasured-column fallback, where members are grouped by column.
   // STRINGS ONLY — `true` means the run sorted by something it did not write down, and the label
@@ -1541,13 +1570,17 @@ function uniqueName(rows, p) {
 }
 
 /**
- * `queried over 1 fact (144.0M), 2 dimensions (3.9K), 4 staging (375.4M) and a log (8.2K)` — what
- * the milliseconds on these axes were spent on.
+ * `queried over 1 fact (144.0M) and 2 dimensions (3.9K)` — what the milliseconds on these axes
+ * were spent on.
  *
- * **The same `tableShape` the lede uses, not a second description of the same thing.** The semantic
- * model carries every table `stats.py` reports on, and the suite has a query per raw table, so a
- * caption naming only the mart fact would understate the workload by 375M rows — `raw_scada_mw`
- * over 370M-row `fct_scada` is the single heaviest measurement in it.
+ * **THE MART, and nothing else.** The semantic model does carry the landing tables and the suite
+ * does run a query per raw table, but this chart is about `fct_summary`: the layouts it groups, the
+ * row-group size it sizes its dots by and the sort key it captions are all properties of the mart
+ * table alone. Naming the staging tables here made the caption describe a workload the grouping
+ * does not distinguish — every layout on the plot reads the identical landing parquet.
+ *
+ * Uses the same `tableShape` the lede does, over the mart's own tables, rather than a second
+ * description of the same thing.
  *
  * DERIVED from the plotted runs' own records, never a constant: a hardcoded `144M` is right until
  * the archive grows and then goes stale silently, which is the failure this repo is built against.
@@ -1561,8 +1594,8 @@ function modelNote(pts, table = DEFAULTS.table) {
   const recs = (pts || []).flatMap((p) => (p.members || []).map(({ rec }) => rec));
   for (let i = recs.length - 1; i >= 0; i--) {
     const rec = recs[i] || {};
-    const shape = tableShape(tableNames(rec), table,
-      ((rec.layout || {}).stats || {})[rec.engine] || null);
+    const mart = tableNames(rec).filter((t) => t === table || t.startsWith("dim_"));
+    const shape = tableShape(mart, table, ((rec.layout || {}).stats || {})[rec.engine] || null);
     if (shape) return `queried over ${shape}`;
   }
   return "";
@@ -1616,7 +1649,7 @@ export function keyCells(members, table = DEFAULTS.table) {
   const sorts = [...new Set((members || []).map(({ rec }) => sortKeyOf(rec, table))
     .filter((s) => typeof s === "string"))];
   const bits = [];
-  if (stats.some((s) => s.vorder)) bits.push("V-Order");
+  if ((members || []).some(({ rec }) => vorderOf(rec, table))) bits.push("V-Order");
   if (sorts.length) bits.push(sorts.join(" / ").split(",").join(", "));
   // Sorted by something the record does not name — say that, never invent a key.
   else if ((members || []).some(({ rec }) => sortKeyOf(rec, table) === true)) bits.push("sorted");
@@ -2242,7 +2275,10 @@ export function renderLayouts(cols, groups, times, counts, martTable = DEFAULTS.
       ? martPoints(groups, times)
         .map((p) => ({ ...p, d: (((p.rec.layout || {}).stats || {})[p.rec.engine] || {})[t] }))
         .filter(({ d }) => d)
-      : order.map((n) => ({ name: n, d: (stats[members.get(n)[0].col] || {})[t], ms: {} }))
+      // `rec` rides along so the V-Order cell can prefer the authoritative flag over the blind
+      // `vorder` property — see `vorderOf`. The first member's record, matching the `d` beside it.
+      : order.map((n) => ({ name: n, d: (stats[members.get(n)[0].col] || {})[t], ms: {},
+        rec: members.get(n)[0].rec }))
         .filter(({ d }) => d);
     if (!present.length) continue;
     if (byLayout) {
@@ -2273,11 +2309,13 @@ export function renderLayouts(cols, groups, times, counts, martTable = DEFAULTS.
     // rather than one layout. What is left here is what `stats.py` read off the Delta log.
     const header = ["layout", ...colsHere.map(([, h]) => h), "V-Order"];
     const align = ["left", ...colsHere.map(() => "right"), "left"];
-    const body = present.map(({ name, d }) => [
+    const body = present.map(({ name, d, rec }) => [
       name,
       ...colsHere.map(([k, , dp]) => (d[k] === undefined || d[k] === null ? DASH
         : dp < 0 ? compact(d[k]) : fmt(d[k], dp))),
-      d.vorder ? "**yes**" : "·",
+      // `vorderOf`, not `d.vorder`: the property is blind to a Warehouse, which is why this column
+      // read `·` for dwh on parquet that was V-Ordered throughout.
+      vorderOf(rec, t) ? "**yes**" : "·",
     ]);
     blocks.push({ name: t,
       html: `<h4>${inline(head)}</h4>\n` + table(header, align, body, { sort: true }) });

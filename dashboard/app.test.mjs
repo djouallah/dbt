@@ -79,7 +79,8 @@ const ago = (hours) => new Date(Date.now() - hours * 3600 * 1000).toISOString();
 const gone = (role, name) => ({ role, name, deleted: ago(1) });
 
 function rec(file, engine, items, opts = {}) {
-  const { config, stats, tables, landing, full_load = true, finishedHoursAgo = 48 } = opts;
+  const { config, stats, tables, landing, ordering,
+    full_load = true, finishedHoursAgo = 48 } = opts;
   const r = {
     _file: file, schema: 1, engine, full_load,
     run: {
@@ -90,6 +91,9 @@ function rec(file, engine, items, opts = {}) {
     layout: { config: config || {}, stats: stats || {}, tables: tables || [] },
   };
   if (landing) r.layout.landing = landing;
+  // Absent unless a test asks for it, matching stats.py: an empty `ordering` would read as "nothing
+  // was measured about the row order", which is a claim rather than the silence of an older record.
+  if (ordering) r.layout.ordering = ordering;
   return r;
 }
 
@@ -449,6 +453,35 @@ test("the caption says which columns a sorted bar is ordered by, row groups only
   assert.equal(d.layoutLabel([{ rec: lay("duckrun", 4, 27, { cfg: { vcores: "64" } }) }]), "27 RG");
   const vo = lay("spark", 11, 11, { vorder: true, cfg: { resource_profile: "readHeavyForPBI" } });
   assert.equal(d.layoutLabel([{ rec: vo }]), "V-Order · 11 RG");
+});
+
+test("a warehouse's V-Order comes off `vorder_enabled`, because the property cannot see it", () => {
+  // THE BUG THIS FIXES, and it ran for every dwh record ever measured. Both of stats.py's V-Order
+  // signals are Spark-shaped — `vorder` is the `TBLPROPERTIES` key `delta.parquet.vorder.enabled` and
+  // `vorder_files` was the Spark writer's per-file `add.tags.VORDER`. Fabric's WAREHOUSE writer sets
+  // neither and V-Orders by default (irreversible once off, and nothing in this repo turns it off),
+  // so the page printed `·` and banded dwh's bars as un-V-Ordered against V-Ordered parquet.
+  const dwh = lay("dwh", 77, 77, { ordering: { dwh: { vorder_enabled: true } } });
+  assert.equal(d.vorderOf(dwh), true, "the authoritative flag wins over a `vorder: false` property");
+  assert.equal(d.layoutLabel([{ rec: dwh }]), "V-Order · 77 RG");
+  assert.equal(d.keyCells([{ rec: dwh }]).ordering, "V-Order");
+  assert.equal(d.layoutKey(dwh)[0], true, "and it is what bands the bar");
+
+  // A REAL `false` MUST BEAT A `true` PROPERTY — someone ran the irreversible ALTER, and that is a
+  // measurement, not an absence. Hence `typeof === "boolean"` rather than a truthiness test.
+  const off = lay("dwh", 77, 77, { vorder: true, ordering: { dwh: { vorder_enabled: false } } });
+  assert.equal(d.vorderOf(off), false);
+  assert.equal(d.layoutKey(off)[0], false);
+
+  // No key at all is a LAKEHOUSE engine, where the property and the tag are the right instruments —
+  // so the fallback has to stay, and must not throw on a record with no ordering block.
+  assert.equal(d.vorderOf(lay("spark", 11, 11, { vorder: true })), true);
+  assert.equal(d.vorderOf(lay("duckrun", 1, 9)), false);
+  assert.equal(d.vorderOf(undefined), false);
+
+  // Two dwh runs, one V-Ordered and one not, must not share a bar — the whole point of the key.
+  assert.notDeepEqual(d.layoutKey(dwh), d.layoutKey(off));
+  assert.equal(d.layoutKey(dwh)[1], d.layoutKey(off)[1], "same RG band, on purpose");
 });
 
 test("a non-default write geometry gets its own column, and the tag says so", () => {
@@ -3008,12 +3041,11 @@ test("the scatter says what was queried, and derives it from the record", () => 
   for (const svg of [d.scatterFit(pts), d.scatterTiers(pts)]) {
     const note = /<span class="chart-note">([^<]*)<\/span>/.exec(svg);
     assert.ok(note, "both scatters carry it — they are the two that leave the page");
-    assert.ok(/^queried over 1 fact \(144\.0M\)/.test(note[1]), note[1]);
-    assert.ok(note[1].includes("2 dimensions (3.9K)"), note[1]);
-    // THE RAW TABLES ARE IN IT, and that is not padding: the suite runs a query per landing table
-    // and `raw_scada_mw` over 370M-row fct_scada is its single heaviest measurement, so a note
-    // naming only the mart fact would understate the workload by 370M rows.
-    assert.ok(/1 staging \(370\.0M\)/.test(note[1]), note[1]);
+    assert.equal(note[1], "queried over 1 fact (144.0M) and 2 dimensions (3.9K)");
+    // THE MART, AND NOTHING ELSE. The model carries the landing tables and the suite queries them,
+    // but this chart groups, sizes and captions on fct_summary alone — every layout on the plot
+    // reads the identical landing parquet, so naming it described a difference that is not there.
+    assert.ok(!/staging|log/.test(note[1]), note[1]);
   }
   assert.equal(/<span class="chart-note">/.test(d.scatterSvg("T", "S",
     [{ x: 1, y: 1, label: "a" }, { x: 2, y: 2, label: "b" }])), false,
