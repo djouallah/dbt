@@ -2864,3 +2864,158 @@ test("slot 6 is the neutral Other, not a sixth hue", () => {
   assert.deepEqual(Object.values(d.WRITER_HUE).sort((a, b) => a - b), [1, 2, 3, 4, 5, 6],
     "one slot per writer, fixed and never cycled");
 });
+
+// ----------------------------------------------------------------- saving a chart as an image
+//
+// The browser half of this — `getComputedStyle`, `<img>`, canvas — cannot run here, and the parts
+// that CAN are the parts that were wrong: an unescaped font stack made the exported document
+// unparseable, and an unparseable SVG does not raise, it just silently fails to load and the export
+// falls back to writing SVG. So the string layer is pinned hard and the DOM layer only has to be
+// reached.
+
+test("a chart's file is named after the chart, so two never overwrite each other", () => {
+  assert.equal(d.chartFilename("CU against cold query time"), "cu-against-cold-query-time.png");
+  assert.equal(d.chartFilename("Cold against warm"), "cold-against-warm.png");
+  assert.equal(d.chartFilename("Cold against warm", "svg"), "cold-against-warm.svg");
+  assert.equal(d.chartFilename("  —  "), "chart.png", "a title of punctuation still names a file");
+  assert.equal(d.chartFilename(""), "chart.png");
+});
+
+test("the caption wraps on words and never inside one", () => {
+  assert.deepEqual(d.wrapText("one dot per layout", 12), ["one dot per", "layout"]);
+  assert.deepEqual(d.wrapText("", 20), []);
+  assert.deepEqual(d.wrapText("supercalifragilistic", 8), ["supercalifragilistic"],
+    "a word longer than the line is not broken");
+});
+
+test("a transparent page background is not carried into the image", () => {
+  // `getComputedStyle(body).backgroundColor` reads `rgba(0, 0, 0, 0)` whenever the page paints its
+  // background elsewhere, and a transparent PNG renders BLACK in a dark chat window — the one place
+  // these get pasted.
+  assert.equal(d.opaque("rgba(0, 0, 0, 0)"), "");
+  assert.equal(d.opaque("transparent"), "");
+  assert.equal(d.opaque(""), "");
+  assert.equal(d.opaque("rgb(255, 255, 255)"), "rgb(255, 255, 255)");
+  assert.equal(d.opaque("rgba(20, 20, 24, 1)"), "rgba(20, 20, 24, 1)");
+});
+
+test("a quoted font stack does not blow the exported document apart", () => {
+  // THE BUG THIS EXISTS FOR: `getComputedStyle` reports the family list WITH its quotes, so writing
+  // it raw produced a font-family attribute closed by its own value — not well-formed, so the
+  // `<img>` fired `error`, the canvas stayed blank and every save silently degraded to SVG. Found
+  // by rendering the file, not by reading the code.
+  const svg = d.wrapSvg("<circle/>", { title: "T", font: '"Segoe UI", system-ui' });
+  assert.ok(!/font-family=""/.test(svg), "the attribute is not closed by its own value");
+  assert.ok(svg.includes("&quot;Segoe UI&quot;"));
+  assert.ok(!/=""[A-Za-z]/.test(svg), "and nothing else opens a bare attribute either");
+});
+
+test("the exported document is a caption above the plot, and the plot is not rescaled", () => {
+  const svg = d.wrapSvg('<circle cx="1" cy="2"/>', {
+    width: 920, plotHeight: 610, title: "CU against cold query time",
+    subtitle: "one dot per layout", note: "queried over 1 fact (144.0M)",
+    bg: "#fff", fg: "#111", dim: "#666", font: "sans-serif",
+  });
+  const dims = /width="(\d+)" height="(\d+)"/.exec(svg);
+  // 16 units of bleed EACH SIDE, and the plot is offset by exactly that — the page grants the chart
+  // `overflow: visible`, a standalone file grants it nothing, and the last x tick is anchored
+  // `middle` on the axis end, so half of `50,000` fell outside and was clipped away.
+  const g = /<g transform="translate\(16 (\d+)\)">/.exec(svg);
+  assert.equal(Number(dims[1]), 920 + 32, "the plot's own width plus the bleed, never rescaled");
+  assert.ok(g, "the plot is pushed down and across rather than redrawn");
+  assert.equal(Number(dims[2]), Number(g[1]) + 610 + 9, "height is caption + plot, exactly");
+  // All three caption lines reach the file — this is the whole reason the export is not just the
+  // `<svg>`: the title, the subtitle and the model-shape note are HTML siblings of it.
+  for (const t of ["CU against cold query time", "one dot per layout", "queried over 1 fact"]) {
+    assert.ok(svg.includes(t), `the image carries "${t}"`);
+  }
+  assert.ok(/<rect x="0" y="0"[^>]*fill="#fff"/.test(svg), "on an opaque background");
+  assert.ok(svg.startsWith('<svg xmlns="http://www.w3.org/2000/svg"'), "namespaced, so it renders");
+});
+
+test("paint is inlined, defaults are not, and type properties stay on text", () => {
+  // A node's computed style has EVERY property, so copying the type ones onto four hundred circles
+  // tripled the file for nothing — and the file travels as a `data:` URL.
+  const node = (tag) => ({
+    tagName: tag, attrs: {}, querySelectorAll: () => [],
+    setAttribute(k, v) { this.attrs[k] = v; }, removeAttribute(k) { delete this.attrs[k]; },
+  });
+  const style = {
+    fill: "rgb(0, 114, 178)", stroke: "none", opacity: "1",
+    "font-family": "sans-serif", "text-anchor": "end",
+  };
+  const styleOf = () => ({ getPropertyValue: (p) => style[p] || "" });
+  const circle = node("circle"), text = node("text");
+  circle.attrs.class = "dot c1"; text.attrs.class = "bar-caption";
+  d.inlinePaint(node("circle"), circle, styleOf);
+  d.inlinePaint(node("text"), text, styleOf);
+  assert.ok(circle.attrs.style.includes("fill:rgb(0, 114, 178)"));
+  assert.ok(!circle.attrs.style.includes("font-family"), "a circle has no type");
+  assert.ok(!circle.attrs.style.includes("stroke:none"), "and a default is not written back");
+  assert.ok(!circle.attrs.style.includes("opacity:1"));
+  assert.ok(text.attrs.style.includes("font-family:sans-serif")
+    && text.attrs.style.includes("text-anchor:end"), "text keeps both");
+  assert.ok(!("class" in circle.attrs) && !("class" in text.attrs),
+    "the class goes: it names rules the exported file will not have");
+});
+
+test("every chart gets a save button, and nothing that is not a chart does", () => {
+  const doc = { createElement: (t) => new El(t) };
+  const root = new El("div");
+  const chart = (withSvg) => {
+    const fig = new El("figure");
+    fig.className = "chart";
+    const cap = new El("figcaption");
+    const title = new El("span");
+    title.className = "chart-title";
+    title.textContent = "Cold against warm";
+    cap.appendChild(title);
+    fig.appendChild(cap);
+    if (withSvg) fig.appendChild(new El("svg"));
+    return fig;
+  };
+  root.appendChild(chart(true));
+  root.appendChild(chart(true));
+  root.appendChild(chart(false));            // a caption with no plot is not a chart
+  const win = { getComputedStyle: () => ({ getPropertyValue: () => "" }), document: doc };
+  assert.equal(d.wireCharts(root, doc, win), 2);
+  const btns = root.querySelectorAll(".savebtn");
+  assert.equal(btns.length, 2);
+  assert.equal(btns[0].textContent, "save PNG");
+  assert.equal(btns[0].attrs["aria-label"], "save this chart as a PNG image");
+  assert.equal(d.wireCharts(null, doc, win), 0, "nothing to wire is not an error");
+});
+
+test("the scatter says what was queried, and derives it from the record", () => {
+  // A hardcoded 144M is right until the archive grows and then goes stale SILENTLY — the exact
+  // failure this repo is built against. It comes off the plotted runs' own stats.
+  const rec = lay("duckrun", 4, 24, {
+    file: "a.json",
+    tables: ["fct_summary", "dim_duid", "dim_calendar", "fct_scada", "stg_csv_archive_log"],
+  });
+  const stats = rec.layout.stats.duckrun;
+  stats.dim_duid = { total_rows: 689, schema: "mart" };
+  stats.dim_calendar = { total_rows: 3197, schema: "mart" };
+  stats.fct_scada = { total_rows: 370021502, schema: "landing" };
+  stats.stg_csv_archive_log = { total_rows: 8167, schema: "landing" };
+  const pts = [
+    { name: "delta_rs", n: 1, cu: 1500, ms: { cold: 25000, warm: 4500 }, members: [{ rec }] },
+    {
+      name: "dwh", n: 1, cu: 2000, ms: { cold: 33767, warm: 4330 },
+      members: [{ rec: lay("dwh", 78, 90, { file: "b.json" }) }],
+    },
+  ];
+  for (const svg of [d.scatterFit(pts), d.scatterTiers(pts)]) {
+    const note = /<span class="chart-note">([^<]*)<\/span>/.exec(svg);
+    assert.ok(note, "both scatters carry it — they are the two that leave the page");
+    assert.ok(/^queried over 1 fact \(144\.0M\)/.test(note[1]), note[1]);
+    assert.ok(note[1].includes("2 dimensions (3.9K)"), note[1]);
+    // THE RAW TABLES ARE IN IT, and that is not padding: the suite runs a query per landing table
+    // and `raw_scada_mw` over 370M-row fct_scada is its single heaviest measurement, so a note
+    // naming only the mart fact would understate the workload by 370M rows.
+    assert.ok(/1 staging \(370\.0M\)/.test(note[1]), note[1]);
+  }
+  assert.equal(/<span class="chart-note">/.test(d.scatterSvg("T", "S",
+    [{ x: 1, y: 1, label: "a" }, { x: 2, y: 2, label: "b" }])), false,
+  "and no empty note element when there is nothing to say");
+});

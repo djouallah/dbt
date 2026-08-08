@@ -260,6 +260,15 @@ figure.chart figcaption { display:flex; flex-wrap:wrap; align-items:baseline; ga
   margin-bottom:.35rem; }
 .chart-title { font-weight:600; font-size:.95rem; }
 .chart-sub { color:var(--dim); font-size:.78rem; }
+/* WHAT WAS QUERIED. Its own span rather than more `.chart-sub` text, so it breaks onto its own line
+   when the caption wraps and so `figureSvg` can put it on a line of its own in the saved image. */
+.chart-note { color:var(--dim); font-size:.78rem; flex-basis:100%; order:2; }
+/* SAVE THE CHART AS AN IMAGE. Hard right on the caption's FIRST line, the same place the row count
+   sits on a filter bar — a control, not part of the title. `order` rather than markup position: the
+   button is appended last so the caption stays a pure string function, and the note claims a whole
+   row, so without it the control would land underneath. It wears the `copy` button's chrome because
+   it is the same kind of thing: take this away with you. */
+.savebtn { margin-left:auto; order:1; }
 figure.chart svg { max-width:100%; height:auto; display:block; overflow:visible; }
 .bar { fill:var(--series); }
 /* A 2px ring in the SURFACE colour, so two dots that overlap still read as two. */

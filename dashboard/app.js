@@ -812,6 +812,11 @@ export function esc(s) {
   return String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 }
 
+/** `esc` plus the double quote — for a value going into a double-quoted ATTRIBUTE rather than into
+ *  text. `getComputedStyle` reports a font stack as `"Segoe UI", system-ui`, quotes included, and
+ *  `esc` alone let those close the attribute and make the whole document unparseable. */
+export const escAttr = (s) => esc(s).replace(/"/g, "&quot;");
+
 /**
  * `**bold**`, `` `code` ``, `[text](url)`, `<br>`, `<sub>`, and nothing else. Escaped first, so a
  * stray `<` in an item name cannot inject markup.
@@ -1136,7 +1141,7 @@ function legendOf(rows) {
 }
 
 export function scatterSvg(title, subtitle, pts, xLabel = "cold ms", legend = "",
-  fmtC = (v) => fmt(v, 1), yLabel = "CU") {
+  fmtC = (v) => fmt(v, 1), yLabel = "CU", note = "") {
   const rows = (pts || []).filter((p) => Number.isFinite(Number(p.x)) && Number(p.x) > 0
     && Number.isFinite(Number(p.y)) && Number(p.y) > 0);
   if (rows.length < 2) return "";
@@ -1166,7 +1171,12 @@ export function scatterSvg(title, subtitle, pts, xLabel = "cold ms", legend = ""
   const out = [
     '<figure class="chart wide">' +
     `<figcaption><span class="chart-title">${esc(title)}</span>` +
-    `<span class="chart-sub">${esc(subtitle)}</span></figcaption>`,
+    `<span class="chart-sub">${esc(subtitle)}</span>` +
+    // WHAT WAS QUERIED, on the figure rather than only in the lede — and it is here because the
+    // chart LEAVES THE PAGE. `save PNG` writes a standalone image carrying this figcaption and
+    // nothing else, so a scatter of milliseconds and CU with no statement of scale is a number
+    // pasted into a deck with its subject left behind on a web page nobody opened.
+    (note ? `<span class="chart-note">${esc(note)}</span>` : "") + "</figcaption>",
     `<svg viewBox="0 0 ${W} ${H}" width="100%" height="${H}" role="img" ` +
     `aria-label="${esc(title)}">`,
   ];
@@ -1530,6 +1540,34 @@ function uniqueName(rows, p) {
   return rows.filter((q) => q.name === p.name).length === 1 ? p.name : "";
 }
 
+/**
+ * `queried over 1 fact (144.0M), 2 dimensions (3.9K), 4 staging (375.4M) and a log (8.2K)` — what
+ * the milliseconds on these axes were spent on.
+ *
+ * **The same `tableShape` the lede uses, not a second description of the same thing.** The semantic
+ * model carries every table `stats.py` reports on, and the suite has a query per raw table, so a
+ * caption naming only the mart fact would understate the workload by 375M rows — `raw_scada_mw`
+ * over 370M-row `fct_scada` is the single heaviest measurement in it.
+ *
+ * DERIVED from the plotted runs' own records, never a constant: a hardcoded `144M` is right until
+ * the archive grows and then goes stale silently, which is the failure this repo is built against.
+ * The generation filter has already dropped every run disagreeing about the row count, so any
+ * record here would answer the same — it takes the LAST that can answer at all, and keeps looking
+ * rather than going quiet when one recorded a short table list. `tableShape` returns `""` for a
+ * single-table record, and a chart losing its subject because the last dot happened to be a thin
+ * record is a silent failure of exactly the kind this note is here to prevent.
+ */
+function modelNote(pts, table = DEFAULTS.table) {
+  const recs = (pts || []).flatMap((p) => (p.members || []).map(({ rec }) => rec));
+  for (let i = recs.length - 1; i >= 0; i--) {
+    const rec = recs[i] || {};
+    const shape = tableShape(tableNames(rec), table,
+      ((rec.layout || {}).stats || {})[rec.engine] || null);
+    if (shape) return `queried over ${shape}`;
+  }
+  return "";
+}
+
 export function scatterFit(pts) {
   const { rows, cut } = plotted(pts, (p) => p.ms && p.ms.cold);
   return scatterSvg("CU against cold query time",
@@ -1537,7 +1575,7 @@ export function scatterFit(pts) {
     rows.map((p) => ({
       x: p.ms.cold, y: p.cu, label: p.name, id: uniqueName(rows, p), n: p.n,
       sub: keyCells(p.members).rgSize, hue: WRITER_HUE[p.name] || 1, c: martSize(p.members),
-    })), "cold ms", "row group size", (v) => `${fmt(v / 1e6, 1)}M`);
+    })), "cold ms", "row group size", (v) => `${fmt(v / 1e6, 1)}M`, "CU", modelNote(rows));
 }
 
 /**
@@ -1560,7 +1598,7 @@ export function scatterTiers(pts) {
     rows.map((p) => ({
       x: p.ms.cold, y: p.ms.warm, label: p.name, id: uniqueName(rows, p), n: p.n,
       sub: keyCells(p.members).rgSize, hue: WRITER_HUE[p.name] || 1, c: martSize(p.members),
-    })), "cold ms", "row group size", (v) => `${fmt(v / 1e6, 1)}M`, "warm ms");
+    })), "cold ms", "row group size", (v) => `${fmt(v / 1e6, 1)}M`, "warm ms", modelNote(rows));
 }
 
 /** A group's rows-per-row-group as a NUMBER — the median across its members, for the colour ramp. */
@@ -3304,6 +3342,274 @@ function copyButton(d, heads, all) {
   return btn;
 }
 
+// ------------------------------------------------------------------ saving a chart as an image
+//
+// A chart on this page is inline SVG styled by the page's own stylesheet, so "download it" is not
+// one step: a naked `<svg>` saved to disk loses every rule in `index.html` and renders as black
+// shapes on nothing, and it loses its figcaption entirely, because the title, the subtitle and the
+// model-shape note are HTML siblings of the SVG rather than part of it.
+//
+// So the export REBUILDS the figure as one standalone document — computed paint copied onto every
+// node, the caption redrawn as `<text>` above the plot, a solid background under it — and then
+// rasterises that. Nothing is fetched and no library is loaded; the page's no-CDN, no-bundler rule
+// holds here as everywhere else.
+//
+// PNG rather than SVG because the destination is a deck, a doc or a chat message, all of which take
+// a bitmap and only some of which take vector. The SVG is still what gets written when the canvas
+// path is unavailable — an image with the wrong file extension is recoverable, no download is not.
+
+/** A slug for the saved file — the chart's own title, so two charts never overwrite each other. */
+export function chartFilename(title, ext = "png") {
+  const slug = String(title || "chart").toLowerCase().replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "") || "chart";
+  return `${slug}.${ext}`;
+}
+
+/**
+ * Greedy word wrap to `max` characters, never breaking a word.
+ *
+ * SVG `<text>` does not wrap, so the caption has to be broken into lines here. Characters rather
+ * than measured advance: the alternative is a hidden measuring node, and these are three lines of
+ * one known font at two known sizes — an estimate that errs long simply leaves whitespace.
+ */
+export function wrapText(text, max) {
+  const words = String(text || "").split(/\s+/).filter(Boolean);
+  if (!words.length) return [];
+  const lines = [words[0]];
+  for (const w of words.slice(1)) {
+    const at = lines.length - 1;
+    if (lines[at].length + 1 + w.length <= max) lines[at] += ` ${w}`;
+    else lines.push(w);
+  }
+  return lines;
+}
+
+// The paint the page's stylesheet supplies and a standalone file would otherwise lose. Copied per
+// node from the COMPUTED style, so `var(--cat3)` and a `@media (prefers-color-scheme)` override
+// both arrive already resolved and the image matches the theme the reader is actually looking at.
+//
+// SPLIT BY WHAT THE ELEMENT IS, and that is a size decision rather than a correctness one: every
+// node has a computed `font-family`, so copying the type properties onto 400 circles and lines put
+// ~100 wasted bytes on each. The image travels as a `data:` URL, and a URL is not a place to be
+// casual about length.
+const SVG_PAINT = ["fill", "stroke", "stroke-width", "stroke-dasharray", "stroke-linecap",
+  "opacity", "fill-opacity", "stroke-opacity"];
+const SVG_TYPE = ["font-family", "font-size", "font-weight", "font-style", "letter-spacing",
+  "text-anchor", "dominant-baseline"];
+// The value each property has when nobody set it. Writing these back is a no-op that costs bytes —
+// and `stroke:none` in particular arrived on every `<text>` in the chart.
+const SVG_DEFAULT = {
+  stroke: "none", "stroke-dasharray": "none", "stroke-linecap": "butt", opacity: "1",
+  "fill-opacity": "1", "stroke-opacity": "1", "font-style": "normal", "letter-spacing": "normal",
+  "text-anchor": "start", "dominant-baseline": "auto",
+};
+
+/**
+ * Copy resolved paint from every node of `live` onto the matching node of `clone`.
+ *
+ * The two trees are walked in parallel by INDEX, which is safe because `clone` is a deep copy of
+ * `live` and neither is mutated structurally between the two queries. Styles are read from the live
+ * tree and written to the clone, so the page on screen is never touched.
+ *
+ * The class attribute goes: it names rules that will not exist in the exported file, and leaving it
+ * on invites the next reader to think the export still depends on the stylesheet.
+ */
+export function inlinePaint(live, clone, styleOf) {
+  const a = [live, ...live.querySelectorAll("*")];
+  const b = [clone, ...clone.querySelectorAll("*")];
+  const n = Math.min(a.length, b.length);
+  for (let i = 0; i < n; i++) {
+    const cs = styleOf(a[i]);
+    if (!cs) continue;
+    const tag = String(a[i].tagName || "").toLowerCase();
+    const props = tag === "text" || tag === "tspan"
+      ? [...SVG_PAINT, ...SVG_TYPE] : SVG_PAINT;
+    const decl = [];
+    for (const prop of props) {
+      const v = cs.getPropertyValue ? cs.getPropertyValue(prop) : cs[prop];
+      if (v === undefined || v === null || v === "" || v === SVG_DEFAULT[prop]) continue;
+      // `stroke-width` is meaningless without a stroke, and every text node carries one.
+      if (prop === "stroke-width" && decl.every((s) => !s.startsWith("stroke:"))) continue;
+      decl.push(`${prop}:${v}`);
+    }
+    if (decl.length) b[i].setAttribute("style", decl.join(";"));
+    if (b[i].removeAttribute) b[i].removeAttribute("class");
+  }
+  return n;
+}
+
+/**
+ * One standalone SVG document: a background, the figcaption redrawn as text, then the plot.
+ *
+ * A pure string function taking the plot's already-style-inlined markup, so everything about the
+ * layout of the exported image is testable with no DOM at all. The plot keeps its own coordinate
+ * system and is simply pushed down by the caption's height — nothing about the chart is rescaled,
+ * so a dot in the image sits where it sits on the page.
+ */
+export function wrapSvg(inner, opts = {}) {
+  const PW0 = Number(opts.width) || 920, PW = Number(opts.plotHeight) || 610;
+  // BLEED, because the page grants the chart `overflow: visible` and a standalone file grants it
+  // nothing. The last x tick is `text-anchor="middle"` on the axis end, so half its glyphs sit
+  // outside the viewBox — on the page they simply paint, in the export they were CLIPPED, and
+  // `50,000` came out as `50,00`. Seen by rendering the file; a reader of the markup would not.
+  const BLEED = 16, W = PW0 + BLEED * 2;
+  // EVERY ONE OF THESE IS ESCAPED, and the font is why. `getComputedStyle` reports a family list as
+  // `"Segoe UI", system-ui, sans-serif` — with the double quotes IN IT — so writing it raw into a
+  // double-quoted attribute produced `font-family=""Segoe UI""`, which is not well-formed XML. An
+  // SVG that is not well-formed does not render at all: the `<img>` fires `error`, the canvas stays
+  // blank and the export silently fell back to saving the SVG. Caught by rendering it, not by
+  // reading it.
+  const bg = opaque(opts.bg) || "#ffffff", fg = opts.fg || "#111111";
+  const dim = opts.dim || "#666666", font = opts.font || "system-ui, sans-serif";
+  const PAD = 18, TITLE = 16, SUB = 12, LH = 17;
+  const wide = Math.floor((W - PAD * 2) / (SUB * 0.5));
+  const subs = [...wrapText(opts.subtitle, wide), ...wrapText(opts.note, wide)];
+  const title = String(opts.title || "");
+  let y = PAD + TITLE - 3;
+  const head = [];
+  if (title) {
+    head.push(`<text x="${PAD}" y="${y}" font-family="${escAttr(font)}" font-size="${TITLE}" ` +
+      `font-weight="600" fill="${escAttr(fg)}">${esc(title)}</text>`);
+    y += 20;
+  } else y += SUB - TITLE;
+  for (const line of subs) {
+    head.push(`<text x="${PAD}" y="${y}" font-family="${escAttr(font)}" font-size="${SUB}" ` +
+      `fill="${escAttr(dim)}">${esc(line)}</text>`);
+    y += LH;
+  }
+  const top = Math.round(y - LH + 20);            // last baseline, plus a gap before the plot
+  const H = top + PW + Math.round(PAD / 2);
+  return [`<svg xmlns="http://www.w3.org/2000/svg" width="${W}" height="${H}" ` +
+    `viewBox="0 0 ${W} ${H}">`,
+  `<rect x="0" y="0" width="${W}" height="${H}" fill="${escAttr(bg)}"/>`,
+  ...head,
+  `<g transform="translate(${BLEED} ${top})">${inner}</g>`, "</svg>"].join("\n");
+}
+
+/**
+ * A background colour that is actually a colour, or `""`.
+ *
+ * `getComputedStyle(body).backgroundColor` reads `rgba(0, 0, 0, 0)` whenever the page paints its
+ * background somewhere other than `body` — and a PNG saved on a transparent background looks
+ * black in every dark-themed chat window it gets pasted into, which is precisely where these go.
+ */
+export function opaque(colour) {
+  const c = String(colour || "").trim();
+  if (!c || c === "transparent") return "";
+  const m = /^rgba?\(([^)]*)\)$/i.exec(c);
+  if (m && Number(m[1].split(",")[3]) === 0) return "";
+  return c;
+}
+
+/** A standalone SVG string for one `figure.chart`, or `""` if it holds no chart. */
+export function figureSvg(fig, win) {
+  const svg = fig.querySelector && fig.querySelector("svg");
+  if (!svg || !win || !win.getComputedStyle) return "";
+  const clone = svg.cloneNode(true);
+  inlinePaint(svg, clone, (n) => win.getComputedStyle(n));
+  const vb = String(svg.getAttribute("viewBox") || "").trim().split(/\s+/).map(Number);
+  const text = (sel) => {
+    const el = fig.querySelector(sel);
+    return el ? String(el.textContent || "").trim() : "";
+  };
+  const body = win.getComputedStyle(fig);
+  const page = win.getComputedStyle(win.document.body);
+  return wrapSvg(clone.innerHTML, {
+    width: vb[2] || 920, plotHeight: vb[3] || 610,
+    title: text(".chart-title"), subtitle: text(".chart-sub"), note: text(".chart-note"),
+    bg: page.backgroundColor || "#ffffff", fg: body.color, dim: body.color,
+    font: body.fontFamily,
+  });
+}
+
+/** An SVG string as a `data:` URL — not a blob URL, because a blob-backed image taints the canvas
+ *  in some engines and a tainted canvas cannot be read back to a PNG. */
+export const svgDataUrl = (svg) =>
+  `data:image/svg+xml;charset=utf-8,${encodeURIComponent(svg)}`;
+
+/** Rasterise an SVG string to a PNG blob at `scale`, or `null` when the browser will not.
+ *  Never rejects: the caller is a click handler and its only job is to say whether it worked. */
+function rasterize(svg, w, h, scale, win) {
+  return new Promise((resolve) => {
+    const img = new win.Image();
+    img.onload = () => {
+      try {
+        const c = win.document.createElement("canvas");
+        c.width = Math.round(w * scale);
+        c.height = Math.round(h * scale);
+        const ctx = c.getContext && c.getContext("2d");
+        if (!ctx || !c.toBlob) return resolve(null);
+        ctx.drawImage(img, 0, 0, c.width, c.height);
+        return c.toBlob((b) => resolve(b || null), "image/png");
+      } catch { return resolve(null); }
+    };
+    img.onerror = () => resolve(null);
+    img.src = svgDataUrl(svg);
+  });
+}
+
+/** Hand a blob to the browser as a download. */
+export function saveBlob(blob, name, win) {
+  const d = win.document;
+  const url = win.URL.createObjectURL(blob);
+  const a = d.createElement("a");
+  a.href = url;
+  a.download = name;
+  a.style.display = "none";
+  d.body.appendChild(a);
+  a.click();
+  if (a.remove) a.remove();
+  if (win.setTimeout) win.setTimeout(() => win.URL.revokeObjectURL(url), 10000);
+}
+
+/**
+ * A `save PNG` button on every chart's figcaption.
+ *
+ * It reports back for the same reason `copy` does: canvas rasterisation of an SVG is refused
+ * outright by some privacy settings, and a control that silently does nothing is worse than none.
+ * On refusal it falls back to writing the SVG — same document, same caption, different container —
+ * and says `saved SVG` rather than claiming a PNG it did not produce.
+ */
+export function wireCharts(root, doc = null, win = null) {
+  const d = doc || (root && root.ownerDocument) || (typeof document === "undefined" ? null : document);
+  const w = win || (typeof window === "undefined" ? null : window);
+  if (!root || !d || !w || !root.querySelectorAll) return 0;
+  let wired = 0;
+  for (const fig of root.querySelectorAll(".chart")) {
+    const cap = fig.querySelector && fig.querySelector("figcaption");
+    if (!cap || !fig.querySelector("svg")) continue;
+    const btn = d.createElement("button");
+    btn.className = "copybtn savebtn";
+    btn.type = "button";
+    btn.textContent = "save PNG";
+    btn.setAttribute("aria-label", "save this chart as a PNG image");
+    let undo = null;
+    btn.addEventListener("click", () => {
+      const say = (msg) => {
+        btn.textContent = msg;
+        if (undo && typeof clearTimeout === "function") clearTimeout(undo);
+        if (typeof setTimeout === "function") {
+          undo = setTimeout(() => { btn.textContent = "save PNG"; }, 1800);
+        }
+      };
+      const title = (fig.querySelector(".chart-title") || {}).textContent || "chart";
+      const svg = figureSvg(fig, w);
+      if (!svg) return say("cannot save");
+      const m = /width="(\d+)" height="(\d+)"/.exec(svg) || [0, 920, 700];
+      // 2x, so the image is legible pasted into a deck at its natural size rather than a screenshot
+      // of a screenshot. Not devicePixelRatio: the file should not differ by which display saved it.
+      return rasterize(svg, Number(m[1]), Number(m[2]), 2, w).then((blob) => {
+        if (blob) { saveBlob(blob, chartFilename(title), w); return say("saved"); }
+        saveBlob(new w.Blob([svg], { type: "image/svg+xml" }), chartFilename(title, "svg"), w);
+        return say("saved SVG");
+      }).catch(() => say("cannot save"));
+    });
+    cap.appendChild(btn);
+    wired++;
+  }
+  return wired;
+}
+
 /** Clickable, keyboard-reachable column sort on one table — shared by the autofilter and the
  *  sort-only `.sortable` box. Click sorts ascending, a second click reverses, a caret marks the
  *  current column. Reordering is `appendChild` on the existing rows, so a filter's `display`
@@ -3357,6 +3663,7 @@ export async function boot(doc = document, loc = location) {
     const { html, skipped } = compose(records, ledger, opts);
     app.innerHTML = html;
     wireTables(app, doc);
+    wireCharts(app, doc);
     if (live) {
       say(inline(`Live — read from \`${opts.repo}@${opts.ref}\` at ` +
         `${new Date().toISOString().slice(0, 16).replace("T", " ")} UTC. ` +
