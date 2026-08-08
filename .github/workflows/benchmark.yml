@@ -62,8 +62,8 @@ on:
       engines:
         description: "engine — one per dispatch"
         type: choice
-        default: "dwh"
-        options: ["dwh", "duckrun", "iceberg", "spark"]
+        default: "duckrun"
+        options: ["duckrun", "dwh", "iceberg", "spark"]
       cores:
         description: "vCores (duckrun / iceberg only)"
         type: choice
