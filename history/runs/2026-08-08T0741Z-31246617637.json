@@ -1,0 +1,65 @@
+{
+ "engine": "dwh",
+ "full_load": true,
+ "inputs": {
+  "benchmark": "true",
+  "build": "true",
+  "cores": "8",
+  "download_limit": "200",
+  "file_size_mb": "1024",
+  "gap_seconds": "600",
+  "native_execution_engine": "true",
+  "row_group_size": "16000000",
+  "runs": "6",
+  "skip_download": "true",
+  "sort_by": "date,time,price",
+  "spark_resource_profile": "writeHeavy",
+  "think_seconds": "4"
+ },
+ "items": {
+  "4B507AF2-2A15-4270-A37B-CEFB7B758F47": {
+   "at": "2026-08-08T07:40:24+00:00",
+   "created": true,
+   "deleted": "2026-08-08T07:40:58+00:00",
+   "kind": "Warehouse",
+   "name": "dbt_dwh",
+   "role": "output"
+  },
+  "4FBE4130-1717-4FC9-A985-3FB7B4A13067": {
+   "at": "2026-08-08T07:39:35+00:00",
+   "created": false,
+   "kind": "Lakehouse",
+   "name": "dbt_landing",
+   "role": "landing"
+  },
+  "6C23854F-CF0F-460D-8AFB-01D9BEA9A92D": {
+   "at": "2026-08-08T07:40:04+00:00",
+   "created": false,
+   "kind": "Folder",
+   "name": "benchmark",
+   "role": "folder"
+  },
+  "A8CF6202-AE31-45E4-9CC8-7FFE463250C9": {
+   "at": "2026-08-08T07:39:37+00:00",
+   "created": false,
+   "kind": "Warehouse",
+   "name": "dbt_landing",
+   "role": "sql_endpoint"
+  },
+  "F50469D2-8347-4464-9EE8-97C768B4F355": {
+   "at": "2026-08-08T07:39:33+00:00",
+   "created": false,
+   "kind": "Folder",
+   "name": "landing",
+   "role": "folder"
+  }
+ },
+ "run": {
+  "finished": "2026-08-08T07:41:11+00:00",
+  "id": "31246617637",
+  "sha": "ce3ea687d3b2e49c5b726aafb78e2c6de29df7cd",
+  "started": "2026-08-08T07:38:34+00:00",
+  "url": "https://github.com/djouallah/fabric-dbt-benchmark/actions/runs/31246617637"
+ },
+ "schema": 1
+}
