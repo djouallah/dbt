@@ -201,13 +201,18 @@ without a build, a token or a dispatch.
   parquet looks like, and what querying it cost. *Table layout* is now physical layout alone and this
   is the other half. It has a title and no commentary. Built from the same `martPoints` as the chart
   and the layout rows, so all three quote the same median.
-  ⚠️ **`etl CU` IS COMPUTED BUT NOT PRINTED — `SHOW_ETL` is `false`.** 7 of 17 layout groups have
-  never been built at `ETL_VCORES`, and a column that is more dash than number reads as "the build
-  was free" rather than "nobody measured it at that size". It comes back when those seven dispatches
-  are done; [TODO.md](../TODO.md) lists them with the cost. Hidden rather than deleted on purpose:
-  `martPoints` still computes it, the filter still applies and the tests still pin both, so turning
-  it on is one constant and nothing has to be reconstructed. The rest of this bullet describes what
-  the column does when it is on.
+  ⚠️ **A LAYOUT WITH NO RUN AT `ETL_VCORES` IS DROPPED FROM THE SECTION** — from the table and
+  from the chart, with the count named in a note under the table (7 of 17 today, all duckrun; nine
+  rows survive). The alternative was hiding the column while most rows could not fill it, and a cost
+  column that is mostly dashes reads as "the build was free" rather than "nobody measured it at that
+  size". **The cost is the chart**: 8 lines instead of 15, so seven layouts' query timings leave a
+  section they had every right to be in, for a build-cost reason — they are still in *Every run*, and
+  [TODO.md](../TODO.md) says what building them would take.
+  The filter is on MEMBERSHIP, not on the value: a layout built at 8 whose CU the ledger has not read
+  keeps its row and dashes that one cell, because "measured, not yet costed" is a different statement
+  from "never built at this size". Table and chart filter together on purpose — they are the same
+  `martPoints`, and a section whose two halves disagreed about which layouts exist would be worse
+  than either.
   **THE TWO CU COLUMNS ARE NOT THE SAME KIND OF NUMBER, and only one of them summarises the whole
   row.** `analytics CU` is what QUERYING the layout cost and is what the table is ranked by — it
   belongs to the parquet, which is why every run in the group can be summarised into it. `etl CU` is

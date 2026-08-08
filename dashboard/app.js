@@ -661,22 +661,7 @@ export function vcoresOf(rec) {
  */
 const ETL_VCORES = "8";
 
-/**
- * Whether the `etl CU` column is PRINTED. The logic behind it runs either way.
- *
- * **OFF UNTIL THE COLUMN IS POPULATED — see TODO.md.** 7 of 17 layout groups have never been built
- * at `ETL_VCORES` and read as a dash, and a column that is more dash than number invites the reader
- * to conclude the build was free rather than that nobody measured it at that size. Closing the gap
- * is seven deliberate `cores=8` dispatches, which is ~70,000 CU, so the column waits rather than
- * the dispatches being rushed.
- *
- * DELIBERATELY NOT A DELETION. `martPoints` still computes `etl`, the core-count filter still
- * applies and the tests still pin both, so turning this to `true` is the whole change — no logic to
- * reconstruct from a commit message, and nothing silently rots in the meantime.
- */
-const SHOW_ETL = false;
-
-/** The layout table's fixed leading columns — shared by the header and the hidden-column test. */
+/** The layout table's fixed leading columns. */
 const FIT_HEAD = ["parquet writer", "ordering", "dictionary", "row group size", "MB", "runs",
   "analytics CU"];
 
@@ -1490,6 +1475,13 @@ export function martPoints(groups, times) {
         const v = vcoresOf(m.rec);
         return v === undefined || v === ETL_VCORES;
       }).map((m) => m.etl)),
+      // How many of the group's runs QUALIFY, which is not the same as how many produced a number:
+      // `renderFit` drops a layout nobody built at this core count, and must not drop one that was
+      // built but whose CU the ledger has not read yet.
+      etlRuns: ms.filter((m) => {
+        const v = vcoresOf(m.rec);
+        return v === undefined || v === ETL_VCORES;
+      }).length,
       ms: Object.fromEntries(TIERS.map(([lbl]) =>
         [lbl, groupMid(ms.map((m) => ((times || {})[m.qid] || {})[lbl]))])),
     };
@@ -1773,7 +1765,17 @@ export function keyCells(members, table = DEFAULTS.table) {
  * Same `martPoints` as the bars and the layout rows, so all three quote the same median.
  */
 export function renderFit(groups, times, tiers, counts = {}) {
-  const pts = martPoints(groups, times).filter((p) => p.cu > 0);
+  const measured = martPoints(groups, times).filter((p) => p.cu > 0);
+  // A LAYOUT NOBODY BUILT AT `ETL_VCORES` LEAVES THE SECTION, rather than sitting in it with a dash.
+  // The alternative was hiding the `etl CU` column while 7 of 17 rows could not fill it, and a cost
+  // column that is mostly dashes reads as "the build was free" rather than "nobody measured it at
+  // that size". Dropping the row instead means every row that IS here is complete.
+  //
+  // ON MEMBERSHIP, NOT ON THE VALUE. A group with an 8-core run whose CU the ledger has not read yet
+  // keeps its row and shows a dash in that one cell — "measured, not yet costed" is a different
+  // statement from "never built at this size", and only the second is grounds for removal.
+  const pts = measured.filter((p) => p.etlRuns > 0);
+  const cut = measured.length - pts.length;
   if (!pts.length) return "";
   const cols = (tiers || []).filter((l) => pts.some((p) => p.ms[l]));
   pts.sort((a, b) => a.cu - b.cu);
@@ -1798,17 +1800,23 @@ export function renderFit(groups, times, tiers, counts = {}) {
     // the engine and the machine it was given, so it is reported at one core count and the header
     // says which (`ETL_VCORES`). They are named for the ledger's own buckets, the same two words
     // `Cost by engine` labels its rows with, so nothing has to be translated between the tables.
-    table([...FIT_HEAD, ...(SHOW_ETL ? [`etl CU (${ETL_VCORES} vCores)`] : []),
+    table([...FIT_HEAD, `etl CU (${ETL_VCORES} vCores)`,
       ...cols.map((l) => (counts[l] ? `${l} ms (${counts[l]} q)` : `${l} ms`))],
-      ["left", "left", "left", "right", "right", "right", "right",
-        ...(SHOW_ETL ? ["right"] : []), ...cols.map(() => "right")],
+      ["left", "left", "left", "right", "right", "right", "right", "right",
+        ...cols.map(() => "right")],
       pts.map((p) => {
         const k = keyCells(p.members);
         return [p.name, k.ordering, k.dict, k.rgSize, k.mb, String(p.n), fmt(p.cu, 0),
-          ...(SHOW_ETL ? [p.etl ? fmt(p.etl, 0) : DASH] : []),
+          p.etl ? fmt(p.etl, 0) : DASH,
           ...cols.map((l) => (p.ms[l] ? fmt(p.ms[l], 0) : DASH))];
       }),
       { sort: true }),
+    // THE EXCLUSION IS NAMED, because a dropped run on this page is always a named run — the same
+    // discipline `renderSources` follows for the generation filter. Silently showing 10 of 17
+    // layouts would read as "these are the layouts", which is the one thing it must not say.
+    cut ? note(`${cut} layout${cut === 1 ? "" : "s"} not shown: never built at `
+      + `${ETL_VCORES} vCores, so there is no build cost to compare. Their query numbers are in `
+      + `**Every run**. See \`TODO.md\` for what filling them would take.`) : "",
     // The same points as the table, plotted against each other. A ranked table cannot show whether
     // two measures move TOGETHER, which is the one question `CU` and a time column side by side
     // invite.

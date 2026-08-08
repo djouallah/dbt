@@ -9,20 +9,28 @@ exercise cost. This file is what has not been done.
 
 ---
 
-## `etl CU (8 vCores)` is hidden until 7 of 17 layout groups are built at 8 cores
+## 7 of 17 layout groups are EXCLUDED from *Cost and speed by parquet layout*
 
-**The column is currently OFF** — `SHOW_ETL = false` in `dashboard/app.js`. The logic is not: the
-value is still computed, still filtered to one core count, and still pinned by tests, so closing this
-item is flipping one constant. Hidden because a column that is more dash than number reads as "the
-build was free" rather than "nobody measured it at that size".
+**The `etl CU (8 vCores)` column is shown, and a layout with no run at that core count is dropped
+from the section entirely** — table and chart alike, with the count named in a note under the table.
+Nine rows survive today, all complete.
+
+This replaced hiding the column while 7 of 17 rows could not fill it: a cost column that is mostly
+dashes reads as "the build was free" rather than "nobody measured it at that size". Dropping the row
+means every row that IS there is complete. **What it costs is the chart** — 8 lines instead of 15 —
+so seven layouts' query timings leave a section they had every right to be in, for a build-cost
+reason. They are still in *Every run*.
+
+The filter is on MEMBERSHIP, not on the value: a layout built at 8 vCores whose CU the ledger has not
+read yet keeps its row and dashes that one cell. "Measured, not yet costed" is not "never built".
 
 *Cost and speed by parquet layout* reports build cost at ONE core count, because build cost tracks
 the machine and `layoutKey` does not carry `vcores` — a group holds runs from several machines and a
 median over them describes none of them (measured: one duckrun layout reads **9,986 CU at 8 vCores
 against 22,547 blended** across 8/16/32/64). See the `ETL_VCORES` comment in `dashboard/app.js`.
 
-Seven groups have never been built at 8 vCores, so their cell would be a dash. All seven are
-duckrun; every one exists only at 64 cores.
+Seven groups have never been built at 8 vCores. All seven are duckrun; every one exists only at 64
+cores. **Building them is what puts them back on the page.**
 
 **⚠️ The nightly does NOT fill these in, and an earlier note claiming it would was wrong.** The
 nightly builds one layout — `sort_by=date,time,price` at `row_group_size=2000000`, 72 row groups —
@@ -53,9 +61,9 @@ of 370M rows plus their query passes. At 8 vCores the CU rate is `cores / 2` = 4
 
 Three ways to close it, in rough order of preference:
 
-1. **Dispatch the seven, then set `SHOW_ETL = true`.** Complete data, known cost, one-line change.
-2. **Leave it hidden.** The status quo, and defensible: the numbers that exist are already in the
-   record and on `Cost by engine`, and a mostly-dashed column adds less than it misleads.
+1. **Dispatch the seven.** They rejoin the section as they land — no code change at all.
+2. **Leave them excluded.** The status quo, and defensible: nine complete rows say more than
+   sixteen half-empty ones, and the missing runs' query numbers are still in *Every run*.
 3. **Lower `ETL_VCORES` coverage by re-pinning it.** Only worth it if the fleet's usual core count
    moves; the constant already has to be kept in step with the dispatch default by hand, and moving
    it to chase coverage would make the column mean whatever happens to be best populated.

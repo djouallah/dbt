@@ -586,7 +586,7 @@ test("the page renders end to end with charts and a layout", () => {
     NB: { role: "compute", name: "dbt-duckrun-baf95ac5" },
     SEM: { role: "semantic_model", name: "aemo_duckrun" },
   }, {
-    config: { duckrun: { vcores: "64" } },
+    config: { duckrun: { vcores: "8" } },
     stats: {
       duckrun: {
         fct_summary: {
@@ -1296,8 +1296,8 @@ test("the same parquet is one row however many engines wrote it", () => {
   // duckrun at 64 cores and at 32 wrote 4 files and 27 row groups either way, so two entries 50%
   // apart was not a comparison: it was one layout measured twice, presented as two results.
   const runs = [
-    lay("duckrun", 4, 27, { cfg: { vcores: "64" }, file: "a-1.json", finishedHoursAgo: 72 }),
-    lay("duckrun", 4, 27, { cfg: { vcores: "32" }, file: "b-2.json", finishedHoursAgo: 48 }),
+    lay("duckrun", 4, 27, { cfg: { vcores: "8" }, file: "a-1.json", finishedHoursAgo: 72 }),
+    lay("duckrun", 4, 27, { cfg: { vcores: "64" }, file: "b-2.json", finishedHoursAgo: 48 }),
   ];
   runs[0].items = { S0: gone("semantic_model", "aemo_duckrun"), O0: gone("output", "dbt_delta") };
   runs[1].items = { S1: gone("semantic_model", "aemo_duckrun"), O1: gone("output", "dbt_delta") };
@@ -1313,7 +1313,8 @@ test("the same parquet is one row however many engines wrote it", () => {
   // given are the entire subject. ONE layout row, TWO engine columns, from the same two runs — that
   // asymmetry is why the two are keyed differently.
   assert.deepEqual(rows(block(out, "Cost by engine"))[0],
-    "| CU (s) | duckrun·32c | duckrun·64c |");
+    "| CU (s) | duckrun·64c | duckrun·8c |",
+    "both configs keep a column — string sort, so 64c precedes 8c");
 });
 
 test("two runs of ONE column that wrote different parquet are two rows", () => {
@@ -1322,7 +1323,7 @@ test("two runs of ONE column that wrote different parquet are two rows", () => {
   // at their mean — 2,041.8, a number neither run measured — described by only the newer's shape.
   // The layout is measured per RUN, so it has to be grouped per run. (The original pair differed by
   // file count too; that element has left the key, so the fixture separates on row groups.)
-  const cfg = { vcores: "64", sorted: "true" };
+  const cfg = { vcores: "8", sorted: "true" };
   const runs = [
     lay("duckrun", 3, 9, { cfg, file: "a-1.json", finishedHoursAgo: 72 }),
     lay("duckrun", 4, 25, { cfg, file: "b-2.json", finishedHoursAgo: 48 }),
@@ -1436,8 +1437,8 @@ test("the mart layout block is one row per writer, and carries no CU", () => {
   // The mart block groups by the DECLARED producer; *Cost and speed by parquet layout* groups by the
   // MEASURED parquet — two directions onto the same rows, and only the latter carries a cost.
   const runs = [
-    lay("duckrun", 4, 27, { cfg: { vcores: "64" }, file: "a-1.json", finishedHoursAgo: 72 }),
-    lay("duckrun", 4, 27, { cfg: { vcores: "32" }, file: "b-2.json", finishedHoursAgo: 48 }),
+    lay("duckrun", 4, 27, { cfg: { vcores: "8" }, file: "a-1.json", finishedHoursAgo: 72 }),
+    lay("duckrun", 4, 27, { cfg: { vcores: "8" }, file: "b-2.json", finishedHoursAgo: 48 }),
   ];
   runs[0].items = { S0: gone("semantic_model", "aemo_duckrun"), O0: gone("output", "dbt_delta") };
   runs[1].items = { S1: gone("semantic_model", "aemo_duckrun"), O1: gone("output", "dbt_delta") };
@@ -1502,7 +1503,7 @@ test("the three tiers are columns of the PER-RUN table, not of the layout block"
   const heads = rows(out).filter((r) => r.includes("cold ms"));
   assert.equal(heads.length, 2, `two headers carry the tiers: ${heads}`);
   assert.ok(heads.some((h) =>
-    /^\| parquet writer \| ordering \| dictionary \| row group size \| MB \| runs \| analytics CU \| cold ms \(\d+ q\)/
+    /^\| parquet writer \| ordering \| dictionary \| row group size \| MB \| runs \| analytics CU \| etl CU \(\d+ vCores\) \| cold ms \(\d+ q\)/
       .test(h)), heads[0]);
   assert.ok(heads.some((h) =>
     h.includes("| etl CU | analytics CU | cold ms | warm ms | hot ms | items |")), heads[1]);
@@ -2107,7 +2108,7 @@ test("the two CU bar charts are GONE, and their numbers are not", () => {
  */
 const fitRuns = (spec) => spec.map(([engine, cold, warm, hot], i) =>
   lay(engine, 4 << (i * 2), 20 << (i * 2), {
-    file: `f-${i}.json`, cfg: { vcores: String(10 + i) },
+    file: `f-${i}.json`,
     timings: timings({ q1: [cold, warm, hot] }),
   }));
 
@@ -2144,21 +2145,47 @@ test("etl CU is computed at ONE core count, even while the column is hidden", ()
   assert.equal(spark.etl, 33444, "an engine with no core count keeps its build CU");
 });
 
-test("the etl CU column is HIDDEN, and nothing else moved to hide it", () => {
-  // Off until the seven unbuilt layouts are dispatched — TODO.md. A column that is more dash than
-  // number reads as "the build was free" rather than "nobody measured it at that size".
-  const out = render(fitRuns([["duckrun", 40000, 5000, 4000], ["dwh", 80000, 3000, 5000]]),
-    ledger({ OUT: 1.0, SEM: 2.0 }));
+test("a layout never built at ETL_VCORES leaves the section, and is NAMED as excluded", () => {
+  // The other way round from hiding the column: every row that IS here is complete, and a cost
+  // column that is mostly dashes never gets the chance to read as "the build was free".
+  const at = (cores, file, rgs) => {
+    const r = lay("duckrun", 4, rgs, { cfg: { vcores: cores }, file,
+      timings: timings({ q1: [20000, 4000, 3000] }) });
+    r.items = { [`O${file}`]: gone("output", "dbt_delta"),
+      [`S${file}`]: gone("semantic_model", "aemo_duckrun") };
+    return r;
+  };
+  const led = {
+    "Oa-1.json": { "Jupyter Notebook Scheduled Run": 9986.0 },
+    "Sa-1.json": { "XMLA Read Operation": 1500.0 },
+    "Ob-2.json": { "Jupyter Notebook Scheduled Run": 22547.0 },
+    "Sb-2.json": { "XMLA Read Operation": 2500.0 },
+  };
+  // Two DIFFERENT layouts (row-group bands a power of two apart): one built at 8, one only at 64.
+  const out = render([at("8", "a-1.json", 9), at("64", "b-2.json", 80)], ledger(led));
+  const t = layoutTable(out);
+  assert.equal(t.length, 1, "the 64-core-only layout is not a row");
+  assert.equal(t[0].cu, "1,500", "the surviving row is the one built at 8");
   const head = rows(block(out, "Cost and speed by parquet layout"))[0];
-  assert.ok(!/etl CU/.test(head), `no etl column while it is unpopulated: ${head}`);
-  assert.ok(/\| analytics CU \|/.test(head), `and the query cost keeps its name: ${head}`);
-  // The alignment list must shrink WITH the header, or every tier column shifts one to the left and
-  // the numbers right-align under the wrong titles — which no assertion above would notice.
-  const body = rows(block(out, "Cost and speed by parquet layout")).slice(1);
-  for (const r of body) {
-    assert.equal(r.split("|").length, head.split("|").length,
-      `every row has as many cells as the header: ${r}`);
-  }
+  assert.ok(/\| etl CU \(8 vCores\) \|/.test(head), `the column is SHOWN now: ${head}`);
+  // NAMED, never silent — the same discipline the generation filter follows. A page quietly showing
+  // a subset would read as "these are the layouts", which is the one thing it must not say.
+  const text = plain(out);
+  assert.ok(/1 layout not shown/.test(text), `the exclusion is stated: ${text.slice(0, 400)}`);
+  assert.ok(/never built at 8 vCores/.test(text), text.slice(0, 400));
+
+  // NOTHING EXCLUDED MEANS NOTHING SAID.
+  const all8 = render([at("8", "a-1.json", 9), at("8", "b-2.json", 80)], ledger(led));
+  assert.ok(!/layouts? not shown/.test(plain(all8)), "no caveat where nothing was cut");
+  assert.equal(layoutTable(all8).length, 2);
+
+  // ON MEMBERSHIP, NOT ON THE VALUE: a layout built at 8 whose CU the ledger has not read keeps its
+  // row and dashes that one cell. "Measured, not yet costed" is not "never built at this size".
+  const unread = render([at("8", "a-1.json", 9)],
+    ledger({ "Sa-1.json": { "XMLA Read Operation": 1500.0 } }));
+  const kept = rows(block(unread, "Cost and speed by parquet layout")).slice(1);
+  assert.equal(kept.length, 1, "still a row");
+  assert.equal(kept[0].split("|")[8].trim(), "—", `etl unread is a dash: ${kept[0]}`);
 });
 
 test("cost and speed is one table, cheapest first, with a title and nothing else", () => {
@@ -2186,7 +2213,7 @@ test("cost and speed is one table, cheapest first, with a title and nothing else
   // is coarser than the parquet, since a group merged on RG band can still hold two file sizes.
   const head = rows(out).find((r) =>
     r.startsWith("| parquet writer | ordering | dictionary | row group size | MB | runs "
-    + "| analytics CU |"));
+    + "| analytics CU | etl CU (8 vCores) |"));
   assert.ok(head, "layout, the key, the size, the sample size, CU, then the tiers");
   // The count rides in the HEADER: each tier cell is a SUM over the suite, and the bare `cold ms`
   // read exactly like one query's time.
@@ -2360,7 +2387,7 @@ test("every run a summary drew from has a row of its own", () => {
   // median spans its whole history, so a superseded run still moves one — and while this listed
   // column holders only, that run's CU appeared nowhere else: `duckrun sorted` read 2,454.1 and no
   // row said so.
-  const cfg = { vcores: "64", sorted: "true" };
+  const cfg = { vcores: "8", sorted: "true" };   // 8 so the layout rows survive the etl filter
   const runs = [
     lay("duckrun", 3, 9, { cfg, file: "a-1.json", finishedHoursAgo: 72 }),
     lay("duckrun", 4, 25, { cfg, file: "b-2.json", finishedHoursAgo: 48 }),
