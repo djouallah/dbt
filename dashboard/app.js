@@ -643,6 +643,27 @@ export function vcoresOf(rec) {
 }
 
 /**
+ * WHAT COMPUTE A ROW'S BUILD COST WAS MEASURED ON — a number for `duckrun`, a dash for everyone else.
+ *
+ * Only `duckrun` gets a figure because it is the only engine whose compute this repo both SIZES and
+ * varies: `FABRIC_CORES` sets its notebook, the etl cost moves 2.3x across core counts, and that is
+ * the whole reason `ETL_VCORES` pins the column to one size. A dash everywhere else is the honest
+ * reading of a question that does not apply the same way — spark's compute is the workspace Livy
+ * pool and dwh's is the warehouse, neither dispatched from here, and iceberg records a core count
+ * but is not what the pinning exists for. Naming each of those in the cell spent a column on
+ * explanations; the dash says "not the dial being reported" and the prose says the rest.
+ *
+ * Printing it per ROW is why the header no longer says `(8 vCores)`: a header can only state one
+ * core count for a table whose engines do not share the concept.
+ */
+function coresCell(members) {
+  const vs = [...new Set((members || [])
+    .filter((m) => ((m || {}).rec || {}).engine === "duckrun")
+    .map((m) => vcoresOf(m.rec)).filter(Boolean))];
+  return vs.length ? vs.sort().join("/") : DASH;
+}
+
+/**
  * The core count the `etl CU` column is reported AT, and it is a filter rather than a summary.
  *
  * Build cost tracks the machine: measured over `history/`, one duckrun layout reads 9,986 CU at 8
@@ -652,12 +673,12 @@ export function vcoresOf(rec) {
  * Pinning one core count is what makes the column a number rather than an average of two answers.
  *
  * 8 because it is the dispatch default and what the nightly runs at. **It is a CONSTANT that has to
- * be kept in step with that default by hand**, which is why the column HEADER prints it — a filter a
- * reader cannot see is the one that lies. A layout nobody has built at this size gets a dash, never
- * a blend: on today's records that is 7 of 17 groups, all duckrun. **The nightly does NOT fill
- * them in** — it writes one layout (`date,time,price` at 2M) and that group already has 8-core
- * runs, while every dashed group is a sort key or row-group size it never builds. Closing them is
- * seven deliberate dispatches; see TODO.md, which states the cost.
+ * be kept in step with that default by hand**, and the `cores` COLUMN is what keeps it visible — a
+ * filter a reader cannot see is the one that lies. A layout nobody has built at this size is dropped
+ * from the section entirely rather than blended: on today's records that is 7 of 17 groups, all
+ * duckrun. **The nightly does NOT fill them in** — it writes one layout (`date,time,price` at 2M)
+ * and that group already has 8-core runs, while every dropped group is a sort key or row-group size
+ * it never builds. Closing them is seven deliberate dispatches; see TODO.md, which states the cost.
  */
 const ETL_VCORES = "8";
 
@@ -1464,6 +1485,12 @@ const groupMid = (vals) => {
 export function martPoints(groups, times) {
   return (groups || []).map(([, ms]) => {
     const rec = ms[ms.length - 1].rec;
+    // The members the `etl CU` column is allowed to speak for: built at `ETL_VCORES`, or by an
+    // engine that has no such input at all.
+    const etlMs = ms.filter((m) => {
+      const v = vcoresOf(m.rec);
+      return v === undefined || v === ETL_VCORES;
+    });
     return {
       // `members` and `n` ride along so a renderer can spell out WHY these runs are one row without
       // re-grouping them. Six rows reading `duckrun sorted` and nothing else is the failure this
@@ -1473,17 +1500,12 @@ export function martPoints(groups, times) {
       // BUILD CU AT ONE CORE COUNT, never a blend across machines — see `ETL_VCORES`. A run that
       // records no `vcores` is KEPT rather than filtered out: spark and dwh have no such input, so
       // dropping them would empty the column for two of the four engines rather than narrow it.
-      etl: groupMid(ms.filter((m) => {
-        const v = vcoresOf(m.rec);
-        return v === undefined || v === ETL_VCORES;
-      }).map((m) => m.etl)),
+      etl: groupMid(etlMs.map((m) => m.etl)),
       // How many of the group's runs QUALIFY, which is not the same as how many produced a number:
       // `renderFit` drops a layout nobody built at this core count, and must not drop one that was
       // built but whose CU the ledger has not read yet.
-      etlRuns: ms.filter((m) => {
-        const v = vcoresOf(m.rec);
-        return v === undefined || v === ETL_VCORES;
-      }).length,
+      etlRuns: etlMs.length,
+      cores: coresCell(etlMs),
       ms: Object.fromEntries(TIERS.map(([lbl]) =>
         [lbl, groupMid(ms.map((m) => ((times || {})[m.qid] || {})[lbl]))])),
     };
@@ -1806,13 +1828,13 @@ export function renderFit(groups, times, tiers, counts = {}) {
     // right of them read left-to-right in the same order (cold, then warm, then hot). The table is
     // still RANKED by `analytics CU`, which no longer leads the pair — sort order and column order
     // are separate things, and the cheapest-first note above says which one ranks.
-    table([...FIT_HEAD, `etl CU (${ETL_VCORES} vCores)`, "analytics CU",
+    table([...FIT_HEAD, "cores", "etl CU", "analytics CU",
       ...cols.map((l) => (counts[l] ? `${l} ms (${counts[l]} q)` : `${l} ms`))],
-      ["left", "left", "left", "right", "right", "right", "right", "right",
+      ["left", "left", "left", "right", "right", "right", "right", "right", "right",
         ...cols.map(() => "right")],
       pts.map((p) => {
         const k = keyCells(p.members);
-        return [p.name, k.ordering, k.dict, k.rgSize, k.mb, String(p.n),
+        return [p.name, k.ordering, k.dict, k.rgSize, k.mb, String(p.n), p.cores,
           p.etl ? fmt(p.etl, 0) : DASH, fmt(p.cu, 0),
           ...cols.map((l) => (p.ms[l] ? fmt(p.ms[l], 0) : DASH))];
       }),

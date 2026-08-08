@@ -196,8 +196,15 @@ without a build, a token or a dispatch.
   flagged loudest. **Absent, never empty**, when no record carries `encodings` — which is every
   record written before `stats.py` learned to profile the mart.
 - **Cost and speed by layout is a TABLE, above its chart and *Cost by engine*.** One row per
-  layout, cheapest first: `etl CU`, `analytics CU`, `cold ms`, `warm ms`, `hot ms` — build before
-  query, the order the work happens in, with the tiers continuing left-to-right in their own order.
+  layout, cheapest first: `cores`, `etl CU`, `analytics CU`, `cold ms`, `warm ms`, `hot ms` — build
+  before query, the order the work happens in, with the tiers continuing left-to-right in their own
+  order.
+  **`cores` reports duckrun's vCores and dashes everyone else.** It is the only engine whose compute
+  this repo both SIZES and varies — `FABRIC_CORES` sets its notebook and the build cost moves 2.3x
+  across core counts, which is the entire reason `ETL_VCORES` pins the column to one size. spark's
+  compute is the workspace Livy pool and dwh's is the warehouse, neither dispatched from here, and
+  iceberg records a count but is not what the pinning exists for. The column also lets the header
+  drop its `(8 vCores)` parenthetical, which could only ever have been right for some rows.
   **Column order is not sort order**: the table is still RANKED by `analytics CU`, which no longer
   leads the pair. Most of these
   were columns of the mart's layout block, which made one table answer two questions — what the
@@ -208,7 +215,7 @@ without a build, a token or a dispatch.
   from the chart, with the count named in a note under the table (7 of 17 today, all duckrun; nine
   rows survive). The alternative was hiding the column while most rows could not fill it, and a cost
   column that is mostly dashes reads as "the build was free" rather than "nobody measured it at that
-  size". **The cost is the chart**: 8 lines instead of 15, so seven layouts' query timings leave a
+  size", and the `cores` column is what keeps that filter visible. **The cost is the chart**: 8 lines instead of 15, so seven layouts' query timings leave a
   section they had every right to be in, for a build-cost reason — they are still in *Every run*, and
   [TODO.md](../TODO.md) says what building them would take.
   The filter is on MEMBERSHIP, not on the value: a layout built at 8 whose CU the ledger has not read
