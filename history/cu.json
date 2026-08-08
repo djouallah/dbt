@@ -509,7 +509,7 @@
    "OneLake Write via Redirect": 331.867
   },
   "4FBE4130-1717-4FC9-A985-3FB7B4A13067": {
-   "OneLake Iterative Read via Proxy": 745.358,
+   "OneLake Iterative Read via Proxy": 749.911,
    "OneLake Other Operations": 5.99,
    "OneLake Other Operations Via Redirect": 37.014,
    "OneLake Read via Proxy": 75.431,
@@ -527,6 +527,10 @@
    "Dataset Scheduled Refresh": 1.008,
    "Query": 25.408,
    "XMLA Read Operation": 1899.12
+  },
+  "52A07D8D-A63B-467E-9DCA-F974DAD8DFFB": {
+   "OneLake Iterative Read via Proxy": 0.65,
+   "OneLake Write via Proxy": 1.138
   },
   "52DE0A29-4FB5-4316-B276-D78F6186145D": {
    "SQL Endpoint Query": 34.388
@@ -1001,7 +1005,7 @@
    "Jupyter Notebook Scheduled Run": 25795.94
   },
   "A8CF6202-AE31-45E4-9CC8-7FFE463250C9": {
-   "SQL Endpoint Query": 1350.008
+   "SQL Endpoint Query": 1363.644
   },
   "AB0FE62E-D856-4D33-BCC1-ECF2DF6D1CF9": {
    "SQL Endpoint Query": 36.3
@@ -2219,6 +2223,14 @@
    "since": "2026-08-02T21:00:00",
    "timed": 264,
    "unfound": 1
+  },
+  {
+   "at": "2026-08-08T08:02:53+00:00",
+   "changed": 4,
+   "items": 265,
+   "since": "2026-08-02T21:00:00",
+   "timed": 265,
+   "unfound": 0
   }
  ],
  "schema": 2,
@@ -2710,7 +2722,7 @@
    "OneLake Write via Redirect": 0.031
   },
   "4FBE4130-1717-4FC9-A985-3FB7B4A13067": {
-   "OneLake Iterative Read via Proxy": 3.663,
+   "OneLake Iterative Read via Proxy": 3.691,
    "OneLake Other Operations": 0.309,
    "OneLake Other Operations Via Redirect": 2.3,
    "OneLake Read via Proxy": 3.31,
@@ -2728,6 +2740,10 @@
    "Dataset Scheduled Refresh": 0.063,
    "Query": 8.874,
    "XMLA Read Operation": 41.11
+  },
+  "52A07D8D-A63B-467E-9DCA-F974DAD8DFFB": {
+   "OneLake Iterative Read via Proxy": 0.004,
+   "OneLake Write via Proxy": 0.001
   },
   "52DE0A29-4FB5-4316-B276-D78F6186145D": {
    "SQL Endpoint Query": 9.969
@@ -3189,7 +3205,7 @@
    "Jupyter Notebook Scheduled Run": 806.116
   },
   "A8CF6202-AE31-45E4-9CC8-7FFE463250C9": {
-   "SQL Endpoint Query": 913.086
+   "SQL Endpoint Query": 922.233
   },
   "AB0FE62E-D856-4D33-BCC1-ECF2DF6D1CF9": {
    "SQL Endpoint Query": 13.949
@@ -3673,5 +3689,5 @@
    "OneLake Write via Redirect": 0.033
   }
  },
- "updated": "2026-08-08T07:41:51+00:00"
+ "updated": "2026-08-08T08:02:53+00:00"
 }
