@@ -196,11 +196,28 @@ without a build, a token or a dispatch.
   flagged loudest. **Absent, never empty**, when no record carries `encodings` — which is every
   record written before `stats.py` learned to profile the mart.
 - **Cost and speed by layout is a TABLE, above its chart and *Cost by engine*.** One row per
-  layout, cheapest first: `CU`, `cold ms`, `warm ms`, `hot ms`. These four were columns of the mart's
-  layout block, which made one table answer two questions — what the parquet looks like, and what
-  querying it cost. *Table layout* is now physical layout alone and this is the other half. It has a
-  title and no commentary. Built from the same `martPoints` as the bars and the layout rows, so all
-  three quote the same median.
+  layout, cheapest first: `analytics CU`, `etl CU`, `cold ms`, `warm ms`, `hot ms`. Most of these
+  were columns of the mart's layout block, which made one table answer two questions — what the
+  parquet looks like, and what querying it cost. *Table layout* is now physical layout alone and this
+  is the other half. It has a title and no commentary. Built from the same `martPoints` as the chart
+  and the layout rows, so all three quote the same median.
+  **THE TWO CU COLUMNS ARE NOT THE SAME KIND OF NUMBER, and only one of them summarises the whole
+  row.** `analytics CU` is what QUERYING the layout cost and is what the table is ranked by — it
+  belongs to the parquet, which is why every run in the group can be summarised into it. `etl CU` is
+  what BUILDING it cost, and that belongs to the engine and the machine it was given.
+  **So `etl CU` is filtered to ONE core count and the header prints which** — `etl CU (8 vCores)`.
+  `layoutKey` does not carry `vcores` (it is about the parquet, and duckrun writes the same files at
+  every core count), so a layout group genuinely holds runs from several machines: measured on the
+  real records one duckrun layout reads **9,986 CU at 8 vCores against 22,547 blended** across
+  8/16/32/64. A median over all of them describes none of them. A filter a reader cannot see is the
+  one that lies, which is why it is in the header and not only here.
+  **A run that records NO core count is kept, not filtered out.** `FABRIC_CORES` sizes the notebook
+  the DuckDB legs run in, so only `duckrun` and `iceberg` record `vcores`; spark's compute is the
+  workspace Livy pool and dwh's is the warehouse, and neither reads the input. Filtering on the value
+  alone would have emptied the column for two of the four engines rather than narrowing it.
+  **A layout nobody has built at that size is a DASH, never a blend and never a zero** — 7 of 17
+  groups today, all duckrun, and the nightly fills them in since it runs at 8. `ETL_VCORES` is a
+  constant that has to be kept in step with the dispatch default by hand.
 - **Under it, ONE LINE CHART where there were two scatters.** Each layout is a single horizontal
   line: **warm ms at its left end, cold ms at its right, on one shared linear time axis**, at the
   height of its analytics CU. **The LENGTH is what the cold transcode costs.** Same `martPoints` and

@@ -626,6 +626,38 @@ export function layoutKey(rec, table = DEFAULTS.table) {
  * no key recorded is the opposite case and gets `true`, which shares a bar with neither an unsorted
  * run nor any named sort — the same rule `layoutKey` applies to a missing row group count.
  */
+/**
+ * The vCores a run's engine was given, as a string — or `undefined` when the engine has no such
+ * notion.
+ *
+ * **ABSENCE IS NOT ZERO AND NOT A DEFAULT: it means the question does not apply.** `FABRIC_CORES`
+ * sizes the notebook the DuckDB legs run in, so only `duckrun` and `iceberg` record it; spark's
+ * compute is the workspace Livy pool and dwh's is the warehouse, and neither reads the input. Every
+ * caller has to treat the two cases apart — filtering `vcores === '8'` would silently delete spark
+ * and dwh from whatever it filters.
+ */
+export function vcoresOf(rec) {
+  const engine = (rec || {}).engine || "?";
+  const v = ((((rec || {}).layout || {}).config || {})[engine] || {}).vcores;
+  return v === undefined || v === null || v === "" ? undefined : String(v);
+}
+
+/**
+ * The core count the `etl CU` column is reported AT, and it is a filter rather than a summary.
+ *
+ * Build cost tracks the machine: measured over `history/`, one duckrun layout reads 9,986 CU at 8
+ * vCores and 22,547 blended across 8/16/32/64 — 2.3x. `layoutKey` does not carry `vcores` (it is
+ * about the PARQUET, and duckrun writes the same files at every core count), so a layout group
+ * genuinely holds runs from several machines and a median over all of them describes none of them.
+ * Pinning one core count is what makes the column a number rather than an average of two answers.
+ *
+ * 8 because it is the dispatch default and what the nightly runs at. **It is a CONSTANT that has to
+ * be kept in step with that default by hand**, which is why the column HEADER prints it — a filter a
+ * reader cannot see is the one that lies. A layout nobody has built at this size gets a dash, never
+ * a blend: on today's records that is 7 of 17 groups, all duckrun, and the nightly fills them in.
+ */
+const ETL_VCORES = "8";
+
 export function sortKeyOf(rec, table = DEFAULTS.table) {
   const engine = (rec || {}).engine || "?";
   const cfg = (((rec || {}).layout || {}).config || {})[engine] || {};
@@ -1429,6 +1461,13 @@ export function martPoints(groups, times) {
       // prevents: the label answers who wrote it, and the key answers what makes it its own row.
       name: producers(ms), rec, members: ms, n: ms.length,
       cu: groupMid(ms.map((m) => m.cu)),
+      // BUILD CU AT ONE CORE COUNT, never a blend across machines — see `ETL_VCORES`. A run that
+      // records no `vcores` is KEPT rather than filtered out: spark and dwh have no such input, so
+      // dropping them would empty the column for two of the four engines rather than narrow it.
+      etl: groupMid(ms.filter((m) => {
+        const v = vcoresOf(m.rec);
+        return v === undefined || v === ETL_VCORES;
+      }).map((m) => m.etl)),
       ms: Object.fromEntries(TIERS.map(([lbl]) =>
         [lbl, groupMid(ms.map((m) => ((times || {})[m.qid] || {})[lbl]))])),
     };
@@ -1731,12 +1770,21 @@ export function renderFit(groups, times, tiers, counts = {}) {
     // like one query's time to anyone who has not reached the note. On one real run the sum is
     // 29,906 while the median query is 736, so the misreading is off by 40x. The header is where a
     // reader is when they form the wrong idea.
-    table(["parquet writer", "ordering", "dictionary", "row group size", "MB", "runs", "CU",
+    // TWO CU COLUMNS, AND THEY ARE NOT THE SAME KIND OF NUMBER. `analytics CU` is what querying this
+    // layout cost and is the column the table is ranked by — it belongs to the PARQUET, which is why
+    // a group's runs can be summarised at all. `etl CU` is what BUILDING it cost, which belongs to
+    // the engine and the machine it was given, so it is reported at one core count and the header
+    // says which (`ETL_VCORES`). They are named for the ledger's own buckets, the same two words
+    // `Cost by engine` labels its rows with, so nothing has to be translated between the tables.
+    table(["parquet writer", "ordering", "dictionary", "row group size", "MB", "runs",
+      "analytics CU", `etl CU (${ETL_VCORES} vCores)`,
       ...cols.map((l) => (counts[l] ? `${l} ms (${counts[l]} q)` : `${l} ms`))],
-      ["left", "left", "left", "right", "right", "right", "right", ...cols.map(() => "right")],
+      ["left", "left", "left", "right", "right", "right", "right", "right",
+        ...cols.map(() => "right")],
       pts.map((p) => {
         const k = keyCells(p.members);
         return [p.name, k.ordering, k.dict, k.rgSize, k.mb, String(p.n), fmt(p.cu, 0),
+          p.etl ? fmt(p.etl, 0) : DASH,
           ...cols.map((l) => (p.ms[l] ? fmt(p.ms[l], 0) : DASH))];
       }),
       { sort: true }),
@@ -3000,7 +3048,10 @@ export function renderPage(cols, runs, ledger, opts = {}) {
     const col = keyOf(rec);
     if (col === undefined || col === null) continue;
     anaEntries.push({ col, rec, qid: String(anaEntries.length),
-      cu: classTotal(runCu(rec, ledger).cells, "analytics") });
+      cu: classTotal(runCu(rec, ledger).cells, "analytics"),
+      // The BUILD half of the same read, for the layout table's `etl CU` column. Taken here because
+      // this is where the ledger is in scope; `martPoints` filters it to one core count.
+      etl: classTotal(runCu(rec, ledger).cells, "etl") });
   }
   const groups = layoutGroups(anaEntries, martTable);
 

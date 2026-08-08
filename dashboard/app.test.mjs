@@ -1496,13 +1496,13 @@ test("the three tiers are columns of the PER-RUN table, not of the layout block"
   // The LAYOUT block is physical layout only — no CU, no tiers.
   const rr = rows(block(out, "the mart the queries land on"));
   assert.ok(rr[0].startsWith("| layout | files | row groups |"), rr[0]);
-  assert.ok(!rr[0].includes("cold ms") && !rr[0].includes("| CU |"), rr[0]);
+  assert.ok(!rr[0].includes("cold ms") && !/\| (analytics |etl )?CU/.test(rr[0]), rr[0]);
   // Exactly two tables carry them, and neither is a layout block: the cost-and-speed table, one row
   // per layout, and the run table, one row per dispatch.
   const heads = rows(out).filter((r) => r.includes("cold ms"));
   assert.equal(heads.length, 2, `two headers carry the tiers: ${heads}`);
   assert.ok(heads.some((h) =>
-    /^\| parquet writer \| ordering \| dictionary \| row group size \| MB \| runs \| CU \| cold ms \(\d+ q\)/
+    /^\| parquet writer \| ordering \| dictionary \| row group size \| MB \| runs \| analytics CU \| etl CU \(\d+ vCores\) \| cold ms \(\d+ q\)/
       .test(h)), heads[0]);
   assert.ok(heads.some((h) =>
     h.includes("| etl CU | analytics CU | cold ms | warm ms | hot ms | items |")), heads[1]);
@@ -2111,6 +2111,57 @@ const fitRuns = (spec) => spec.map(([engine, cold, warm, hot], i) =>
     timings: timings({ q1: [cold, warm, hot] }),
   }));
 
+test("etl CU is reported at ONE core count, and the header says which", () => {
+  // BUILD COST TRACKS THE MACHINE, and `layoutKey` does not carry `vcores` — it is about the
+  // parquet, and duckrun writes the same files at every core count. So a layout group really does
+  // hold runs from several machines, and a median over all of them describes none of them: measured
+  // on the real records one duckrun layout reads 9,986 CU at 8 vCores and 22,547 blended.
+  const at = (cores, cu, file) => {
+    const r = lay("duckrun", 4, 27, { cfg: { vcores: cores }, file });
+    r.items = { [`O${file}`]: gone("output", "dbt_delta"), [`S${file}`]: gone("semantic_model", "aemo_duckrun") };
+    return r;
+  };
+  const runs = [at("8", 1, "a-1.json"), at("64", 2, "b-2.json")];
+  const out = render(runs, ledger({
+    "Oa-1.json": { "Jupyter Notebook Scheduled Run": 9986.0 },
+    "Sa-1.json": { "XMLA Read Operation": 1500.0 },
+    "Ob-2.json": { "Jupyter Notebook Scheduled Run": 22547.0 },
+    "Sb-2.json": { "XMLA Read Operation": 1500.0 },
+  }));
+  const head = rows(out).find((r) => r.includes("etl CU"));
+  assert.ok(/\| etl CU \(8 vCores\) \|/.test(head), `the filter is PRINTED, not hidden: ${head}`);
+  const body = rows(block(out, "Cost and speed by parquet layout")).slice(1)
+    .map((r) => r.split("|").map((c) => c.trim()));
+  assert.equal(body.length, 1, "one layout — both runs wrote the same parquet");
+  assert.equal(body[0][6], "2", "two runs behind the row");
+  assert.equal(body[0][8], "9,986", "the 8-core reading alone, never a blend with the 64-core one");
+  // ...while analytics CU spans BOTH, because that one belongs to the parquet and both runs wrote
+  // the same parquet. The two columns summarising different member sets is the whole point.
+  assert.equal(body[0][7], "1,500", "analytics is the median over both runs");
+
+  // A LAYOUT NOBODY BUILT AT THIS SIZE IS A DASH, never a blend and never a zero.
+  const only64 = [at("64", 2, "c-3.json")];
+  const dashed = render(only64, ledger({
+    "Oc-3.json": { "Jupyter Notebook Scheduled Run": 22547.0 },
+    "Sc-3.json": { "XMLA Read Operation": 1500.0 },
+  }));
+  const row = rows(block(dashed, "Cost and speed by parquet layout")).slice(1)[0].split("|");
+  assert.equal(row[8].trim(), "—", `no 8-core run means no number: ${row.join("|")}`);
+
+  // SPARK AND DWH RECORD NO `vcores` AT ALL — FABRIC_CORES sizes the DuckDB notebook and neither
+  // reads it. Filtering on the value alone would delete two of the four engines from the column.
+  assert.equal(d.vcoresOf(lay("spark", 11, 11)), undefined);
+  assert.equal(d.vcoresOf(lay("dwh", 78, 78)), undefined);
+  assert.equal(d.vcoresOf(lay("duckrun", 4, 27, { cfg: { vcores: "8" } })), "8");
+  const sp = full("s-1.json", "spark");
+  sp.items = { O: gone("output", "dbt_spark"), S: gone("semantic_model", "aemo_spark") };
+  const kept = render([sp], ledger({
+    O: { "High Concurrency Session Livy Run": 33444.0 }, S: { "XMLA Read Operation": 1500.0 },
+  }));
+  assert.ok(rows(block(kept, "Cost and speed by parquet layout")).slice(1)[0].includes("33,444"),
+    "an engine with no core count keeps its build CU");
+});
+
 test("cost and speed is one table, cheapest first, with a title and nothing else", () => {
   const out = render(fitRuns([
     ["spark", 20000, 4000, 3000], ["duckrun", 40000, 5000, 4000],
@@ -2135,7 +2186,8 @@ test("cost and speed is one table, cheapest first, with a title and nothing else
   // `MB` sits beside `RG` and is NOT part of `layoutKey` — printed so a reader can see where the key
   // is coarser than the parquet, since a group merged on RG band can still hold two file sizes.
   const head = rows(out).find((r) =>
-    r.startsWith("| parquet writer | ordering | dictionary | row group size | MB | runs | CU |"));
+    r.startsWith("| parquet writer | ordering | dictionary | row group size | MB | runs "
+    + "| analytics CU | etl CU (8 vCores) |"));
   assert.ok(head, "layout, the key, the size, the sample size, CU, then the tiers");
   // The count rides in the HEADER: each tier cell is a SUM over the suite, and the bare `cold ms`
   // read exactly like one query's time.
