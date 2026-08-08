@@ -3051,3 +3051,33 @@ test("the scatter says what was queried, and derives it from the record", () => 
     [{ x: 1, y: 1, label: "a" }, { x: 2, y: 2, label: "b" }])), false,
   "and no empty note element when there is nothing to say");
 });
+
+test("a dot's hover is its whole table row, sort key included", () => {
+  // THE SORT KEY IS THE POINT. The plot encodes four things and the table above prints eight, and
+  // `ordering` is the one that separates two dots of the same colour sitting a thousand CU apart —
+  // it is on no label (only unique writers get one) and in no legend.
+  const rec = sortedBy(1, 9, ["date", "time", "price"], { file: "a.json", mb: 574.6 });
+  const pts = [
+    { name: "delta_rs", n: 3, cu: 1461.7, ms: { cold: 20845, warm: 4016, hot: 3315 },
+      members: [{ rec }] },
+    { name: "dwh", n: 1, cu: 2000, ms: { cold: 33767, warm: 4330, hot: 4100 },
+      members: [{ rec: lay("dwh", 78, 90, { file: "b.json" }) }] },
+  ];
+  const tip = /<title>([\s\S]*?)<\/title>/.exec(d.scatterFit(pts))[1].split("\n");
+  assert.equal(tip[0], "delta_rs", "the writer leads, as it does in the table");
+  assert.ok(tip.includes("ordering: date, time, price"), tip.join(" | "));
+  assert.ok(tip.includes("row groups: 9") && tip.includes("row group size: 16.0M"),
+    tip.join(" | "));
+  assert.ok(tip.includes("size: 575 MB") && tip.includes("CU: 1,462"), tip.join(" | "));
+  // Every tier, so the two scatters do not each show only their own axes.
+  assert.ok(tip.includes("cold: 20,845 ms") && tip.includes("warm: 4,016 ms")
+    && tip.includes("hot: 3,315 ms"), tip.join(" | "));
+  assert.ok(tip.includes("3 runs"), "and the sample size behind the median");
+  // Nothing measured is nothing SAID — a dash is a column that has to line up with its neighbours,
+  // and nothing in a tooltip lines up with anything. This record filed no encodings, so it simply
+  // has no `dictionary` line rather than one reading a dash.
+  assert.ok(!tip.some((l) => l.includes("—")), tip.join(" | "));
+  assert.ok(!tip.some((l) => l.startsWith("dictionary")), tip.join(" | "));
+  const both = /<title>([\s\S]*?)<\/title>/.exec(d.scatterTiers(pts))[1];
+  assert.ok(both.includes("ordering: date, time, price"), "the second scatter gets the same row");
+});

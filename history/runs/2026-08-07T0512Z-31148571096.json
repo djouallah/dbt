@@ -861,6 +861,7 @@
      "rows": 2097152
     },
     "table": "mart.fct_summary",
+    "vorder_enabled": true,
     "vorder_files": {
      "files": 77,
      "tagged": 0,

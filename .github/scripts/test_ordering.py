@@ -185,6 +185,33 @@ def test_vorder_tags_count_live_files_and_report_what_the_log_cannot_say(stats):
         ["abfss://x/part-1.parquet"]) == {"tagged": 1, "files": 1, "unknown": 0}
 
 
+def test_a_warehouse_gets_no_vorder_files_key_at_all_not_a_zero(stats, monkeypatch):
+    """THE FALSE NEGATIVE THIS GUARD EXISTS FOR. `add.tags.VORDER` is a marker the Fabric SPARK writer
+    stamps. The warehouse writer stamps none and V-Orders BY DEFAULT, so the tag read came back
+    `{tagged: 0, files: 77, unknown: 0}` against dwh's genuinely V-Ordered parquet — a fully successful
+    read of a log with no such marker, which on the page is indistinguishable from a writer that did
+    not V-Order. `unknown: 0` even asserts the read was complete, which is what made it convincing.
+
+    Absent, not zero: absence reads as "this probe cannot see it", which is the truth, and the answer
+    arrives instead as `vorder_enabled` from the leg's own `sys.databases` query. A lakehouse must be
+    unaffected — that is where the tag means something."""
+    monkeypatch.setattr(stats, "vorder_tags",
+                        lambda *a, **k: {"tagged": 0, "files": 77, "unknown": 0})
+    # The two parquet metrics are stubbed out: what is under test is the gate, not the readers, and
+    # `ordering_for` drops a document holding nothing but `table`.
+    monkeypatch.setattr(stats, "rg_ordering", lambda *a, **k: {"date": {"rg_overlap_pct": 0.0}})
+    monkeypatch.setattr(stats, "run_lengths", lambda *a, **k: {})
+    at, rows = {"file_name": 0}, [("part-1.parquet",)]
+    lake = stats.ordering_for(object(), "g", "mart", at, rows, "lakehouses")
+    assert lake["vorder_files"] == {"tagged": 0, "files": 77, "unknown": 0}
+    wh = stats.ordering_for(object(), "g", "mart", at, rows, "warehouses")
+    assert "vorder_files" not in wh, "a warehouse's tag read is meaningless, so it must not be recorded"
+    # Still a document — the two parquet metrics are dialect-neutral and dwh keeps them.
+    assert wh.get("table") == "mart.fct_summary"
+    # The default must be the lakehouse behaviour: a caller that forgets the argument keeps measuring.
+    assert "vorder_files" in stats.ordering_for(object(), "g", "mart", at, rows)
+
+
 def test_every_measurement_is_best_effort_and_absent_never_empty(stats):
     """A layout job that goes red for a measurement it added is worse than one that reports less.
     `{}` would read as "nothing is ordered"; absence reads as "not measured", which is the truth."""
@@ -234,7 +261,10 @@ def test_the_step_summary_renders_without_the_parts_that_failed(stats, capsys):
     stats.ordering_table(order, ["duckrun", "dwh", "spark"])
     out = capsys.readouterr().out
     assert "| duckrun | 9/9 +2? | `part-1.parquet` · 4,000,000 rows |" in out
-    assert "| dwh | — | — |" in out, "a missing part is a dash, not a zero and not a crash"
+    # A missing part is a dash, not a zero and not a crash — EXCEPT the V-Order tag on a WAREHOUSE,
+    # which reads `n/a`: a dash there says "not V-Ordered" about the one engine that always is, which
+    # is the misreading that cost this repo months. Its state comes from `vorder_enabled` instead.
+    assert "| dwh | n/a (warehouse) | — |" in out
     assert "spark" not in out, "an engine that measured nothing gets no column"
     assert "| `date` | 0% RG overlap · 45 runs | 50% RG overlap |" in out
     assert "100%* RG overlap" in out, "a truncated statistic is flagged for the reader"

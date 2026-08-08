@@ -498,6 +498,16 @@ jobs:
         # No `--exclude tag:heavy`: nothing carries the tag any more, and a selector matching zero
         # nodes is a warning and a lie about what ran.
         run: dbt build --target ${{ matrix.engine }} --profiles-dir . || dbt retry --target ${{ matrix.engine }} --profiles-dir .
+      # The ONE V-Order signal that can see a Warehouse. `stats.py`'s two are both Spark-shaped — a
+      # TBLPROPERTIES key and the Spark writer's per-file `add.tags.VORDER` — and the warehouse sets
+      # neither while V-Ordering by default, so the layout job read dwh as un-V-Ordered for every run
+      # it ever measured. `sys.databases.is_vorder_enabled` is what Microsoft's own doc says to query.
+      # Here rather than in `layout` because this needs T-SQL and a warehouse connection, both of
+      # which this leg already has; `always()` so a failed build still records what it wrote under.
+      - name: V-Order state of the warehouse
+        if: always() && matrix.engine == 'dwh'
+        continue-on-error: true
+        run: python .github/scripts/dwh_vorder.py ${{ matrix.engine }}
       - if: always()
         uses: actions/upload-artifact@v4
         with:

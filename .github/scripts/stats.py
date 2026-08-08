@@ -35,6 +35,13 @@ V-Order is documented as a row-reordering pass and nothing here could tell wheth
 contain. That is measured from the parquet itself now, plus the per-file Delta `VORDER` tag this
 file's own comments have called the honest check for months without anything reading it.
 
+**NEITHER of those two sees a WAREHOUSE, and reading them as "dwh writes no V-Order" is wrong.** The
+property is a `TBLPROPERTIES` key and the tag is a Spark-writer marker; the warehouse engine sets
+neither and V-Orders **by default** on every new warehouse (irreversible once disabled). So
+`ordering_for` skips the tag read for `kind == "warehouses"` — absent, not `tagged: 0` — and dwh's
+answer comes from `sys.databases.is_vorder_enabled`, recorded by the dwh leg as
+`layout.ordering.dwh.vorder_enabled`.
+
 That JSON is a data contract with a consumer outside this file. Its shape is
 `{"run": {...}, "config": {...}, "engines": {...}, "tables": [...], "landing": {...},
 "ordering": {engine: {...}}, "stats": {engine: {table: {detail}}}}` and the detail keys are
@@ -114,6 +121,11 @@ DETAIL_COLS = [("total_rows", "rows", "num"), ("num_files", "files", "num"),
 # engines produce the same rows in a very different physical layout.
 WRITER = {"duckrun": "delta-rs", "iceberg": "duckdb (iceberg)",
           "spark": "spark", "dwh": "warehouse"}
+
+# Item kind per engine, so the renderers can say WHY a signal is absent rather than dashing it out.
+# `vorder_files` is a Spark-writer marker and a warehouse writes none, so `—` there would read as
+# "not V-Ordered" on the one engine that V-Orders by default. See `vorder_tags`.
+KIND = {name: kind for name, _item, kind in ALL_ENGINES}
 
 
 def fabric_token():
@@ -529,8 +541,16 @@ def vorder_tags(con, guid, schema, table, live_files):
     `secret.refreshed(...)` — so it adds no dependency this job does not already have. The commit
     files are zero-padded 20-digit, so a lexicographic sort IS commit order.
 
-    Best-effort: `{}` on anything at all, including a Warehouse whose OneLake Delta representation
-    turns out not to lay its log out this way.
+    **ONLY MEANINGFUL FOR A SPARK-WRITTEN TABLE, which is why `ordering_for` does not call this for a
+    Warehouse.** `add.tags.VORDER` is a marker the Fabric SPARK writer stamps. The warehouse engine
+    V-Orders by default (`is_vorder_enabled`, on for every new warehouse and irreversible once off)
+    and stamps no such tag, so this returned `{tagged: 0, files: 77, unknown: 0}` against dwh — a
+    successful read of a log that simply does not carry the marker, which is indistinguishable on the
+    page from "the writer did not V-Order". That is the false negative this guard exists to prevent;
+    the authoritative dwh signal is `layout.ordering.dwh.vorder_enabled`, read from `sys.databases`
+    by the dwh leg itself.
+
+    Best-effort: `{}` on anything at all.
     """
     try:
         import obstore
@@ -551,7 +571,7 @@ def vorder_tags(con, guid, schema, table, live_files):
         return {}
 
 
-def ordering_for(con, guid, schema, at, rows):
+def ordering_for(con, guid, schema, at, rows, kind="lakehouses"):
     """DID THE WRITER PHYSICALLY REORDER THE ROWS? Three signals over the mart, one document.
 
     V-Order is documented as a row-reordering plus encoding pass, and until this existed the record
@@ -562,7 +582,12 @@ def ordering_for(con, guid, schema, at, rows):
     - `columns[c].runs` — ordering WITHIN a file, from a bounded read of one sample file. This is
       the intra-file reordering V-Order claims and nothing else here can see.
     - `vorder_files` — whether Fabric TAGGED the files as V-Ordered, read from the Delta log. A
-      measured answer to the question the `vorder` detail column pretends to answer.
+      measured answer to the question the `vorder` detail column pretends to answer — **for a
+      Spark-written table only**. `kind == "warehouses"` skips it, because the tag is a Spark-writer
+      marker and the warehouse writes none: it read `0/77` against dwh's own V-Ordered parquet, which
+      is a successful read of an absent marker, not a measurement of an absent optimisation. See
+      `vorder_tags`. The dwh answer arrives as `vorder_enabled` from the leg's own `sys.databases`
+      query instead, so an ABSENT `vorder_files` here is the honest "this probe cannot see it".
 
     All three land under `layout.ordering.<engine>`, a sibling of `stats` and `encodings` and
     deliberately NOT in `layout.config` — the dashboard's `variant()` walks every key of that block
@@ -581,7 +606,7 @@ def ordering_for(con, guid, schema, at, rows):
         doc["sample"] = {"file": rl["file"], "rows": rl["rows"]}
         for c, n in rl["runs"].items():
             cols.setdefault(c, {})["runs"] = n
-    if "file_name" in at:
+    if "file_name" in at and kind != "warehouses":
         vt = vorder_tags(con, guid, schema, MART, {r[at["file_name"]] for r in rows})
         if vt:
             doc["vorder_files"] = vt
@@ -766,14 +791,23 @@ def ordering_table(ordering, engines):
           "means equal values were brought together, which is the intra-file reordering V-Order "
           "claims and the row-group ranges cannot see. A near-unique column (`mw`, `price`) is the "
           "control: it can only drop if the file really was reordered. `*` = a truncated string "
-          "statistic, so that boundary is approximate.</sub>\n")
+          "statistic, so that boundary is approximate. <b>V-Order files</b> is the per-file Delta "
+          "<code>add.tags.VORDER</code>, which only the Fabric SPARK writer stamps — a Warehouse "
+          "reads <code>n/a</code> rather than 0/N, because it writes no such tag while V-Ordering by "
+          "default; its state is <code>layout.ordering.dwh.vorder_enabled</code> in the run "
+          "record.</sub>\n")
     print("| engine | V-Order files | sample |")
     print("| --- | --- | --- |")
     for e in have:
         d = ordering[e]
         v, s = d.get("vorder_files") or {}, d.get("sample") or {}
-        vc = "—" if not v else (f"{v['tagged']:,}/{v['files']:,}"
-                                + (f" +{v['unknown']:,}?" if v.get("unknown") else ""))
+        # `n/a`, never `—`, for a warehouse: the tag is a Spark-writer marker and the warehouse writes
+        # none while V-Ordering BY DEFAULT, so a dash here reads as "not V-Ordered" on the one engine
+        # that always is. The real answer is `vorder_enabled` in the record, from the build leg's own
+        # `sys.databases` query — this job has no T-SQL connection and cannot print it.
+        vc = ("n/a (warehouse)" if not v and KIND.get(e) == "warehouses"
+              else "—" if not v else (f"{v['tagged']:,}/{v['files']:,}"
+                                      + (f" +{v['unknown']:,}?" if v.get("unknown") else "")))
         sc = "—" if not s else f"`{s['file']}` · {s['rows']:,} rows"
         print(f"| {e} | {vc} | {sc} |")
     print()
@@ -924,7 +958,7 @@ def one_engine(item, kind):
     # one the rest of this document reports on.
     schema = (st.get(MART) or {}).get("schema")
     at, chunks = mart_chunks(con, f"{schema}.{MART}") if schema else (None, [])
-    return guid, st, encodings_from(at, chunks), ordering_for(con, guid, schema, at, chunks)
+    return guid, st, encodings_from(at, chunks), ordering_for(con, guid, schema, at, chunks, kind)
 
 
 def main():

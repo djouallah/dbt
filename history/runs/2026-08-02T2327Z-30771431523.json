@@ -751,6 +751,11 @@
    "item": "dbt_landing",
    "size_mb": 170491.41
   },
+  "ordering": {
+   "dwh": {
+    "vorder_enabled": true
+   }
+  },
   "run": {
    "id": "30771431523",
    "sha": "3d9d4f51e6339d2408bef40a144a7a60a2f325bf",

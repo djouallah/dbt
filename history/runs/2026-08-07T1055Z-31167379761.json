@@ -864,6 +864,7 @@
      }
     },
     "table": "mart.fct_summary",
+    "vorder_enabled": true,
     "vorder_files": {
      "files": 78,
      "tagged": 0,

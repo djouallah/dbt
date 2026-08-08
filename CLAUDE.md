@@ -542,6 +542,9 @@ to `provision.py teardown`, which polls for a 404 and goes red if it is still li
   are independent in principle — either can be set without the other — so they *can* disagree, and
   `vorder_files` is what to believe if they ever do. The by-hand recipe this file used to prescribe
   is gone: `layout.ordering` measures it every run.
+  **Everything in this bullet is about SPARK. Do not carry "believe `vorder_files`" over to dwh** —
+  there both signals are blind and the warehouse's own `sys.databases.is_vorder_enabled` is the only
+  authority. See the retraction under *V-Order only affects files written after it*.
 - **WHETHER THE ROWS WERE ACTUALLY REORDERED IS MEASURED NOW — `layout.ordering` in the run record,
   and one step-summary section in the `layout` job.** V-Order is documented as a row-reordering plus
   encoding pass and nothing here could say whether it happened; the record could state that a run
@@ -566,6 +569,10 @@ to `provision.py teardown`, which polls for a 404 and goes red if it is still li
     live set comes from the file list the metadata fetch already holds, so this cannot disagree with
     the rest of the document about which files exist. A live file no JSON commit describes is
     `unknown` (checkpointed away), never silently counted untagged.
+    **IT IS A SPARK-WRITER MARKER, so `ordering_for` SKIPS IT FOR dwh — see the retraction below.**
+    An absent `vorder_files` on a warehouse is now the honest "this probe cannot see it"; a
+    `tagged: 0` there was a successful read of a log that carries no such tag, which is a different
+    statement from "the writer did not V-Order" and read identically on the page.
   **READ THE TWO PARQUET METRICS TOGETHER — neither alone says "sorted".** A secondary sort key
   repeats through the table, so its row-group ranges all span the domain (100% overlap) while its
   values stay perfectly grouped inside each row group (few runs); measured on a `date,time,DUID`
@@ -609,10 +616,43 @@ to `provision.py teardown`, which polls for a 404 and goes red if it is still li
 - **V-Order only affects files written after it, so an incremental leg flips over slowly.** There
   is no model-level equivalent and no way to retrofit it in place; `OPTIMIZE … VORDER` or a
   rewrite is what moves parquet already on disk. `benchmark/README.md`'s snapshot table predates
-  all of this. A `·` on the other three engines is correct rather than a regression, but for two
-  different reasons: delta-rs and DuckDB have no V-Order encoder at all, whereas Fabric Warehouse
-  does — it is off by default on new warehouses and toggled at the warehouse level
-  (`ALTER DATABASE`), not from anything in this repo.
+  all of this. A `·` is correct for duckrun and iceberg — delta-rs and DuckDB have no V-Order encoder
+  at all — and **was WRONG for dwh for every run ever measured; see the retraction below.**
+- **RETRACTED: "Fabric Warehouse V-Order is off by default on new warehouses." IT IS ON BY DEFAULT,
+  AND BOTH OF THIS REPO'S PROBES ARE BLIND TO IT.** Microsoft's
+  [performance guidelines](https://learn.microsoft.com/en-us/fabric/data-warehouse/guidelines-warehouse-performance)
+  (updated 2026-06-24): *"By default, V-Order is enabled on all warehouses."* Disabling is
+  `ALTER DATABASE CURRENT SET VORDER = OFF`, **irreversible** once done, and the state is read with
+  `SELECT [name], [is_vorder_enabled] FROM sys.databases` (`1` on, `0` off). Nothing in this repo runs
+  that `ALTER`, and every dispatch creates its warehouse from nothing, so **every dwh run this repo
+  has ever measured wrote V-Ordered parquet** — while the record said `false` and the page printed `·`
+  and grouped dwh's layout bars as un-V-Ordered.
+  Why it read false, and this is the part worth keeping: **both signals are SPARK-SHAPED.**
+  `stats[dwh][*].vorder` is the Delta table property `delta.parquet.vorder.enabled`, a
+  `TBLPROPERTIES` key; `ordering.dwh.vorder_files` was the Fabric **Spark** writer's per-file
+  `add.tags.VORDER`. The warehouse engine sets neither. Measured on runs 31148571096 and
+  31167379761 — freshly created warehouses — `mart.fct_summary` read **0 of 77** and **0 of 78** files
+  tagged at `unknown: 0`, i.e. a completely successful read of a log with no such marker in it.
+  **The trap is that the positive control is engine-specific.** `vorder_tags` demonstrably works — it
+  returned `12/12` and `9/9` on spark runs — which proves it can see a *Spark* writer's tag and says
+  nothing whatever about a warehouse's parquet. A probe that returns a plausible zero, with its own
+  success indicator (`unknown: 0`) confirming the read, is the worst shape a measurement can have; do
+  not read one as an answer without a control written by the *same* engine.
+  Corroborating that the warehouse writer is a different beast, from our own records: dwh is the only
+  engine reading `compression: UNCOMPRESSED`, and run 31148571096's dwh columns come back GUID-named
+  (`col-198f7fa3-…`), i.e. parquet column mapping.
+  **So the authoritative signal is recorded now**, by the dwh leg itself:
+  `.github/scripts/dwh_vorder.py` queries `sys.databases` after the build and writes
+  `layout.ordering.dwh.vorder_enabled`. It lives in `layout.ordering` and **never `layout.config`**,
+  for the reason stated above that block. `ordering_for` no longer emits `vorder_files` for
+  `kind == "warehouses"`, and `dashboard/app.js`'s `vorderOf()` prefers `vorder_enabled` over the
+  property everywhere V-Order is grouped, captioned or printed. The six existing dwh records were
+  **backfilled** to `vorder_enabled: true` on the documented default, the same way the sort keys were
+  backfilled from the model at each run's SHA. The check is `typeof === "boolean"`, not truthiness: a
+  real `false` (someone ran the `ALTER`) has to beat a `vorder: true`.
+  One thing this does NOT claim: that dwh's V-Order changes its parquet measurably here. Its
+  `rg_overlap_pct` is 100% on every column but `cutoff`, which is consistent with the measured spark
+  finding that V-Order does not reorder rows. That is the same open question, not a new one.
 - **A Fabric Environment was built for the V-Order problem and reverted. Nothing here uses one.**
   Not because it failed — it published fine and its `readHeavyForPBI` profile is the *documented*
   answer — but because **attaching one gives up the starter pool**. Microsoft's Livy docs say so in

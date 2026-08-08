@@ -1285,9 +1285,14 @@ export function scatterSvg(title, subtitle, pts, xLabel = "cold ms", legend = ""
   for (const p of [...rows].sort((a, b) => Number(a.y) - Number(b.y))) {
     const cx = px(p.x), cy = py(p.y);
     const at = p.id ? label(p) : { x: 0, y: 0, anchor: "start" };
-    out.push(`<g><title>${esc(p.label)}${p.sub ? ` (${esc(p.sub)})` : ""}: ` +
-      `${fmt(p.y, 0)} ${esc(yLabel)}, ${fmt(p.x, 0)} ms ${esc(xLabel.replace(/ ms$/, ""))}` +
-      `${p.n ? `, ${p.n} run(s)` : ""}</title>` +
+    // THE HOVER IS THE WHOLE TABLE ROW when the caller supplies one — the plot encodes four things
+    // and the table above prints eight, and the four it drops include the sort key, which is the
+    // only thing separating two dots of the same colour. The one-liner stays as the fallback for a
+    // caller with nothing richer to say.
+    const tip = (p.tip || []).length ? p.tip.map(esc).join("\n")
+      : `${esc(p.label)}: ${fmt(p.y, 0)} ${esc(yLabel)}, ` +
+        `${fmt(p.x, 0)} ms ${esc(xLabel.replace(/ ms$/, ""))}${p.n ? `, ${p.n} run(s)` : ""}`;
+    out.push(`<g><title>${tip}</title>` +
       `<circle class="dot c${p.hue || 1}" cx="${cx.toFixed(1)}" cy="${cy.toFixed(1)}" ` +
       `r="${rad(p.c).toFixed(1)}"/>` +
       (p.id ? `<text class="bar-caption" x="${at.x.toFixed(1)}" y="${at.y.toFixed(1)}"` +
@@ -1559,6 +1564,37 @@ function cutNote(cut) {
 }
 
 /**
+ * A dot's whole table row, for its `<title>` — THE SORT KEY INCLUDED.
+ *
+ * The plot encodes four things (position twice, colour, area) and the table above it prints eight.
+ * The four it drops are not decoration: `ordering` is the difference between two dots of the same
+ * colour sitting a thousand CU apart, and it is the one thing nothing on the chart shows — the
+ * labels stopped carrying it because it made them long, and only three writers get a label at all.
+ * So the hover is the full row, and a reader never has to scroll back up to the table to find out
+ * which `delta_rs` they are looking at.
+ *
+ * NEWLINE SEPARATED, which a native `<title>` tooltip honours. Anything the record did not measure
+ * is OMITTED rather than dashed: a dash is a column that must line up with its neighbours, and
+ * nothing here lines up with anything.
+ */
+function tipLines(p) {
+  const k = keyCells(p.members);
+  const out = [p.name];
+  const say = (label, v) => { if (v && v !== DASH) out.push(`${label}: ${v}`); };
+  say("ordering", k.ordering);
+  say("row group size", k.rgSize);
+  say("row groups", k.rg);
+  say("dictionary", k.dict);
+  say("size", k.mb && k.mb !== DASH ? `${k.mb} MB` : "");
+  if (p.cu) out.push(`CU: ${fmt(p.cu, 0)}`);
+  for (const tier of ["cold", "warm", "hot"]) {
+    if (p.ms && p.ms[tier]) out.push(`${tier}: ${fmt(p.ms[tier], 0)} ms`);
+  }
+  if (p.n) out.push(`${p.n} run${p.n !== 1 ? "s" : ""}`);
+  return out;
+}
+
+/**
  * LABELLED ONLY WHERE THE WRITER NAME IS UNIQUE on the plot — `dwh` and the three spark profiles.
  * `delta_rs` is seven of the twelve dots, so labelling it would print one word seven times and
  * separate nothing; those seven are told apart by the LEGEND's colour, and their ordering and size
@@ -1607,7 +1643,7 @@ export function scatterFit(pts) {
     "one dot per layout — cold ms across, CU up, sized by row group size" + cutNote(cut),
     rows.map((p) => ({
       x: p.ms.cold, y: p.cu, label: p.name, id: uniqueName(rows, p), n: p.n,
-      sub: keyCells(p.members).rgSize, hue: WRITER_HUE[p.name] || 1, c: martSize(p.members),
+      tip: tipLines(p), hue: WRITER_HUE[p.name] || 1, c: martSize(p.members),
     })), "cold ms", "row group size", (v) => `${fmt(v / 1e6, 1)}M`, "CU", modelNote(rows));
 }
 
@@ -1630,7 +1666,7 @@ export function scatterTiers(pts) {
     "one dot per layout — cold ms across, warm ms up, sized by row group size" + cutNote(cut),
     rows.map((p) => ({
       x: p.ms.cold, y: p.ms.warm, label: p.name, id: uniqueName(rows, p), n: p.n,
-      sub: keyCells(p.members).rgSize, hue: WRITER_HUE[p.name] || 1, c: martSize(p.members),
+      tip: tipLines(p), hue: WRITER_HUE[p.name] || 1, c: martSize(p.members),
     })), "cold ms", "row group size", (v) => `${fmt(v / 1e6, 1)}M`, "warm ms", modelNote(rows));
 }
 
