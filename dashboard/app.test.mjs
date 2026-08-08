@@ -2898,9 +2898,9 @@ test("a layout is one LINE on one shared time axis, warm end to cold end", () =>
   }
   assert.ok(/its cold pass 2x the slowest of these/.test(svg), "the exclusion is still stated");
   const axes = [...svg.matchAll(
-    /<text class="bar-caption"[^>]*>((?:cold|warm|hot) ms|query time \(ms\)|CU)</g)]
+    /<text class="bar-caption"[^>]*>((?:cold|warm|hot) ms|query time \(ms\)|CUs?)</g)]
     .map((m2) => m2[1]).sort();
-  assert.deepEqual(axes, ["CU", "query time (ms)"], `one time axis, not two: ${axes}`);
+  assert.deepEqual(axes, ["CUs", "query time (ms)"], `one time axis, not two: ${axes}`);
   // NO SIZE KEY: with the dots gone there is nothing to size. Row group size is NOT lost — it stays
   // a column of the table above and a line of every hover, which is why this looks at the legend
   // text alone rather than at the whole document.
@@ -2952,7 +2952,7 @@ test("a writer that names several layouts is labelled with the layout, at the co
   ]);
   const labs = [...svg.matchAll(/<text class="bar-caption"([^>]*)>([^<]+)</g)]
     .map((m) => ({ end: /text-anchor="end"/.test(m[1]), x: +/x="([\d.]+)"/.exec(m[1])[1], t: m[2] }))
-    .filter((l) => !["query time (ms)", "CU"].includes(l.t));
+    .filter((l) => !["query time (ms)", "CUs"].includes(l.t));
   const texts = labs.map((l) => l.t);
   assert.ok(texts.includes("date, time · 9 RG") && texts.includes("date, time, price · 24 RG"),
     `the layout, not the writer: ${texts}`);

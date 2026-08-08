@@ -1784,7 +1784,7 @@ export function scatterFit(pts) {
       // make the two captions disagree.
       id2: uniqueName(rows, p) ? "" : layoutLabel(p.members).replace(/^by /, ""),
       tip: tipLines(p), hue: WRITER_HUE[p.name] || 1,
-    })), "query time (ms)", "", undefined, "CU", modelNote(rows));
+    })), "query time (ms)", "", undefined, "CUs", modelNote(rows));
   // NO SIZE CHANNEL. The dots carried row-group size as their AREA; with the marks gone there is
   // nothing to size, and putting it back as stroke width would be the third encoding this chart was
   // simplified to remove. It is not lost: it is a column of the table directly above and a line of
