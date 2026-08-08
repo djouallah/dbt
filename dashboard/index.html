@@ -282,6 +282,21 @@ figure.chart svg { max-width:100%; height:auto; display:block; overflow:visible;
    roles, and it is safe here for a reason specific to this chart: the one writer in slot 6 has a
    unique name, so it carries a DIRECT LABEL and its identity never rested on colour. */
 .dot.c6 { fill:var(--dim); }
+/* THE PAIR: a layout whose point carries two times is drawn as the SEGMENT BETWEEN THEM and nothing
+   else — no end markers. The length is the whole reading, and two circles on it were a second
+   grammar (fill for the tier, area for row group size) to learn before the length could be read at
+   all. `butt` caps, not `round`: a round cap overshoots the value by half the stroke, and these
+   endpoints ARE the two measurements. No new colour — the same `--catN` the dots fill with. */
+/* SLIGHTLY TRANSPARENT, and it is the one concession the dots used to make for free. A dot marked
+   one x; a line spans most of the plot, so two layouts at nearly the same CU now overlap along their
+   whole length instead of sitting at two different x. On the real records four pairs land within 3
+   units of each other, all of them `delta_rs`, i.e. the same hue — drawn opaque they read as one
+   line and the chart silently undercounts. At .8 the overlap composites darker, so a coincidence
+   looks like what it is. */
+.pair { stroke-width:3; fill:none; opacity:.8; }
+.pair.c1 { stroke:var(--cat1); } .pair.c2 { stroke:var(--cat2); } .pair.c3 { stroke:var(--cat3); }
+.pair.c4 { stroke:var(--cat4); } .pair.c5 { stroke:var(--cat5); }
+.pair.c6 { stroke:var(--dim); }
 /* The size key's circles carry no hue — they encode the size channel alone, so giving them a
    writer colour would say a size belongs to a writer. */
 .swatch.c0 { fill:var(--dim); opacity:.55; stroke:none; }

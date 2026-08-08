@@ -1119,6 +1119,46 @@ function niceScale(min, max, want = 4) {
 }
 
 /**
+ * The same, on a LOG scale — `{lo, hi, ticks, log:true}`, bracketing `[min,max]` multiplicatively.
+ *
+ * The bound is padded by a FACTOR, not by a difference, which is the log analogue of the linear 4%:
+ * padding a log axis additively pads the small end by a whole tick and the large end by nothing.
+ * The bound is NOT snapped out to whole decades — that is the same mistake `niceScale` documents one
+ * function up, and it is worse here: `fct_summary`'s CU spans 1,332-3,769, so decade bounds of
+ * 1,000-10,000 would put every layout on the page inside the bottom half of the plot.
+ *
+ * TICKS COME FROM MANTISSAS, coarsest set that still fills the axis. A log decade has room for
+ * 1/2/5, but this chart's y only spans HALF a decade, where that set yields a single tick and the
+ * gridlines vanish — so the sets get finer until one produces enough. Never empty: a scale with no
+ * ticks draws no gridlines and no numbers, which reads as a rendering failure rather than as a
+ * narrow range.
+ */
+const LOG_MANTISSAS = [[1], [1, 3], [1, 2, 5], [1, 2, 3, 5, 7], [1, 1.5, 2, 3, 4, 5, 7]];
+function logScale(min, max, want = 4, padHi = 1.08) {
+  const lo0 = Math.max(Number(min) || 1, Number.MIN_VALUE);
+  const lo = lo0 / 1.08, hi = Math.max(Number(max) || lo0, lo0) * padHi;
+  let ticks = [];
+  for (const ms of LOG_MANTISSAS) {
+    ticks = [];
+    for (let e = Math.floor(Math.log10(lo)); e <= Math.ceil(Math.log10(hi)); e++) {
+      for (const m of ms) {
+        const v = m * 10 ** e;
+        if (v >= lo && v <= hi) ticks.push(v);
+      }
+    }
+    if (ticks.length >= want) break;
+  }
+  return { lo, hi, ticks: ticks.length ? ticks : [lo, hi], log: true };
+}
+
+/** Where a value sits on a scale, 0..1 — the one place the log/linear difference lives. */
+function frac(S, v) {
+  return S.log
+    ? (Math.log(Number(v)) - Math.log(S.lo)) / ((Math.log(S.hi) - Math.log(S.lo)) || 1)
+    : (Number(v) - S.lo) / ((S.hi - S.lo) || 1);
+}
+
+/**
  * CU against query time, one dot per layout — the relationship the ranked table cannot show.
  *
  * WHY A SCATTER AND NOT A THIRD BAR CHART: the table above ranks by CU and the reader can already
@@ -1127,15 +1167,24 @@ function niceScale(min, max, want = 4) {
  * answer here reads off the shape rather than off any single row: the cheapest layouts are the
  * SLOWEST, so paying more CU does not buy latency.
  *
- * **ONE SERIES, so no categorical palette and no legend.** Every dot is the same `--series` the bars
- * already use; identity comes from a direct label on the outliers and a `<title>` on every mark, so
- * nothing is encoded in colour alone and there is no hue order to get wrong. Thirteen hues for
- * thirteen layouts would be past the point any palette stays separable under CVD, and the table
- * directly above IS the table view of these same points.
+ * WHY EACH LAYOUT IS A LINE AND NOT A DOT, and it replaced two whole charts. The page carried *CU
+ * against cold* and *cold against warm*: both plotted `cold ms` on x, so a reader wanting all three
+ * numbers carried one between two panels, and the quantity that actually matters — what the cold
+ * transcode COSTS over the warm pass — was on neither. Giving a point a second x on the SAME axis
+ * turns that subtraction into a LENGTH, which is the one thing the eye reads without arithmetic.
+ * The two ends carry no markers on purpose: the length is the reading, and end markers meant a
+ * second grammar (which fill is which tier, what the area means) to learn before it could be read.
  *
- * NOT ZERO-BASED, deliberately: a scatter shows association, not magnitude, so the axes bracket the
+ * ONE TIME AXIS, NEVER TWO. Both tiers are milliseconds; two scales for two measures of the same
+ * kind is the dual-axis mistake, and a length spanning two scales is not a quantity. The separation
+ * that results — warm bunched at the left, cold spread across the right — IS the finding: the
+ * second visit is 5-8x cheaper and how much cheaper varies by layout, which is what the varying
+ * lengths say. Warm is always the LEFT end because it is always the smaller number.
+ *
+ * NOT ZERO-BASED as a RULE: a scatter shows association, not magnitude, so the axes bracket the
  * data. (The zero-baseline rule is a BAR rule — a truncated bar misstates a ratio, a truncated
- * scatter axis does not.)
+ * scatter axis does not.) On today's data the time axis reaches 0 anyway, because the combined span
+ * snaps `niceScale`'s step to 5,000 — a consequence of the numbers, not a policy.
  */
 /**
  * Writer -> categorical slot, FIXED and never cycled.
@@ -1174,6 +1223,15 @@ export function scatterSvg(title, subtitle, pts, xLabel = "cold ms", legend = ""
   const rows = (pts || []).filter((p) => Number.isFinite(Number(p.x)) && Number(p.x) > 0
     && Number.isFinite(Number(p.y)) && Number(p.y) > 0);
   if (rows.length < 2) return "";
+  // A POINT'S SECOND X, or NaN — and it changes the MARK, not just its decoration: a point with one
+  // x is a dot, a point with two is the SEGMENT between them. One shape per point, never both.
+  //
+  // The second x is OPTIONAL per point: a layout that recorded no warm pass draws its cold end as a
+  // plain dot rather than losing its row. Unmeasured is an absent thing, never a zero — the same
+  // rule `tipLines` follows when it omits a tier instead of dashing it, and a segment run back to
+  // x=0 would read as "this layout answered instantly".
+  const x2 = (p) => (Number.isFinite(Number(p.x2)) && Number(p.x2) > 0 ? Number(p.x2) : NaN);
+  const paired = rows.filter((p) => Number.isFinite(x2(p)));
   // TALLER THAN THE BARS, on purpose. It is drawn at the same 660-unit width so it lines up with the
   // bar charts in the same 62rem column; height is the only axis free to grow, and a scatter needs
   // vertical room the way a bar list does not — thirteen dots in a 300-tall box sat on top of one
@@ -1184,19 +1242,38 @@ export function scatterSvg(title, subtitle, pts, xLabel = "cold ms", legend = ""
   // area at an unchanged text size — 920 units into ~86rem is the same 1.5x scale 660 into 62rem
   // was. Twelve dots in a dense cluster is exactly the case that wants the area.
   const W = 920, H = 610, L = 62, R = 16, T = 20, B = 96, LEG = 36;
-  const xs = rows.map((p) => Number(p.x)), ys = rows.map((p) => Number(p.y));
-  // 4% padding, so a dot on the extreme does not sit half-outside the axis line.
-  const pad = (v, k) => (v[1] - v[0]) * 0.04 * k;
+  // THE DOMAIN SPANS BOTH ENDS. Scaling to `p.x` alone would run every segment off the left of the
+  // plot, which is the failure that makes a span not a span.
+  const xs = [...rows.map((p) => Number(p.x)), ...paired.map(x2)], ys = rows.map((p) => Number(p.y));
   const xr = [Math.min(...xs), Math.max(...xs)], yr = [Math.min(...ys), Math.max(...ys)];
-  // MORE TICKS ON X than on Y, so the step stays small enough that flooring it does not walk the
-  // axis back to zero. `cold ms` carries one 4x outlier (iceberg, 100,394 against 22,823-45,010),
-  // and a coarse step turned that into an axis running 0-125,000 with twelve of thirteen dots
-  // piled in the left quarter.
-  const X = niceScale(xr[0] - pad(xr, 1), xr[1] + pad(xr, 1), 8);
-  const Y = niceScale(yr[0] - pad(yr, 1), yr[1] + pad(yr, 1));
-  const px = (v) => L + (W - L - R) * ((Number(v) - X.lo) / ((X.hi - X.lo) || 1));
+  // BOTH AXES ARE LOG, and on x that CHANGES WHAT A LINE'S LENGTH MEANS — from a difference to a
+  // RATIO. That is the better quantity here and the reason for the change: cold is 5-8x warm, and
+  // "how many times slower the first visit is" is a property of the layout, while "how many
+  // thousand ms slower" mostly tracks how big the query happened to be. It also fixes the crowding
+  // a linear axis forced — warm at 3,000-6,500 against cold at 20,000-37,000 pinned every warm end
+  // into the left eighth of the plot, so the ends could not be compared with each other at all.
+  // On y it un-squashes the cheap layouts, which sit within half a decade of each other while one
+  // outlier sets the top.
+  //
+  // MORE TICKS ON X than on Y: x spans more than a decade and y less than one.
+  //
+  // X GETS EXTRA HEADROOM ON THE HIGH SIDE, and it is a LABEL GUTTER rather than a statement about
+  // the data. Names sit to the right of the cold end, the cold ends are the far right of the plot,
+  // and at the symmetric 1.08 pad the rightmost one had 22 units of room for a name needing 139 —
+  // so two of eleven fell back across the plot to the warm end and the chart labelled one side of
+  // itself in two places. Widening the axis moves every line left together, which costs a little
+  // plot width and buys every name a spot beside the mark it names. It cannot mislead: the ticks
+  // are drawn from the same scale, so the axis says exactly how far it runs.
+  //
+  // ONLY WHEN THERE IS SOMETHING TO PUT IN IT. Reserving it unconditionally compresses the plot for
+  // a caller with no right-hand labels, and that is not free: on a dense cluster the same 11 names
+  // that fitted before started colliding, because squeezing the x span squeezes the gaps a label
+  // has to find. A gutter with nothing in it is pure loss.
+  const X = logScale(xr[0], xr[1], 8, rows.some((p) => p.id2) ? 1.55 : 1.08);
+  const Y = logScale(yr[0], yr[1], 4);
+  const px = (v) => L + (W - L - R) * frac(X, v);
   const PH = H - T - B - LEG;                      // plot height, above the legend strip
-  const py = (v) => T + PH * (1 - (Number(v) - Y.lo) / ((Y.hi - Y.lo) || 1));
+  const py = (v) => T + PH * (1 - frac(Y, v));
   const out = [
     '<figure class="chart wide">' +
     `<figcaption><span class="chart-title">${esc(title)}</span>` +
@@ -1230,8 +1307,11 @@ export function scatterSvg(title, subtitle, pts, xLabel = "cold ms", legend = ""
   // word seven times and disambiguated nothing. So the label is `p.id`, the writer PLUS whatever
   // distinguishes it (its ordering), which is exactly the identity the table above uses.
   //
-  // Placed greedily against eight candidate offsets, taking the first that hits no already-placed
-  // label and no dot. Sorted by y first so the placement order is stable run to run rather than
+  // Placed greedily against sixteen candidate offsets in three rings, taking the first that hits no
+  // already-placed label and NO MARK — a dot's disc, or a line's whole length. A name printed
+  // across a 3px hued line is the one collision a reader cannot undo by hovering, and a line
+  // reaches much further across the plot than a dot ever did.
+  // Sorted by y first so the placement order is stable run to run rather than
   // depending on group iteration order. A point with nowhere free keeps its label anyway, to the
   // right: an overlapping name is recoverable by hovering, an absent one is the bug being fixed.
   const CH = 5.15, LH = 13;                        // glyph advance and line height at 10px
@@ -1240,12 +1320,8 @@ export function scatterSvg(title, subtitle, pts, xLabel = "cold ms", legend = ""
     x0: anchor === "end" ? x - t.length * CH : x, x1: anchor === "end" ? x : x + t.length * CH,
     y0: y - LH * 0.72, y1: y + LH * 0.28,
   });
-  const hits = (b) => placed.some((q) => b.x0 < q.x1 && b.x1 > q.x0 && b.y0 < q.y1 && b.y1 > q.y0)
-    || rows.some((q) => {
-      const qx = px(q.x), qy = py(q.y);
-      const qr = rad(q.c) + 2;
-      return qx + qr > b.x0 && qx - qr < b.x1 && qy + qr > b.y0 && qy - qr < b.y1;
-    });
+  const over = (b, q) => b.x0 < q.x1 && b.x1 > q.x0 && b.y0 < q.y1 && b.y1 > q.y0;
+  const hits = (b) => placed.some((q) => over(b, q)) || occluders.some((q) => over(b, q));
   // Two rings. The inner one keeps a label tight against its dot; the outer is what the dense
   // middle of the cluster needs — with one ring, two labels there exhausted every candidate and
   // fell back to overlapping.
@@ -1253,20 +1329,35 @@ export function scatterSvg(title, subtitle, pts, xLabel = "cold ms", legend = ""
     [11, 15, "start"], [-11, 15, "end"], [0, -13, "middle"], [0, 19, "middle"],
     [11, -22, "start"], [-11, -22, "end"], [11, 28, "start"], [-11, 28, "end"],
     [0, -26, "middle"], [0, 32, "middle"], [11, -35, "start"], [-11, -35, "end"]];
-  const label = (p) => {
-    const t = String(p.id || p.label);
-    const cx = px(p.x), cy = py(p.y);
-    for (const [dx, dy, anchor] of CANDIDATES) {
-      const x = cx + dx, y = cy + dy;
+  // `side` picks which half of the ring is TRIED FIRST, not which half is allowed — a left label
+  // that cannot fit on the left still gets placed rather than dropped, same as always. It exists
+  // because a line has two ends and they are labelled with different things: the writer at the cold
+  // end, and for a writer that names several layouts, the layout itself at the warm end, where the
+  // plot is empty.
+  const ORDER = {
+    right: CANDIDATES,
+    left: [...CANDIDATES.filter((c) => c[0] <= 0), ...CANDIDATES.filter((c) => c[0] > 0)],
+  };
+  const fit = (t, ax, ay, side) => {
+    for (const [dx, dy, anchor] of ORDER[side]) {
+      const x = ax + dx, y = ay + dy;
       const b = anchor === "middle" ? box(t, x - (t.length * CH) / 2, y, "start") : box(t, x, y, anchor);
       if (b.x0 < L || b.x1 > W - R || b.y0 < T || b.y1 > T + PH) continue;
       if (hits(b)) continue;
       placed.push(b);
       return { x, y, anchor };
     }
-    const x = cx + 11, y = cy + 4;
-    placed.push(box(t, x, y, "start"));
-    return { x, y, anchor: "start" };
+    return null;
+  };
+  // NEVER DROPPED: a name overlapping something is recoverable by hovering, an absent one is the bug
+  // this was built to fix. But it flips to the right when a left-anchored name would not FIT on the
+  // left — the old fallback checked no bounds at all and pushed one 25 units past the y axis, off
+  // the plot and across an unrelated line.
+  const force = (t, ax, ay, side) => {
+    const right = side !== "left" || ax - 11 - t.length * CH < L;
+    const x = right ? ax + 11 : ax - 11, y = ay + 4, anchor = right ? "start" : "end";
+    placed.push(box(t, x, y, anchor));
+    return { x, y, anchor };
   };
   // SIZE CARRIES THE ROW GROUP SIZE, and it is scaled by AREA — `r = sqrt(lerp(rMin², rMax²))`.
   // Scaling the RADIUS instead is the classic bubble lie: the eye reads the disc, and a disc whose
@@ -1282,22 +1373,56 @@ export function scatterSvg(title, subtitle, pts, xLabel = "cold ms", legend = ""
     const t = (Number(v) - cLo) / (cHi - cLo);
     return Math.sqrt(R_MIN * R_MIN + t * (R_MAX * R_MAX - R_MIN * R_MIN));
   };
+  // WHAT A LABEL MAY NOT BE PRINTED ON — a dot's disc, or a segment's whole length. A name across a
+  // 3px hued line is the one collision a reader cannot undo by hovering. Precomputed rather than
+  // recomputed inside `hits`, which runs sixteen times per label; declared after `rad` and before
+  // the draw loop, which is the only place `hits` is ever CALLED from.
+  const occluders = [];
+  for (const p of rows) {
+    const cx = px(p.x), cy = py(p.y), w = x2(p);
+    // 3 of half-height is the stroke's own 1.5 plus 1.5 of clearance.
+    if (Number.isFinite(w)) {
+      const wx = px(w);
+      occluders.push({ x0: Math.min(wx, cx), x1: Math.max(wx, cx), y0: cy - 3, y1: cy + 3 });
+    } else {
+      const r = rad(p.c) + 2;
+      occluders.push({ x0: cx - r, x1: cx + r, y0: cy - r, y1: cy + r });
+    }
+  }
   for (const p of [...rows].sort((a, b) => Number(a.y) - Number(b.y))) {
     const cx = px(p.x), cy = py(p.y);
-    const at = p.id ? label(p) : { x: 0, y: 0, anchor: "start" };
+    const w = x2(p), wx = Number.isFinite(w) ? px(w) : NaN;
+    // THE RIGHT LABEL IS THE WRITER, at the cold end. The LEFT one is the LAYOUT, at the warm end,
+    // and it exists for the writer whose name identifies nothing: `delta_rs` is most of the lines,
+    // so its name is in the legend and what separates its lines from each other — the sort key and
+    // the row group count — goes here. The warm half of the plot is where the room is.
+    const at = p.id ? (fit(String(p.id), cx, cy, "right") || force(String(p.id), cx, cy, "right"))
+      : null;
+    // THE COLD END FIRST, THE WARM END AS THE FALLBACK. Both ends are free for these lines — a
+    // writer whose name identifies nothing carries no name label at all — and the cold end wins
+    // because that is where the eye already is: the cold ends are what the chart is ranked by and
+    // what spreads out, while the warm ends bunch toward the y axis. It names the LINE either way,
+    // so a name that will not fit on the right moves rather than being forced somewhere it
+    // overlaps.
+    const ax2 = Number.isFinite(wx) ? wx : cx;
+    const at2 = p.id2 ? (fit(String(p.id2), cx, cy, "right") || fit(String(p.id2), ax2, cy, "left")
+      || force(String(p.id2), cx, cy, "right")) : null;
+    const text = (a, s) => (a ? `<text class="bar-caption" x="${a.x.toFixed(1)}" ` +
+      `y="${a.y.toFixed(1)}"${a.anchor === "start" ? "" : ` text-anchor="${a.anchor}"`}>` +
+      `${esc(s)}</text>` : "");
     // THE HOVER IS THE WHOLE TABLE ROW when the caller supplies one — the plot encodes four things
-    // and the table above prints eight, and the four it drops include the sort key, which is the
-    // only thing separating two dots of the same colour. The one-liner stays as the fallback for a
-    // caller with nothing richer to say.
+    // and the table above prints eight, and what it drops includes the row group size and `hot`.
+    // The one-liner stays as the fallback for a caller with nothing richer to say.
     const tip = (p.tip || []).length ? p.tip.map(esc).join("\n")
       : `${esc(p.label)}: ${fmt(p.y, 0)} ${esc(yLabel)}, ` +
         `${fmt(p.x, 0)} ms ${esc(xLabel.replace(/ ms$/, ""))}${p.n ? `, ${p.n} run(s)` : ""}`;
     out.push(`<g><title>${tip}</title>` +
-      `<circle class="dot c${p.hue || 1}" cx="${cx.toFixed(1)}" cy="${cy.toFixed(1)}" ` +
-      `r="${rad(p.c).toFixed(1)}"/>` +
-      (p.id ? `<text class="bar-caption" x="${at.x.toFixed(1)}" y="${at.y.toFixed(1)}"` +
-        `${at.anchor === "start" ? "" : ` text-anchor="${at.anchor}"`}>` +
-        `${esc(String(p.id))}</text>` : "") + "</g>");
+      (Number.isFinite(wx)
+        ? `<line class="pair c${p.hue || 1}" x1="${wx.toFixed(1)}" y1="${cy.toFixed(1)}" ` +
+          `x2="${cx.toFixed(1)}" y2="${cy.toFixed(1)}"/>`
+        : `<circle class="dot c${p.hue || 1}" cx="${cx.toFixed(1)}" cy="${cy.toFixed(1)}" ` +
+          `r="${rad(p.c).toFixed(1)}"/>`) +
+      text(at, String(p.id)) + text(at2, String(p.id2)) + "</g>");
   }
   // TWO LEGENDS, because there are two encodings and neither is self-evident. The writer legend is
   // REQUIRED — colour is categorical now, and identity may never rest on colour alone; only four of
@@ -1528,28 +1653,29 @@ function spanM(values) {
 }
 
 /**
- * The engine kept off BOTH scatters, and it is named here rather than detected.
+ * The engine kept off the chart, and it is named here rather than detected.
  *
- * Cold is an axis on both charts, and `iceberg`'s cold pass is 100,394 ms against 22,823-45,010 for
- * everything else — so including it sets the scale and the other twelve pile into one corner: 12 of
- * 78 dot pairs overlapped with it in, against 1 of 66 without. It is not dropped for being
- * inconvenient; 1,172 row groups is a layout nothing else on the page is near, and its cost is
- * already the top row of the table directly above.
+ * `iceberg`'s cold pass is 100,394 ms against 22,823-45,010 for everything else — so including it
+ * sets the scale and the other twelve pile into one corner: 12 of 78 dot pairs overlapped with it
+ * in, against 1 of 66 without. THE SHARED TIME AXIS MAKES THIS STRONGER, not weaker: warm sits an
+ * order of magnitude below cold, so an iceberg line four times longer than the next would squash
+ * every other line into a fraction of the plot and flatten the comparison the chart exists for. It
+ * is not dropped for being inconvenient; 1,172 row groups is a layout nothing else on the page is
+ * near, and its cost is already the top row of the table directly above.
  *
  * A CONSTANT, never a computed "more than Nx the median" rule: an automatic outlier filter changes
  * which point it silently removes as records land, and this page's whole discipline is that a
- * dropped run is a NAMED run. Each subtitle says what was left out, and says nothing when nothing
+ * dropped run is a NAMED run. The subtitle says what was left out, and says nothing when nothing
  * was.
  */
 const SCATTER_OMIT = "iceberg";
 
 /**
- * The scatter under the layout table, with its exclusion stated in its own subtitle.
+ * The points the chart may plot: those carrying the measures it needs, minus `SCATTER_OMIT`.
  *
  * Split out of `renderFit` so the omission is one named thing rather than a filter buried in a call
  * argument — the caption and the filter cannot drift apart if they are three lines from each other.
  */
-/** The points a scatter may plot: those carrying the measures it needs, minus `SCATTER_OMIT`. */
 function plotted(pts, has) {
   const usable = (pts || []).filter(has);
   const rows = usable.filter((p) =>
@@ -1564,10 +1690,11 @@ function cutNote(cut) {
 }
 
 /**
- * A dot's whole table row, for its `<title>` — THE SORT KEY INCLUDED.
+ * A line's whole table row, for its `<title>` — THE SORT KEY INCLUDED, and `hot` and the row-group
+ * size, which the chart no longer encodes at all.
  *
- * The plot encodes four things (position twice, colour, area) and the table above it prints eight.
- * The four it drops are not decoration: `ordering` is the difference between two dots of the same
+ * The plot encodes four things (two times, CU, colour) and the table above it prints eight.
+ * What it drops is not decoration: `ordering` is the difference between two lines of the same
  * colour sitting a thousand CU apart, and it is the one thing nothing on the chart shows — the
  * labels stopped carrying it because it made them long, and only three writers get a label at all.
  * So the hover is the full row, and a reader never has to scroll back up to the table to find out
@@ -1598,7 +1725,7 @@ function tipLines(p) {
  * LABELLED ONLY WHERE THE WRITER NAME IS UNIQUE on the plot — `dwh` and the three spark profiles.
  * `delta_rs` is seven of the twelve dots, so labelling it would print one word seven times and
  * separate nothing; those seven are told apart by the LEGEND's colour, and their ordering and size
- * are one hover away. No sort key appears on either chart: it was the only thing making the labels
+ * are one hover away. No sort key appears on the chart: it was the only thing making the labels
  * long, and it is a column of the table three lines above.
  */
 function uniqueName(rows, p) {
@@ -1638,36 +1765,30 @@ function modelNote(pts, table = DEFAULTS.table) {
 }
 
 export function scatterFit(pts) {
+  // THE FILTER IS COLD ONLY, deliberately. Requiring warm here would silently change WHICH layouts
+  // are on the chart, and making the membership quiet is the one thing `cutNote` exists to prevent
+  // — a layout with no warm pass keeps its row and draws as a plain dot.
   const { rows, cut } = plotted(pts, (p) => p.ms && p.ms.cold);
-  return scatterSvg("CU against cold query time",
-    "one dot per layout — cold ms across, CU up, sized by row group size" + cutNote(cut),
+  return scatterSvg("CU against query time",
+    "one line per layout, warm ms at its left end and cold ms at its right — "
+    + "on a log axis its length is how many times slower the cold pass is; "
+    + "CU up, also log" + cutNote(cut),
     rows.map((p) => ({
-      x: p.ms.cold, y: p.cu, label: p.name, id: uniqueName(rows, p), n: p.n,
-      tip: tipLines(p), hue: WRITER_HUE[p.name] || 1, c: martSize(p.members),
-    })), "cold ms", "row group size", (v) => `${fmt(v / 1e6, 1)}M`, "CU", modelNote(rows));
-}
-
-/**
- * The second scatter: COLD against WARM, the same twelve layouts.
- *
- * A different question from the chart above. That one asks whether cost tracks the transcode; this
- * one asks what the transcode BUYS — a slow cold pass is the price of a first visit, and the useful
- * thing to know is whether paying it leaves you better off on the second. Cold on x because it
- * happens first and reads left to right, and because it is the larger quantity by an order of
- * magnitude.
- *
- * `iceberg` is off this one for the SAME reason it is off the first, which is why both go through
- * `plotted()`: cold is an axis on both charts and its cold pass is 100,394 ms against 22,823-45,010
- * for everything else. One exclusion, one reason, stated in both subtitles.
- */
-export function scatterTiers(pts) {
-  const { rows, cut } = plotted(pts, (p) => p.ms && p.ms.cold && p.ms.warm);
-  return scatterSvg("Cold against warm",
-    "one dot per layout — cold ms across, warm ms up, sized by row group size" + cutNote(cut),
-    rows.map((p) => ({
-      x: p.ms.cold, y: p.ms.warm, label: p.name, id: uniqueName(rows, p), n: p.n,
-      tip: tipLines(p), hue: WRITER_HUE[p.name] || 1, c: martSize(p.members),
-    })), "cold ms", "row group size", (v) => `${fmt(v / 1e6, 1)}M`, "warm ms", modelNote(rows));
+      x: p.ms.cold, x2: p.ms.warm, y: p.cu, label: p.name, id: uniqueName(rows, p), n: p.n,
+      // The layout at the WARM end, for a writer whose name identifies nothing. `layoutLabel` is
+      // the string the analytics bar is already captioned with — the sort key and the row group
+      // count — so a line and its bar cannot describe the same parquet two different ways. The
+      // leading `by ` is dropped and ONLY that: thirteen of these sit in the crowded left half, and
+      // three characters each is the difference between a name that finds a free spot and one that
+      // falls back onto a line. It reads fine without the preposition; changing anything else would
+      // make the two captions disagree.
+      id2: uniqueName(rows, p) ? "" : layoutLabel(p.members).replace(/^by /, ""),
+      tip: tipLines(p), hue: WRITER_HUE[p.name] || 1,
+    })), "query time (ms)", "", undefined, "CU", modelNote(rows));
+  // NO SIZE CHANNEL. The dots carried row-group size as their AREA; with the marks gone there is
+  // nothing to size, and putting it back as stroke width would be the third encoding this chart was
+  // simplified to remove. It is not lost: it is a column of the table directly above and a line of
+  // every segment's own hover.
 }
 
 /** A group's rows-per-row-group as a NUMBER — the median across its members, for the colour ramp. */
@@ -1746,13 +1867,16 @@ export function renderFit(groups, times, tiers, counts = {}) {
       { sort: true }),
     // The same points as the table, plotted against each other. A ranked table cannot show whether
     // two measures move TOGETHER, which is the one question `CU` and a time column side by side
-    // invite. COLD, not hot: the cold pass is the transcode — parquet into VertiPaq segments — which
-    // is what CU is mostly buying, so it is the tier with a mechanism connecting it to the y axis.
-    // Row-group size rides along as the SIZE, since it is the shape most likely to explain both.
+    // invite.
+    //
+    // ONE CHART WHERE THERE WERE TWO. It was *CU against cold* stacked on *cold against warm*: both
+    // plotted `cold ms` on x, so the reader carried a number between two panels to get all three,
+    // and the thing worth knowing — what the cold transcode COSTS over the warm pass — was on
+    // neither. Both tiers now share one time axis and each layout is the LINE between them. Cold is
+    // still the tier with a mechanism connecting it to CU (it is the transcode, parquet into
+    // VertiPaq segments, which is what the CU is mostly buying); warm is what the transcode BUYS,
+    // and the line is that trade as one mark.
     scatterFit(pts),
-    // ...and cold against warm, which asks what the transcode BUYS: a slow cold pass is the price of
-    // a first visit, and the useful thing is whether paying it leaves you better off on the second.
-    scatterTiers(pts),
   ].filter(Boolean).join("\n");
 }
 

@@ -16,7 +16,7 @@ index.html   the shell: one stylesheet, the title, three empty elements
 dag.html     the dbt DAG -- `dbt docs generate --static` output, one self-contained file
 app.js       the whole page — loader, join, layout grouping, render, charts
 build.mjs    index.html + app.js -> one file, twice (live, and offline with data inlined)
-app.test.mjs 88 offline tests, no browser, no network
+app.test.mjs offline tests, no browser, no network (a count here goes stale silently)
 ```
 
 Where the data comes from is [`cu/`](../cu/README.md) (the CU ledger) and the `Benchmark` workflow
@@ -162,7 +162,8 @@ without a build, a token or a dispatch.
   Pages URL, because the offline copy is one loose file with no sibling to point at — and a 404 off
   a local disk looks like nothing happened at all. The build fails if that link ever stops matching.
 - **EVERY CHART AND TABLE COMES BEFORE EVERY PARAGRAPH, and the methodology is LAST.** The order is
-  the two CU charts, *Cost and speed by layout*, *Cost by engine*, *Table layout*, *Input archive*,
+  the two CU charts, *Cost and speed by layout* (its table, then its line chart), *Cost by engine*,
+  *Table layout*, *Input archive*,
   *Every run*, then *About these numbers* and the provenance line. `About these numbers` used to sit
   between the layout tables and the run table, so the last table on the page was below a screen of
   prose explaining the measure. A reader arrives for the numbers; the explanation is where they go
@@ -181,13 +182,10 @@ without a build, a token or a dispatch.
   enumerated to 12 panels in the stylesheet; past that `renderLayouts` falls back to stacked blocks
   rather than render tabs whose panels could never show. The `?table=` param still picks which table
   leads, i.e. which tab is first and checked.
-- **The two charts share one row, each in its own card** — analytics left in the page's blue, ETL
-  right in orange (categorical slots 1 and 2 of the dataviz reference palette, validated as a pair
-  on both surfaces), because side by side one hue for both read as one dataset split in half. The
-  bar tip carries the **median alone**, one mark per row; the exact range is in the
-  tooltip — the parenthetical range beside every bar doubled the ink for a fact already drawn. Both
-  gutters (labels, values) are sized to what is actually printed so nothing leaves the viewBox.
-- **Bar charts first**, analytics then ETL, **cheapest first** because "lower is better" makes the
+- **The bar tip carries the median alone**, one mark per row; the exact range is in the tooltip —
+  the parenthetical range beside every bar doubled the ink for a fact already drawn. Both gutters
+  (labels, values) are sized to what is actually printed so nothing leaves the viewBox.
+- **Bar charts cheapest first**, because "lower is better" makes the
   ranking the finding. A **zero sorts to the bottom**, never the top: zero means the engine did no
   such work, and at the top under that caption it would read as the winner.
 - **`Column encoding` sits under `Table layout`, and is the half shape could not explain.** One row
@@ -206,6 +204,72 @@ without a build, a token or a dispatch.
   querying it cost. *Table layout* is now physical layout alone and this is the other half. It has a
   title and no commentary. Built from the same `martPoints` as the bars and the layout rows, so all
   three quote the same median.
+- **Under it, ONE LINE CHART where there were two scatters.** Each layout is a single horizontal
+  line: **warm ms at its left end, cold ms at its right, on one shared linear time axis**, at the
+  height of its analytics CU. **The LENGTH is what the cold transcode costs.** Same `martPoints` and
+  same `groupMid` as the table above, so the chart and the table cannot disagree about a number.
+  It replaced *CU against cold* stacked on *cold against warm*. Both of those plotted `cold ms` on
+  x, so a reader wanting all three numbers carried one between two panels — and the quantity worth
+  knowing was on neither: the first had no warm at all, the second had it as a distance from a
+  45-degree line nobody drew. A subtraction became a length.
+  **The ends carry no markers, and that is the second simplification, not an oversight.** A first
+  version drew a filled dot at cold and a hollow one at warm, sized by row-group size — which meant
+  learning two more encodings (which fill is which tier, what the area means) before the length
+  could be read at all. **There is no size channel now**: row-group size is a column of the table
+  directly above and a line of every hover, so nothing was lost from the page.
+  **One time axis is not a compromise, it is the correct encoding.** Both tiers are milliseconds,
+  and two scales for two measures of the same kind is the dual-axis mistake: a length spanning two
+  scales is not a quantity. Warm is always the LEFT end because it is always the smaller number.
+  **BOTH AXES ARE LOG, and on x that changes what a length MEANS — from a difference to a RATIO.**
+  That is the better quantity and the reason for it: "the cold pass is 6x the warm one" is a
+  property of the layout, where "18,000 ms slower" mostly tracks how big the query happened to be.
+  It also fixed real crowding — warm at 3,000–6,500 against cold at 20,000–37,000 pinned every warm
+  end into the left eighth of a linear plot, so the ends could not be compared with each other at
+  all; on log the lines span 84→882 instead of 107→820, and near-coincident pairs fell from four to
+  two. On y it un-squashes the cheap layouts, which sit within half a decade of each other.
+  **`logScale` does NOT snap the bound out to whole decades**, for the same reason `niceScale` snaps
+  the step and not the bound one function above it: CU spans 1,332–3,769, so a 1,000–10,000 axis
+  would put every layout on the page in the bottom half. Ticks come from mantissa sets, coarsest
+  that still fills the axis — `[1,2,5]` yields a single tick over half a decade, and an axis with no
+  numbers reads as a rendering failure rather than as a narrow range.
+- **Every line is named at its COLD END, and what the name says depends on the writer.** The writer
+  itself when that identifies the line, which `uniqueName` decides — `dwh`, the three spark
+  profiles. `delta_rs` is most of the lines, so its name separates nothing; it is in the legend, and
+  what actually tells its lines apart takes its place: the sort key and the row group count,
+  `date, time · 9 RG`. That string is `layoutLabel`, the same one the analytics bar is captioned
+  with, minus its leading `by ` — so a line and its bar cannot describe the same parquet two
+  different ways, and three characters each is what keeps eleven of them off each other.
+  **The cold end because that is where the eye already is**: the cold ends are what the chart is
+  ranked by and what spreads out, while the warm ends bunch toward the y axis. The warm end is the
+  FALLBACK — both ends are free on a line with no writer name, so a label that cannot fit beside the
+  cold end moves rather than being forced somewhere it overlaps. On the real records 10 of 11 sit
+  beside a cold end and 1 falls back; that one's line runs 8.5 units from its neighbour's, less than
+  a line of text, so both cannot sit on the same side of their own marks. A name is never dropped —
+  an overlapping one is recoverable by hovering, an absent one is the bug this was built to fix —
+  and `force()` flips side rather than running off the plot, which the bounds-free version did once,
+  25 units past the y axis and across an unrelated line.
+  **The x axis reserves a LABEL GUTTER on its high side (`padHi` 1.55), and only when something goes
+  in it.** Names read rightward from the cold end and the cold ends are the far right of the plot;
+  at the symmetric pad the rightmost had 22 units of room for a name needing 139. Widening the axis
+  moves every line left together — it cannot mislead, because the ticks come from the same scale.
+  Reserving it unconditionally is the part that had to be conditional: on a dense cluster of plain
+  dots, squeezing the x span squeezed the gaps a label has to find and eleven names that used to fit
+  started colliding. A gutter with nothing in it is pure loss.
+  **THE KNOWN COST OF DROPPING THE MARKERS: two layouts at nearly the same CU now overlap along
+  their whole length.** A dot marked one x, so two of them at the same height still sat apart; a
+  line spans most of the plot. On the real records four pairs land within 3 units of each other, all
+  `delta_rs`, i.e. the same hue. `.pair` is drawn at `opacity: .8` so an overlap composites darker
+  rather than reading as a single line — a mitigation, not a fix. If it ever misleads, the honest
+  levers are jittering y or going back to end markers, **not** dropping runs from the chart.
+  **`iceberg` is still off it (`SCATTER_OMIT`), and the shared axis makes that stronger** — its cold
+  pass is 124,036 ms against 20,000–37,000, so its line would be four times the next longest and
+  squash every other one into a fraction of the plot. A named constant, never a computed outlier
+  rule, and the subtitle says what was left out and says nothing when nothing was.
+  **A layout with no warm pass is still plotted, as a plain dot** — one shape per point, never both,
+  and unmeasured is an absent thing rather than a zero: a line run back to x=0 would read as "this
+  layout answered instantly". The axis reaching 0 on today's data is a *consequence* (the combined
+  span snaps `niceScale`'s step to 5,000), not a zero-baseline policy.
+  One `<title>` per layout, on the line itself — which is the mark a reader is pointing at.
 - **TWO CHARTS, STACKED, analytics first — and they are keyed on DIFFERENT THINGS, which is the
   design rather than an inconsistency.** The order is the ranking: interactive CU is what throttles a
   capacity, build CU is background and smoothed over 24h. The build chart was removed once on that
@@ -398,7 +462,9 @@ without a build, a token or a dispatch.
   renders it per dispatch, but a dispatch builds ONE engine, so that report always has a single column
   and a degenerate ranking — composed here, this is the only place the tiers can be read across
   engines at all.
-  **Per LAYOUT** in *Cost and speed by layout*, beside the CU, which is a group's median over its runs.
+  **Per LAYOUT** in *Cost and speed by layout*, beside the CU, which is a group's median over its runs
+  — and the cold and warm medians are also the two ends of the line chart directly below it, same
+  `martPoints`, same `groupMid`, so the chart and the table cannot disagree about a number.
   **Per RUN** in the sources table, which is what actually measured them: one dispatch, against one
   semantic model it had just deployed. They were columns of the mart's layout block and are not any
   more — there they had to be a group mean sitting on a row about parquet, and no single run recorded

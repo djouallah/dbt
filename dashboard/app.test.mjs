@@ -2872,22 +2872,184 @@ test("every point is named and no two names collide", () => {
   }
 });
 
-test("the second scatter is cold against warm, and drops iceberg for the same reason", () => {
-  // COLD IS AN AXIS ON BOTH CHARTS now, so the exclusion is one reason shared rather than two
-  // reasons that happened to agree — `plotted()` and `cutNote()` are the single copy of it.
+test("a layout is one LINE on one shared time axis, warm end to cold end", () => {
+  // ONE AXIS, NEVER TWO. Both tiers are milliseconds, so a second scale would make the length —
+  // which is the entire reading — not a quantity. This replaced a second chart plotting cold
+  // against warm: same three numbers, one panel, and the transcode cost readable without
+  // subtracting anything.
   const p = (engine, name, cold, warm) => ({
     name, n: 1, cu: 2000, ms: { cold, warm, hot: warm - 300 },
     members: [{ rec: lay(engine, 4, 24, { file: `${name}.json` }) }],
   });
-  const pts = [p("duckrun", "delta_rs", 25000, 4500), p("dwh", "dwh", 33767, 4330),
-    p("iceberg", "duckdb iceberg", 100394, 3646)];
-  const svg = d.scatterTiers(pts);
-  assert.equal([...svg.matchAll(/<circle class="dot c\d"/g)].length, 2, "iceberg is off it too");
-  assert.ok(/its cold pass 2x the slowest of these/.test(svg), "and the subtitle says so");
-  // Both axes are TIMES here, so neither is CU — the first chart is the one that costs.
-  const axes = [...svg.matchAll(/<text class="bar-caption"[^>]*>((?:cold|warm|hot) ms|CU)</g)]
+  const svg = d.scatterFit([p("duckrun", "delta_rs", 25000, 4500), p("dwh", "dwh", 33767, 4330),
+    p("iceberg", "duckdb iceberg", 100394, 3646)]);
+  const seg = [...svg.matchAll(
+    /<line class="pair c\d" x1="([\d.]+)" y1="([\d.]+)" x2="([\d.]+)" y2="([\d.]+)"/g)];
+  assert.equal(seg.length, 2, "one line per layout, and iceberg is off it");
+  // NO END MARKERS. The length is the reading; two circles on it were a second grammar to learn
+  // before it could be read, which is what got this chart simplified.
+  assert.equal([...svg.matchAll(/<circle class="dot c\d"/g)].length, 0, "and no dots at all");
+  for (const [, x1, y1, x2, y2] of seg) {
+    assert.equal(y1, y2, "the line sits at ONE y — its length is a time, not a slope");
+    assert.ok(+x1 < +x2, "warm left, cold right: the second visit is always the cheap one");
+    // The shared domain reaches the warm end: scaling to `p.x` alone would run every line off the
+    // left of the plot, which is the failure that makes a span not a span.
+    assert.ok(+x1 > 62, `the warm end is inside the plot, not on the axis: ${x1}`);
+  }
+  assert.ok(/its cold pass 2x the slowest of these/.test(svg), "the exclusion is still stated");
+  const axes = [...svg.matchAll(
+    /<text class="bar-caption"[^>]*>((?:cold|warm|hot) ms|query time \(ms\)|CU)</g)]
     .map((m2) => m2[1]).sort();
-  assert.deepEqual(axes, ["cold ms", "warm ms"], `no CU axis on a time-vs-time plot: ${axes}`);
+  assert.deepEqual(axes, ["CU", "query time (ms)"], `one time axis, not two: ${axes}`);
+  // NO SIZE KEY: with the dots gone there is nothing to size. Row group size is NOT lost — it stays
+  // a column of the table above and a line of every hover, which is why this looks at the legend
+  // text alone rather than at the whole document.
+  const key = [...svg.matchAll(/<text class="bar-caption key"[^>]*>([^<]*)</g)].map((m) => m[1]);
+  assert.ok(!key.some((t) => /row group size/.test(t)), `no key for an unencoded channel: ${key}`);
+  assert.ok(key.includes("delta_rs") && key.includes("dwh"), `but the writer key stays: ${key}`);
+  assert.ok(/row group size: /.test(svg), "and the size is still on every hover");
+});
+
+test("both axes are LOG, so an equal RATIO is an equal distance", () => {
+  // WHAT THE CHANGE MEANS, and it is not cosmetic: on a log x a line's LENGTH stops being a
+  // difference and becomes a ratio — "the cold pass is 6x the warm one", which is a property of the
+  // layout, where "18,000 ms slower" mostly tracks how big the query happened to be. Pinned by
+  // geometry rather than by reading a flag: three points a decade apart must be evenly spaced.
+  const svg = d.scatterSvg("t", "s", [
+    { label: "a", x: 1000, y: 1000 }, { label: "b", x: 10000, y: 10000 },
+    { label: "c", x: 100000, y: 100000 }], "query time (ms)");
+  const at = [...svg.matchAll(/<circle class="dot c\d" cx="([\d.]+)" cy="([\d.]+)"/g)]
+    .map((m) => ({ x: +m[1], y: +m[2] })).sort((p, q) => p.x - q.x);
+  assert.equal(at.length, 3);
+  const dx = [at[1].x - at[0].x, at[2].x - at[1].x];
+  assert.ok(Math.abs(dx[0] - dx[1]) < 0.5, `equal decades, equal gaps on x: ${dx}`);
+  const dy = [at[0].y - at[1].y, at[1].y - at[2].y];
+  assert.ok(Math.abs(dy[0] - dy[1]) < 0.5, `and on y: ${dy}`);
+  // AND THE BOUND IS NOT SNAPPED OUT TO WHOLE DECADES. `fct_summary`'s CU spans half a decade
+  // (1,332-3,769); a 1,000-10,000 axis would put every layout on the page in the bottom half.
+  const narrow = d.scatterSvg("t", "s", [{ label: "a", x: 1332, y: 1332 },
+    { label: "b", x: 3769, y: 3769 }], "query time (ms)");
+  const ys = [...narrow.matchAll(/<circle class="dot c\d" cx="[\d.]+" cy="([\d.]+)"/g)].map((m) => +m[1]);
+  assert.ok(Math.abs(ys[0] - ys[1]) > 380, `the pair fills the plot, not a corner: ${ys}`);
+  // A narrow log range still gets gridlines — the coarse 1/2/5 mantissas yield one tick over half a
+  // decade, and an axis with no numbers on it reads as a rendering failure, not as a narrow range.
+  assert.ok([...narrow.matchAll(/<line class="axis"/g)].length >= 4, "and keeps its gridlines");
+});
+
+test("a writer that names several layouts is labelled with the layout, at the cold end", () => {
+  // `delta_rs` is most of the lines, so its NAME separates nothing — it is in the legend, and what
+  // tells its lines apart is the sort key and the row group count. Both ends are free for such a
+  // line (no unique name means no label at the cold end), and the COLD end wins because that is
+  // where the eye already is: the cold ends are what the chart is ranked by and what spreads out.
+  // A writer whose name IS unique keeps the name, in the same place.
+  const p = (rec, name, cold, warm, cu) => ({
+    name, cu, n: 1, ms: { cold, warm }, members: [{ rec }],
+  });
+  const svg = d.scatterFit([
+    p(sortedBy(1, 9, ["date", "time"], { file: "a.json" }), "delta_rs", 25000, 4500, 1500),
+    p(sortedBy(1, 24, ["date", "time", "price"], { file: "b.json" }), "delta_rs", 27000, 4200, 1700),
+    p(lay("dwh", 78, 90, { file: "c.json" }), "dwh", 33767, 1500, 2000),
+  ]);
+  const labs = [...svg.matchAll(/<text class="bar-caption"([^>]*)>([^<]+)</g)]
+    .map((m) => ({ end: /text-anchor="end"/.test(m[1]), x: +/x="([\d.]+)"/.exec(m[1])[1], t: m[2] }))
+    .filter((l) => !["query time (ms)", "CU"].includes(l.t));
+  const texts = labs.map((l) => l.t);
+  assert.ok(texts.includes("date, time · 9 RG") && texts.includes("date, time, price · 24 RG"),
+    `the layout, not the writer: ${texts}`);
+  assert.ok(texts.includes("dwh"), `and a unique writer keeps its name: ${texts}`);
+  // THE SAME STRING THE ANALYTICS BAR IS CAPTIONED WITH, minus its leading `by ` — a line and its
+  // bar must not describe the same parquet two different ways, and three characters each is what
+  // keeps thirteen of these off each other in the crowded left half.
+  assert.equal(d.layoutLabel([{ rec: sortedBy(1, 9, ["date", "time"], { file: "a.json" }) }]),
+    "by date, time · 9 RG");
+  // Anchored `start` and past its own line's cold end — printed rightward into the label gutter,
+  // never leftward back across the line it names.
+  const colds = [...svg.matchAll(/<line class="pair c\d" x1="[\d.]+" y1="[\d.]+" x2="([\d.]+)"/g)]
+    .map((m) => +m[1]);
+  for (const l of labs.filter((x) => /RG$/.test(x.t))) {
+    assert.ok(!l.end, `"${l.t}" reads rightward`);
+    assert.ok(colds.some((c) => l.x > c && l.x - c < 40),
+      `"${l.t}" at ${l.x} sits just past a cold end; colds ${colds}`);
+  }
+  assert.equal(texts.filter((t) => t === "delta_rs").length, 0, "and the bare writer name is gone");
+
+  // THE GUTTER IS ONLY RESERVED WHEN SOMETHING GOES IN IT. Widening the x axis unconditionally
+  // squeezes the gaps a label has to find, and on a dense cluster of plain dots that made eleven
+  // names that used to fit start colliding. A gutter with nothing in it is pure loss.
+  const rightmost = (id2) => Math.max(...[...d.scatterSvg("t", "s",
+    [{ label: "a", x: 1000, y: 10, id2 }, { label: "b", x: 10000, y: 20 }], "query time (ms)")
+    .matchAll(/<circle class="dot c\d" cx="([\d.]+)"/g)].map((m) => +m[1]));
+  assert.ok(rightmost("") > 870, `no right-hand labels, no gutter: ${rightmost("")}`);
+  assert.ok(rightmost("9 RG") < rightmost("") - 60,
+    `one label opens the gutter and everything shifts left: ${rightmost("9 RG")}`);
+
+  // WHEREVER IT LANDS, IT LANDS INSIDE THE PLOT. A name is never dropped, and the forcing fallback
+  // flips side rather than running off the axis — the bounds-free version pushed one 25 units past
+  // the y axis and across an unrelated line.
+  const cramped = d.scatterFit([
+    p(sortedBy(1, 9, ["date", "time", "price"], { file: "a.json" }), "delta_rs", 25000, 4500, 1500),
+    p(sortedBy(1, 24, ["date", "time", "price"], { file: "b.json" }), "delta_rs", 27000, 4600, 1700),
+  ]);
+  const far = [...cramped.matchAll(/<text class="bar-caption" x="([\d.]+)"([^>]*)>([^<]+)</g)]
+    .map((m) => ({ x: +m[1], end: /text-anchor="end"/.test(m[2]), t: m[3] }))
+    .filter((l) => /RG$/.test(l.t));
+  assert.equal(far.length, 2, "both are still labelled — a name is never dropped");
+  for (const l of far) {
+    const w = l.t.length * 5.15;
+    const x0 = l.end ? l.x - w : l.x;
+    assert.ok(x0 >= 62 && x0 + w <= 904, `"${l.t}" stays inside the plot: ${x0}–${x0 + w}`);
+  }
+});
+
+test("a layout with no warm pass is still plotted, as a dot", () => {
+  const svg = d.scatterSvg("t", "s", [
+    { label: "a", x: 25000, x2: 4500, y: 1800, hue: 1 },
+    { label: "b", x: 33000, y: 2600, hue: 2 }], "query time (ms)");
+  assert.equal([...svg.matchAll(/<line class="pair c\d"/g)].length, 1, "one has a span");
+  assert.equal([...svg.matchAll(/<circle class="dot c\d"/g)].length, 1, "the other is a dot");
+  // ONE SHAPE PER POINT, never both — and unmeasured is an absent thing, never a zero. A line run
+  // back to x=0 would sit on the axis and read as "this layout answered instantly".
+  assert.ok(!/<line class="pair[^>]*x1="62\./.test(svg));
+  assert.equal(d.scatterSvg("t", "s", [{ label: "a", x: 0, x2: 4500, y: 5 },
+    { label: "b", x: 3, y: 2 }]), "", "and a zero x still drops the whole row, second end or not");
+});
+
+test("a label lands on no line", () => {
+  // A line reaches much further across the plot than a dot did, so it is the occluder that matters
+  // now. If this fails, reorder CANDIDATES or add a ring — never drop the line from `hits`, which
+  // is the fix that hides the problem.
+  const pts = Array.from({ length: 11 }, (_, i) => ({
+    label: `w${i}`, id: `w${i}`, x: 25000 + i * 900, x2: 3500 + i * 250,
+    y: 1400 + i * 220, hue: (i % 5) + 1,
+  }));
+  const svg = d.scatterSvg("t", "s", pts, "query time (ms)");
+  const CH = 5.15, LH = 13;
+  const labs = [...svg.matchAll(/<text class="bar-caption" x="([\d.]+)" y="([\d.]+)"([^>]*)>([^<]+)</g)]
+    .map((m) => ({ x: +m[1], y: +m[2], a: /end/.test(m[3]) ? "end" : /middle/.test(m[3]) ? "mid" : "s", t: m[4] }))
+    .filter((l) => /^w\d+$/.test(l.t));
+  assert.equal(labs.length, 11, "one label per line, none dropped");
+  const box = (l) => {
+    const w = l.t.length * CH;
+    const x0 = l.a === "end" ? l.x - w : l.a === "mid" ? l.x - w / 2 : l.x;
+    return { x0, x1: x0 + w, y0: l.y - LH * 0.72, y1: l.y + LH * 0.28 };
+  };
+  const segs = [...svg.matchAll(/<line class="pair c\d" x1="([\d.]+)" y1="([\d.]+)" x2="([\d.]+)"/g)]
+    .map((m) => ({ x0: +m[1], x1: +m[3], y: +m[2] }));
+  assert.equal(segs.length, 11);
+  for (const l of labs) {
+    const b = box(l);
+    for (const s of segs) {
+      assert.ok(!(b.x0 < s.x1 && b.x1 > s.x0 && b.y0 < s.y + 3 && b.y1 > s.y - 3),
+        `"${l.t}" is printed across a line`);
+    }
+  }
+  for (let i = 0; i < labs.length; i++) {
+    for (let j = i + 1; j < labs.length; j++) {
+      const A = box(labs[i]), B = box(labs[j]);
+      assert.ok(!(A.x0 < B.x1 && A.x1 > B.x0 && A.y0 < B.y1 && A.y1 > B.y0),
+        `"${labs[i].t}" collides with "${labs[j].t}"`);
+    }
+  }
 });
 
 test("slot 6 is the neutral Other, not a sixth hue", () => {
@@ -2907,9 +3069,11 @@ test("slot 6 is the neutral Other, not a sixth hue", () => {
 // reached.
 
 test("a chart's file is named after the chart, so two never overwrite each other", () => {
-  assert.equal(d.chartFilename("CU against cold query time"), "cu-against-cold-query-time.png");
-  assert.equal(d.chartFilename("Cold against warm"), "cold-against-warm.png");
-  assert.equal(d.chartFilename("Cold against warm", "svg"), "cold-against-warm.svg");
+  assert.equal(d.chartFilename("CU against query time"), "cu-against-query-time.png");
+  assert.equal(d.chartFilename("Capacity units per engine build"),
+    "capacity-units-per-engine-build.png");
+  assert.equal(d.chartFilename("Capacity units per engine build", "svg"),
+    "capacity-units-per-engine-build.svg");
   assert.equal(d.chartFilename("  —  "), "chart.png", "a title of punctuation still names a file");
   assert.equal(d.chartFilename(""), "chart.png");
 });
@@ -2990,6 +3154,16 @@ test("paint is inlined, defaults are not, and type properties stay on text", () 
     && text.attrs.style.includes("text-anchor:end"), "text keeps both");
   assert.ok(!("class" in circle.attrs) && !("class" in text.attrs),
     "the class goes: it names rules the exported file will not have");
+  // A STROKED MARK KEEPS ITS WIDTH. `stroke-width` is skipped when nothing pushed a `stroke:`
+  // before it — right for the four hundred `<text>` nodes that guard was written for, and it would
+  // silently flatten every line on the scatter to a hairline if `SVG_PAINT`'s order ever moved.
+  // Nothing else in the suite exercises it in the positive direction.
+  const line = node("line");
+  const paint = { stroke: "rgb(0, 114, 178)", "stroke-width": "3px" };
+  d.inlinePaint(node("line"), line, () => ({ getPropertyValue: (p) => paint[p] || "" }));
+  for (const want of ["stroke:rgb(0, 114, 178)", "stroke-width:3px"]) {
+    assert.ok(line.attrs.style.includes(want), `${want} in ${line.attrs.style}`);
+  }
 });
 
 test("every chart gets a save button, and nothing that is not a chart does", () => {
@@ -3001,7 +3175,7 @@ test("every chart gets a save button, and nothing that is not a chart does", () 
     const cap = new El("figcaption");
     const title = new El("span");
     title.className = "chart-title";
-    title.textContent = "Cold against warm";
+    title.textContent = "CU against query time";
     cap.appendChild(title);
     fig.appendChild(cap);
     if (withSvg) fig.appendChild(new El("svg"));
@@ -3038,15 +3212,13 @@ test("the scatter says what was queried, and derives it from the record", () => 
       members: [{ rec: lay("dwh", 78, 90, { file: "b.json" }) }],
     },
   ];
-  for (const svg of [d.scatterFit(pts), d.scatterTiers(pts)]) {
-    const note = /<span class="chart-note">([^<]*)<\/span>/.exec(svg);
-    assert.ok(note, "both scatters carry it — they are the two that leave the page");
-    assert.equal(note[1], "queried over 1 fact (144.0M) and 2 dimensions (3.9K)");
-    // THE MART, AND NOTHING ELSE. The model carries the landing tables and the suite queries them,
-    // but this chart groups, sizes and captions on fct_summary alone — every layout on the plot
-    // reads the identical landing parquet, so naming it described a difference that is not there.
-    assert.ok(!/staging|log/.test(note[1]), note[1]);
-  }
+  const note = /<span class="chart-note">([^<]*)<\/span>/.exec(d.scatterFit(pts));
+  assert.ok(note, "the chart carries it — it is the one that leaves the page");
+  assert.equal(note[1], "queried over 1 fact (144.0M) and 2 dimensions (3.9K)");
+  // THE MART, AND NOTHING ELSE. The model carries the landing tables and the suite queries them,
+  // but this chart groups and captions on fct_summary alone — every layout on the plot reads the
+  // identical landing parquet, so naming it described a difference that is not there.
+  assert.ok(!/staging|log/.test(note[1]), note[1]);
   assert.equal(/<span class="chart-note">/.test(d.scatterSvg("T", "S",
     [{ x: 1, y: 1, label: "a" }, { x: 2, y: 2, label: "b" }])), false,
   "and no empty note element when there is nothing to say");
@@ -3069,7 +3241,8 @@ test("a dot's hover is its whole table row, sort key included", () => {
   assert.ok(tip.includes("row groups: 9") && tip.includes("row group size: 16.0M"),
     tip.join(" | "));
   assert.ok(tip.includes("size: 575 MB") && tip.includes("CU: 1,462"), tip.join(" | "));
-  // Every tier, so the two scatters do not each show only their own axes.
+  // EVERY TIER, including `hot`, which is on neither end of the line and so appears nowhere else on
+  // the chart — as does the row group size, now that nothing is sized by it.
   assert.ok(tip.includes("cold: 20,845 ms") && tip.includes("warm: 4,016 ms")
     && tip.includes("hot: 3,315 ms"), tip.join(" | "));
   assert.ok(tip.includes("3 runs"), "and the sample size behind the median");
@@ -3078,6 +3251,6 @@ test("a dot's hover is its whole table row, sort key included", () => {
   // has no `dictionary` line rather than one reading a dash.
   assert.ok(!tip.some((l) => l.includes("—")), tip.join(" | "));
   assert.ok(!tip.some((l) => l.startsWith("dictionary")), tip.join(" | "));
-  const both = /<title>([\s\S]*?)<\/title>/.exec(d.scatterTiers(pts))[1];
-  assert.ok(both.includes("ordering: date, time, price"), "the second scatter gets the same row");
+  // ONE HOVER PER LAYOUT, on the line itself, which is the mark a reader is pointing at.
+  assert.equal((d.scatterFit(pts).match(/<title>/g) || []).length, pts.length);
 });
